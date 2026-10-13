@@ -1,0 +1,325 @@
+-----------------------------------------------------------------------------
+-- Copyright 2026, Microsoft Research, Daan Leijen, Anton Lorenzen.
+--
+-- This is free software; you can redistribute it and/or modify it under the
+-- terms of the Apache License, Version 2.0. A copy of the License can be
+-- found in the LICENSE file at the root of this distribution.
+-----------------------------------------------------------------------------
+
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
+{- Linearity checker for programs after Perceus.
+
+  Variables of a type without pointers are unrestricted. Every other variable is
+  either owned, and must be consumed exactly once on every path, or borrowed,
+  and may only be inspected or duplicated. A borrowed variable that was obtained
+  by destructuring an owned variable becomes invalid once that variable is consumed.
+  The binder of a borrowed destructuring that keeps the pointer (`keepsPointer`) at a boxed
+  type is an *alias* of the owned variable: consuming the alias (or testing whether it is
+  unique) takes over the owned variable, whose borrowed variables are then borrowed from the alias.
+  `UnboxLazy` takes the contents of a box of the lazy value in `lazy-eval-locked`: the
+  binder is owned and the box is left as it is (its block is then written over without
+  dropping its old fields, see `Lazy`).
+
+  A unique variable is owned and holds the only reference to its block, so `UnboxRu` may
+  take its contents and keep its block as a credit. An owned variable is unique in the
+  first branch of `IsUnique`; unique parameters, and the binders of unique destructuring,
+  are unique too. Any borrowed use of a unique variable, or of a variable borrowed from it,
+  may duplicate the reference, after which it is only owned.
+
+  The body of a join point is closed and checked like the body of a function; a jump
+  is checked like a call. Nothing follows a jump in its branch, so the variables left
+  at a jump (including the parents of borrowed arguments) are compared with the other
+  branches and consumed after the whole join.
+
+  This checks the modes of the typing rules in `Syntax` (the types are checked by `Check`).
+  Keep it in sync with the rules: a change here must be reflected there, and vice versa.
+-}
+module Backend.Typed.Linear( checkLinear ) where
+
+import qualified Data.Map as M
+import qualified Data.Set as S
+import Control.Monad( unless, when, forM_ )
+import Common.Name
+import Backend.Typed.Syntax
+import Backend.Typed.Monad
+import Backend.Typed.Check( Env(..), Gamma, envOf, bindAll, inferV, altTypes, boxContents, reuseSize, paramModes, isTrivial )
+
+-- the mode of a variable, for a borrowed one the owned variable it is borrowed from (if any),
+-- and whether it is an alias of that variable (the same pointer)
+data Status = Status{ stMode :: Mode, stRoot :: Maybe Name, stAlias :: Bool }
+            deriving (Eq,Show)
+
+owned', unique' :: Status
+owned'  = Status Owned Nothing False
+unique' = Status Unique Nothing False
+
+owns :: Status -> Bool
+owns = owning . stMode
+
+isUnique :: Delta -> Name -> Bool
+isUnique d x = fmap stMode (M.lookup x d) == Just Unique
+
+type Delta = M.Map Name Status
+
+type L a = M () Delta a
+
+-- the modes of the parameters of the join points in scope
+type Joins = M.Map Name [Mode]
+
+checkLinear :: Program -> [String]
+checkLinear prog
+  = [show (defName d) ++ ": " ++ err | d <- progDefs prog, Left err <- [checkDef (envOf prog) d]]
+
+checkDef :: Env -> Def -> Either String ()
+checkDef env def
+  = case def of
+      DefFun _ _ args _ body
+        -> run (M.fromList [(x,V t) | (x,_,t) <- args]) (paramDelta args) body
+      DefVal _ _ _ body -> run M.empty M.empty body
+  where
+    run g d body = evalM (scopeEnd (checkE env g M.empty body)) () d
+
+-- the variables of a parameter list with their modes
+paramDelta :: [(Name,Mode,VType)] -> Delta
+paramDelta ps = M.fromList [(x, Status m Nothing False) | (x,m,t) <- ps, not (isTrivial (V t))]
+
+-- at the end of a scope no owned variable may be left
+scopeEnd :: L () -> L ()
+scopeEnd action
+  = do action
+       d <- get
+       let left = [x | (x,st) <- M.toList d, owns st]
+       unless (null left) (fail ("owned variables are not consumed: " ++ show left))
+
+-- consume an owned variable; borrowed variables derived from it become invalid
+consume :: Gamma -> Name -> L ()
+consume g x
+  | trivialVar g x = return ()
+  | otherwise
+  = do promote x
+       d <- get
+       case M.lookup x d of
+         Just st | owns st -> put (M.filter ((/= Just x) . stRoot) (M.delete x d))
+                 | otherwise -> fail ("owned use of borrowed variable " ++ show x)
+         Nothing -> fail ("use of consumed or invalid variable " ++ show x)
+
+-- an alias of an owned variable takes it over
+promote :: Name -> L ()
+promote x
+  = do d <- get
+       case M.lookup x d of
+         Just (Status Borrowed (Just z) True)
+           | Just stz <- M.lookup z d, owns stz
+           -> put (M.insert x stz (M.map (\st -> if stRoot st == Just z then st{ stRoot = Just x } else st) (M.delete z d)))
+         _ -> return ()
+
+inspect :: Gamma -> Name -> L ()
+inspect g x
+  | trivialVar g x = return ()
+  | otherwise
+  = do d <- get
+       unless (M.member x d) (fail ("use of consumed or invalid variable " ++ show x))
+       r <- rootOf x
+       case r of
+         Just z | isUnique d z -> put (M.insert z owned' d)
+         _ -> return ()
+
+trivialVar :: Gamma -> Name -> Bool
+trivialVar g x = maybe False isTrivial (M.lookup x g)
+
+rootOf :: Name -> L (Maybe Name)
+rootOf x
+  = do d <- get
+       return (case M.lookup x d of
+                 Just (Status Borrowed r _) -> r
+                 Just _                   -> Just x
+                 Nothing                  -> Nothing)
+
+addVars :: [(Name,Ty)] -> Status -> L ()
+addVars bs st
+  = do d <- get
+       put (foldr (\(x,_) -> M.insert x st) d [b | b@(_,t) <- bs, not (isTrivial t)])
+
+-- leaving the scope of binders: owned ones must have been consumed
+leave :: [(Name,Ty)] -> L ()
+leave bs
+  = do d <- get
+       forM_ bs $ \(x,_) ->
+         when (maybe False owns (M.lookup x d)) (fail ("owned variable is not consumed: " ++ show x))
+       put (foldr M.delete d (map fst bs))
+
+-- values
+
+ownedV :: Env -> Gamma -> Val -> L ()
+ownedV env g val
+  = case val of
+      Var x -> consume g x
+      Dup v -> borrowedV env g v
+      Glob _ _ -> do t <- liftE (inferV env g val)
+                     unless (isTrivial t) (fail ("owned use of global " ++ show val))
+      Fun _ -> ownedParams env g val
+      Lam ps _ e
+        -> do unless (all (\(_,m,_) -> m == Owned) ps) (fail ("closure with parameters that are not owned: " ++ show val))
+              let caps = S.toList (fvV val)
+              mapM_ (consume g) caps
+              d <- get
+              let g' = bindAll [(x,V t) | (x,_,t) <- ps] g
+                  inner = M.fromList ([(x,owned') | x <- caps, not (trivialVar g x)] ++
+                                      [(x,owned') | (x,_,t) <- ps, not (isTrivial (V t))])
+              put inner
+              scopeEnd (checkE env g' M.empty e)
+              put d
+      Unit        -> return ()
+      Lit _       -> return ()
+      NoReuse _   -> return ()
+      Inj _ _ _   -> children
+      Inl _ _     -> children
+      Inr _ _     -> children
+      Pair _ _    -> children
+      Fold _ _    -> children
+      Box _       -> children
+      Pack _ _ _  -> children
+      OpenCon _ _ _ -> children
+      TyApp _ _   -> children
+      BoxAt _ _   -> children
+      BoxIn _ _   -> children
+  where
+    children = mapM_ (ownedV env g) (childrenV val)
+
+-- a unique value is a unique variable
+uniqueV :: Gamma -> Val -> L ()
+uniqueV g val
+  = case val of
+      Var x -> do promote x
+                  d <- get
+                  unless (isUnique d x) (fail ("unique use of a variable that is not unique: " ++ show x))
+                  consume g x
+      _ -> fail ("unique use of a value that is not a variable: " ++ show val)
+
+borrowedV :: Env -> Gamma -> Val -> L ()
+borrowedV env g val
+  = case val of
+      Var x -> inspect g x
+      Glob _ _ -> return ()
+      Lit _ -> return ()
+      Unit -> return ()
+      Fun _ -> ownedParams env g val
+      TyApp v _ -> borrowedV env g v
+      _ -> fail ("borrowed use of a non-atomic value: " ++ show val)
+
+-- closures only have owned parameters
+ownedParams :: Env -> Gamma -> Val -> L ()
+ownedParams env g f
+  = do t <- liftE (inferV env g f)
+       case t of
+         A a | any (/= Owned) (modes a) -> fail ("closure with parameters that are not owned: " ++ show f)
+         _ -> return ()
+  where
+    modes (AFun ps _)    = map fst ps
+    modes (AForall _ a)  = modes a
+    modes _              = []
+
+-- expressions
+
+checkE :: Env -> Gamma -> Joins -> Expr -> L ()
+checkE env g js (UnboxLazy v x e)
+  = do t   <- liftE (inferV env g v)
+       [[tx]] <- liftE (altTypes env t (UnboxLazy v x e))
+       borrowedV env g v
+       let bs = [(x,tx)]
+       addVars bs owned'
+       checkE env (bindAll bs g) js e
+       leave bs
+checkE _ _ _ expr
+  | isRead expr, Just ds <- destructOf expr, owning (dsMode ds)
+  = fail ("owned read of the contents of a box: " ++ show (dsScrut ds))
+checkE _ _ _ expr
+  | not (keepsPointer expr), Just ds <- destructOf expr, dsMode ds == Unique
+  = fail ("unique destructuring of a value that is not a pointer: " ++ show (dsScrut ds))
+checkE env g js expr
+  | Just ds <- destructOf expr
+  = do t   <- liftE (inferV env g (dsScrut ds))
+       tss <- liftE (altTypes env t expr)
+       destruct env g js (dsMode ds) (keepsPointer expr) (dsScrut ds) [(zip xs ts,e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
+checkE env g js expr
+  = case expr of
+      Ret v -> ownedV env g v
+      Let x t e1 e2 -> do checkE env g M.empty e1
+                          addVars [(x,t)] owned'
+                          checkE env (M.insert x t g) js e2
+                          leave [(x,t)]
+      Call f _ vs -> args (paramModes env f (length vs)) vs
+      Jump j vs -> case M.lookup j js of
+                     Just ms -> args ms vs
+                     Nothing -> fail ("jump to unknown join point " ++ show j)
+      Join j ps e1 e2 -> do d <- get
+                            put (paramDelta ps)
+                            scopeEnd (checkE env (M.fromList [(x,V t) | (x,_,t) <- ps]) js e1)
+                            put d
+                            checkE env g (M.insert j [m | (_,m,_) <- ps] js) e2
+      App f vs -> do ownedParams env g f
+                     mapM_ (ownedV env g) (f:vs)
+      Gen _ e -> checkE env g M.empty e
+      Drop x e -> consume g x >> checkE env g js e
+      DropRu x r e -> do n <- liftE (inferV env g (Var x) >>= boxContents >>= reuseSize)
+                         consume g x
+                         let bs = [(r,V (VReuse n))]
+                         addVars bs owned'
+                         checkE env (bindAll bs g) js e
+                         leave bs
+      IsUnique x e1 e2 -> do promote x
+                             d <- get
+                             unless (maybe False owns (M.lookup x d)) (fail ("uniqueness test of a variable that is not owned: " ++ show x))
+                             branches [modify (M.insert x unique') >> checkE env g js e1, checkE env g js e2]
+      UnboxRu (Var z) x r e
+        -> do s <- liftE (inferV env g (Var z) >>= boxContents)
+              n <- liftE (reuseSize s)
+              uniqueV g (Var z)
+              let bs = [(x,V s),(r,V (VReuse n))]
+              addVars bs owned'
+              checkE env (bindAll bs g) js e
+              leave bs
+      CaseLit v alts def -> do borrowedV env g v
+                               branches (map (checkE env g js) (def : map snd alts))
+      _ -> fail "unexpected destructuring form"
+  where
+    -- owned and unique arguments first: a borrowed argument must not be derived from one of them
+    args ms vs = do sequence_ [ownedV env g v | (Owned,v) <- zip ms vs]
+                    sequence_ [uniqueV g v | (Unique,v) <- zip ms vs]
+                    sequence_ [borrowedV env g v | (Borrowed,v) <- zip ms vs]
+
+destruct :: Env -> Gamma -> Joins -> Mode -> Bool -> Val -> [([(Name,Ty)],Expr)] -> L ()
+destruct env g js m keeps v alts
+  = do st <- case (m,v) of
+               (Owned,_)  -> ownedV env g v >> return (const owned')
+               (Unique,_) -> uniqueV g v >> return (const unique')
+               (Borrowed,Var z) -> do borrowedV env g v
+                                      r <- rootOf z
+                                      d <- get
+                                      let zAlias = maybe False (\s -> owns s || stAlias s) (M.lookup z d)
+                                      return (\t -> Status Borrowed r (keeps && zAlias && isA t))
+               (Borrowed,_) -> borrowedV env g v >> return (const (Status Borrowed Nothing False))
+       branches [do sequence_ [addVars [b] (st t) | b@(_,t) <- bs]
+                    checkE env (bindAll bs g) js e
+                    leave bs
+                | (bs,e) <- alts]
+
+-- every branch must consume the same owned variables
+branches :: [L ()] -> L ()
+branches cs
+  = do d <- get
+       ds <- mapM (\c -> do put d
+                            c
+                            get) cs
+       case ds of
+         [] -> return ()
+         (d1:rest) -> do forM_ rest $ \d2 ->
+                           unless (owned d1 == owned d2)
+                             (fail ("branches consume different variables: " ++ show (owned d1) ++ " vs. " ++ show (owned d2)))
+                         put (M.mapWithKey (\x st -> if st == unique' && any (\d2 -> not (isUnique d2 x)) rest then owned' else st) d1)
+  where
+    owned d = M.keys (M.filter owns d)
+
+isA :: Ty -> Bool
+isA (A _) = True
+isA (V _) = False

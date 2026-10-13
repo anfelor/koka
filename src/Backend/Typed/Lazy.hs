@@ -1,0 +1,121 @@
+-----------------------------------------------------------------------------
+-- Copyright 2026, Microsoft Research, Daan Leijen, Anton Lorenzen.
+--
+-- This is free software; you can redistribute it and/or modify it under the
+-- terms of the Apache License, Version 2.0. A copy of the License can be
+-- found in the LICENSE file at the root of this distribution.
+-----------------------------------------------------------------------------
+
+{- Memoization of lazy values (after Perceus), as in Koka's `Backend.C.ParcReuse`.
+
+  `memoize-target(x, size, scan)` marks `x` as the lazy value under evaluation, whose
+  constructor has Koka's allocation size `size`. `memoize(x, v)` then updates `x` with `v`:
+  - if `v` is a constructor that is not a singleton and whose Koka size is at most `size`,
+    it is written over the block of `x`, keeping its reference count so that every
+    reference sees the value;
+  - otherwise `x` is freed if it is unique, and else overwritten with an indirection to `v`
+    (which `lazy-eval-locked` follows).
+  `lazy-eval-locked` has taken the old fields of `x` (see `Perceus`), so they are not dropped.
+-}
+module Backend.Typed.Lazy( lazyProgram, nameLazyFree ) where
+
+import qualified Data.Map as M
+import Common.Name
+import Common.NamePrim( nameLazyMemoize, nameLazyMemoizeTarget, nameDataTypePtrIsUnique )
+import Backend.Typed.Syntax
+import Backend.Typed.Types( inst, splitSum )
+import Backend.Typed.Layout( layout, blockSize )
+import Backend.Typed.Coerce( injA )
+import Backend.Typed.Monad
+
+type Z a = M () Int a
+
+-- free the block of a lazy value without dropping its (taken) fields
+nameLazyFree :: Name
+nameLazyFree = newHiddenName "typed-lazy-free"
+
+-- lazy values under evaluation with their Koka size
+type Targets = M.Map Name Int
+
+fresh :: String -> Z Name
+fresh s = state (\n -> (newHiddenName ("lz" ++ s ++ show n), n+1))
+
+lazyProgram :: Program -> (Program,[String])
+lazyProgram prog
+  = let tdefs = progTypes prog
+        run d = case evalM (lazyE tdefs M.empty (defBody d)) () 0 of
+                  Right body -> (d{ defBody = body }, [])
+                  Left err   -> (d, [show (defName d) ++ ": " ++ err])
+        (defs,errs) = unzip (map run (progDefs prog))
+        a     = -4
+        isUniqueSig = SigFun [a] [(Borrowed,VVar a)] (VSum [VUnit,VUnit])
+        sigs = M.insert nameLazyFree (SigFun [a] [(Owned,VVar a)] VUnit) $
+               M.insertWith (\_ old -> old) nameDataTypePtrIsUnique isUniqueSig (progSigs prog)
+    in (prog{ progDefs = defs, progSigs = sigs }, concat errs)
+
+lazyE :: TypeDefs -> Targets -> Expr -> Z Expr
+lazyE tdefs targets expr
+  = case expr of
+      Let _ _ (Call f _ [Var x, Lit (LitInt size), _]) e | f == nameLazyMemoizeTarget
+        -> lazyE tdefs (M.insert x (fromInteger size) targets) e
+      Call f [t] [target,v] | f == nameLazyMemoize
+        -> memoize tdefs targets t target v
+      _ -> descendE (lazyV tdefs) (\_ e -> lazyE tdefs targets e) expr
+
+-- lambdas have no targets
+lazyV :: TypeDefs -> Val -> Z Val
+lazyV tdefs val
+  = case val of
+      Lam ps r e -> Lam ps r <$> lazyE tdefs M.empty e
+      _          -> descendV (lazyV tdefs) val
+
+memoize :: TypeDefs -> Targets -> VType -> Val -> Val -> Z Expr
+memoize tdefs targets t target v
+  = case (t, target) of
+      (VCon tname targs, Var x) | Just tdef <- M.lookup tname tdefs, Just linfo <- tdefLazy tdef, Just body <- tdefBody tdef
+        -> let shapes = splitSum (length (lazyCons linfo)) (inst (tdefParams tdef) targs body)
+           in case conOf v of
+                Just (i,w,rebuild) | inPlace linfo shapes (M.lookup x targets) i
+                  -> return (Ret (rebuild (BoxIn x w)))
+                _ -> indirect t shapes (lazyIndirect linfo) x v
+      _ -> fail ("cannot memoize " ++ show target ++ " at " ++ show t)
+
+-- Koka's decision (by its sizes); our layout must fit in every lazy constructor of that size
+inPlace :: LazyInfo -> [AType] -> Maybe Int -> Int -> Bool
+inPlace linfo shapes mbSize i
+  = case mbSize of
+      Nothing   -> False
+      Just size -> let (_,newSize) = lazyCons linfo !! i
+                       targets   = [ourSize s | (c,(isLazy,ksize),s) <- zip3 [0..] (lazyCons linfo) shapes
+                                                , isLazy, c /= lazyIndirect linfo, ksize == size]
+                   in newSize > 0 && newSize <= size && not (null targets) && ourSize (shapes !! i) <= minimum targets
+  where
+    ourSize (ABox p) = blockSize (layout p)
+    ourSize _        = 0
+
+-- free the lazy value if it is unique, and otherwise overwrite it with an indirection to the value
+indirect :: VType -> [AType] -> Int -> Name -> Val -> Z Expr
+indirect t shapes ind x v
+  = do r <- fresh "r"
+       u <- fresh "u"
+       d <- fresh "d"
+       yf <- fresh "f"
+       yt <- fresh "y"
+       z <- fresh "z"
+       let ref = Fold t (injA shapes ind (BoxIn x (Dup (Var r))))
+           shared = Let d (V t) (Ret ref) (Drop d (Ret (Var r)))
+           unique = Let z (V VUnit) (Call nameLazyFree [t] [Var x]) (Ret (Var r))
+       return (Let r (V t) (Ret v)
+                (Let u (V (VSum [VUnit,VUnit])) (Call nameDataTypePtrIsUnique [t] [Var x])
+                  (CaseV Owned (Var u) [(yf,shared),(yt,unique)])))
+
+-- the constructor of a value of a lazy datatype: its index, payload, and how to rebuild it with another box
+conOf :: Val -> Maybe (Int, Val, Val -> Val)
+conOf (Fold t s) = fmap (\(i,w,re) -> (i, w, Fold t . re)) (go s)
+  where
+    go (Box w)   = Just (0, w, id)
+    go (Inl a s') = fmap (\(_,w,re) -> (0, w, Inl a . re)) (go s')
+    go (Inr a s') = fmap (\(i,w,re) -> (i+1, w, Inr a . re)) (go s')
+    go _         = Nothing
+conOf _ = Nothing
+
