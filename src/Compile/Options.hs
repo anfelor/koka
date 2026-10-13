@@ -148,6 +148,9 @@ data Flags
          , showCore         :: !Bool
          , showInitialCore  :: !Bool
          , showFinalCore    :: !Bool
+         , checkTyped       :: !Bool
+         , showTyped        :: !Bool
+         , typedC           :: !Bool
          , showCoreTypes    :: !Bool
          , showTypeIds      :: !Bool
          , showAsmCS        :: !Bool
@@ -298,6 +301,7 @@ flagsNull
           -- show
           False False  -- kinds kindsigs
           False False False False -- synonyms core icore fcore
+          False False False -- checktyped showtyped typedc
           False False -- core-types type-ids
           False -- show asm
           False
@@ -487,6 +491,9 @@ options = (\(xss,yss) -> (concat xss, concat yss)) $ unzip
  , flag   []    ["showcore"]       (\b f -> f{showCore=b})          "show core"
  , flag   []    ["showicore"]      (\b f -> f{showInitialCore=b})   "show initial core (right after type checking)"
  , flag   []    ["showfcore"]      (\b f -> f{showFinalCore=b})     "show final core (with backend optimizations)"
+ , flag   []    ["checktyped"]     (\b f -> f{checkTyped=b})        "elaborate into the typed backend IR and check it"
+ , flag   []    ["showtyped"]      (\b f -> f{showTyped=b})         "show the typed backend IR (implies --checktyped)"
+ , flag   []    ["typedc"]         (\b f -> f{typedC=b})            "generate C with the typed backend (as <exe>_typed)"
  , flag   []    ["showcoretypes"]  (\b f -> f{showCoreTypes=b})     "show full types in core"
  , flag   []    ["showtypeids"]    (\b f -> f{showTypeIds=b})       "show numeric type variable ids"
  , flag   []    ["showcs"]         (\b f -> f{showAsmCS=b})         "show generated c#"
