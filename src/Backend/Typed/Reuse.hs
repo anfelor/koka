@@ -9,9 +9,10 @@
 {- Drop-guided reuse (after Perceus).
 
   A drop of a box that is a heap block becomes a drop-reuse: if the box was unique,
-  its fields are dropped and its block is kept as a reuse credit. A box of the same
+  its fields are dropped and its block is kept as a reuse credit (`dropReuse`). A
+  `free` of a credit (from drop specialization) keeps the credit instead. A box of the same
   size that is allocated in the continuation of the drop uses that block. A credit
-  that is used in some branch of a case is dropped (freed) in the other branches.
+  that is used in some branch of a case is freed in the other branches.
   Closures get no credits. The body of a join point (which runs at most once) asks
   its jumps for the credits it needs as extra parameters: an allocation that finds
   no credit adds one. A jump passes an available credit of each size, or an empty one.
@@ -24,8 +25,9 @@ import Data.List( nub, (\\) )
 import Data.Maybe( fromMaybe )
 import Common.Name
 import Backend.Typed.Syntax
+import Backend.Typed.Perceus( dropValue )
 import Backend.Typed.Monad
-import Backend.Typed.Check( Env, Gamma, envOf, bindAll, inferV, altTypes, boxContents, reuseSize )
+import Backend.Typed.Check( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, boxContents, reuseSize )
 
 -- credits with the size of their block
 type Credits = [(Name,Int)]
@@ -94,24 +96,34 @@ reuseProgram prog
 bind :: [(Name,Ty)] -> R a -> R a
 bind bs = local (\re -> re{ reGamma = bindAll bs (reGamma re) })
 
-typeOfV :: Val -> R Ty
+typeOfV :: VVal -> R VType
 typeOfV v = do re <- ask
                liftE (inferV (reEnv re) (reGamma re) v)
 
+typeOfName :: Name -> R Ty
+typeOfName x = asks reGamma >>= liftE . (`inferVar` x)
+
 -- expressions
 
-ruE :: Expr -> R Expr
+ruE :: VExpr -> R VExpr
 ruE expr
-  | Just ds <- destructOf expr
+  | Just ds <- destructVOf expr
   = do t   <- typeOfV (dsScrut ds)
        env <- asks reEnv
-       tss <- liftE (altTypes env t expr)
+       tss <- liftE (altTypes env (V t) expr)
        v   <- ruV (dsScrut ds)
        es  <- branches [(zip xs ts,e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
        return (dsBuild ds (dsMode ds) v es)
 ruE expr
+  | Just ds <- destructAOf expr
+  = do t <- typeOfName (dsScrut ds)
+       env <- asks reEnv
+       tss <- liftE (altTypes env t expr)
+       es <- branches [(zip xs ts,e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
+       return (dsBuild ds (dsMode ds) (dsScrut ds) es)
+ruE expr
   = case expr of
-      Let x t e1 e2 -> Let x t <$> ruE e1 <*> bind [(x,t)] (ruE e2)
+      Let x t e1 e2 -> Let x t <$> ruE e1 <*> bind [(x,V t)] (ruE e2)
       Join j ps e1 e2
         -> do (e1',as) <- scope (Just []) (bind [(x,V t) | (x,_,t) <- ps] (ruE e1))
               let rs = fromMaybe [] as
@@ -126,16 +138,25 @@ ruE expr
         -> do es <- branches [([],e) | e <- map snd alts ++ [def]]
               return (CaseLit v (zip (map fst alts) es) (last es))
       Drop x e
-        -> do tx <- typeOfV (Var x)
-              case boxContents tx >>= reuseSize of
-                Left _  -> Drop x <$> ruE e
+        -> do g <- asks reGamma
+              a <- liftE (inferAVar g x)
+              case boxContents a >>= reuseSize of
                 Right n -> do r <- fresh
-                              credits >>= setCredits . ((r,n) :)
-                              e' <- bind [(r,V (VReuse n))] (ruE e)
-                              unused <- any ((== r) . fst) <$> credits
-                              if unused then do spend r
-                                                return (Drop x e')
-                                        else return (DropRu x r e')
+                              offer r n (dropReuse x r n) (Drop x) e
+                Left _ -> Drop x <$> ruE e
+      Free r e
+        -> do t <- typeOfName r
+              case t of
+                V (VReuse n) -> offer r n return (Free r) e
+                _ -> fail ("free of a non-credit: " ++ show r)
+      IsUnique x e1 e2
+        -> do es <- branches [([],e1),([],e2)]
+              return (IsUnique x (es !! 0) (es !! 1))
+      UnboxRu v x r e
+        -> do g <- asks reGamma
+              s <- liftE (inferAVar g v >>= boxContents)
+              n <- liftE (reuseSize s)
+              UnboxRu v x r <$> bind [(x,V s),(r,V (VReuse n))] (ruE e)
       Ret _ -> plain
       Call _ _ _ -> plain
       App _ _ -> plain
@@ -144,20 +165,39 @@ ruE expr
       Unpair{} -> plain
       CaseV{} -> plain
       CaseA{} -> plain
-      Unfold{} -> plain
+      Deref{} -> plain
+      Unroll{} -> plain
       Unbox{} -> plain
       UnboxLazy{} -> plain
       Unpack{} -> plain
       CaseOpen{} -> plain
-      -- only produced by reuse and drop specialization
-      DropRu{} -> fail "drop-reuse before reuse"
-      IsUnique{} -> fail "uniqueness test before reuse"
-      UnboxRu{} -> fail "unbox-reuse before reuse"
   where
-    plain = descendE ruV (\_ e -> ruE e) expr
+    plain = descendE pure ruV (\_ e -> ruE e) expr
 
--- every branch starts with the same credits; credits used in some branch are dropped in the others
-branches :: [([(Name,Ty)],Expr)] -> R [Expr]
+-- Make a credit available in the continuation; retain the original operation if unused.
+offer :: Name -> Int -> (VExpr -> R VExpr) -> (VExpr -> VExpr) -> VExpr -> R VExpr
+offer r n use unusedOp e
+  = do credits >>= setCredits . ((r,n) :)
+       e' <- bind [(r,V (VReuse n))] (ruE e)
+       unused <- any ((== r) . fst) <$> credits
+       if unused then do spend r
+                         return (unusedOp e')
+                 else use e'
+
+-- the paper's `[dropru]`, derived from `[if-unique]` and `[unbox-ru]`
+dropReuse :: Name -> Name -> Int -> VExpr -> R VExpr
+dropReuse x r n e
+  = do y  <- fresh
+       r' <- fresh
+       g <- asks reGamma
+       s <- liftE (inferAVar g x >>= boxContents)
+       body <- dropValue fresh y (V s) (Ret (Var r'))
+       return (Let r (VReuse n) (IsUnique x (UnboxRu x y r' body)
+                                                (Drop x (Ret (NoReuse n))))
+                 e)
+
+-- every branch starts with the same credits; credits used in some branch are freed in the others
+branches :: [([(Name,Ty)],VExpr)] -> R [VExpr]
 branches alts
   = do cs <- credits
        rs <- mapM (\(bs,e) -> do setCredits cs
@@ -168,18 +208,20 @@ branches alts
                                  return (e', [r | (r,_) <- cs, r `notElem` map fst left] ++ (as' \\ as))) alts
        let usedAny = nub (concatMap snd rs)
        setCredits [c | c <- cs, fst c `notElem` usedAny]
-       return [foldr Drop e [r | r <- usedAny, r `notElem` used] | (e,used) <- rs]
+       return [foldr Free e [r | r <- usedAny, r `notElem` used] | (e,used) <- rs]
 
 -- values: inner boxes are allocated first
 
-ruV :: Val -> R Val
-ruV val
+ruV :: VVal -> R VVal
+ruV = descendV ruA ruV
+
+ruA :: AVal -> R AVal
+ruA val
   = case val of
       Lam ps r e -> Lam ps r . fst <$> scope Nothing (bind [(x,V t) | (x,_,t) <- ps] (ruE e))
       Box w -> do tw <- typeOfV w
                   w' <- ruV w
-                  case tw of
-                    V t | Right n <- reuseSize t
-                      -> maybe (Box w') (`BoxAt` w') <$> takeCredit n
-                    _ -> return (Box w')
-      _ -> descendV ruV val
+                  case reuseSize tw of
+                    Right n -> maybe (Box w') (`BoxAt` w') <$> takeCredit n
+                    Left _ -> return (Box w')
+      _ -> descendA pure ruA ruV val

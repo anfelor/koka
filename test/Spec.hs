@@ -1,11 +1,14 @@
 import Control.Monad
 import Control.Monad.IO.Class
+import Control.Exception (bracket)
 import Data.Maybe
 import Data.Char
 import Data.List
 import Data.List.Extra (replace, trim)
+import Data.Time.Clock (addUTCTime)
 import System.Directory
 import System.Environment
+import System.Exit (ExitCode(..))
 import System.FilePath
 import System.IO
 import qualified System.Info as Sys
@@ -305,7 +308,9 @@ main = do
                then NameSpec.spec
                else (if (target options == "js" || not (par options)) then id else parallel) $
                     mapM_ (\(backend,out) -> withBackend backend $
-                                              do when (backend == BackendTyped) $ typedStdTest out
+                                              do when (backend == BackendTyped) $
+                                                   do typedStdTest out
+                                                      typedBuildTest options
                                                  discoverTests (initialCfg options backend) (pwd </> "test"))
                           (zip runBackends precompiled)
       withBackend backend = if (length runBackends > 1) then describe (backendName backend) else id
@@ -321,6 +326,85 @@ backendName BackendTyped = "typed"
 typedStdTest :: String -> Spec
 typedStdTest out
   = it "std" $ filter ("typed " `isPrefixOf`) (lines out) `shouldBe` []
+
+-- Exercise the module lifecycle, rather than just the output of an executable:
+-- libraries need objects before any executable is built, and cached objects
+-- must be reused or rebuilt together with their interfaces.
+typedBuildTest :: Options -> Spec
+typedBuildTest options
+  = describe "build" $ it "compiles and caches both backend objects per module" $
+      bracket scratch removeDirectoryRecursive $ \dir -> do
+        let out = dir </> "build"
+            dep = dir </> "dependency.kk"
+            wrapper = dir </> "wrapper.kk"
+            main = dir </> "main.kk"
+            obj name = out </> name <.> if Sys.os == "mingw32" then "obj" else "o"
+            exe name = out </> (name ++ if Sys.os == "mingw32" then ".exe" else "")
+            baseFlags = ["-v0", "--console=raw", "--no-buildhash", "--outputdir=" ++ out, "-i" ++ dir]
+            run typed args file = do
+              let kflags = baseFlags ++ ["--typedc" | typed] ++ args ++ [file]
+                  (cmd,argv) = if cabal options
+                                 then ("cabal", ["new-run","koka","--"] ++ kflags)
+                                 else ("stack", ["exec","koka"] ++
+                                        [flag | sysghc options, flag <- ["--system-ghc","--skip-ghc-check"]] ++ ["--"] ++ kflags)
+              (code,stdout,stderr) <- readProcessWithExitCode cmd argv ""
+              unless (code == ExitSuccess) $ expectationFailure (stdout ++ stderr)
+              return (trim (testSanitize "" stdout))
+            dependency value = "import std/text/regex\npub fun matched() : bool\n  \"hello\".find(regex(\"ell\")).default(\"\") == \"" ++ value ++ "\"\n"
+        writeFile dep (dependency "ell")
+        writeFile wrapper "import dependency\npub fun result() : bool\n  dependency/matched()\n"
+        writeFile main "import wrapper\nfun main()\n  println(wrapper/result())\n"
+        -- Start with a C-only cache, then enable typed compilation in that same directory.
+        void $ run False ["-l"] dep
+        doesFileExist (obj "dependency") `shouldReturn` True
+        doesFileExist (obj "kt_dependency") `shouldReturn` False
+        removeFile (obj "dependency")
+        void $ run False ["-l"] wrapper
+        doesFileExist (obj "dependency") `shouldReturn` True
+        void $ run True ["-l"] wrapper
+        doesFileExist (obj "kt_dependency") `shouldReturn` True
+        before <- mapM getModificationTime [obj "dependency", obj "kt_dependency"]
+        void $ run True ["-l"] wrapper
+        mapM getModificationTime [obj "dependency", obj "kt_dependency"] `shouldReturn` before
+        -- A lost object must invalidate the interface and rebuild the module.
+        removeFile (obj "kt_dependency")
+        void $ run True ["-l"] wrapper
+        doesFileExist (obj "kt_dependency") `shouldReturn` True
+        -- The regex dependency is transitive from main, so its include paths
+        -- must be handled by its own module build rather than the final link.
+        run True ["-e", "--buildname=program"] main `shouldReturn` "True"
+        readProcessWithExitCode (exe "program") [] "" `shouldReturn` (ExitSuccess, "True\n", "")
+        readProcessWithExitCode (exe "program_typed") [] "" `shouldReturn` (ExitSuccess, "True\n", "")
+        -- Give the changed source a strictly newer timestamp without sleeping.
+        ifaceTime <- getModificationTime (out </> "dependency.kki")
+        writeFile dep (dependency "other")
+        setModificationTime dep (addUTCTime 1 ifaceTime)
+        run True ["-e", "--buildname=program"] main `shouldReturn` "False"
+        readProcessWithExitCode (exe "program") [] "" `shouldReturn` (ExitSuccess, "False\n", "")
+        readProcessWithExitCode (exe "program_typed") [] "" `shouldReturn` (ExitSuccess, "False\n", "")
+        -- A C-only rebuild leaves typed artifacts behind. Enabling typed C
+        -- again must rebuild them even though their own sources are unchanged.
+        typedBefore <- getModificationTime (obj "kt_dependency")
+        ifaceTime <- getModificationTime (out </> "dependency.kki")
+        writeFile dep (dependency "ell")
+        setModificationTime dep (addUTCTime 1 ifaceTime)
+        run False ["-e", "--buildname=program"] main `shouldReturn` "True"
+        getModificationTime (obj "kt_dependency") `shouldReturn` typedBefore
+        -- Ensure the next build tests artifact validation, not a source whose
+        -- synthetic timestamp is still newer than the rebuilt interface.
+        ifaceTime <- getModificationTime (out </> "dependency.kki")
+        setModificationTime dep (addUTCTime (-1) ifaceTime)
+        run True ["-e", "--buildname=program"] main `shouldReturn` "True"
+        readProcessWithExitCode (exe "program") [] "" `shouldReturn` (ExitSuccess, "True\n", "")
+        readProcessWithExitCode (exe "program_typed") [] "" `shouldReturn` (ExitSuccess, "True\n", "")
+      where
+        scratch = do
+          root <- getTemporaryDirectory
+          (path,handle) <- openTempFile root "koka-build-test"
+          hClose handle
+          removeFile path
+          createDirectory path
+          return path
 
 -- compile all standard libraries before testing so we can run in parallel (and return the output)
 precompile :: Options -> Backend -> IO String
