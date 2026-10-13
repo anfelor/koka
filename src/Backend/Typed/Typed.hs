@@ -30,8 +30,8 @@ typedFromCore :: Platform -> Bool -> Newtypes -> [C.Core] -> Int -> C.Core -> (P
 typedFromCore platform enableReuse nt imports uniq core
   = let (acore,_)             = runUnique uniq (contifyCore core >>= matchCore nt >>= anfCore)
         (prog,elabErrs,notes) = elabProgram platform nt imports acore
-        passes                = [("simplify",False,pure' simplifyProgram), ("perceus",True,perceusProgram), ("lazy",True,lazyProgram)]
-                                ++ [("reuse",True,reuseProgram) | enableReuse] ++ [("dropspec",True,pure' dropSpecProgram)]
+        passes                = [("simplify",False,pure' simplifyProgram), ("perceus",True,perceusProgram), ("lazy",True,lazyProgram)
+                                  ,("dropspec",True,pure' dropSpecProgram)] ++ [("reuse",True,reuseProgram) | enableReuse]
         (dsprog,msgs)         = runPasses prog (label "check" (checkProgram prog)) passes
     in (dsprog, label "elab" elabErrs ++ msgs ++ label "note" notes)
   where

@@ -56,11 +56,7 @@ layout t
                        cts  -> CProd (structName ("P(" ++ intercalate "," [show i ++ ":" ++ canonCT ct | (i,ct) <- zip [0::Int ..] cts] ++ ")"))
                                      (orderFields (zip [0..] cts))
       VUnit       -> CUnit
-      VVar _      -> CBox
-      VApp _ _    -> CBox
-      VCon _ _    -> CBox
       VPtr _      -> CBox
-      VTLam _ _   -> CBox
   where
     altLayout s = case layout s of
                     CUnit -> Nothing
@@ -73,13 +69,9 @@ leaves t
       VProd a b -> leaves a ++ leaves b
       VExists _ b -> leaves b
       VUnit -> []
-      VVar _ -> [t]
-      VApp _ _ -> [t]
-      VCon _ _ -> [t]
       VPtr _ -> [t]
       VSum _ -> [t]
       VRaw _ -> [t]
-      VTLam _ _ -> [t]
       VReuse _ -> [t]
 
 enumSize :: Int -> Int
