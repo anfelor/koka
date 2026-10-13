@@ -23,7 +23,7 @@ import qualified Data.Map as M
 import Common.Name
 import Common.NamePrim( nameLazyMemoize, nameLazyMemoizeTarget, nameDataTypePtrIsUnique )
 import Backend.Typed.Syntax
-import Backend.Typed.Types( inst, splitSum )
+import Backend.Typed.Types( inst, splitSum, varV )
 import Backend.Typed.Layout( layout, blockSize )
 import Backend.Typed.Coerce( injA )
 import Backend.Typed.Monad
@@ -48,31 +48,34 @@ lazyProgram prog
                   Left err   -> (d, [show (defName d) ++ ": " ++ err])
         (defs,errs) = unzip (map run (progDefs prog))
         a     = -4
-        isUniqueSig = SigFun [a] [(Borrowed,VVar a)] (VSum [VUnit,VUnit])
-        sigs = M.insert nameLazyFree (SigFun [a] [(Owned,VVar a)] VUnit) $
+        isUniqueSig = SigFun [a] [(Borrowed,varV a)] (VSum [VUnit,VUnit])
+        sigs = M.insert nameLazyFree (SigFun [a] [(Owned,varV a)] VUnit) $
                M.insertWith (\_ old -> old) nameDataTypePtrIsUnique isUniqueSig (progSigs prog)
     in (prog{ progDefs = defs, progSigs = sigs }, concat errs)
 
-lazyE :: TypeDefs -> Targets -> Expr -> Z Expr
+lazyE :: TypeDefs -> Targets -> VExpr -> Z VExpr
 lazyE tdefs targets expr
   = case expr of
       Let _ _ (Call f _ [Var x, Lit (LitInt size), _]) e | f == nameLazyMemoizeTarget
         -> lazyE tdefs (M.insert x (fromInteger size) targets) e
       Call f [t] [target,v] | f == nameLazyMemoize
         -> memoize tdefs targets t target v
-      _ -> descendE (lazyV tdefs) (\_ e -> lazyE tdefs targets e) expr
+      _ -> descendE pure (lazyV tdefs) (\_ e -> lazyE tdefs targets e) expr
 
 -- lambdas have no targets
-lazyV :: TypeDefs -> Val -> Z Val
-lazyV tdefs val
+lazyV :: TypeDefs -> VVal -> Z VVal
+lazyV tdefs = descendV (lazyA tdefs) (lazyV tdefs)
+
+lazyA :: TypeDefs -> AVal -> Z AVal
+lazyA tdefs val
   = case val of
       Lam ps r e -> Lam ps r <$> lazyE tdefs M.empty e
-      _          -> descendV (lazyV tdefs) val
+      _          -> descendA pure (lazyA tdefs) (lazyV tdefs) val
 
-memoize :: TypeDefs -> Targets -> VType -> Val -> Val -> Z Expr
+memoize :: TypeDefs -> Targets -> AType -> VVal -> VVal -> Z VExpr
 memoize tdefs targets t target v
   = case (t, target) of
-      (VCon tname targs, Var x) | Just tdef <- M.lookup tname tdefs, Just linfo <- tdefLazy tdef, Just body <- tdefBody tdef
+      (ACon tname targs, Var x) | Just tdef <- M.lookup tname tdefs, Just linfo <- tdefLazy tdef, Just body <- tdefBody tdef
         -> let shapes = splitSum (length (lazyCons linfo)) (inst (tdefParams tdef) targs body)
            in case conOf v of
                 Just (i,w,rebuild) | inPlace linfo shapes (M.lookup x targets) i
@@ -94,7 +97,7 @@ inPlace linfo shapes mbSize i
     ourSize _        = 0
 
 -- free the lazy value if it is unique, and otherwise overwrite it with an indirection to the value
-indirect :: VType -> [AType] -> Int -> Name -> Val -> Z Expr
+indirect :: AType -> [AType] -> Int -> Name -> VVal -> Z VExpr
 indirect t shapes ind x v
   = do r <- fresh "r"
        u <- fresh "u"
@@ -102,16 +105,17 @@ indirect t shapes ind x v
        yf <- fresh "f"
        yt <- fresh "y"
        z <- fresh "z"
-       let ref = Fold t (injA shapes ind (BoxIn x (Dup (Var r))))
-           shared = Let d (V t) (Ret ref) (Drop d (Ret (Var r)))
-           unique = Let z (V VUnit) (Call nameLazyFree [t] [Var x]) (Ret (Var r))
-       return (Let r (V t) (Ret v)
-                (Let u (V (VSum [VUnit,VUnit])) (Call nameDataTypePtrIsUnique [t] [Var x])
+       a <- fresh "a"
+       let ref = Ptr t (Roll t (injA shapes ind (BoxIn x (DupV (Var r)))))
+           shared = Let d (VPtr t) (Ret ref) (Deref Owned (Var d) a (Drop a (Ret (Var r))))
+           unique = Let z VUnit (Call nameLazyFree [t] [Var x]) (Ret (Var r))
+       return (Let r (VPtr t) (Ret v)
+                (Let u (VSum [VUnit,VUnit]) (Call nameDataTypePtrIsUnique [t] [Var x])
                   (CaseV Owned (Var u) [(yf,shared),(yt,unique)])))
 
 -- the constructor of a value of a lazy datatype: its index, payload, and how to rebuild it with another box
-conOf :: Val -> Maybe (Int, Val, Val -> Val)
-conOf (Fold t s) = fmap (\(i,w,re) -> (i, w, Fold t . re)) (go s)
+conOf :: VVal -> Maybe (Int, VVal, AVal -> VVal)
+conOf (Ptr t (Roll t' s)) = fmap (\(i,w,re) -> (i, w, Ptr t . Roll t' . re)) (go s)
   where
     go (Box w)   = Just (0, w, id)
     go (Inl a s') = fmap (\(_,w,re) -> (0, w, Inl a . re)) (go s')

@@ -38,11 +38,11 @@ module Backend.Typed.Linear( checkLinear ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Control.Monad( unless, when, forM_ )
+import Control.Monad( unless, when, forM_, void )
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Monad
-import Backend.Typed.Check( Env(..), Gamma, envOf, bindAll, inferV, altTypes, boxContents, reuseSize, paramModes, isTrivial )
+import Backend.Typed.Check( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, boxContents, reuseSize, paramModes, isTrivial )
 
 -- the mode of a variable, for a borrowed one the owned variable it is borrowed from (if any),
 -- and whether it is an alias of that variable (the same pointer)
@@ -150,17 +150,32 @@ leave bs
 
 -- values
 
-ownedV :: Env -> Gamma -> Val -> L ()
+ownedV :: Env -> Gamma -> VVal -> L ()
 ownedV env g val
   = case val of
       Var x -> consume g x
-      Dup v -> borrowedV env g v
-      Glob _ _ -> do t <- liftE (inferV env g val)
+      DupV v -> borrowedV env g v
+      Glob _ _ -> do t <- V <$> liftE (inferV env g val)
                      unless (isTrivial t) (fail ("owned use of global " ++ show val))
-      Fun _ -> ownedParams env g val
+      UnitV -> return ()
+      Lit _ -> return ()
+      NoReuse _ -> return ()
+      Inj _ _ _ -> children
+      Pair _ _ -> children
+      Ptr _ _ -> children
+      Pack _ _ _ -> children
+      TyApp _ _ -> children
+  where
+    children = void (descendV (\a -> ownedA env g a >> return a) (\v -> ownedV env g v >> return v) val)
+
+ownedA :: Env -> Gamma -> AVal -> L ()
+ownedA env g val
+  = case val of
+      Fun _ -> liftE (inferA env g val) >>= ownedParams
+      DupA x -> inspect g x
       Lam ps _ e
         -> do unless (all (\(_,m,_) -> m == Owned) ps) (fail ("closure with parameters that are not owned: " ++ show val))
-              let caps = S.toList (fvV val)
+              let caps = S.toList (fvA val)
               mapM_ (consume g) caps
               d <- get
               let g' = bindAll [(x,V t) | (x,_,t) <- ps] g
@@ -169,85 +184,88 @@ ownedV env g val
               put inner
               scopeEnd (checkE env g' M.empty e)
               put d
-      Unit        -> return ()
-      Lit _       -> return ()
-      NoReuse _   -> return ()
-      Inj _ _ _   -> children
-      Inl _ _     -> children
-      Inr _ _     -> children
-      Pair _ _    -> children
-      Fold _ _    -> children
-      Box _       -> children
-      Pack _ _ _  -> children
-      OpenCon _ _ _ -> children
-      TyApp _ _   -> children
-      BoxAt _ _   -> children
-      BoxIn _ _   -> children
-  where
-    children = mapM_ (ownedV env g) (childrenV val)
+      UnitA -> return ()
+      Inl _ v -> ownedA env g v
+      Inr _ v -> ownedA env g v
+      Roll _ v -> ownedA env g v
+      Box v -> ownedV env g v
+      OpenCon _ _ v -> ownedV env g v
+      BoxAt r v -> consume g r >> ownedV env g v
+      BoxIn x v -> consume g x >> ownedV env g v
 
 -- a unique value is a unique variable
-uniqueV :: Gamma -> Val -> L ()
+uniqueV :: Gamma -> VVal -> L ()
 uniqueV g val
   = case val of
-      Var x -> do promote x
-                  d <- get
-                  unless (isUnique d x) (fail ("unique use of a variable that is not unique: " ++ show x))
-                  consume g x
+      Var x -> uniqueName g x
       _ -> fail ("unique use of a value that is not a variable: " ++ show val)
 
-borrowedV :: Env -> Gamma -> Val -> L ()
+uniqueName :: Gamma -> Name -> L ()
+uniqueName g x
+  = do promote x
+       d <- get
+       unless (isUnique d x) (fail ("unique use of a variable that is not unique: " ++ show x))
+       consume g x
+
+borrowedV :: Env -> Gamma -> VVal -> L ()
 borrowedV env g val
   = case val of
       Var x -> inspect g x
       Glob _ _ -> return ()
       Lit _ -> return ()
-      Unit -> return ()
-      Fun _ -> ownedParams env g val
+      UnitV -> return ()
       TyApp v _ -> borrowedV env g v
       _ -> fail ("borrowed use of a non-atomic value: " ++ show val)
 
 -- closures only have owned parameters
-ownedParams :: Env -> Gamma -> Val -> L ()
-ownedParams env g f
-  = do t <- liftE (inferV env g f)
-       case t of
-         A a | any (/= Owned) (modes a) -> fail ("closure with parameters that are not owned: " ++ show f)
-         _ -> return ()
+ownedParams :: AType -> L ()
+ownedParams a = unless (all (== Owned) (modes a)) (fail ("closure with parameters that are not owned: " ++ show a))
   where
-    modes (AFun ps _)    = map fst ps
-    modes (AForall _ a)  = modes a
-    modes _              = []
+    modes (AFun ps _) = map fst ps
+    modes (AForall _ t) = modes t
+    modes _ = []
 
 -- expressions
 
-checkE :: Env -> Gamma -> Joins -> Expr -> L ()
+checkE :: Env -> Gamma -> Joins -> VExpr -> L ()
 checkE env g js (UnboxLazy v x e)
-  = do t   <- liftE (inferV env g v)
+  = do t   <- liftE (inferVar g v)
        [[tx]] <- liftE (altTypes env t (UnboxLazy v x e))
-       borrowedV env g v
+       inspect g v
        let bs = [(x,tx)]
        addVars bs owned'
        checkE env (bindAll bs g) js e
        leave bs
 checkE _ _ _ expr
-  | isRead expr, Just ds <- destructOf expr, owning (dsMode ds)
+  | isRead expr, Just ds <- destructAOf expr, owning (dsMode ds)
   = fail ("owned read of the contents of a box: " ++ show (dsScrut ds))
-checkE _ _ _ expr
-  | not (keepsPointer expr), Just ds <- destructOf expr, dsMode ds == Unique
-  = fail ("unique destructuring of a value that is not a pointer: " ++ show (dsScrut ds))
 checkE env g js expr
-  | Just ds <- destructOf expr
-  = do t   <- liftE (inferV env g (dsScrut ds))
+  | Just ds <- destructAOf expr
+  = do when (not (keepsPointer expr) && dsMode ds == Unique)
+         (fail ("unique destructuring of a value that is not a pointer: " ++ show (dsScrut ds)))
+       t <- liftE (inferVar g (dsScrut ds))
        tss <- liftE (altTypes env t expr)
-       destruct env g js (dsMode ds) (keepsPointer expr) (dsScrut ds) [(zip xs ts,e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
+       let z = dsScrut ds
+       destruct env g js (dsMode ds) (keepsPointer expr) (Just z)
+         (consume g z) (uniqueName g z) (inspect g z)
+         [(zip xs ts,e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
+  | Just ds <- destructVOf expr
+  = do when (not (keepsPointer expr) && dsMode ds == Unique)
+         (fail ("unique destructuring of a value that is not a pointer: " ++ show (dsScrut ds)))
+       t <- V <$> liftE (inferV env g (dsScrut ds))
+       tss <- liftE (altTypes env t expr)
+       let v = dsScrut ds
+           name = case v of { Var z -> Just z; _ -> Nothing }
+       destruct env g js (dsMode ds) (keepsPointer expr) name
+         (ownedV env g v) (uniqueV g v) (borrowedV env g v)
+         [(zip xs ts,e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
 checkE env g js expr
   = case expr of
       Ret v -> ownedV env g v
       Let x t e1 e2 -> do checkE env g M.empty e1
-                          addVars [(x,t)] owned'
-                          checkE env (M.insert x t g) js e2
-                          leave [(x,t)]
+                          addVars [(x,V t)] owned'
+                          checkE env (M.insert x (V t) g) js e2
+                          leave [(x,V t)]
       Call f _ vs -> args (paramModes env f (length vs)) vs
       Jump j vs -> case M.lookup j js of
                      Just ms -> args ms vs
@@ -257,24 +275,23 @@ checkE env g js expr
                             scopeEnd (checkE env (M.fromList [(x,V t) | (x,_,t) <- ps]) js e1)
                             put d
                             checkE env g (M.insert j [m | (_,m,_) <- ps] js) e2
-      App f vs -> do ownedParams env g f
-                     mapM_ (ownedV env g) (f:vs)
+      App f vs -> do ft <- liftE (inferVar g f)
+                     case ft of
+                       A a -> ownedParams a
+                       _ -> fail "unboxed function operand"
+                     consume g f
+                     mapM_ (ownedV env g) vs
       Gen _ e -> checkE env g M.empty e
       Drop x e -> consume g x >> checkE env g js e
-      DropRu x r e -> do n <- liftE (inferV env g (Var x) >>= boxContents >>= reuseSize)
-                         consume g x
-                         let bs = [(r,V (VReuse n))]
-                         addVars bs owned'
-                         checkE env (bindAll bs g) js e
-                         leave bs
+      Free r e -> consume g r >> checkE env g js e
       IsUnique x e1 e2 -> do promote x
                              d <- get
                              unless (maybe False owns (M.lookup x d)) (fail ("uniqueness test of a variable that is not owned: " ++ show x))
                              branches [modify (M.insert x unique') >> checkE env g js e1, checkE env g js e2]
-      UnboxRu (Var z) x r e
-        -> do s <- liftE (inferV env g (Var z) >>= boxContents)
+      UnboxRu z x r e
+        -> do s <- liftE (inferAVar g z >>= boxContents)
               n <- liftE (reuseSize s)
-              uniqueV g (Var z)
+              uniqueName g z
               let bs = [(x,V s),(r,V (VReuse n))]
               addVars bs owned'
               checkE env (bindAll bs g) js e
@@ -288,17 +305,17 @@ checkE env g js expr
                     sequence_ [uniqueV g v | (Unique,v) <- zip ms vs]
                     sequence_ [borrowedV env g v | (Borrowed,v) <- zip ms vs]
 
-destruct :: Env -> Gamma -> Joins -> Mode -> Bool -> Val -> [([(Name,Ty)],Expr)] -> L ()
-destruct env g js m keeps v alts
-  = do st <- case (m,v) of
-               (Owned,_)  -> ownedV env g v >> return (const owned')
-               (Unique,_) -> uniqueV g v >> return (const unique')
-               (Borrowed,Var z) -> do borrowedV env g v
-                                      r <- rootOf z
-                                      d <- get
-                                      let zAlias = maybe False (\s -> owns s || stAlias s) (M.lookup z d)
-                                      return (\t -> Status Borrowed r (keeps && zAlias && isA t))
-               (Borrowed,_) -> borrowedV env g v >> return (const (Status Borrowed Nothing False))
+destruct :: Env -> Gamma -> Joins -> Mode -> Bool -> Maybe Name -> L () -> L () -> L () -> [([(Name,Ty)],VExpr)] -> L ()
+destruct env g js m keeps name own unique borrow alts
+  = do st <- case (m,name) of
+               (Owned,_) -> own >> return (const owned')
+               (Unique,_) -> unique >> return (const unique')
+               (Borrowed,Just z) -> do borrow
+                                       r <- rootOf z
+                                       d <- get
+                                       let zAlias = maybe False (\s -> owns s || stAlias s) (M.lookup z d)
+                                       return (\t -> Status Borrowed r (keeps && zAlias && isA t))
+               (Borrowed,Nothing) -> borrow >> return (const (Status Borrowed Nothing False))
        branches [do sequence_ [addVars [b] (st t) | b@(_,t) <- bs]
                     checkE env (bindAll bs g) js e
                     leave bs

@@ -109,7 +109,7 @@ funSig tp
 
 -- expressions
 
-elabExpr :: C.Expr -> E Expr
+elabExpr :: C.Expr -> E VExpr
 elabExpr expr
   = case expr of
       C.Let [] body -> elabExpr body
@@ -125,7 +125,7 @@ elabExpr expr
         -> do t  <- vt (C.defType def)
               e1 <- elabExprAt t (C.defExpr def)
               e2 <- withLocals [C.defName def] (elabExpr (C.Let dgs body))
-              return (Let (C.defName def) (V t) e1 e2)
+              return (Let (C.defName def) t e1 e2)
       C.Let (C.DefRec defs : _) _
         -> failE ("local recursive definition: " ++ show (map C.defName defs))
       C.TypeLam tvs e | not (any tvarStar tvs) -> elabExpr e
@@ -136,21 +136,24 @@ elabExpr expr
       _ -> do (k,v) <- elabVal expr
               return (k (Ret v))
 
-elabGen :: [TVar] -> C.Expr -> Type -> E Expr
+elabGen :: [TVar] -> C.Expr -> Type -> E VExpr
 elabGen tvs e tp
   = do target <- vt tp
        case target of
-         VPtr (AForall tvs' a) -> Gen tvs' <$> withTVars tvs' (elabExprAt (VPtr (inst tvs (map VVar tvs') a)) e)
+         VPtr (AForall tvs' a)
+           -> do let a' = inst tvs (map AVar tvs') a
+                 body <- withTVars tvs' (elabExprAt (VPtr a') e)
+                 return (Gen tvs' body)
          _ -> failE ("type abstraction at the monomorphic type " ++ ppr target)
 
-elabExprAt :: VType -> C.Expr -> E Expr
+elabExprAt :: VType -> C.Expr -> E VExpr
 elabExprAt t e
   = do e' <- elabExpr e
        t0 <- vt (typeOf e)
        if alphaEq t0 t then return e'
          else do r <- fresh "g"
                  (k,v) <- coerce t0 t (Var r)
-                 return (Let r (V t0) e' (k (Ret v)))
+                 return (Let r t0 e' (k (Ret v)))
 
 isConApp :: C.Expr -> Bool
 isConApp (C.Con _ _)     = True
@@ -159,7 +162,7 @@ isConApp _               = False
 
 -- applications
 
-elabApp :: C.Expr -> [C.Expr] -> Type -> E Expr
+elabApp :: C.Expr -> [C.Expr] -> Type -> E VExpr
 elabApp f args resTp
   = do mbsig <- globalOf f
        case mbsig of
@@ -169,8 +172,8 @@ elabApp f args resTp
          _ -> do (k1,fv) <- elabVal f
                  g <- fresh "f"
                  (params,res) <- funType f
-                 body <- callWith (App (Var g)) (map snd params) res args resTp
-                 return (k1 (Unfold Owned fv g body))
+                 body <- callWith (App g) (map snd params) res args resTp
+                 return (k1 (Deref Owned fv g body))
 
 globalOf :: C.Expr -> E (Maybe (Name,Sig,Type,[Type]))
 globalOf f
@@ -198,7 +201,7 @@ isFunInfo (C.InfoArity _ _)  = True
 isFunInfo (C.InfoExternal _) = True
 isFunInfo _                  = False
 
-instFun :: Name -> Sig -> Type -> [Type] -> E ([VType],[VType],VType)
+instFun :: Name -> Sig -> Type -> [Type] -> E ([AType],[VType],VType)
 instFun g (SigFun tvs params res) gtp tys
   = do e <- env
        tys' <- instArgs gtp tys
@@ -216,10 +219,10 @@ splitForallA :: AType -> ([TVar],AType)
 splitForallA (AForall tvs a) = (tvs,a)
 splitForallA a = ([],a)
 
-instOf :: Sub -> TVar -> VType
-instOf sub tv = M.findWithDefault vtAny tv sub
+instOf :: Sub -> TVar -> AType
+instOf sub tv = M.findWithDefault atAny tv sub
 
-instVal :: Name -> Sig -> Type -> [Type] -> E ([VType],VType)
+instVal :: Name -> Sig -> Type -> [Type] -> E ([AType],VType)
 instVal g (SigVal tvs t) gtp tys
   = do e <- env
        tys' <- instArgs gtp tys
@@ -236,13 +239,13 @@ funType f = do t <- vt (typeOf f)
                  VPtr (AFun params res) -> return (params,res)
                  _ -> failE ("expecting a function value: " ++ ppr t)
 
-callWith :: ([Val] -> Expr) -> [VType] -> VType -> [C.Expr] -> Type -> E Expr
+callWith :: ([VVal] -> VExpr) -> [VType] -> VType -> [C.Expr] -> Type -> E VExpr
 callWith call params res args resTp
   = do (ks,vs) <- unzip <$> mapM (\(p,arg) -> elabValAt p arg) (zip params args)
        expect <- vt resTp
        r <- fresh "r"
        (kr,vr) <- coerce res expect (Var r)
-       let body = if alphaEq res expect then call vs else Let r (V res) (call vs) (kr (Ret vr))
+       let body = if alphaEq res expect then call vs else Let r res (call vs) (kr (Ret vr))
        return (compose ks body)
 
 splitTypeApp :: C.Expr -> (Maybe (TName,C.VarInfo),[Type])
@@ -252,7 +255,7 @@ splitTypeApp expr
       C.Var x info                 -> (Just (x,info),[])
       _                            -> (Nothing,[])
 
-instArgs :: Type -> [Type] -> E [VType]
+instArgs :: Type -> [Type] -> E [AType]
 instArgs gtp tys
   = do e <- env
        tr (elabArgs (envNT e) (fst (splitForall gtp)) tys)
@@ -266,17 +269,17 @@ splitForall tp
 
 -- values
 
-elabValAt :: VType -> C.Expr -> E (K,Val)
-elabValAt expect@(VPtr (AFun qs _)) (C.Lam pars _ body) | length qs == length pars
+elabValAt :: VType -> C.Expr -> E (K,VVal)
+elabValAt expect@(VPtr a@(AFun qs _)) (C.Lam pars _ body) | length qs == length pars
   = do lam <- elabLam expect pars body
-       return (id, Fold expect lam)
+       return (id, Ptr a lam)
 elabValAt expect expr
   = do (k1,v) <- elabVal expr
        t <- vt (typeOf expr)
        (k2,v') <- coerce t expect v
        return (k1 . k2, v')
 
-elabVal :: C.Expr -> E (K,Val)
+elabVal :: C.Expr -> E (K,VVal)
 elabVal expr
   = case expr of
       C.Var (TName x tp) _ | x == nameUnreachable -> unreachable tp
@@ -285,12 +288,13 @@ elabVal expr
       C.Lit lit -> return (id, Lit (elabLit lit))
       _ | isConApp expr -> case expandSyn (typeOf expr) of
                               TFun pars eff _ -> etaCon expr pars eff
+                              TForall tvs _ -> generalize [typevarId tv | tv <- tvs, tvarStar tv] (elabCon expr []) (typeOf expr)
                               _ -> elabCon expr []
       C.App f args | isConApp f -> elabCon f args
       C.TypeLam tvs e | not (any tvarStar tvs) -> elabVal e
       C.Lam pars _ body -> do t <- vt (typeOf expr)
                               lam <- elabLam t pars body
-                              return (id, Fold t lam)
+                              genVal t lam
       C.TypeLam tvs (C.Lam pars _ body)
         -> do t <- vt (typeOf expr)
               lam <- withTVars (map typevarId tvs) (elabLam (stripForallV t) pars body)
@@ -298,24 +302,25 @@ elabVal expr
       C.TypeLam tvs e | isValue e -> elabTypeLam [typevarId tv | tv <- tvs, tvarStar tv] e (typeOf expr)
       _ -> failE ("unsupported value expression: " ++ exprKind expr)
 
-elabTypeLam :: [TVar] -> C.Expr -> Type -> E (K,Val)
-elabTypeLam tvs e tp
-  = do (k,v) <- withTVars tvs (elabVal e)
-       target <- vt tp
-       case (target,v) of
-         (VPtr (AForall _ _), Fold _ w) -> do (k2,v') <- genVal target w
-                                              return (k . k2, v')
-         (VPtr (AForall _ _), _) -> failE ("type abstraction over a non-pointer value")
-         _ -> return (k,v)
+elabTypeLam :: [TVar] -> C.Expr -> Type -> E (K,VVal)
+elabTypeLam tvs e tp = generalize tvs (elabVal e) tp
 
-unreachable :: Type -> E (K,Val)
+-- a pointer value at its polymorphic type `tp`
+generalize :: [TVar] -> E (K,VVal) -> Type -> E (K,VVal)
+generalize tvs elab tp
+  = do (k,v) <- withTVars tvs elab
+       target <- vt tp
+       (k2,v') <- genPtr target v
+       return (k . k2, v')
+
+unreachable :: Type -> E (K,VVal)
 unreachable tp
   = do t <- vt tp
        let a = -2
-       recordSig nameUnreachable (SigFun [a] [] (VVar a))
+       recordSig nameUnreachable (SigFun [a] [] (varV a))
        x <- fresh "u"
        (k,v) <- coerce (boxrep t) t (Var x)
-       return (Let x (V (boxrep t)) (Call nameUnreachable [boxrep t] []) . k, v)
+       return (Let x (boxrep t) (Call nameUnreachable [rep t] []) . k, v)
 
 exprKind :: C.Expr -> String
 exprKind expr
@@ -328,12 +333,12 @@ exprKind expr
       C.Var x _     -> "variable " ++ show (getName x)
       _             -> "other"
 
-etaCon :: C.Expr -> [(Name,Type)] -> Type -> E (K,Val)
+etaCon :: C.Expr -> [(Name,Type)] -> Type -> E (K,VVal)
 etaCon con pars eff
   = do xs <- mapM (\(_,tp) -> (\x -> TName x tp) <$> fresh "c") pars
        elabVal (C.Lam xs eff (C.App con [C.Var x C.InfoNone | x <- xs]))
 
-elabLam :: VType -> [TName] -> C.Expr -> E Val
+elabLam :: VType -> [TName] -> C.Expr -> E AVal
 elabLam (VPtr (AFun qs res)) pars body
   = do (ps,ks) <- unzip <$> mapM lamParam (zip pars qs)
        body' <- withLocals (map getName pars) (elabExprAt res body)
@@ -346,7 +351,7 @@ lamParam (p,(m,q))
        if alphaEq q t then return ((getName p,m,q),id)
          else do y <- fresh "a"
                  (k,v) <- coerce q t (Var y)
-                 return ((y,m,q), k . Let (getName p) (V t) (Ret v))
+                 return ((y,m,q), k . Let (getName p) t (Ret v))
 
 stripForallV :: VType -> VType
 stripForallV (VPtr (AForall _ a)) = VPtr a
@@ -360,7 +365,7 @@ elabLit lit
       C.LitChar c   -> LitChar c
       C.LitString s -> LitString s
 
-elabVar :: Name -> Type -> C.VarInfo -> [Type] -> E (K,Val)
+elabVar :: Name -> Type -> C.VarInfo -> [Type] -> E (K,VVal)
 elabVar x tp info tys
   = do e <- env
        expect <- vt (typeOf (mkTypeApp (C.Var (TName x tp) info) tys))
@@ -369,29 +374,26 @@ elabVar x tp info tys
                  instLocal x tp tys' expect
          else do sig <- globalSig x tp info
                  case sig of
-                   SigFun _ ps _ -> do (tysD,params,res) <- instFun x sig tp tys
-                                       let a = AFun [(Owned,p) | p <- params] res
-                                       f <- if any ((/= Owned) . fst) ps then etaOwned x tysD params res
-                                                                         else return (tapp (Fun x) tysD)
-                                       coerce (VPtr a) expect (Fold (VPtr a) f)
+                   SigFun tvs ps r -> do (tysD,params,res) <- instFun x sig tp tys
+                                         let a = AFun [(Owned,p) | p <- params] res
+                                         f <- if any ((/= Owned) . fst) ps then Ptr a <$> etaOwned x tysD params res
+                                                                           else return (tapp (Ptr (forallA tvs (AFun ps r)) (Fun x)) tysD)
+                                         coerce (VPtr a) expect f
                    SigVal _ _   -> do (tysD,t) <- instVal x sig tp tys
                                       coerce t expect (Glob x tysD)
                    SigCon _ _ _ -> failE ("constructor used as a variable: " ++ show x)
 
 -- closures only have owned parameters ([fun]): wrap a function that borrows (or takes a unique argument)
-etaOwned :: Name -> [VType] -> [VType] -> VType -> E Val
+etaOwned :: Name -> [AType] -> [VType] -> VType -> E AVal
 etaOwned x tysD params res
   = do ys <- mapM (const (fresh "e")) params
        return (Lam [(y,Owned,p) | (y,p) <- zip ys params] res (Call x tysD (map Var ys)))
 
-instLocal :: Name -> Type -> [VType] -> VType -> E (K,Val)
+instLocal :: Name -> Type -> [AType] -> VType -> E (K,VVal)
 instLocal x _ [] _ = return (id, Var x)
 instLocal x tp tys' expect
   = do a <- ptrType tp
-       g <- fresh "g"
-       let ai = instA a tys'
-       (k,v) <- coerce (VPtr ai) expect (Fold (VPtr ai) (TyApp (Var g) tys'))
-       return (Unfold Owned (Var x) g . k, v)
+       coerce (VPtr (instA a tys')) expect (TyApp (Var x) tys')
 
 ptrType :: Type -> E AType
 ptrType tp = do t <- vt tp
@@ -403,13 +405,13 @@ mkTypeApp :: C.Expr -> [Type] -> C.Expr
 mkTypeApp e []  = e
 mkTypeApp e tys = C.TypeApp e tys
 
-instA :: AType -> [VType] -> AType
+instA :: AType -> [AType] -> AType
 instA (AForall tvs a) tys = inst tvs tys a
 instA a _ = a
 
 -- constructors
 
-elabCon :: C.Expr -> [C.Expr] -> E (K,Val)
+elabCon :: C.Expr -> [C.Expr] -> E (K,VVal)
 elabCon conExpr args
   = do (info,vargs) <- dataArgs (resultType (typeOf conExpr))
        (k,v) <- elabConArgs info vargs conExpr args
@@ -418,11 +420,11 @@ elabCon conExpr args
            -> do t <- vt (resultType (typeOf conExpr))
                  x <- fresh "cp"
                  let a = -3
-                 recordSig nameSetCtxPath (SigFun [a] [(Owned,VVar a),(Owned,vtString),(Owned,vtString)] (VVar a))
-                 return (k . Let x (V t) (Call nameSetCtxPath [t] [v, Lit (LitString (show cname)), Lit (LitString (show (getName fname)))]), Var x)
+                 recordSig nameSetCtxPath (SigFun [a] [(Owned,varV a),(Owned,vtString),(Owned,vtString)] (varV a))
+                 return (k . Let x t (Call nameSetCtxPath [rep t] [v, Lit (LitString (show cname)), Lit (LitString (show (getName fname)))]), Var x)
          _ -> return (k,v)
 
-elabConArgs :: DataInfo -> [VType] -> C.Expr -> [C.Expr] -> E (K,Val)
+elabConArgs :: DataInfo -> [AType] -> C.Expr -> [C.Expr] -> E (K,VVal)
 elabConArgs info vargs conExpr args
   = do let C.Con (TName cname scheme) _ = stripTypeApp conExpr
        if dataInfoIsOpen info
@@ -430,7 +432,7 @@ elabConArgs info vargs conExpr args
          else do con <- conInfoE info cname
                  elabConWith info vargs con args
 
-elabConWith :: DataInfo -> [VType] -> ConInfo -> [C.Expr] -> E (K,Val)
+elabConWith :: DataInfo -> [AType] -> ConInfo -> [C.Expr] -> E (K,VVal)
 elabConWith info vargs con args
   = do let cname = conInfoName con
        idx <- tr (conIndex info cname)
@@ -441,20 +443,20 @@ elabConWith info vargs con args
        v <- conValue info vargs idx exSub (prodVal vs)
        return (compose ks, v)
 
-elabOpenCon :: DataInfo -> [VType] -> Name -> Type -> [C.Expr] -> E (K,Val)
+elabOpenCon :: DataInfo -> [AType] -> Name -> Type -> [C.Expr] -> E (K,VVal)
 elabOpenCon info vargs cname scheme args
   = do recordOpenSig info cname scheme
        fields <- schemeFields vargs scheme
        (ks,vs) <- unzip <$> mapM (\(t,arg) -> elabValAt t arg) (zip fields args)
-       return (compose ks, OpenCon cname vargs (prodVal vs))
+       return (compose ks, Ptr (ACon (dataInfoName info) vargs) (OpenCon cname vargs (prodVal vs)))
 
 recordOpenSig :: DataInfo -> Name -> Type -> E ()
 recordOpenSig info cname scheme
   = do let tvs = [typevarId tv | tv <- dataInfoParams info, tvarStar tv]
-       fields <- schemeFields (map VVar tvs) scheme
-       recordSig cname (SigCon tvs (prodV fields) (VCon (dataInfoName info) (map VVar tvs)))
+       fields <- schemeFields (map AVar tvs) scheme
+       recordSig cname (SigCon tvs (prodV fields) (dataInfoName info))
 
-schemeFields :: [VType] -> Type -> E [VType]
+schemeFields :: [AType] -> Type -> E [VType]
 schemeFields vargs scheme
   = do e <- env
        tr (schemeFieldTypes (envNT e) vargs scheme)
@@ -463,7 +465,7 @@ existsSub :: [TVar] -> [VType] -> [VType] -> Tr Sub
 existsSub [] _ _ = Right M.empty
 existsSub tvs pats ts = foldM add M.empty (zip pats ts)
   where
-    add sub (VVar v, t) | v `elem` tvs = Right (M.insert v (boxrep t) sub)
+    add sub (VPtr (AVar v), t) | v `elem` tvs = Right (M.insert v (rep t) sub)
     add sub (p, t) = maybe (Left ("cannot instantiate existential field " ++ ppr p ++ " with " ++ ppr t)) (Right . M.union sub) (match tvs p t)
 
 stripTypeApp :: C.Expr -> C.Expr
@@ -477,7 +479,7 @@ resultType tp
       TFun _ _ res -> res
       t            -> t
 
-dataArgs :: Type -> E (DataInfo,[VType])
+dataArgs :: Type -> E (DataInfo,[AType])
 dataArgs tp
   = do e <- env
        (name,args) <- case expandSyn tp of
@@ -493,45 +495,46 @@ conInfoE info cname
   = maybe (failE ("unknown constructor: " ++ show cname)) return
           (find (\c -> conInfoName c == cname) (dataInfoConstrs info))
 
-fieldTypes :: [VType] -> ConInfo -> E [VType]
+fieldTypes :: [AType] -> ConInfo -> E [VType]
 fieldTypes vargs con
   = do e <- env
        tr (conFieldTypes (envNT e) vargs con)
 
-prodVal :: [Val] -> Val
-prodVal []     = Unit
+prodVal :: [VVal] -> VVal
+prodVal []     = UnitV
 prodVal [v]    = v
 prodVal (v:vs) = Pair v (prodVal vs)
 
-conValue :: DataInfo -> [VType] -> Int -> Sub -> Val -> E Val
+conValue :: DataInfo -> [AType] -> Int -> Sub -> VVal -> E VVal
 conValue info vargs idx exSub v
   | isValueInfo info = do t <- dataType info vargs
                           let packed = packV (conTypes t) v
                           return (if conCount info > 1 then Inj idx t packed else packed)
   | otherwise = do shapes <- conShapes info vargs
-                   return (Fold (VCon (dataInfoName info) vargs) (injA shapes idx (shapeVal (shapes !! idx))))
+                   let t = ACon (dataInfoName info) vargs
+                   return (Ptr t (Roll t (injA shapes idx (shapeVal (shapes !! idx)))))
   where
     shapeVal (ABox t) = Box (packV t v)
-    shapeVal _ = Unit
+    shapeVal _ = UnitA
     conTypes (VSum ts) | conCount info > 1 = ts !! idx
     conTypes t = t
     packV t@(VExists tvs _) w = Pack t (exTypes tvs) w
     packV _ w = w
-    exTypes tvs = [M.findWithDefault vtAny tv exSub | tv <- tvs]
+    exTypes tvs = [M.findWithDefault atAny tv exSub | tv <- tvs]
 
-dataType :: DataInfo -> [VType] -> E VType
+dataType :: DataInfo -> [AType] -> E VType
 dataType info vargs
   = do e <- env
        tr (valueBody (envNT e) info vargs)
 
-conShapes :: DataInfo -> [VType] -> E [AType]
+conShapes :: DataInfo -> [AType] -> E [AType]
 conShapes info vargs
   = do e <- env
        mapM (tr . conShape (envNT e) vargs) (dataInfoConstrs info)
 
 -- matching
 
-elabCase :: C.Expr -> [C.Branch] -> E Expr
+elabCase :: C.Expr -> [C.Branch] -> E VExpr
 elabCase scrut brs
   = do let scrutTp = typeOf scrut
        expect <- vt scrutTp
@@ -546,11 +549,11 @@ isWild :: C.Pattern -> Bool
 isWild C.PatWild = True
 isWild _         = False
 
-branchBody :: C.Branch -> E Expr
+branchBody :: C.Branch -> E VExpr
 branchBody (C.Branch _ [C.Guard _ e]) = elabExpr e
 branchBody _ = failE "unexpected guards after matching"
 
-elabLitCase :: Val -> [C.Branch] -> E Expr
+elabLitCase :: VVal -> [C.Branch] -> E VExpr
 elabLitCase v brs
   = do alts <- mapM (\b@(C.Branch [C.PatLit l] _) -> (,) (elabLit l) <$> branchBody b) [b | b@(C.Branch [C.PatLit _] _) <- brs]
        def  <- case [b | b@(C.Branch [C.PatWild] _) <- brs] of
@@ -558,42 +561,44 @@ elabLitCase v brs
                  []    -> failE "literal match without default"
        return (CaseLit v alts def)
 
-elabConCase :: Type -> Val -> [C.Branch] -> E Expr
+elabConCase :: Type -> VVal -> [C.Branch] -> E VExpr
 elabConCase scrutTp v brs
   = do (info,vargs) <- dataArgs scrutTp
        if dataInfoIsOpen info then elabOpenCase info vargs v brs
        else if isValueInfo info then elabValueCase info vargs v brs
        else elabBoxedCase info vargs v brs
 
-elabBoxedCase :: DataInfo -> [VType] -> Val -> [C.Branch] -> E Expr
+elabBoxedCase :: DataInfo -> [AType] -> VVal -> [C.Branch] -> E VExpr
 elabBoxedCase info vargs v brs
-  = do z <- fresh "z"
+  = do p <- fresh "d"
+       z <- fresh "z"
        shapes <- conShapes info vargs
        let cons = dataInfoConstrs info
-       body <- caseChain shapes (Var z) (\i y -> conBranch True vargs (cons !! i) (Var y) (findBranch (cons !! i) brs))
-       return (Unfold Owned v z body)
+       body <- caseChain shapes z (\i y -> conBranch vargs (cons !! i) (Left y) (findBranch (cons !! i) brs))
+       return (Deref Owned v p (Unroll Owned p z body))
 
-elabValueCase :: DataInfo -> [VType] -> Val -> [C.Branch] -> E Expr
+elabValueCase :: DataInfo -> [AType] -> VVal -> [C.Branch] -> E VExpr
 elabValueCase info vargs v brs
   = case dataInfoConstrs info of
-      [con] -> conBranch False vargs con v (findBranch con brs)
+      [con] -> conBranch vargs con (Right v) (findBranch con brs)
       cons  -> CaseV Owned v <$> mapM (valueAlt vargs brs) cons
 
-valueAlt :: [VType] -> [C.Branch] -> ConInfo -> E (Name,Expr)
+valueAlt :: [AType] -> [C.Branch] -> ConInfo -> E (Name,VExpr)
 valueAlt vargs brs con
   = do y <- fresh "y"
-       b <- conBranch False vargs con (Var y) (findBranch con brs)
+       b <- conBranch vargs con (Right (Var y)) (findBranch con brs)
        return (y,b)
 
-elabOpenCase :: DataInfo -> [VType] -> Val -> [C.Branch] -> E Expr
+elabOpenCase :: DataInfo -> [AType] -> VVal -> [C.Branch] -> E VExpr
 elabOpenCase info vargs v brs
-  = do alts <- mapM (openAlt info vargs) [(c,b) | b@(C.Branch [C.PatCon{ C.patConInfo = c }] _) <- brs]
+  = do p <- fresh "d"
+       alts <- mapM (openAlt info vargs) [(c,b) | b@(C.Branch [C.PatCon{ C.patConInfo = c }] _) <- brs]
        def  <- case [b | b@(C.Branch [C.PatWild] _) <- brs] of
                  (b:_) -> branchBody b
                  []    -> failE "open match without default"
-       return (CaseOpen Owned v alts def)
+       return (Deref Owned v p (CaseOpen Owned p alts def))
 
-openAlt :: DataInfo -> [VType] -> (ConInfo,C.Branch) -> E (Name,Name,Expr)
+openAlt :: DataInfo -> [AType] -> (ConInfo,C.Branch) -> E (Name,Name,VExpr)
 openAlt info vargs (con,br@(C.Branch [pat] _))
   = do recordOpenSig info (conInfoName con) (conInfoType con)
        x <- fresh "o"
@@ -612,32 +617,32 @@ findBranch con brs
                  [] | conInfoIsLazy con -> Just (C.Branch [C.PatWild] [C.Guard C.exprTrue (C.Var (TName nameUnreachable (typeOf (head brs))) C.InfoNone)])
                     | otherwise -> Nothing
 
-conBranch :: Bool -> [VType] -> ConInfo -> Val -> Maybe C.Branch -> E Expr
-conBranch _ _ con _ Nothing = failE ("missing branch for " ++ show (conInfoName con))
-conBranch boxed vargs con y (Just br@(C.Branch [pat] _))
+conBranch :: [AType] -> ConInfo -> Either Name VVal -> Maybe C.Branch -> E VExpr
+conBranch _ con _ Nothing = failE ("missing branch for " ++ show (conInfoName con))
+conBranch vargs con y (Just br@(C.Branch [pat] _))
   = do body <- withTVars (patExistIds pat) (withLocals (patBinders pat) (branchBody br))
        case pat of
          C.PatCon _ subs _ _ exists _ _ _ | not (null subs) ->
            do fields <- fieldTypes vargs con
               let exIds = [typevarId tv | tv <- exists, tvarStar tv]
-                  exSub = M.fromList (zip (conExists con) (map VVar exIds))
-              (k1,payload) <- openCon boxed y (conExists con) exIds
+                  exSub = M.fromList (zip (conExists con) (map AVar exIds))
+              (k1,payload) <- openCon y (conExists con) exIds
               k2 <- destructure (zip (map subBinder subs) (map (subst exSub) fields)) payload
               return (k1 (k2 body))
          _ -> return body
-conBranch _ _ _ _ (Just _) = failE "unexpected branch after matching"
+conBranch _ _ _ (Just _) = failE "unexpected branch after matching"
 
-openCon :: Bool -> Val -> [TVar] -> [TVar] -> E (K,Val)
-openCon boxed y exs exIds
-  = do (k1,p) <- if boxed then unboxK y else return (id,y)
+openCon :: Either Name VVal -> [TVar] -> [TVar] -> E (K,VVal)
+openCon y exs exIds
+  = do (k1,p) <- either unboxK (return . (,) id) y
        (k2,u) <- if null exs then return (id,p) else unpackK p exIds
        return (k1 . k2, u)
 
-unboxK :: Val -> E (K,Val)
+unboxK :: Name -> E (K,VVal)
 unboxK y = do p <- fresh "p"
               return (Unbox Owned y p, Var p)
 
-unpackK :: Val -> [TVar] -> E (K,Val)
+unpackK :: VVal -> [TVar] -> E (K,VVal)
 unpackK v ids = do u <- fresh "e"
                    return (Unpack Owned v ids u, Var u)
 
@@ -653,7 +658,7 @@ subBinder :: C.Pattern -> Maybe TName
 subBinder (C.PatVar x _) = Just x
 subBinder _              = Nothing
 
-destructure :: [(Maybe TName,VType)] -> Val -> E K
+destructure :: [(Maybe TName,VType)] -> VVal -> E K
 destructure [(x,s)] p = bindField x s p
 destructure ((x,s):rest) p
   = do y <- fresh "f"
@@ -663,9 +668,9 @@ destructure ((x,s):rest) p
        return (Unpair Owned p y r . k1 . k2)
 destructure [] _ = return id
 
-bindField :: Maybe TName -> VType -> Val -> E K
+bindField :: Maybe TName -> VType -> VVal -> E K
 bindField Nothing _ _ = return id
 bindField (Just (TName x tp)) s v
   = do t <- vt tp
        (k,w) <- coerce s t v
-       return (k . Let x (V t) (Ret w))
+       return (k . Let x t (Ret w))

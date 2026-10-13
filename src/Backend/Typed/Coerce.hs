@@ -7,7 +7,7 @@
 -----------------------------------------------------------------------------
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Coerce( coerce, genVal, injA, caseChain, tapp ) where
+module Backend.Typed.Coerce( coerce, genVal, genPtr, injA, caseChain, tapp ) where
 
 import qualified Data.Map as M
 import Common.Name
@@ -16,25 +16,32 @@ import Backend.Typed.Types
 import Backend.Typed.ElabMonad
 import Backend.Typed.Pretty( ppr )
 
-genVal :: VType -> Val -> E (K,Val)
-genVal t@(VPtr (AForall tvs a)) w
-  = do x <- fresh "l"
-       return (Let x (V t) (Gen tvs (Ret (Fold (VPtr a) w))), Var x)
-genVal t w = return (id, Fold t w)
+-- a pointer to a value `w : A`, generalized at `(∀ā. A)*`
+genVal :: VType -> AVal -> E (K,VVal)
+genVal t@(VPtr (AForall _ a)) w = genPtr t (Ptr a w)
+genVal t@(VPtr a) w = genPtr t (Ptr a w)
+genVal t _ = failE ("not a pointer type: " ++ ppr t)
 
-tapp :: Val -> [VType] -> Val
+-- a pointer `v : A*`, generalized at `(∀ā. A)*`
+genPtr :: VType -> VVal -> E (K,VVal)
+genPtr t@(VPtr (AForall tvs _)) v
+  = do x <- fresh "l"
+       return (Let x t (Gen tvs (Ret v)), Var x)
+genPtr _ v = return (id, v)
+
+tapp :: VVal -> [AType] -> VVal
 tapp v []  = v
 tapp v tys = TyApp v tys
 
 sumOf :: [AType] -> AType
 sumOf = foldr1 ASum
 
-injA :: [AType] -> Int -> Val -> Val
+injA :: [AType] -> Int -> AVal -> AVal
 injA [_] 0 v = v
 injA ss 0 v  = Inl (sumOf ss) v
 injA ss i v  = Inr (sumOf ss) (injA (tail ss) (i-1) v)
 
-coerce :: VType -> VType -> Val -> E (K,Val)
+coerce :: VType -> VType -> VVal -> E (K,VVal)
 coerce from to v
   | alphaEq from to = return (id,v)
   | not (isPtr from) && alphaEq to (boxrep from) = boxV from v
@@ -45,95 +52,93 @@ coerce from to v
       (VPtr (AForall tvs a), _) | Just sub <- match tvs a (ptrA to) -> instPoly tvs a sub v to
       _ -> failE ("cannot coerce " ++ ppr from ++ " to " ++ ppr to)
 
-boxV :: VType -> Val -> E (K,Val)
+-- a sum is boxed by a case on it (and on its nested sums), and each alternative builds the whole
+-- boxed value at once, so that no variable is bound at a boxed type
+boxV :: VType -> VVal -> E (K,VVal)
 boxV t v
-  = do (k,a) <- boxAV t v
-       return (k, Fold (VPtr (boxA t)) a)
+  | isMultiSum t = do r <- fresh "b"
+                      body <- boxAV t v (return . Ret . Ptr (boxA t))
+                      return (Let r (VPtr (boxA t)) body, Var r)
+  | otherwise    = return (id, Ptr (boxA t) (boxLeaf t v))
 
-boxAV :: VType -> Val -> E (K,Val)
-boxAV t v
+-- the boxed form `a : boxA(t)` of `v : t`, given to the continuation in every alternative
+boxAV :: VType -> VVal -> (AVal -> E VExpr) -> E VExpr
+boxAV t v k
+  | VSum ts <- t, isMultiSum t = CaseV Owned v <$> mapM (boxAlt ts k) (zip [0..] ts)
+  | otherwise                  = k (boxLeaf t v)
+
+-- as `boxA` on a type that is not a sum of several alternatives
+boxLeaf :: VType -> VVal -> AVal
+boxLeaf t v
   = case t of
-      VUnit -> return (id, Unit)
-      VSum ts | length ts > 1 ->
-        do r <- fresh "b"
-           alts <- mapM (boxAlt ts) (zip [0..] ts)
-           return (Let r (A (boxA t)) (CaseV Owned v alts), Var r)
-      VSum _      -> box
-      VVar _      -> box
-      VApp _ _    -> box
-      VCon _ _    -> box
-      VPtr _      -> box
-      VProd _ _   -> box
-      VRaw _      -> box
-      VExists _ _ -> box
-      VTLam _ _   -> box
-      VReuse _    -> box
-  where
-    box = return (id, Box v)   -- as `boxA`
+      VUnit       -> UnitA
+      VSum _      -> Box v
+      VPtr _      -> Box v
+      VProd _ _   -> Box v
+      VRaw _      -> Box v
+      VExists _ _ -> Box v
+      VReuse _    -> Box v
 
-boxAlt :: [VType] -> (Int,VType) -> E (Name,Expr)
-boxAlt ts (i,ti)
+boxAlt :: [VType] -> (AVal -> E VExpr) -> (Int,VType) -> E (Name,VExpr)
+boxAlt ts k (i,ti)
   = do y <- fresh "y"
-       (k,a) <- boxAV ti (Var y)
-       return (y, k (Ret (injA (map boxA ts) i a)))
+       body <- boxAV ti (Var y) (k . injA (map boxA ts) i)
+       return (y, body)
 
-unboxV :: VType -> Val -> E (K,Val)
+isMultiSum :: VType -> Bool
+isMultiSum (VSum ts) = length ts > 1
+isMultiSum _         = False
+
+unboxV :: VType -> VVal -> E (K,VVal)
 unboxV t v
   = do a <- fresh "u"
-       (k,w) <- unboxAV t (Var a)
-       return (Unfold Owned v a . k, w)
+       (k,w) <- unboxAV t a
+       return (Deref Owned v a . k, w)
 
-unboxAV :: VType -> Val -> E (K,Val)
+unboxAV :: VType -> Name -> E (K,VVal)
 unboxAV t a
   = case t of
-      VUnit -> return (id, Unit)
+      VUnit -> return (id, UnitV)
       VSum ts | length ts > 1 ->
         do r <- fresh "s"
            body <- caseChain (map boxA ts) a (unboxAlt t ts)
-           return (Let r (V t) body, Var r)
+           return (Let r t body, Var r)
       VSum _      -> unbox
-      VVar _      -> unbox
-      VApp _ _    -> unbox
-      VCon _ _    -> unbox
       VPtr _      -> unbox
       VProd _ _   -> unbox
       VRaw _      -> unbox
       VExists _ _ -> unbox
-      VTLam _ _   -> unbox
       VReuse _    -> unbox
   where
     unbox = do x <- fresh "x"   -- as `boxA`
                return (Unbox Owned a x, Var x)
 
-unboxAlt :: VType -> [VType] -> Int -> Name -> E Expr
+unboxAlt :: VType -> [VType] -> Int -> Name -> E VExpr
 unboxAlt t ts i y
-  = do (k,w) <- unboxAV (ts !! i) (Var y)
+  = do (k,w) <- unboxAV (ts !! i) y
        return (k (Ret (Inj i t w)))
 
-caseChain :: [AType] -> Val -> (Int -> Name -> E Expr) -> E Expr
+-- a case on each alternative of a boxed sum `a`; the branch gets the alternative, a variable at a
+-- boxed type that it may only destructure
+caseChain :: [AType] -> Name -> (Int -> Name -> E VExpr) -> E VExpr
 caseChain shapes a branch = go 0 shapes a
   where
-    go i [_] v = do y <- fresh "y"
-                    body <- branch i y
-                    return (Let y (A (shapes !! i)) (Ret v) body)
+    go i [_] v = branch i v
     go _ [] _ = failE "empty case chain"
     go i (_:rest) v
       = do y <- fresh "y"
            z <- fresh "z"
            b1 <- branch i y
-           b2 <- go (i+1) rest (Var z)
+           b2 <- go (i+1) rest z
            return (CaseA Owned v (y,b1) (z,b2))
 
 ptrA :: VType -> AType
 ptrA (VPtr a) = a
 ptrA t        = ABox t
 
-instPoly :: [TVar] -> AType -> Sub -> Val -> VType -> E (K,Val)
+instPoly :: [TVar] -> AType -> Sub -> VVal -> VType -> E (K,VVal)
 instPoly tvs a sub v to
-  = do g <- fresh "i"
-       let ai = subst sub a
-       (k,w) <- coerce (VPtr ai) to (Fold (VPtr ai) (TyApp (Var g) [M.findWithDefault vtAny tv sub | tv <- tvs]))
-       return (Unfold Owned v g . k, w)
+  = coerce (VPtr (subst sub a)) to (TyApp v [M.findWithDefault atAny tv sub | tv <- tvs])
 
 funPair :: AType -> AType -> Maybe ([TVar],[TVar],[(Mode,VType)],VType,[(Mode,VType)],VType)
 funPair a b
@@ -141,18 +146,18 @@ funPair a b
       (AFun ps r, AFun qs s) | length ps == length qs -> Just ([],[],ps,r,qs,s)
       (AFun ps r, AForall bs (AFun qs s)) | length ps == length qs -> Just (bs,[],ps,r,qs,s)
       (AForall as (AFun ps r), AForall bs b') | length as == length bs
-        -> case inst bs (map VVar as) b' of
+        -> case inst bs (map AVar as) b' of
              AFun qs s | length ps == length qs -> Just (as,as,ps,r,qs,s)
              _ -> Nothing
       _ -> Nothing
 
-wrapFun :: [TVar] -> [TVar] -> [(Mode,VType)] -> VType -> [(Mode,VType)] -> VType -> Val -> E (K,Val)
+wrapFun :: [TVar] -> [TVar] -> [(Mode,VType)] -> VType -> [(Mode,VType)] -> VType -> VVal -> E (K,VVal)
 wrapFun tvs itvs ps r qs s v
   = do ys <- mapM (const (fresh "w")) qs
        g  <- fresh "g"
        (ks,args) <- unzip <$> mapM (\((_,q),(_,p),y) -> coerce q p (Var y)) (zip3 qs ps ys)
        x  <- fresh "r"
        (kr,res) <- coerce r s (Var x)
-       let body = Unfold Owned v g (compose ks (Let x (V r) (App (tapp (Var g) (map VVar itvs)) args) (kr (Ret res))))
+       let body = Deref Owned (tapp v (map AVar itvs)) g (compose ks (Let x r (App g args) (kr (Ret res))))
            lam  = Lam [(y,m,q) | (y,(m,q)) <- zip ys qs] s body
        genVal (VPtr (forallA tvs (AFun qs s))) lam

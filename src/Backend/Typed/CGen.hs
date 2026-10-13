@@ -19,7 +19,7 @@ import qualified Data.Set as S
 import Data.Char( isAlphaNum, ord, isDigit )
 import Data.List( isInfixOf )
 import qualified Numeric
-import Control.Monad( forM, when, (>=>) )
+import Control.Monad( forM, when )
 import Common.Name
 import Common.NamePrim
 import Type.Type
@@ -28,7 +28,7 @@ import Kind.Newtypes
 import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Types( inst, prodV )
-import Backend.Typed.Check( Env(..), Gamma, envOf, inferV, unfoldT, openFields, boxContents, reuseSize )
+import Backend.Typed.Check( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, unrollT, openFields, boxContents, reuseSize )
 import Backend.Typed.ElabType( conFieldTypes )
 import Backend.Typed.Match( nameSetCtxPath )
 import Backend.Typed.Lazy( nameLazyFree )
@@ -124,8 +124,11 @@ blockType ct
 
 -- types of values
 
-tyOf :: Ctx -> Val -> G Ty
+tyOf :: Ctx -> VVal -> G VType
 tyOf cx v = liftC (inferV (cxEnv cx) (cxGamma cx) v)
+
+tyOfName :: Ctx -> Name -> G Ty
+tyOfName cx x = liftC (inferVar (cxGamma cx) x)
 
 ctOf :: Ty -> G CT
 ctOf (V t) = ctype t
@@ -147,6 +150,10 @@ reprs a
                      return (Just [case ct of { CUnit -> RImm; _ -> RBlock }])
       AFun _ _    -> return Nothing
       AForall _ _ -> return Nothing
+      AVar _      -> return Nothing
+      AApp _ _    -> return Nothing
+      ACon _ _    -> return Nothing
+      ALam _ _    -> return Nothing
 
 -- size of a boxed sum
 sumSize :: AType -> Int
@@ -155,23 +162,20 @@ sumSize _ = 1
 
 -- values
 
-genV :: Ctx -> Val -> G String
+genV :: Ctx -> VVal -> G String
 genV cx val
   = case val of
       Var x -> return (localName x)
       Glob x _ -> return (cName x)
-      Dup v -> do t <- tyOf cx v
-                  ct <- ctOf t
-                  e <- genV cx v
-                  return (dupExpr ct e)
-      Unit -> return "kk_Unit"
+      DupV v -> do t <- tyOf cx v
+                   ct <- ctype t
+                   e <- genV cx v
+                   return (dupExpr ct e)
+      UnitV -> return "kk_Unit"
       Lit lit -> genLit lit
       NoReuse _ -> return "kk_reuse_null"
-      Fun f -> staticFun f
       TyApp v _ -> genV cx v
-      Fold _ v -> case v of
-                    Unit -> genSum cx 0 v
-                    _ -> genV cx v
+      Ptr _ v -> genA cx v
       Pack _ _ v -> genV cx v
       Inj i t v
         | isEnum t -> do ct <- ctype t
@@ -188,9 +192,14 @@ genV cx val
                       ++ concat [x ++ "._cons._fields[" ++ show j ++ "] = kk_box_null(); " | j <- [0..scan-2]]
                       ++ setAlt ++ x ++ "; })")
       Pair _ _ -> do t <- tyOf cx val
-                     case t of
-                       V vt -> genProd cx vt (prodLeafVals val)
-                       _ -> failG "pair of boxed values"
+                     genProd cx t (prodLeafVals val)
+genA :: Ctx -> AVal -> G String
+genA cx val
+  = case val of
+      Fun f -> staticFun f
+      UnitA -> genSum cx 0 val
+      DupA x -> return (dupExpr CBox (localName x))
+      Roll _ v -> genA cx v
       Inl _ _ -> genSum cx 0 val
       Inr _ _ -> genSum cx 0 val
       Box v -> genBox cx False 1 Fresh v
@@ -199,12 +208,12 @@ genV cx val
       OpenCon c tys v -> genOpenCon cx c tys v
       Lam ps r e -> genLam cx ps r e
 
-prodLeafVals :: Val -> [Val]
+prodLeafVals :: VVal -> [VVal]
 prodLeafVals (Pair v w) = prodLeafVals v ++ prodLeafVals w
 prodLeafVals v = [v]
 
 -- construct an unboxed product from values for its components
-genProd :: Ctx -> VType -> [Val] -> G String
+genProd :: Ctx -> VType -> [VVal] -> G String
 genProd cx t vs
   = do ct <- ctype t
        case ct of
@@ -212,9 +221,7 @@ genProd cx t vs
            -> do -- each value covers some leaves
                  parts <- forM vs $ \v -> do tv <- tyOf cx v
                                              e <- genV cx v
-                                             case tv of
-                                               V s -> return (e, length (leaves s), s)
-                                               A _ -> return (e, 1, VPtr AUnit)
+                                             return (e, length (leaves tv), tv)
                  x <- fresh "p"
                  assigns <- assignLeaves x (zip [0..] fs) parts 0
                  return ("({ " ++ name ++ " " ++ x ++ "; " ++ concat assigns ++ x ++ "; })")
@@ -253,10 +260,10 @@ projLeaves whole e start part
          _ -> return e
 
 -- boxed sums
-genSum :: Ctx -> Int -> Val -> G String
+genSum :: Ctx -> Int -> AVal -> G String
 genSum cx = genSumIn cx False
 
-genSumIn :: Ctx -> Bool -> Int -> Val -> G String
+genSumIn :: Ctx -> Bool -> Int -> AVal -> G String
 genSumIn cx inSum pos val
   = case val of
       Inl a v -> case a of
@@ -265,11 +272,11 @@ genSumIn cx inSum pos val
       Inr a v -> case a of
                    ASum l _ -> genSumIn cx True (pos + sumSize l) v
                    _ -> failG "inr"
-      Unit -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" ++ show (pos+1) ++ "))")
+      UnitA -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" ++ show (pos+1) ++ "))")
       Box v -> genBox cx inSum (pos+1) Fresh v
       BoxAt r v -> genBox cx inSum (pos+1) (At r) v
       BoxIn x v -> genBox cx inSum (pos+1) (In x) v
-      _ | pos == 0 -> genV cx val
+      _ | pos == 0 -> genA cx val
       _ -> failG ("injection of a value of a sub-sum: " ++ show val)
 
 -- where the block of a box comes from
@@ -277,10 +284,10 @@ data Alloc = Fresh | At Name | In Name
 
 -- a box: freshly allocated, in the block of a reuse credit, or over the block of a lazy value
 -- (whose old fields were taken, see `Lazy`, and whose reference count is kept)
-genBox :: Ctx -> Bool -> Int -> Alloc -> Val -> G String
+genBox :: Ctx -> Bool -> Int -> Alloc -> VVal -> G String
 genBox cx inSum tag at v
   = do t <- tyOf cx v
-       ct <- ctOf t
+       ct <- ctype t
        e <- genV cx v
        case ct of
          CPrim p | not inSum, Just (box,_) <- primBox p -> return (box ++ "(" ++ e ++ ",_ctx)")
@@ -301,14 +308,22 @@ genBox cx inSum tag at v
                                        ++ bt ++ "* " ++ x ++ " = (" ++ bt ++ "*)kt_block_clear(kk_datatype_as_ptr(kk_datatype_unbox(" ++ localName y ++ "),_ctx)," ++ scan ++ ",(kk_tag_t)" ++ show tag ++ ",_ctx); "
                                        ++ x ++ "->p = " ++ v ++ "; " ++ box)
 
-genUnbox :: Ctx -> Dest -> Val -> Name -> Expr -> G [String]
+-- `[deref]` and `[unroll]` keep the pointer (and its tag offset in an enclosing sum)
+genAlias :: Ctx -> Dest -> String -> Maybe Name -> Name -> AType -> S.Set Name -> VExpr -> G [String]
+genAlias cx dest ve source x a named e
+  = do let (off,inSum) = case source of
+                           Just z -> (M.findWithDefault 0 z (cxOffsets cx), S.member z (cxInSum cx))
+                           _ -> (0,False)
+           cxInSum' = if inSum then S.insert x (cxInSum cx) else cxInSum cx
+       s <- genE (bindVar cx{ cxOffsets = M.insert x off (cxOffsets cx), cxInSum = cxInSum', cxNamed = named } x (A a)) dest e
+       return (["kk_box_t " ++ localName x ++ " = " ++ ve ++ ";"] ++ s)
+
+genUnbox :: Ctx -> Dest -> Name -> Name -> VExpr -> G [String]
 genUnbox cx dest v x e
-  = do A (ABox t) <- tyOf cx v
-       ve <- genV cx v
+  = do A (ABox t) <- tyOfName cx v
+       let ve = localName v
        ct <- ctype t
-       let member set = case v of
-                          Var z -> S.member z (set cx)
-                          _ -> False
+       let member set = S.member v (set cx)
        ue <- unboxV cx (member cxInSum) (member cxNamed) t ve
        s <- genE (bindVar cx x (V t)) dest e
        return ([ctName ct ++ " " ++ localName x ++ " = " ++ ue ++ ";"] ++ s)
@@ -366,7 +381,7 @@ staticFun f
        return ("({ kk_define_static_function(" ++ x ++ "," ++ cName f ++ "_fun,_ctx); kk_datatype_box(" ++ x ++ "); })")
 
 -- closures
-genLam :: Ctx -> [(Name,Mode,VType)] -> VType -> Expr -> G String
+genLam :: Ctx -> [(Name,Mode,VType)] -> VType -> VExpr -> G String
 genLam cx ps r e
   = do let caps = S.toList (lamFree ps e)
        capTys <- mapM (\x -> case M.lookup x (cxGamma cx) of
@@ -396,11 +411,11 @@ genLam cx ps r e
                ++ concat [x ++ "->c" ++ show i ++ " = " ++ localName (caps !! i) ++ "; " | (i,_) <- fields]
                ++ "kk_datatype_box(kk_datatype_from_base(&" ++ x ++ "->_base,_ctx)); })")
 
-lamFree :: [(Name,Mode,VType)] -> Expr -> S.Set Name
-lamFree ps e = fvV (Lam ps VUnit e)
+lamFree :: [(Name,Mode,VType)] -> VExpr -> S.Set Name
+lamFree ps e = fvA (Lam ps VUnit e)
 
 -- open datatypes use the constructors of Koka's headers
-genOpenCon :: Ctx -> Name -> [VType] -> Val -> G String
+genOpenCon :: Ctx -> Name -> [AType] -> VVal -> G String
 genOpenCon cx c tys v
   = do (fields,kfields) <- openConFields cx c tys
        e <- genV cx v
@@ -413,7 +428,7 @@ genOpenCon cx c tys v
        fct <- ctype ft
        return ("({ " ++ ctName fct ++ " " ++ x ++ " = " ++ e ++ "; kt_box_datatype(" ++ kokaName (makeHiddenName "new" c) ++ "(" ++ (if null args then "" else "kk_reuse_null,0,") ++ concatMap (++ ",") args ++ "_ctx)); })")
 
-openConFields :: Ctx -> Name -> [VType] -> G ([VType],[Type])
+openConFields :: Ctx -> Name -> [AType] -> G ([VType],[Type])
 openConFields cx c tys
   = case M.lookup c (envSigs (cxEnv cx)) of
       Just (SigCon tvs f _) ->
@@ -495,50 +510,47 @@ indent = concatMap (\l -> "  " ++ l ++ "\n")
 bindVar :: Ctx -> Name -> Ty -> Ctx
 bindVar cx x t = cx{ cxGamma = M.insert x t (cxGamma cx) }
 
-genE :: Ctx -> Dest -> Expr -> G [String]
+genE :: Ctx -> Dest -> VExpr -> G [String]
 genE cx dest expr
   | Just (v,mk) <- hoistDeep expr
   = do x <- newHiddenName <$> fresh "hoist"
        let expr' = mk (Var x)
        t <- tyOf cx v
-       ct <- ctOf t
+       ct <- ctype t
        s <- genE cx (DAssign (localName x)) (Ret v)
-       rest <- genE (bindVar cx x t) dest expr'
+       rest <- genE (bindVar cx x (V t)) dest expr'
        return ([ctName ct ++ " " ++ localName x ++ ";"] ++ s ++ rest)
 genE cx dest expr
   = case expr of
       Ret v -> do t <- tyOf cx v
-                  ct <- ctOf t
+                  ct <- ctype t
                   e <- genV cx v
                   return (assignTo dest ct e)
       Let x t e1 e2
-        -> do ct <- ctOf t
+        -> do ct <- ctype t
               s1 <- genE cx (DAssign (localName x)) e1
-              let cx' = (bindVar cx x t){ cxOffsets = offsetOf cx e1 x, cxInSum = inSumOf cx e1 x, cxNamed = namedOf cx e1 x }
+              let cx' = (bindVar cx x (V t)){ cxOffsets = offsetOf cx e1 x, cxInSum = inSumOf cx e1 x, cxNamed = namedOf cx e1 x }
               s2 <- genE cx' dest e2
               return ([ctName ct ++ " " ++ localName x ++ ";"] ++ s1 ++ s2)
       Drop x e
-        -> do t <- tyOf cx (Var x)
+        -> do t <- tyOfName cx x
               ct <- ctOf t
               s <- genE cx dest e
               return (filter (not . null) [dropStmt ct (localName x)] ++ s)
-      DropRu x r e
-        -> do n <- tyOf cx (Var x) >>= liftC . (boxContents >=> reuseSize)
-              s <- genE (bindVar cx r (V (VReuse n))) dest e
-              return (["kk_reuse_t " ++ localName r ++ " = kk_block_dropi_reuse(kk_datatype_as_ptr(kk_datatype_unbox(" ++ localName x ++ "),_ctx),_ctx);"] ++ s)
+      Free r e
+        -> do s <- genE cx dest e
+              return (dropStmt CReuse (localName r) : s)
       IsUnique x e1 e2
         -> do s1 <- genE cx dest e1
               s2 <- genE cx dest e2
               return (["if (kk_block_is_unique(kk_datatype_as_ptr(kk_datatype_unbox(" ++ localName x ++ "),_ctx))) {"]
                       ++ map ("  " ++) s1 ++ ["} else {"] ++ map ("  " ++) s2 ++ ["}"])
       UnboxRu v x r e
-        -> do t <- tyOf cx v >>= liftC . boxContents
+        -> do t <- liftC (inferAVar (cxGamma cx) v >>= boxContents)
               n <- liftC (reuseSize t)
-              ve <- genV cx v
+              let ve = localName v
               ct <- ctype t
-              let inSum = case v of
-                            Var z -> S.member z (cxInSum cx)
-                            _ -> False
+              let inSum = S.member v (cxInSum cx)
               ue <- unboxV cx inSum True t ve   -- a unique box is never `box-any`
               s <- genE (bindVar (bindVar cx x (V t)) r (V (VReuse n))) dest e
               return ([ctName ct ++ " " ++ localName x ++ " = " ++ ue ++ ";",
@@ -560,19 +572,19 @@ genE cx dest expr
               return ([localName x ++ " = " ++ a ++ ";" | (x,a) <- zip xs args] ++ ["goto " ++ lbl ++ ";"])
       Call f tys vs -> genCall cx dest f tys vs
       App f vs
-        -> do ft <- tyOf cx f
+        -> do ft <- tyOfName cx f
               (ps,r) <- case ft of
                           A (AFun ps r) -> return (map snd ps, r)
                           _ -> failG ("application of " ++ show ft)
               pcts <- mapM ctype ps
               rct  <- ctype r
-              fe <- genV cx f
+              let fe = localName f
               args <- mapM (genV cx) vs
               fx <- fresh "fn"
               let call = "kk_function_call(" ++ ctName rct ++ ",(kk_function_t" ++ concatMap ((", " ++) . ctName) pcts ++ ", kk_context_t*)," ++ fx ++ ",(" ++ fx ++ concatMap (", " ++) args ++ ", _ctx),_ctx)"
               return (["{ kk_function_t " ++ fx ++ " = kk_datatype_unbox(" ++ fe ++ ");"] ++ map ("  " ++) (assignTo dest rct call) ++ ["}"])
       Unpair _ v x y e
-        -> do V (VProd a b) <- tyOf cx v
+        -> do VProd a b <- tyOf cx v
               ve <- genV cx v
               z <- fresh "u"
               wct <- ctype (VProd a b)
@@ -585,35 +597,29 @@ genE cx dest expr
                        ctName cta ++ " " ++ localName x ++ " = " ++ px ++ ";",
                        ctName ctb ++ " " ++ localName y ++ " = " ++ py ++ ";"] ++ s)
       Unpack _ v _ x e
-        -> do V (VExists bs t) <- tyOf cx v
+        -> do VExists bs t <- tyOf cx v
               ve <- genV cx v
               ct <- ctype t
               s <- genE (bindVar cx x (V t)) dest e
               return ([ctName ct ++ " " ++ localName x ++ " = " ++ ve ++ ";"] ++ s)
-      Unfold _ v x e
-        -> do V t <- tyOf cx v
-              a <- liftC (unfoldT (cxEnv cx) t)
+      Deref _ v x e
+        -> do VPtr a <- tyOf cx v
               ve <- genV cx v
-              let off = case v of
-                          Var z -> M.findWithDefault 0 z (cxOffsets cx)
-                          _ -> 0
-                  named = case t of
-                            VCon _ _ -> S.insert x (cxNamed cx)
-                            _ -> cxNamed cx
-              s <- genE (bindVar cx{ cxOffsets = M.insert x off (cxOffsets cx), cxNamed = named } x (A a)) dest e
-              return (["kk_box_t " ++ localName x ++ " = " ++ ve ++ ";"] ++ s)
+              genAlias cx dest ve (case v of { Var z -> Just z; _ -> Nothing }) x a (case v of
+                                        Var z | S.member z (cxNamed cx) -> S.insert x (cxNamed cx)
+                                        _ -> cxNamed cx) e
+      Unroll _ v x e
+        -> do A t <- tyOfName cx v
+              a <- liftC (unrollT (cxEnv cx) t)
+              genAlias cx dest (localName v) (Just v) x a (S.insert x (cxNamed cx)) e
       Unbox _ v x e -> genUnbox cx dest v x e
       UnboxLazy v x e -> genUnbox cx dest v x e
       CaseA _ v (x,e1) (y,e2)
-        -> do A (ASum l r) <- tyOf cx v
-              ve <- genV cx v
-              let off = case v of
-                          Var z -> M.findWithDefault 0 z (cxOffsets cx)
-                          _ -> 0
+        -> do A (ASum l r) <- tyOfName cx v
+              let ve = localName v
+                  off = M.findWithDefault 0 v (cxOffsets cx)
                   offs = cxOffsets cx
-                  named z = case v of
-                              Var w | S.member w (cxNamed cx) -> S.insert z (cxNamed cx)
-                              _ -> cxNamed cx
+                  named z = if S.member v (cxNamed cx) then S.insert z (cxNamed cx) else cxNamed cx
               s1 <- genE (bindVar cx{ cxOffsets = M.insert x off offs, cxInSum = S.insert x (cxInSum cx), cxNamed = named x } x (A l)) dest e1
               s2 <- genE (bindVar cx{ cxOffsets = M.insert y (off + sumSize l) offs, cxInSum = S.insert y (cxInSum cx), cxNamed = named y } y (A r)) dest e2
               tg <- fresh "t"
@@ -637,7 +643,7 @@ genE cx dest expr
                        "    kk_box_t " ++ localName y ++ " = " ++ ve ++ ";"]
                       ++ map ("    " ++) s2 ++ ["  }", "}"])
       CaseV _ v alts
-        -> do V t@(VSum ts) <- tyOf cx v
+        -> do t@(VSum ts) <- tyOf cx v
               ve <- genV cx v
               z <- fresh "w"
               ct <- ctype t
@@ -665,8 +671,8 @@ genE cx dest expr
               sd <- genE cx dest def
               return (ifChain (brs ++ [("true", sd)]))
       CaseOpen _ v alts def
-        -> do ve <- genV cx v
-              V tv <- tyOf cx v
+        -> do let ve = localName v
+              A tv <- tyOfName cx v
               brs <- forM alts $ \(c,x,e) ->
                        do f <- liftC (openFields (cxEnv cx) c tv)
                           tys <- openTypeArgs cx v
@@ -680,7 +686,7 @@ genE cx dest expr
               return (ifChain (brs ++ [("true",sd)]))
 
 -- bind deeply nested values first (C compilers limit the nesting of brackets)
-hoistDeep :: Expr -> Maybe (Val, Val -> Expr)
+hoistDeep :: VExpr -> Maybe (VVal, VVal -> VExpr)
 hoistDeep expr
   = case expr of
       Ret v -> one v Ret
@@ -693,23 +699,42 @@ hoistDeep expr
     many vs k = case [(i,r) | (i,v) <- zip [0..] vs, Just r <- [deep 0 v]] of
                   ((i,(w,mk)):_) -> Just (w, \x -> k (take i vs ++ [mk x] ++ drop (i+1) vs))
                   [] -> Nothing
-    deep :: Int -> Val -> Maybe (Val, Val -> Val)
+    deep :: Int -> VVal -> Maybe (VVal, VVal -> VVal)
     -- only whole values of named types, whose tags have no offset in an enclosing sum
     deep d v
-      | d >= 24 && depth v > 8, Fold _ _ <- v = Just (v,id)
-      | otherwise = case [(i,r) | (i,w) <- zip [0..] (childrenV v), Just r <- [deep (d+1) w]] of
-                      ((i,(u,mk)):_) -> Just (u, \x -> setChild i (mk x) v)
+      | d >= 24 && depth v > 8, Ptr _ _ <- v = Just (v,id)
+      | otherwise = case [(replace,r) | (w,replace) <- childrenV v, Just r <- [deep (d+1) w]] of
+                      ((replace,(u,mk)):_) -> Just (u, replace . mk)
                       [] -> Nothing
 
 -- nesting depth of value constructors
-depth :: Val -> Int
+depth :: VVal -> Int
 depth v
   = case childrenV v of
       [] -> 0
-      ws -> 1 + maximum (map depth ws)
+      ws -> 1 + maximum (map (depth . fst) ws)
 
-setChild :: Int -> Val -> Val -> Val
-setChild i w v = evalState (descendV (\u -> state (\j -> (if i == j then w else u, j+1))) v) 0
+-- Unboxed children reached through boxed constructors, with typed rebuild functions.
+childrenV :: VVal -> [(VVal, VVal -> VVal)]
+childrenV v = case v of
+  Inj i t w -> [(w,Inj i t)]
+  Pair u w -> [(u,\x -> Pair x w),(w,Pair u)]
+  Ptr a w -> [(u,Ptr a . rebuild) | (u,rebuild) <- childrenA w]
+  Pack t ts w -> [(w,Pack t ts)]
+  TyApp w ts -> [(w,\x -> TyApp x ts)]
+  DupV w -> [(w,DupV)]
+  _ -> []
+
+childrenA :: AVal -> [(VVal, VVal -> AVal)]
+childrenA v = case v of
+  Inl a w -> [(u,Inl a . rebuild) | (u,rebuild) <- childrenA w]
+  Inr a w -> [(u,Inr a . rebuild) | (u,rebuild) <- childrenA w]
+  Roll a w -> [(u,Roll a . rebuild) | (u,rebuild) <- childrenA w]
+  Box w -> [(w,Box)]
+  OpenCon c ts w -> [(w,OpenCon c ts)]
+  BoxAt r w -> [(w,BoxAt r)]
+  BoxIn x w -> [(w,BoxIn x)]
+  _ -> []
 
 ifChain :: [(String,[String])] -> [String]
 ifChain [] = []
@@ -731,11 +756,11 @@ litTest ve lit
     intLit i | i >= -8191 && i <= 8191 = "kk_integer_from_small(" ++ show i ++ ")"
              | otherwise = "kk_integer_from_str(\"" ++ show i ++ "\",_ctx)"
 
-openTypeArgs :: Ctx -> Val -> G [VType]
+openTypeArgs :: Ctx -> Name -> G [AType]
 openTypeArgs cx v
-  = do t <- tyOf cx v
+  = do t <- tyOfName cx v
        case t of
-         V (VCon _ args) -> return args
+         A (ACon _ args) -> return args
          _ -> return []
 
 conFieldNames :: Ctx -> Name -> G [String]
@@ -771,7 +796,7 @@ openFieldExpr c fields kfields names ve
 
 -- calls
 
-genCall :: Ctx -> Dest -> Name -> [VType] -> [Val] -> G [String]
+genCall :: Ctx -> Dest -> Name -> [AType] -> [VVal] -> G [String]
 genCall cx dest f tys vs
   | f == nameFieldAddrOf = genFieldAddr cx dest vs
   | f == nameSetCtxPath  = genSetCtxPath cx dest vs
@@ -797,13 +822,13 @@ callName f
   | f == newHiddenName "typed-unreachable" = "kt_unreachable_value"
   | otherwise = cName f
 
-callSig :: Ctx -> Name -> [VType] -> G ([VType],VType)
+callSig :: Ctx -> Name -> [AType] -> G ([VType],VType)
 callSig cx f tys
   = case M.lookup f (envSigs (cxEnv cx)) of
       Just (SigFun tvs ps r) -> return (map (inst tvs tys . snd) ps, inst tvs tys r)
       _ -> failG ("unknown function " ++ show f)
 
-genExtern :: Ctx -> Dest -> Name -> [VType] -> [Val] -> External -> G [String]
+genExtern :: Ctx -> Dest -> Name -> [AType] -> [VVal] -> External -> G [String]
 genExtern cx dest f tys vs ext
   = do (ps,r) <- callSig cx f tys
        let (kpars,kres) = kokaFunType (extType ext)
@@ -826,7 +851,7 @@ genExtern cx dest f tys vs ext
     -- Koka passes type variables of its lazy internals at their instance (see `Backend.C.Box`)
     externCType kt t
       = case (kt,t) of
-          (TVar _, VCon n _) | f `elem` unboxedInternals -> maybe (kokaTypeName n) id (lookup n kokaPrimTypes)
+          (TVar _, VPtr (ACon n _)) | f `elem` unboxedInternals -> maybe (kokaTypeName n) id (lookup n kokaPrimTypes)
           _ -> kokaCType kt
 
 unboxedInternals :: [Name]
@@ -873,31 +898,32 @@ substFormat fmt args = go fmt
     go (x:xs) = x : go xs
 
 -- boxed values that are (parts of) values of named types, which are never Koka's `box-any`
-namedOf :: Ctx -> Expr -> Name -> S.Set Name
+namedOf :: Ctx -> VExpr -> Name -> S.Set Name
 namedOf cx e x
   = case e of
       Ret v | Just z <- copyOf v, S.member z (cxNamed cx) -> S.insert x (cxNamed cx)
       _ -> cxNamed cx
 
-inSumOf :: Ctx -> Expr -> Name -> S.Set Name
+inSumOf :: Ctx -> VExpr -> Name -> S.Set Name
 inSumOf cx e x
   = case e of
       Ret v | Just z <- copyOf v, S.member z (cxInSum cx) -> S.insert x (cxInSum cx)
       _ -> cxInSum cx
 
 -- offsets of boxed sums bound by a let
-offsetOf :: Ctx -> Expr -> Name -> M.Map Name Int
+offsetOf :: Ctx -> VExpr -> Name -> M.Map Name Int
 offsetOf cx e x
   = case e of
       Ret v | Just z <- copyOf v, Just off <- M.lookup z (cxOffsets cx) -> M.insert x off (cxOffsets cx)
       _ -> cxOffsets cx
 
 -- a let that binds a variable or a duplicate of one binds the same value
-copyOf :: Val -> Maybe Name
+copyOf :: VVal -> Maybe Name
 copyOf v
   = case v of
       Var z -> Just z
-      Dup w -> copyOf w
+      DupV w -> copyOf w
+      Ptr _ (DupA z) -> Just z   -- a boxed value is bound by `let p = ret (ptr v) in let ptr x = p`
       _ -> Nothing
 
 -- definitions
@@ -932,13 +958,13 @@ genWrapper env cenv f
               rct  <- ctype r
               let xs  = [newHiddenName ("p" ++ show i) | i <- [0..length ps - 1]]
                   cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) M.empty S.empty S.empty Nothing M.empty
-              body <- genCall cx DReturn f (map VVar tvs) (map Var xs)
+              body <- genCall cx DReturn f (map AVar tvs) (map Var xs)
               let sig = "static " ++ ctName rct ++ " " ++ cName f ++ "_fun(kk_function_t _fself" ++ concat [", " ++ ctName ct ++ " " ++ localName x | (x,ct) <- zip xs pcts] ++ ", kk_context_t* _ctx)"
               return (sig ++ ";\n", sig ++ " {\n  kk_function_static_drop(_fself,_ctx);\n" ++ indent body ++ "}\n")
       _ -> failG ("wrapper for unknown function " ++ show f)
 
 -- the address of a field in a constructor (for constructor contexts)
-genFieldAddr :: Ctx -> Dest -> [Val] -> G [String]
+genFieldAddr :: Ctx -> Dest -> [VVal] -> G [String]
 genFieldAddr cx dest [obj, Lit (LitString conStr), Lit (LitString fieldStr)]
   = do (bt,path) <- fieldLocation cx obj conStr fieldStr
        e <- genV cx obj
@@ -946,7 +972,7 @@ genFieldAddr cx dest [obj, Lit (LitString conStr), Lit (LitString fieldStr)]
 genFieldAddr _ _ vs = failG ("unexpected field address arguments: " ++ show vs)
 
 -- set the context path of a constructor to the field leading to the hole
-genSetCtxPath :: Ctx -> Dest -> [Val] -> G [String]
+genSetCtxPath :: Ctx -> Dest -> [VVal] -> G [String]
 genSetCtxPath cx dest [obj, Lit (LitString conStr), Lit (LitString fieldStr)]
   = do (bt,path) <- fieldLocation cx obj conStr fieldStr
        e <- genV cx obj
@@ -956,11 +982,11 @@ genSetCtxPath cx dest [obj, Lit (LitString conStr), Lit (LitString fieldStr)]
                ++ map ("  " ++) (assignTo dest CBox x) ++ ["}"])
 genSetCtxPath _ _ vs = failG ("unexpected context path arguments: " ++ show vs)
 
-fieldLocation :: Ctx -> Val -> String -> String -> G (String,String)
+fieldLocation :: Ctx -> VVal -> String -> String -> G (String,String)
 fieldLocation cx obj conStr fieldStr
   = do t <- tyOf cx obj
        args <- case t of
-                 V (VCon _ args) -> return args
+                 VPtr (ACon _ args) -> return args
                  _ -> failG ("field address of " ++ show t)
        let cname = readQualified conStr
            fname = unqualify (readQualified fieldStr)
@@ -1006,7 +1032,7 @@ cgenModule cenv prog
                           ++ concat [stStructs st M.! n | n <- stOrder st]
                           ++ concat [p | (p,_,_) <- ok]
                           ++ "void " ++ ktInitName (ceModName cenv) ++ "(kk_context_t* _ctx);\n#endif\n"
-                  csrc  = concat ["#define main kt_koka_main\n#include \"" ++ take (length h - 2) h ++ ".c\"\n#undef main\n" | h <- take 1 (ceIncludes cenv)]
+                  csrc  = concat ["#include \"" ++ take (length h - 2) h ++ ".c\"\n" | h <- take 1 (ceIncludes cenv)]
                           ++ "#include \"" ++ "kt_" ++ encode (show (ceModName cenv)) ++ ".h\"\n"
                           ++ concat (map fst wdefs)
                           ++ concat (stDecls st)

@@ -20,7 +20,7 @@ import Backend.Typed.Syntax
 import Backend.Typed.ElabType
 import Backend.Typed.Monad
 
-type K = Expr -> Expr
+type K = VExpr -> VExpr
 
 data Env = Env{ envNT :: Newtypes, envLocals :: S.Set Name, envTVars :: S.Set TVar, envSigs :: Sigs }
 

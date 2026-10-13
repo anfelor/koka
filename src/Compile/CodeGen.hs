@@ -5,7 +5,7 @@
 -- terms of the Apache License, Version 2.0. A copy of the License can be
 -- found in the LICENSE file at the root of this distribution.
 -----------------------------------------------------------------------------
-module Compile.CodeGen ( codeGen, codeGenTyped, Link, LinkResult(..), noLink ) where
+module Compile.CodeGen ( codeGen, codeGenTyped, cModuleBases, Link, LinkResult(..), noLink ) where
 
 import Debug.Trace
 import Data.Char
@@ -297,12 +297,12 @@ codeGenTyped term flags imports mod
             writeFile (joinPath outDir (TC.ktFileName (modName mod) ++ ".c")) csrc
             mapM_ (\err -> termInfo term (text ("typed cgen: " ++ err))) errs
 
--- compile the C of the typed backend and link it with the objects of the C backend (except for the main module)
-codeGenLinkTyped :: Terminal -> Flags -> CC -> ModuleName -> Name -> [Module] -> FilePath -> IO FilePath
-codeGenLinkTyped term flags cc progName entryName imported outBase
-  = do let outName fname = joinPath (dirname outBase) fname
-           mods     = map modName imported ++ [progName]
-           mainC    = outName (TC.ktFileName progName ++ "_main.c")
+-- The typed backend uses a separate entry point, but its modules are compiled
+-- by the same per-module action and linked by the same linker as regular C.
+codeGenTypedMain :: Flags -> ModuleName -> Name -> [Module] -> Doc
+codeGenTypedMain flags progName entryName imported
+  = let    mods     = map modName imported ++ [progName]
+           mainName = if null (outputEntryName flags) then "main" else outputEntryName flags
            mainSrc  = unlines (["#include \"" ++ TC.ktFileName progName ++ ".h\""]
                                ++ ["#include \"" ++ moduleNameToPath m ++ ".h\"" | m <- mods]
                                ++ ["#include <execinfo.h>"
@@ -310,7 +310,7 @@ codeGenLinkTyped term flags cc progName entryName imported outBase
                                   ,"#include <unistd.h>"
                                   ,"#include <signal.h>"
                                   ,"static void kt_segv(int sig) { fflush(stdout); void* b[64]; int n = backtrace(b,64); backtrace_symbols_fd(b,n,2); _exit(139); }"
-                                  ,"int main(int argc, char** argv) {"
+                                  ,"int " ++ mainName ++ "(int argc, char** argv) {"
                                   ,"  if (getenv(\"KT_BACKTRACE\") != NULL) { signal(SIGSEGV,&kt_segv); signal(SIGBUS,&kt_segv); }"
                                   ]
                                ++ ["  kk_os_set_stack_size(KK_IZ(" ++ show (stackSize flags) ++ "));" | stackSize flags /= 0]
@@ -322,50 +322,11 @@ codeGenLinkTyped term flags cc progName entryName imported outBase
                                   ,"  kk_main_end(_ctx);"
                                   ,"  return 0;"
                                   ,"}"])
-       writeFile mainC mainSrc
-       objs <- mapM (\(src,obj,deps) -> compileStale src obj deps)
-                    ([(outName (TC.ktFileName m ++ ".c"), outName (TC.ktFileName m), [outName (TC.ktFileName m ++ ".h"), outName (moduleNameToPath m ++ ".c")]) | m <- mods] ++
-                     [(mainC, outName (TC.ktFileName progName ++ "_main"), [])])
-       let kokaObjs = [outName (ccObjFile cc (moduleNameToPath m)) | m <- map modName imported]
-           kklibObj = outName (ccObjFile cc "kklib")
-           mainExe  = outName (moduleNameToPath progName ++ "_typed")
-           syslibs  = nub (concat [csyslibsFromCore flags mcore | mcore <- map (fromJust . modCore) imported]
-                           ++ ccompLinkSysLibs flags ++ ["m","pthread"])
-           clink    = concat ([ [ccPath cc], ccFlags cc, ccFlagsBuildFromFlags cc flags, ccTargetExe cc mainExe ]
-                              ++ [[kklibObj] ++ objs]
-                              ++ [ccFlagsLink cc] ++ linkStackHeapFlags flags cc
-                              ++ map (ccAddLib cc . outName . ccLibFile cc) clibs
-                              ++ map (ccAddSysLib cc) syslibs)
-           clibs    = nub (concat [clibsFromCore flags mcore | mcore <- map (fromJust . modCore) imported])
-       runCommand term flags clink
-       return mainExe
-  where
-    -- the C files of imported modules only change when those modules are recompiled
-    compileStale src obj deps
-      = do let objFile = ccObjFile cc obj
-           objTime <- getFileTime objFile
-           srcTime <- maxFileTimes <$> mapM getFileTime (src:deps)
-           when (objTime <= srcTime) (ccompile term flags cc obj [] [src])
-           return objFile
+      in text mainSrc
 
 {---------------------------------------------------------------
   C backend
 ---------------------------------------------------------------}
-
--- the stack and heap size of the executable (shared by the C and the typed link)
-linkStackSize, linkHeapSize :: Flags -> Int
-linkStackSize flags
-  = if (stackSize flags == 0 && (onWindows || isTargetWasm (targetFromFlags flags)))
-      then 8*1024*1024    -- default to 8Mb on windows and wasi
-      else stackSize flags
-linkHeapSize flags
-  = if (heapSize flags == 0 && isTargetWasm (targetFromFlags flags))
-      then 1024*1024*1024 -- default to 1Gb on wasi
-      else heapSize flags
-
-linkStackHeapFlags :: Flags -> CC -> [[String]]
-linkStackHeapFlags flags cc
-  = [ccFlagStack cc (linkStackSize flags), ccFlagHeap cc (linkHeapSize flags)]
 
 codeGenC :: FilePath -> Newtypes -> Borrowed -> [Module] -> Int
              -> Terminal -> Flags -> (IO () -> IO ()) -> Maybe (Name,Type)
@@ -379,7 +340,7 @@ codeGenC sourceFile newtypes borrowed0 imported unique0 term flags sequential en
                             Just (name,tp) -> Just (name,isAsyncFunction tp)
                             _              -> Nothing
       -- generate C
-      let (cdoc,hdoc,_,bcore) = cFromCore False
+      let (cdoc,hdoc,mainDoc,bcore) = cFromCore True
                                           (buildType flags) sourceDir (prettyEnvFromFlags flags) (platformFromFlags flags)
                                           newtypes borrowed0 unique0 (parcReuse flags) (parcSpecialize flags) (parcReuseSpec flags)
                                           (parcBorrowInference flags) (optEagerPatBind flags) (stackSize flags) mbEntry
@@ -411,39 +372,49 @@ codeGenC sourceFile newtypes borrowed0 imported unique0 term flags sequential en
 
       -- return the C compilation and final link as a separate IO action to increase concurrency
       return $ \fullImports ->
-               do -- compile the generated C
-                  ccompile term flags cc outBase extraIncDirs [outC]
-                  case entry of
-                    Nothing -> return LinkDone
-                    Just (entryName,_)
-                            -> do res <- codeGenLinkC term flags sequential cc progName fullImports {-link all objs, not just direct imports -}
-                                                      outBase clibs
-                                  if not (typedC flags) then return res else
-                                    do typedExe <- codeGenLinkTyped term flags cc progName entryName fullImports outBase
-                                       -- with --typedc, executing runs the typed executable
-                                       return (case res of
-                                                 LinkExe exe _ -> LinkExe exe (runCommand term flags ([typedExe] ++ execFlags flags))
-                                                 _             -> res)
+               do -- Compile every enabled representation with the same module configuration.
+                  mapM_ (\base -> ccompile term flags cc base extraIncDirs [base ++ ".c"])
+                        (cModuleBases flags progName outBase)
+                  case (entry,mainDoc) of
+                    (Just (entryName,_),Just regularMain)
+                            -> do let backends = [(moduleNameToPath,"",regularMain)] ++
+                                                 [(TC.ktFileName,"_typed",codeGenTypedMain flags progName entryName fullImports) | typedC flags]
+                                      link (moduleFile,suffix,doc) = do
+                                        let mainBase = joinPath (dirname outBase) (moduleFile progName ++ "_main")
+                                        writeDocW 120 (mainBase ++ ".c") doc
+                                        ccompile term flags cc mainBase extraIncDirs [mainBase ++ ".c"]
+                                        codeGenLinkC term flags sequential cc progName fullImports outBase moduleFile suffix [ccObjFile cc mainBase] clibs
+                                  results <- mapM link backends
+                                  -- --typedc produces both executables and runs the typed one.
+                                  return (case results of
+                                            [LinkExe exe _,LinkExe _ run] -> LinkExe exe run
+                                            res:_ -> res
+                                            [] -> LinkDone)
+                    _ -> return LinkDone
 
+
+-- The same module artifacts are compiled, copied and validated for both backends.
+cModuleBases :: Flags -> ModuleName -> FilePath -> [FilePath]
+cModuleBases flags modName outBase
+  = outBase : [joinPath (dirname outBase) (TC.ktFileName modName) | typedC flags]
 
 -- link obj's and create an executable
 codeGenLinkC :: Terminal -> Flags -> (IO () -> IO ()) -> CC -> ModuleName -> [Module]
-                  -> FilePath -> [FilePath] -> IO LinkResult
-codeGenLinkC term flags sequential cc progName imported outBase clibs
+                  -> FilePath -> (ModuleName -> FilePath) -> String -> [FilePath] -> [FilePath] -> IO LinkResult
+codeGenLinkC term flags sequential cc progName imported outBase moduleFile exeSuffix extraObjs clibs
   = do  -- names
         let outName fname = joinPath (dirname outBase) fname
             mainModName = moduleNameToPath progName
             mainName    = if null (outBaseName flags) then mainModName else outBaseName flags
-            mainExe     = outName mainName
+            mainExe     = outName (mainName ++ exeSuffix)
 
         -- build kklib for the specified build variant
         kklibObj <- kklibBuild term flags sequential cc (dirname outBase) "kklib" (ccObjFile cc "kklib")
 
         -- set up linker command line
         let objs   = [kklibObj] ++
-                      [outName (ccObjFile cc (moduleNameToPath mname))
-                          | mname <- map modName imported ++ [progName]]
-                      -- ++ [mainObj]
+                      [outName (ccObjFile cc (moduleFile mname))
+                          | mname <- map modName imported ++ [progName]] ++ extraObjs
             syslibs= nub $ concat [csyslibsFromCore flags mcore | mcore <- map (fromJust . modCore) imported]
                       ++ ccompLinkSysLibs flags
                       ++ (if onWindows && not (isTargetWasm (targetFromFlags flags))
@@ -451,14 +422,20 @@ codeGenLinkC term flags sequential cc progName imported outBase clibs
                             else ["m","pthread"])
             libs   = -- ["kklib"] -- [normalizeWith '/' (outName (ccLibFile cc "kklib"))] ++ ccompLinkLibs flags
                       -- ++
-                      nub $ clibs
-                      ++
-                      concat [clibsFromCore flags mcore | mcore <- map (fromJust . modCore) imported]
+                      nub (clibs ++ concat [clibsFromCore flags mcore | mcore <- map (fromJust . modCore) imported])
 
             libpaths = map (\lib -> outName (ccLibFile cc lib)) libs
 
-            stksize   = linkStackSize flags
-            linkFlags = ccFlagsLink cc : linkStackHeapFlags flags cc
+            stksize = if (stackSize flags == 0 && (onWindows || isTargetWasm (targetFromFlags flags)))
+                        then 8*1024*1024    -- default to 8Mb on windows and wasi
+                        else stackSize flags
+            hpsize  = if (heapSize flags == 0 && isTargetWasm (targetFromFlags flags))
+                        then 1024*1024*1024 -- default to 1Gb on wasi
+                        else heapSize flags
+
+            linkFlags = [ ccFlagsLink cc
+                        , ccFlagStack cc stksize
+                        , ccFlagHeap cc hpsize]
 
             linkLibs  = map (ccAddLib cc) libpaths  -- libs
                         ++ map (ccAddSysLib cc) syslibs
@@ -500,7 +477,7 @@ codeGenLinkExe term flags stksize clink mainExe
         when (not (null (outFinalPath flags)) && verbose flags > 1) $
           termPhase term $ color (colorInterpreter (colorScheme flags)) (text "created :") <+>
                                 color (colorSource (colorScheme flags)) (text (normalizeWith pathSep mainTarget))
-        let mainflags = execFlags flags
+        let mainflags = (if (showElapsed flags) then ["--kktime"] else []) ++ execOpts flags
 
         -- termInfo term $ text "flags:" <+> text (show flags) <+> text "\n"
         case targetFromFlags flags of
@@ -517,11 +494,6 @@ codeGenLinkExe term flags stksize clink mainExe
           _ -> do return (LinkExe mainTarget
                             (runCommand term flags ([mainExe] ++ mainflags)))
 
-
--- the command line flags passed to an executable when it is run
-execFlags :: Flags -> [String]
-execFlags flags
-  = (if (showElapsed flags) then ["--kktime"] else []) ++ execOpts flags
 
 
 -- Run the C compiler
