@@ -29,9 +29,13 @@ data Mode = Test | New | Update
   deriving (Eq, Ord, Show)
 
 
-data Options = Options{ mode :: Mode, cabal :: Bool, sysghc:: Bool, opt :: Int, target :: String, par :: Bool, rebuild :: Bool }
+-- the C backend, or the typed backend (`--typedc`, executing the typed executable)
+data Backend = BackendC | BackendTyped
+  deriving (Eq, Ord, Show)
 
-optionsDefault = Options Test False False 0 "" True False
+data Options = Options{ mode :: Mode, cabal :: Bool, sysghc:: Bool, opt :: Int, target :: String, par :: Bool, rebuild :: Bool, backends :: [Backend] }
+
+optionsDefault = Options Test False False 0 "" True False [BackendC]
 
 data Cfg = Cfg{ flags   :: [String],
                 options :: Options,
@@ -108,10 +112,15 @@ extendCfg (Cfg flags1 opts1 exclude1 fexclude1) (Cfg flags2 opts2 exclude2 fexcl
   = Cfg (flags1 ++ flags2) opts1
         (exclude1 ++ exclude2) (\s -> fexclude1 s || fexclude2 s)
 
-initialCfg :: Options -> Cfg
-initialCfg options
-  = makeCfg (commonFlags ++ if (not (null (target options))) then ["--target=" ++ target options] else [])
+initialCfg :: Options -> Backend -> Cfg
+initialCfg options backend
+  = makeCfg (commonFlags ++ backendFlags ++ if (not (null (target options))) then ["--target=" ++ target options] else [])
             options []
+  where
+    -- the typed backend needs its own build directory as it generates extra C for every module
+    backendFlags = case backend of
+                     BackendC     -> []
+                     BackendTyped -> ["--typedc", "--buildtag=test-typed"]
 
 
 readFlagsFile :: FilePath -> IO [String]
@@ -257,6 +266,8 @@ processOptions arg (options,hargs)
       then (options{par=False}, hargs)
     else if (arg == "--rebuild" || arg == "-r")
       then (options{rebuild=True}, hargs)
+    else if (take 10 arg == "--backend=")
+      then (options{backends=parseBackend (drop 10 arg)}, hargs)
       else (options, arg : hargs)
   where
     parseMode :: String -> Mode
@@ -264,6 +275,12 @@ processOptions arg (options,hargs)
     parseMode "update" = Update
     parseMode "test" = Test
     parseMode m = error $ "Unrecognized mode: " ++ show m
+
+    parseBackend :: String -> [Backend]
+    parseBackend "c" = [BackendC]
+    parseBackend "typed" = [BackendTyped]
+    parseBackend "both" = [BackendC,BackendTyped]
+    parseBackend b = error $ "Unrecognized backend: " ++ show b
 
 getOptions :: IO (Options , [String])
 getOptions
@@ -279,28 +296,52 @@ main = do
                  return (maybe "" id stackExe == "")
   let options = options0{ cabal = cabalEnv || cabal options0 }
   hcfg <- readConfig defaultConfig args
+  -- the typed backend only generates native C; new and updated expected output come from the C backend
+  let runBackends = if (null (target options) && mode options == Test) then backends options else filter (/= BackendTyped) (backends options)
   putStrLn "pre-compiling standard libraries..."
-  -- compile all standard libraries before testing so we can run in parallel
-  let cfg = initialCfg options
-      stdcfg = if rebuild options then cfg{ flags = flags cfg ++ ["-r", "-l"]} else cfg
-  runKoka stdcfg{flags = "-e" : flags stdcfg} "" "util/link-test.kk"
-  -- precompile bench by compiling a dependent file (ensures correct module name resolution)
-  runKoka stdcfg "" "test/lazy/queue/bankers.kk"
-  -- precompile mpat-lib so test/cgen/mpat.kk loads it from the .kki
-  runKoka stdcfg "" "test/cgen/mpat-lib.kk"
-  -- precompile specbox-lib so test/cgen/specbox.kk loads it from the .kki
-  -- (both carry a -O2 .flags file so they share one build directory)
-  runKoka stdcfg "" "test/cgen/specbox-lib.kk"
-  -- precompile the syn-nested chain so syn-nested1 emits only its own core
-  runKoka stdcfg "" "test/parc/syn-nested1c.kk"
-  runKoka stdcfg{flags = "--target=js":(flags stdcfg)} "" "util/link-test.kk" -- precompiled js libraries as well
+  precompiled <- mapM (precompile options) runBackends
   putStrLn "ok."
   let spec = if target options == "names"
                then NameSpec.spec
                else (if (target options == "js" || not (par options)) then id else parallel) $
-                    discoverTests cfg (pwd </> "test")
+                    mapM_ (\(backend,out) -> withBackend backend $
+                                              do when (backend == BackendTyped) $ typedStdTest out
+                                                 discoverTests (initialCfg options backend) (pwd </> "test"))
+                          (zip runBackends precompiled)
+      withBackend backend = if (length runBackends > 1) then describe (backendName backend) else id
   summary <- withArgs [] (runSpec spec hcfg{configFormatter=Just specProgress})
   evaluateSummary summary
+
+backendName :: Backend -> String
+backendName BackendC     = "c"
+backendName BackendTyped = "typed"
+
+-- the typed backend reports problems in the precompiled modules (not in the tests) only once,
+-- when they are compiled (use `--rebuild` to check them again)
+typedStdTest :: String -> Spec
+typedStdTest out
+  = it "std" $ filter ("typed " `isPrefixOf`) (lines out) `shouldBe` []
+
+-- compile all standard libraries before testing so we can run in parallel (and return the output)
+precompile :: Options -> Backend -> IO String
+precompile options backend
+  = do let cfg = initialCfg options backend
+           stdcfg = if rebuild options then cfg{ flags = flags cfg ++ ["-r", "-l"]} else cfg
+       outs <- sequence
+         [ runKoka stdcfg{flags = "-e" : flags stdcfg} "" "util/link-test.kk"
+           -- precompile bench by compiling a dependent file (ensures correct module name resolution)
+         , runKoka stdcfg "" "test/lazy/queue/bankers.kk"
+           -- precompile mpat-lib so test/cgen/mpat.kk loads it from the .kki
+         , runKoka stdcfg "" "test/cgen/mpat-lib.kk"
+           -- precompile specbox-lib so test/cgen/specbox.kk loads it from the .kki
+           -- (both carry a -O2 .flags file so they share one build directory)
+         , runKoka stdcfg "" "test/cgen/specbox-lib.kk"
+           -- precompile the syn-nested chain so syn-nested1 emits only its own core
+         , runKoka stdcfg "" "test/parc/syn-nested1c.kk"
+         ]
+       when (backend == BackendC) $
+         void $ runKoka stdcfg{flags = "--target=js":(flags stdcfg)} "" "util/link-test.kk" -- precompiled js libraries as well
+       return (unlines outs)
 
 
 specProgress = specdoc {

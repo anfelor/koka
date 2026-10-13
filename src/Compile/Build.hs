@@ -71,7 +71,7 @@ import Compile.Options
 import Compile.Module
 import Compile.TypeCheck      ( typeCheck )
 import Compile.Optimize       ( coreOptimize )
-import Compile.CodeGen        ( codeGen, Link, LinkResult(..), noLink )
+import Compile.CodeGen        ( codeGen, codeGenTyped, Link, LinkResult(..), noLink )
 import Core.Core (Core(coreProgDefs))
 import GHC.IORef (atomicSwapIORef)
 
@@ -317,6 +317,9 @@ moduleCodeGen mainEntries parsedMap tcheckedMap optimizedMap codegenMap
                       inlines = inlinesFromModules imports
                   mbEntry <- getMainEntry (defsGamma defs) mainEntries mod
                   seqIO   <- sequentialIO
+                  when (checkTyped flags || showTyped flags || typedC flags) $
+                    do allImports <- moduleWaitForImports True optimizedMap [] (modImportNames mod)
+                       pooledIO $ codeGenTyped term flags allImports mod
                   link    <- pooledIO $ codeGen term flags seqIO
                                                 (defsNewtypes defs) (defsBorrowed defs) (defsKGamma defs) (defsGamma defs)
                                                 mbEntry imports mod
