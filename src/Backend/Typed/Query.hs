@@ -125,7 +125,20 @@ altTypes env t expr
   = case (expr,t) of
       (Unpair{}, V (VProd a b)) -> return [[V a, V b]]
       (CaseV _ _ alts, V (VSum ts)) | length ts == length alts -> return [[V s] | s <- ts]
-      (CaseA{}, A (ASum a b)) -> return [[A a],[A b]]
+      (SplitA _ _ k _ _, A a@(ASum ts)) -> do
+        checkShape a
+        let (ls,rs) = span ((< k) . fst) ts
+        unless (not (null ls) && not (null rs)) (Left "invalid boxed sum partition")
+        return [[A (ASum ls)], [A (ASum rs)]]
+      (CaseA _ _ alts def, A a@(ASum ts)) -> do
+        checkShape a
+        let indices = [i | (i,_,_) <- alts]
+            rest = [(i,t) | (i,t) <- ts, i `notElem` indices]
+        unless (all (`elem` map fst ts) indices && S.size (S.fromList indices) == length indices)
+          (Left "invalid boxed case indices")
+        unless (maybe (null rest) (const (not (null rest))) def)
+          (Left "incomplete boxed case")
+        return ([[A t] | i <- indices, Just t <- [lookup i ts]] ++ maybe [] (const [[A (ASum rest)]]) def)
       (Deref{}, V (VPtr a)) -> return [[A a]]
       (Unroll{}, A a) -> do b <- unrollT env a
                             return [[A b]]
@@ -231,12 +244,9 @@ inferA env g val
                  Just (SigFun tvs ps r) -> return (forallA tvs (AFun ps r))
                  _ -> Left ("unknown function " ++ show f)
       UnitA -> return AUnit
-      Inl a v -> case a of
-                   ASum l _ -> checkShape a >> checkA env g v l >> return a
-                   _ -> Left ("inl into " ++ ppr a)
-      Inr a v -> case a of
-                   ASum _ r -> checkShape a >> checkA env g v r >> return a
-                   _ -> Left ("inr into " ++ ppr a)
+      InjA i a v -> case a of
+                      ASum ts | Just t <- lookup i ts -> checkShape a >> checkA env g v t >> return a
+                      _ -> Left ("invalid boxed injection into " ++ ppr a)
       Roll a v -> do b <- unrollT env a
                      checkA env g v b
                      return a
@@ -259,8 +269,8 @@ inferA env g val
                       noHeapCredit tv
                       case tx of
                         VPtr (ACon n args)
-                          | Just (TypeDef _ tvs (Just body) (Just linfo)) <- M.lookup n (envTypes env)
-                          , any (alphaEq (ABox tv)) (splitSum (length (lazyCons linfo)) (inst tvs args body))
+                          | Just (TypeDef _ tvs (Just body) (Just _)) <- M.lookup n (envTypes env)
+                          , any (alphaEq (ABox tv)) (sumTypes (inst tvs args body))
                           -> return (ABox tv)
                         _ -> Left ("writing " ++ ppr tv ++ " into " ++ ppr tx)
       BoxAt r v -> do tr <- inferV env g (Var r)

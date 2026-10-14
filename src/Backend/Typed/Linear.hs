@@ -185,8 +185,7 @@ ownedA env g val
               scopeEnd (checkE env g' M.empty e)
               put d
       UnitA -> return ()
-      Inl _ v -> ownedA env g v
-      Inr _ v -> ownedA env g v
+      InjA _ _ v -> ownedA env g v
       Roll _ v -> ownedA env g v
       Box v -> ownedV env g v
       OpenCon _ _ v -> ownedV env g v

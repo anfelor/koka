@@ -17,7 +17,7 @@
   Structs are named by a hash of their layout so modules agree on them.
 -}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Layout( CT(..), layout, leaves, isEnum, orderFields
+module Backend.Typed.Layout( CT(..), layout, leaves, isEnum, orderFields, shapeIsHeap
                            , ctName, scanOf, rawOf, needsRC
                            , structDefs, blockName, blockDef, blockSize, isBlock
                            , dupExpr, dropStmt, rawCType, primBox, fnv
@@ -41,6 +41,17 @@ data CT = CBox
         | CSum String [Maybe CT]      -- the payload of each alternative (if not unit)
         | CReuse                      -- a reuse credit
         deriving (Show)
+
+-- A uniform boxed shape can be distinguished by the pointer bit. Nothing means
+-- either a mixture of heap blocks and immediates or an opaque representation.
+shapeIsHeap :: AType -> Maybe Bool
+shapeIsHeap AUnit = Just False
+shapeIsHeap (ABox t) = Just (case layout t of { CUnit -> False; _ -> True })
+shapeIsHeap (ASum ((_,t):ts))
+  = do b <- shapeIsHeap t
+       bs <- mapM (shapeIsHeap . snd) ts
+       if all (== b) bs then Just b else Nothing
+shapeIsHeap _ = Nothing
 
 layout :: VType -> CT
 layout t

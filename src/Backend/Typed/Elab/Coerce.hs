@@ -90,7 +90,7 @@ unboxAV t a
       VUnit -> return (id, UnitV)
       VSum ts | length ts > 1 ->
         do r <- fresh "s"
-           body <- caseChain fresh (map boxA ts) a (unboxAlt t ts)
+           body <- caseSum fresh (map boxA ts) a (unboxAlt t ts)
            return (Let r t body, Var r)
       VSum _      -> unbox
       VPtr _      -> unbox
