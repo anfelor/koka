@@ -293,6 +293,14 @@ elabVal expr
                               TForall tvs _ -> generalize [typevarId tv | tv <- tvs, tvarStar tv] (elabCon expr []) (typeOf expr)
                               _ -> elabCon expr []
       C.App f args | isConApp f -> elabCon f args
+      C.TypeApp e tys
+        -> do (k1,v) <- elabVal e
+              tys' <- instArgs (typeOf e) tys
+              if null tys' then return (k1,v)
+                else do a <- ptrType (typeOf e)
+                        expect <- vt (typeOf expr)
+                        (k2,v') <- coerce (VPtr (instA a tys')) expect (tapp v tys')
+                        return (k1 . k2,v')
       C.TypeLam tvs e | not (any tvarStar tvs) -> elabVal e
       C.Lam pars _ body -> do t <- vt (typeOf expr)
                               lam <- elabLam t pars body
@@ -302,7 +310,10 @@ elabVal expr
               lam <- withTVars (map typevarId tvs) (elabLam (stripForallV t) pars body)
               genVal t lam
       C.TypeLam tvs e | isValue e -> elabTypeLam [typevarId tv | tv <- tvs, tvarStar tv] e (typeOf expr)
-      _ -> failE ("unsupported value expression: " ++ exprKind expr)
+      _ -> do t <- vt (typeOf expr)
+              x <- fresh "a"
+              e <- elabExpr expr
+              return (Let x t e, Var x)
 
 elabTypeLam :: [TVar] -> C.Expr -> Type -> E (K,VVal)
 elabTypeLam tvs e tp = generalize tvs (elabVal e) tp
@@ -323,17 +334,6 @@ unreachable tp
        x <- fresh "u"
        (k,v) <- coerce (boxrep t) t (Var x)
        return (Let x (boxrep t) (Call nameUnreachable [rep t] []) . k, v)
-
-exprKind :: C.Expr -> String
-exprKind expr
-  = case expr of
-      C.TypeLam _ e -> "type lambda over " ++ exprKind e
-      C.TypeApp e _ -> "type application of " ++ exprKind e
-      C.App _ _     -> "application"
-      C.Let _ _     -> "let"
-      C.Case _ _    -> "case"
-      C.Var x _     -> "variable " ++ show (getName x)
-      _             -> "other"
 
 etaCon :: C.Expr -> [(Name,Type)] -> Type -> E (K,VVal)
 etaCon con pars eff
