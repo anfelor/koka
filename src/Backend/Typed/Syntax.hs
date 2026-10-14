@@ -113,8 +113,12 @@ data VType = VPtr AType                 -- A*
            | VProd VType VType          -- V ⊗ W
            | VRaw Name                  -- raw: unboxed primitives (`int32`, `float64`, `char`, ...)
            | VExists [TVar] VType       -- ∃ā. V
-           | VReuse Int                 -- ◇n, a reuse credit for a heap block of n bytes
+           | VReuse Int (Maybe VVal)    -- ◇n[p]: if nonempty, an n-byte block containing p
            deriving (Eq,Show)
+
+-- p is an unevaluated structural value describing the original contents.
+-- It carries no ownership; its names follow scope and substitution.
+-- Descriptions may be forgotten and cannot escape their names' scope.
 
 -- t ::= A | V
 data Ty = A AType | V VType
@@ -208,7 +212,7 @@ data AVal
   -- count (`Lazy`). It is an update through a shared reference and only sound because `x` is
   -- locked and its old fields (taken by `[unbox-lazy]`) are not used again.
   | BoxIn Name VVal
-  deriving (Show)
+  deriving (Eq,Show)
 
 -- Unboxed values `Γ ⊢ v :q V`.
 data VVal
@@ -280,7 +284,7 @@ data VVal
   --
   -- An empty credit, passed when a join asks for a block that is unavailable.
   | NoReuse Int
-  deriving (Show)
+  deriving (Eq,Show)
 
 -- Expressions `Γ | J ⊢ e : W` (always unboxed).
 --
@@ -324,11 +328,15 @@ data VExpr
   --   Γ₁ ⊢ v :q V₁ ⊗ V₂    Γ₂, x :q V₁, y :q V₂ ⊢ e : W
   --  ──────────────────────────────────────────────────── [unpair]
   --   Γ₁, Γ₂ ⊢ let_q (x, y) = v in e : W
+  --
+  -- For a variable scrutinee z, credit descriptions substitute (x,y) for z.
   | Unpair Mode VVal Name Name VExpr
 
   --   Γ₁ ⊢ v :q ⊕ᵢ Vᵢ    Γ₂, xᵢ :q Vᵢ ⊢ eᵢ : W   (for each i)
   --  ────────────────────────────────────────────────────────── [case]
   --   Γ₁, Γ₂ ⊢ case_q v of { injᵢ xᵢ -> eᵢ } : W
+  --
+  -- For a variable scrutinee z, branch i substitutes injᵢ xᵢ in credit descriptions.
   | CaseV Mode VVal [(Name,VExpr)]
 
   --   Γ₁ ⊢ v :q ⊕ⱼ∈J Aⱼ    Γ₂, xᵢ :q Aᵢ ⊢ eᵢ : W (i ∈ I)    Γ₂, d :q ⊕ⱼ∈J\I Aⱼ ⊢ e : W
@@ -379,6 +387,8 @@ data VExpr
   --   Γ₁ ⊢ v :q ∃ā. V    Γ₂, x :q V[b̄/ā] ⊢ e : W    b̄ ∉ ftv(Γ₂, W)
   --  ────────────────────────────────────────────────────────────────── [unpack]
   --   Γ₁, Γ₂ ⊢ let_q pack[b̄] x = v in e : W
+  --
+  -- For a variable scrutinee z, credit descriptions substitute pack[b̄] x for z.
   | Unpack Mode VVal [TVar] Name VExpr
 
   --   Γ₁ ⊢ v :^ V    lᵢ : V    Γ₂ ⊢ eᵢ : W    Γ₂ ⊢ e : W
@@ -436,7 +446,7 @@ data VExpr
   -- Branches on whether a box is unique (`DropSpec`).
   | IsUnique Name VExpr VExpr
 
-  --   Γ, x : V, r : ◇n ⊢ e : W    |V| = n
+  --   Γ, x : V, r : ◇n[x] ⊢ e : W    |V| = n
   --  ─────────────────────────────────────────────── [unbox-ru]
   --   Γ, z :! Box V ⊢ let box x @ r = z in e : W
   --
@@ -458,7 +468,7 @@ data VExpr
   --  ─────────────────────────────────────── [jump]
   --   Γ₁, ..., Γₙ | J ⊢ jump j(v₁, ..., vₙ) : W
   | Jump Name [VVal]
-  deriving (Show)
+  deriving (Eq,Show)
 
 -- Definitions `⊢ def`, with `f : ∀ā. (q̄ V̄) -> W ∈ Σ` and `x : ∀ā. V ∈ Σ`
 data Def

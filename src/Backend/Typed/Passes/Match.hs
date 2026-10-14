@@ -80,7 +80,7 @@ matchE expr
               A a <- liftE (inferVar g v)
               t <- liftE (boxContents a)
               n <- liftE (reuseSize t)
-              UnboxRu v x r <$> bind [(x,V t),(r,V (VReuse n))] (matchE e)
+              UnboxRu v x r <$> bind [(x,V t),(r,V (VReuse n (Just (Var x))))] (matchE e)
       _ -> descendE pure matchV (\_ -> matchE) expr
 
 partition :: Mode -> Name -> [(Int,AType)] -> [(Int,Name,VExpr)] -> Maybe (Name,VExpr) -> Match VExpr
