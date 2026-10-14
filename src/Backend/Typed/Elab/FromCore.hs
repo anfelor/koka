@@ -6,7 +6,7 @@
 -- found in the LICENSE file at the root of this distribution.
 -----------------------------------------------------------------------------
 
-module Backend.Typed.Elab( elabProgram ) where
+module Backend.Typed.Elab.FromCore( elabProgram ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -20,12 +20,14 @@ import Type.Type
 import qualified Core.Core as C
 import Core.Core( TName(..), typeOf )
 import Backend.Typed.Syntax
-import Backend.Typed.ElabType
+import Backend.Typed.Common
+import Backend.Typed.Elab.Types( typeDefs )
+import Backend.Typed.TypeInfo
 import Backend.Typed.Types
-import Backend.Typed.ElabMonad
-import Backend.Typed.Coerce
-import Backend.Typed.Match( nameUnreachable, nameSetCtxPath, isJoinName )
-import Backend.Typed.Anf( isValue )
+import Backend.Typed.Elab.Monad
+import Backend.Typed.Elab.Coerce
+import Backend.Typed.Names( nameUnreachable, nameSetCtxPath, isJoinName )
+import Backend.Typed.Elab.Common( isValue )
 import Backend.Typed.Pretty( ppr )
 
 -- programs
@@ -574,7 +576,7 @@ elabBoxedCase info vargs v brs
        z <- fresh "z"
        shapes <- conShapes info vargs
        let cons = dataInfoConstrs info
-       body <- caseChain shapes z (\i y -> conBranch vargs (cons !! i) (Left y) (findBranch (cons !! i) brs))
+       body <- caseChain fresh shapes z (\i y -> conBranch vargs (cons !! i) (Left y) (findBranch (cons !! i) brs))
        return (Deref Owned v p (Unroll Owned p z body))
 
 elabValueCase :: DataInfo -> [AType] -> VVal -> [C.Branch] -> E VExpr

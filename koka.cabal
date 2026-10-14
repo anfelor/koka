@@ -30,25 +30,30 @@ library
       Backend.C.ParcReuseSpec
       Backend.CSharp.FromCore
       Backend.JavaScript.FromCore
-      Backend.Typed.Anf
       Backend.Typed.CGen
       Backend.Typed.Check
-      Backend.Typed.Coerce
-      Backend.Typed.Contify
-      Backend.Typed.DropSpec
-      Backend.Typed.Elab
-      Backend.Typed.ElabMonad
-      Backend.Typed.ElabType
+      Backend.Typed.Common
+      Backend.Typed.Elab.Anf
+      Backend.Typed.Elab.Coerce
+      Backend.Typed.Elab.Common
+      Backend.Typed.Elab.Contify
+      Backend.Typed.Elab.FromCore
+      Backend.Typed.Elab.Match
+      Backend.Typed.Elab.Monad
+      Backend.Typed.Elab.Types
       Backend.Typed.Layout
-      Backend.Typed.Lazy
       Backend.Typed.Linear
-      Backend.Typed.Match
       Backend.Typed.Monad
-      Backend.Typed.Perceus
+      Backend.Typed.Names
+      Backend.Typed.Passes.DropSpec
+      Backend.Typed.Passes.Lazy
+      Backend.Typed.Passes.Perceus
+      Backend.Typed.Passes.Reuse
+      Backend.Typed.Passes.Simplify
       Backend.Typed.Pretty
-      Backend.Typed.Reuse
-      Backend.Typed.Simplify
+      Backend.Typed.Query
       Backend.Typed.Syntax
+      Backend.Typed.TypeInfo
       Backend.Typed.Typed
       Backend.Typed.Types
       Common.ColorScheme

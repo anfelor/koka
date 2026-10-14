@@ -12,7 +12,7 @@
   parameters, passed at every call. Runs before `Match`, which closes the guards
   over these extra arguments.
 -}
-module Backend.Typed.Contify( contifyCore ) where
+module Backend.Typed.Elab.Contify( contifyCore ) where
 
 import qualified Data.Set as S
 import Common.Name

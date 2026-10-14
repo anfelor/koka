@@ -40,7 +40,7 @@
   The body of a join point is closed and processed like the body of a function; a jump
   is like a call, but nothing follows it, so owned variables are only dropped before it.
 -}
-module Backend.Typed.Perceus( perceusProgram, dropValue ) where
+module Backend.Typed.Passes.Perceus( perceusProgram ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -50,9 +50,10 @@ import Data.Functor.Const( Const(..) )
 import Data.List( isSuffixOf )
 import Common.Name
 import Backend.Typed.Syntax
+import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Check( Env(..), Gamma, envOf, bindAll, inferV, altTypes, paramModes, isTrivial )
-import Backend.Typed.Types( Types(..), inst, isPtr )
+import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, altTypes, paramModes )
+import Backend.Typed.Types( inst, isPtr )
 
 type VarSet = S.Set Name
 
@@ -72,8 +73,6 @@ type P a = M () Int a
 
 fresh :: String -> P Name
 fresh s = state (\n -> (newHiddenName ("rc" ++ s ++ show n), n+1))
-
-type K = VExpr -> VExpr
 
 -- programs
 
@@ -107,42 +106,6 @@ ownedParams ps = S.fromList [x | (x,m,t) <- ps, owning m, not (isTrivial (V t))]
 
 typeOfV :: PEnv -> VVal -> P VType
 typeOfV pe v = liftE (inferV (peEnv pe) (peGamma pe) v)
-
--- Discard an owned value by destructuring it down to boxed operands and credits.
--- The caller supplies fresh names from its own pass's supply.
-dropValue :: Monad m => m Name -> Name -> Ty -> VExpr -> m VExpr
-dropValue _ _ t e
-  | isTrivial t = return e
-dropValue fresh x t e
-  = case t of
-      A _ -> return (Drop x e)
-      V v -> case v of
-        VPtr a -> do y <- fresh
-                     return (Deref Owned (Var x) y (Drop y e))
-        VProd a b -> do y <- fresh
-                        z <- fresh
-                        rest <- dropValue fresh z (V b) e
-                        body <- dropValue fresh y (V a) rest
-                        return (Unpair Owned (Var x) y z body)
-        VSum ts -> do alts <- mapM dropAlt ts
-                      return (CaseV Owned (Var x) alts)
-          where
-            dropAlt s = do y <- fresh
-                           body <- dropValue fresh y (V s) e
-                           return (y,body)
-        VExists tvs s
-          -> do y <- fresh
-                u <- fresh
-                -- Keep the continuation outside the existential's scope.
-                -- Fresh types only need to avoid the payload's free variables.
-                let start = minimum (0 : tvs ++ ftv s) - 1
-                    bs = take (length tvs) [start,start-1 ..]
-                    s' = inst tvs (map AVar bs) s
-                body <- dropValue fresh y (V s') (Ret UnitV)
-                return (Let u VUnit (Unpack Owned (Var x) bs y body) e)
-        VReuse _ -> return (Free x e)
-        VUnit -> return e
-        VRaw _ -> return e
 
 -- Discard variables using their types, expanding unboxed aggregates into moves.
 dropNames :: PEnv -> [Name] -> VExpr -> P VExpr
@@ -244,9 +207,7 @@ dupAs :: [(Name,Name,Ty)] -> P K
 dupAs xs = foldr (.) id <$> mapM dupOne xs
   where
     dupOne (x,x',V t) = return (Let x' t (Ret (DupV (Var x))))
-    dupOne (x,x',A a)
-      = do p <- fresh "p"
-           return (Let p (VPtr a) (Ret (Ptr a (DupA x))) . Deref Owned (Var p) x')
+    dupOne (x,x',A a) = letA (fresh "p") x' a (DupA x)
 
 tyOfVar :: PEnv -> Name -> P Ty
 tyOfVar pe x = maybe (fail ("unknown variable " ++ show x)) return (M.lookup x (peGamma pe))
