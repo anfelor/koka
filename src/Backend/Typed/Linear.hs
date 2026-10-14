@@ -41,8 +41,9 @@ import qualified Data.Set as S
 import Control.Monad( unless, when, forM_, void )
 import Common.Name
 import Backend.Typed.Syntax
+import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Check( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, boxContents, reuseSize, paramModes, isTrivial )
+import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, boxContents, reuseSize, paramModes )
 
 -- the mode of a variable, for a borrowed one the owned variable it is borrowed from (if any),
 -- and whether it is an alias of that variable (the same pointer)

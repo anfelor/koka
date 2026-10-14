@@ -13,16 +13,16 @@ import Common.Syntax( Platform )
 import Kind.Newtypes
 import qualified Core.Core as C
 import Backend.Typed.Syntax
-import Backend.Typed.Contify( contifyCore )
-import Backend.Typed.Match( matchCore )
-import Backend.Typed.Anf( anfCore )
-import Backend.Typed.Elab( elabProgram )
+import Backend.Typed.Elab.Contify( contifyCore )
+import Backend.Typed.Elab.Match( matchCore )
+import Backend.Typed.Elab.Anf( anfCore )
+import Backend.Typed.Elab.FromCore( elabProgram )
 import Backend.Typed.Check( checkProgram )
-import Backend.Typed.Simplify( simplifyProgram )
-import Backend.Typed.Perceus( perceusProgram )
-import Backend.Typed.Lazy( lazyProgram )
-import Backend.Typed.Reuse( reuseProgram )
-import Backend.Typed.DropSpec( dropSpecProgram )
+import Backend.Typed.Passes.Simplify( simplifyProgram )
+import Backend.Typed.Passes.Perceus( perceusProgram )
+import Backend.Typed.Passes.Lazy( lazyProgram )
+import Backend.Typed.Passes.Reuse( reuseProgram )
+import Backend.Typed.Passes.DropSpec( dropSpecProgram )
 import Backend.Typed.Linear( checkLinear )
 
 -- returns the program after Perceus (and reuse) and messages labeled by the phase that produced them

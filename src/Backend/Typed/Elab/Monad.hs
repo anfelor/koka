@@ -6,9 +6,9 @@
 -- found in the LICENSE file at the root of this distribution.
 -----------------------------------------------------------------------------
 
-module Backend.Typed.ElabMonad( K, Env(..), St(..), E
+module Backend.Typed.Elab.Monad( Env(..), St(..), E
                               , runE, failE, tr, env, withLocals, withTVars
-                              , fresh, recordSig, note, vt, compose
+                              , fresh, recordSig, note, vt
                               ) where
 
 import qualified Data.Map as M
@@ -17,10 +17,8 @@ import Common.Name
 import Type.Type
 import Kind.Newtypes
 import Backend.Typed.Syntax
-import Backend.Typed.ElabType
+import Backend.Typed.TypeInfo
 import Backend.Typed.Monad
-
-type K = VExpr -> VExpr
 
 data Env = Env{ envNT :: Newtypes, envLocals :: S.Set Name, envTVars :: S.Set TVar, envSigs :: Sigs }
 
@@ -58,6 +56,3 @@ note msg = modify (\st -> st{ stNotes = stNotes st ++ [msg] })
 vt :: Type -> E VType
 vt tp = do e <- env
            tr (elabType (envNT e) tp)
-
-compose :: [K] -> K
-compose = foldr (.) id

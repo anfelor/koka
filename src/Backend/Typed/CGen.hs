@@ -27,11 +27,11 @@ import Kind.Kind( kindStar )
 import Kind.Newtypes
 import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
+import Backend.Typed.Common
 import Backend.Typed.Types( inst, prodV )
-import Backend.Typed.Check( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, unrollT, openFields, boxContents, reuseSize )
-import Backend.Typed.ElabType( conFieldTypes )
-import Backend.Typed.Match( nameSetCtxPath )
-import Backend.Typed.Lazy( nameLazyFree )
+import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, unrollT, openFields, boxContents, reuseSize )
+import Backend.Typed.TypeInfo( conFieldTypes )
+import Backend.Typed.Names( nameSetCtxPath, nameLazyFree )
 import Backend.Typed.Layout
 import Backend.Typed.Monad
 

@@ -18,16 +18,16 @@
   no credit adds one. A jump passes an available credit of each size, or an empty one.
 -}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Reuse( reuseProgram ) where
+module Backend.Typed.Passes.Reuse( reuseProgram ) where
 
 import qualified Data.Map as M
 import Data.List( nub, (\\) )
 import Data.Maybe( fromMaybe )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Perceus( dropValue )
+import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Check( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, boxContents, reuseSize )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, boxContents, reuseSize )
 
 -- credits with the size of their block
 type Credits = [(Name,Int)]

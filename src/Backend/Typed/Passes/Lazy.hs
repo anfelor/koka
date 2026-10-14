@@ -17,22 +17,21 @@
     (which `lazy-eval-locked` follows).
   `lazy-eval-locked` has taken the old fields of `x` (see `Perceus`), so they are not dropped.
 -}
-module Backend.Typed.Lazy( lazyProgram, nameLazyFree ) where
+module Backend.Typed.Passes.Lazy( lazyProgram ) where
 
 import qualified Data.Map as M
 import Common.Name
 import Common.NamePrim( nameLazyMemoize, nameLazyMemoizeTarget, nameDataTypePtrIsUnique )
 import Backend.Typed.Syntax
+import Backend.Typed.Common
 import Backend.Typed.Types( inst, splitSum, varV )
 import Backend.Typed.Layout( layout, blockSize )
-import Backend.Typed.Coerce( injA )
+import Backend.Typed.Names( nameLazyFree )
 import Backend.Typed.Monad
 
 type Z a = M () Int a
 
 -- free the block of a lazy value without dropping its (taken) fields
-nameLazyFree :: Name
-nameLazyFree = newHiddenName "typed-lazy-free"
 
 -- lazy values under evaluation with their Koka size
 type Targets = M.Map Name Int
