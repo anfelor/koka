@@ -58,7 +58,7 @@ layout t
   = case t of
       VRaw n      -> CPrim (rawCType n)
       VExists _ b -> layout b
-      VReuse _    -> CReuse
+      VReuse _ _    -> CReuse
       VSum ts | isEnum t -> CEnum (enumSize (length ts))
       VSum ts     -> let alts = map altLayout ts
                      in CSum (structName ("S[" ++ intercalate "|" (map (maybe "U" canonCT) alts) ++ "]")) alts
@@ -83,7 +83,7 @@ leaves t
       VPtr _ -> [t]
       VSum _ -> [t]
       VRaw _ -> [t]
-      VReuse _ -> [t]
+      VReuse _ _ -> [t]
 
 enumSize :: Int -> Int
 enumSize n
@@ -223,7 +223,7 @@ dropStmt :: CT -> String -> String
 dropStmt ct e
   = case ct of
       CBox -> "kk_box_drop(" ++ e ++ ",_ctx);"
-      CReuse -> "kk_reuse_drop(" ++ e ++ ",_ctx);"
+      CReuse -> "kt_reuse_drop(" ++ e ++ ",_ctx);"
       CProd _ _ | needsRC ct -> ctName ct ++ "_drop(" ++ e ++ ",_ctx);"
       CSum _ _  | needsRC ct -> ctName ct ++ "_drop(" ++ e ++ ",_ctx);"
       CProd _ _ -> ""

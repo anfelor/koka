@@ -7,7 +7,7 @@
 -----------------------------------------------------------------------------
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Types( Sub, Types(..), inst
+module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents
                           , rep, boxrep, boxA, isPtr, varV, forallA, prodV, sumTypes, sumAlts, sumWidth
                           , vtInt, vtString, vtChar, vtFloat, atAny
                           ) where
@@ -56,6 +56,29 @@ instance Types Ty where
 inst :: Types t => [TVar] -> [AType] -> t -> t
 inst tvs tys = subst (M.fromList (zip tvs tys))
 
+-- Transform descriptions without changing the runtime type of a credit.
+mapReuseContents :: (Maybe VVal -> Maybe VVal) -> VType -> VType
+mapReuseContents f = goV
+  where
+    goV t = case t of
+      VPtr a -> VPtr (goA a)
+      VSum ts -> VSum (map goV ts)
+      VProd a b -> VProd (goV a) (goV b)
+      VExists vs b -> VExists vs (goV b)
+      VReuse n p -> VReuse n (f p)
+      VUnit -> t
+      VRaw _ -> t
+    goA a = case a of
+      ABox t -> ABox (goV t)
+      ASum ts -> ASum [(i,goA t) | (i,t) <- ts]
+      AFun ps r -> AFun [(m,goV t) | (m,t) <- ps] (goV r)
+      AForall vs b -> AForall vs (goA b)
+      AApp v ts -> AApp v (map goA ts)
+      ACon n ts -> ACon n (map goA ts)
+      ALam vs b -> ALam vs (goA b)
+      AUnit -> a
+      AVar _ -> a
+
 -- a value at a type variable: `a*`
 varV :: TVar -> VType
 varV v = VPtr (AVar v)
@@ -103,7 +126,7 @@ substV sub t
       VExists tvs b -> VExists tvs (substV (foldr M.delete sub tvs) b)
       VUnit     -> t
       VRaw _    -> t
-      VReuse _  -> t
+      VReuse n p -> VReuse n (fmap (substContents sub) p)
 
 substA :: Sub -> AType -> AType
 substA sub a
@@ -139,7 +162,7 @@ ftvV t
       VExists vs b  -> filter (`notElem` vs) (ftvV b)
       VUnit         -> []
       VRaw _        -> []
-      VReuse _      -> []
+      VReuse _ p    -> maybe [] ftvContents p
 
 ftvA :: AType -> [TVar]
 ftvA a
@@ -163,7 +186,7 @@ isPtr t
       VProd _ _   -> False
       VRaw _      -> False
       VExists _ _ -> False
-      VReuse _    -> False
+      VReuse _ _    -> False
 
 -- the boxed type that instantiates a type variable for a Koka type argument of type `V` (Koka's
 -- `box`); a closure there takes and returns `boxrep`s of its types (Koka's `boxedFunType`).
@@ -203,7 +226,7 @@ boxA t
       VProd _ _   -> ABox t
       VRaw _      -> ABox t
       VExists _ _ -> ABox t
-      VReuse _    -> ABox t
+      VReuse _ _    -> ABox t
 
 eqV :: VType -> VType -> Bool
 eqV s t
@@ -213,7 +236,38 @@ eqV s t
       (VProd a b, VProd c d) -> eqV a c && eqV b d
       (VExists as a, VExists bs b) | length as == length bs
         -> eqV a (inst bs (map AVar as) b)
+      (VReuse n p, VReuse m q) -> n == m && eqContentsMaybe p q
       _                      -> s == t
+
+-- Contents are descriptions, so only their structural forms need type substitution.
+substContents :: Sub -> VVal -> VVal
+substContents sub v = case v of
+  Inj i t x -> Inj i (substV sub t) (substContents sub x)
+  Pair x y -> Pair (substContents sub x) (substContents sub y)
+  Pack t ts x -> Pack (substV sub t) (map (substA sub) ts) (substContents sub x)
+  TyApp x ts -> TyApp (substContents sub x) (map (substA sub) ts)
+  _ -> v
+
+ftvContents :: VVal -> [TVar]
+ftvContents v = case v of
+  Inj _ t x -> ftvV t ++ ftvContents x
+  Pair x y -> ftvContents x ++ ftvContents y
+  Pack t ts x -> ftvV t ++ concatMap ftvA ts ++ ftvContents x
+  TyApp x ts -> ftvContents x ++ concatMap ftvA ts
+  _ -> []
+
+eqContentsMaybe :: Maybe VVal -> Maybe VVal -> Bool
+eqContentsMaybe Nothing Nothing = True
+eqContentsMaybe (Just p) (Just q) = eqContents p q
+eqContentsMaybe _ _ = False
+
+eqContents :: VVal -> VVal -> Bool
+eqContents p q = case (p,q) of
+  (Inj i t x, Inj j u y) -> i == j && eqV t u && eqContents x y
+  (Pair a b, Pair c d) -> eqContents a c && eqContents b d
+  (Pack t ts x, Pack u us y) -> eqV t u && eqAs ts us && eqContents x y
+  (TyApp x ts, TyApp y us) -> eqContents x y && eqAs ts us
+  _ -> p == q
 
 eqVs :: [VType] -> [VType] -> Bool
 eqVs ss ts = length ss == length ts && and (zipWith eqV ss ts)

@@ -67,7 +67,7 @@ data PEnv = PEnv{ peEnv :: Env, peGamma :: Gamma, peBorrowed :: VarSet, peLazy :
 -- type), a part of the contents of the box `y` (an alias or the root itself) at a path of
 -- `Unpair`s (`True` for the second component), or anything else
 data Dep = Dep{ depRoot :: Name, depKind :: DepKind }
-data DepKind = Alias | Part Name [Bool] | Other
+data DepKind = Alias | NestedAlias | Part Name [Bool] | Other
 
 type P a = M () Int a
 
@@ -159,6 +159,35 @@ dupDeps pe owned xs expr
 -- duplicated and `z` is dropped, except that the parts of the contents of a box alias `y` are
 -- taken from a copy of the whole contents (see the top)
 settle :: PEnv -> VarSet -> VExpr -> Name -> [(Name,Dep)] -> P VExpr
+settle pe owned expr z deps
+  | not (null nested)
+  = do renames <- mapM (\y -> (,) y <$> fresh "a") nested
+       ts <- mapM (tyOfVar pe) nested
+       keep <- dupAs [(y,y',t) | ((y,y'),t) <- zip renames ts]
+       let sub = M.fromList renames
+           retained (Dep _ (Part y path)) | Just y' <- M.lookup y sub = Just (Dep y' (Part y' path))
+           retained _ = Nothing
+           remaining = [(x,d) | (x,d) <- deps, not (isJust (retained d)), x `notElem` nested]
+           pe0 = bind pe{ peDeps = M.map (\d -> maybe d id (retained d)) (peDeps pe) }
+                      [(y',t) | ((_,y'),t) <- zip renames ts]
+       (k,pe1,own1,expr1) <- dupDeps pe0 owned (map fst remaining) (renameE sub expr)
+       body <- percE pe1 (S.delete z own1 `S.union` S.fromList (map snd renames)) expr1
+       released <- release body
+       return (keep (k released))
+  where
+    nested = S.toList (S.fromList [y | (_,Dep _ (Part y _)) <- deps,
+                                     Just (Dep r NestedAlias) <- [M.lookup y (peDeps pe)], r == z])
+    -- Take and discard the parent's payload before destructuring the retained
+    -- child aliases. This keeps the parent's credit and restores child uniqueness.
+    release body
+      | (y:_) <- [y | (y,Dep r Alias) <- M.toList (peDeps pe), r == z,
+                       Just (A (ABox _)) <- [M.lookup y (peGamma pe)]]
+      , Just (A (ABox s)) <- M.lookup y (peGamma pe)
+      = do p <- fresh "p"
+           q <- fresh "q"
+           dropped <- dropValue (fresh "d") q (V s) body
+           return (Unbox Borrowed y p (Let q s (Ret (DupV (Var p))) (Drop y dropped)))
+      | otherwise = dropNames pe [z] body
 settle pe owned expr z deps
   = do let parts = [(x,y,path) | (x,Dep _ (Part y path)) <- deps]
        box <- case parts of
@@ -402,6 +431,9 @@ depsOf pe owned expr z bs
       = case (k,expr) of
           (Alias, _) | keepsPointer expr, A _ <- t -> Alias
           (Alias, Unbox{})     -> Part z []
+          (NestedAlias, _) | keepsPointer expr, A _ <- t -> NestedAlias
+          (Part{}, _) | keepsPointer expr, A _ <- t -> NestedAlias
+          (NestedAlias, Unbox{}) -> Part z []
           (Part y p, Unpair{}) -> Part y (p ++ [i == 1])
           _ -> Other
 

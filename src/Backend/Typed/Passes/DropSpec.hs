@@ -49,7 +49,7 @@ dsE (Unbox Borrowed z p (Let y s (Ret (DupV (Var p'))) (Drop z' e)))
        r' <- fresh "r"
        e' <- dsE e
        let shared = Unbox Borrowed z p (Let y' s (Ret (DupV (Var p))) (Drop z (Ret (Pair (Var y') (NoReuse n)))))
-       return (Let q (VProd s (VReuse n))
+       return (Let q (VProd s (VReuse n Nothing))
                  (IsUnique z (UnboxRu z p r' (Ret (Pair (Var p) (Var r')))) shared)
                  (Unpair Owned (Var q) y r (Free r e')))
 dsE expr = descendE pure dsV (\_ e -> dsE e) expr

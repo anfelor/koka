@@ -298,7 +298,7 @@ checkE env g js expr
         -> do s <- liftE (inferAVar g z >>= boxContents)
               n <- liftE (reuseSize s)
               uniqueName g z
-              let bs = [(x,V s),(r,V (VReuse n))]
+              let bs = [(x,V s),(r,V (VReuse n (Just (Var x))))]
               addVars bs owned'
               checkE env (bindAll bs g) js e
               leave bs

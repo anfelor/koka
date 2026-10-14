@@ -21,6 +21,7 @@ import Test.Hspec.Core.Formatters hiding (Error)
 import qualified NameSpec(spec)
 import qualified Data.Map as M
 import qualified Common.Name as N
+import qualified Common.NamePrim as NP
 import qualified Backend.Typed.Syntax as T
 import qualified Backend.Typed.Types as TT
 import qualified Backend.Typed.Query as TQ
@@ -29,6 +30,7 @@ import qualified Backend.Typed.Linear as TL
 import qualified Backend.Typed.Passes.Anf as TA
 import qualified Backend.Typed.Passes.Contify as TF
 import qualified Backend.Typed.Passes.Perceus as TP
+import qualified Backend.Typed.Passes.Reuse as TR
 import qualified Backend.Typed.Passes.Match as TM
 import qualified Backend.Typed.CGen as CG
 import Kind.Newtypes (newtypesEmpty)
@@ -351,7 +353,7 @@ typedIRTest = describe "typed IR ownership" $ do
       r = n "r"
       q = n "q"
       j = n "j"
-      credit = T.VReuse 16
+      credit = T.VReuse 16 Nothing
       env = TQ.Env M.empty M.empty
       gamma = M.singleton r (T.V credit)
       program args result body = T.Program (n "typed-ir") M.empty M.empty
@@ -374,6 +376,54 @@ typedIRTest = describe "typed IR ownership" $ do
   it "rejects credits in heap payloads and closure captures" $ do
     TQ.inferA env gamma (T.Box (T.Var r)) `shouldSatisfy` isLeft
     TQ.inferA env gamma (T.Lam [] T.VUnit (T.Free r (T.Ret T.UnitV))) `shouldSatisfy` isLeft
+  it "records reuse contents without borrowing or owning the payload twice" $ do
+    let arg = n "arg"
+        z = n "box"
+        x = n "payload"
+        payload = T.VPtr T.AUnit
+        result = T.VPtr (T.ABox payload)
+        described = T.VReuse 16 (Just (T.Var x))
+        body = T.Deref T.Unique (T.Var arg) z
+          (T.UnboxRu z x r (T.Let q described (T.Ret (T.Var r))
+            (T.Ret (T.Ptr (T.ABox payload) (T.BoxAt q (T.Var x))))))
+        prog = program [(arg,T.Unique,result)] result body
+    TC.checkProgram prog `shouldBe` []
+    TL.checkLinear prog `shouldBe` []
+  it "refines reuse contents when the payload is destructured" $ do
+    let z = n "box"
+        x = n "payload"
+        a = n "a"
+        b = n "b"
+        payload = T.VProd (T.VPtr T.AUnit) (T.VPtr T.AUnit)
+        described = T.VReuse 24 (Just (T.Pair (T.Var a) (T.Var b)))
+        ctx = M.singleton z (T.A (T.ABox payload))
+        body = T.UnboxRu z x r (T.Unpair T.Owned (T.Var x) a b
+          (T.Let q described (T.Ret (T.Var r)) (T.Ret (T.Var q))))
+    TQ.inferE env ctx M.empty body `shouldBe` Right (T.VReuse 24 Nothing)
+  it "forgets local reuse descriptions and rejects fabricated identities" $ do
+    let z = n "box"
+        x = n "payload"
+        y = n "other"
+        payload = T.VPtr T.AUnit
+        ctx = M.fromList [(z,T.A (T.ABox payload)),(y,T.V payload)]
+        extract = T.UnboxRu z x r (T.Ret (T.Var r))
+        forged = T.UnboxRu z x r
+          (T.Let q (T.VReuse 16 (Just (T.Var y))) (T.Ret (T.Var r)) (T.Ret (T.Var q)))
+    TQ.inferE env ctx M.empty extract `shouldBe` Right credit
+    TQ.inferE env ctx M.empty forged `shouldSatisfy` isLeft
+    TQ.inferE env ctx M.empty
+      (T.UnboxRu z x r (T.Let x payload (T.Ret (T.Var y)) (T.Ret (T.Var r)))) `shouldSatisfy` isLeft
+    TQ.inferE env ctx M.empty
+      (T.Let q (T.VReuse 16 (Just (T.Var x))) extract (T.Ret (T.Var q))) `shouldSatisfy` isLeft
+  it "checks description structure and size, and allows empty described credits" $ do
+    let x = n "payload"
+        ctx = M.singleton x (T.V (T.VPtr T.AUnit))
+        check t = TQ.checkE env ctx M.empty (T.Ret (T.NoReuse 16)) t
+    check (T.VReuse 16 (Just (T.Var x))) `shouldBe` Right ()
+    forM_ [T.VReuse 24 (Just (T.Var x)),
+           T.VReuse 16 (Just (T.DupV (T.Var x))),
+           T.VReuse 16 (Just (T.Ptr (T.ABox (T.VPtr T.AUnit)) (T.Box (T.Var x))))] $ \t ->
+      check t `shouldSatisfy` isLeft
   it "rejects opaque alternatives in boxed sums" $ do
     let a = sumA [T.AUnit, T.AFun [] T.VUnit]
     TQ.inferA env M.empty (T.InjA 1 a (T.Lam [] T.VUnit (T.Ret T.UnitV))) `shouldSatisfy` isLeft
@@ -401,6 +451,101 @@ typedIRTest = describe "typed IR ownership" $ do
     -- Both the outer sum and the duplicated sub-sum use tags 2 and 3.
     [ws | line <- lines source, let ws = words line, take 1 ws == ["case"]]
       `shouldBe` [["case","1:"],["case","2:"],["case","3:"],["case","2:"],["case","3:"]]
+  it "specializes reuse stores after payload destructuring and credit aliasing" $ do
+    let arg = n "arg"
+        z = n "box"
+        p = n "payload"
+        a = n "a"
+        b = n "b"
+        value = T.Pair (T.Var a) (T.Lit (T.LitChar 'x'))
+        -- Use a raw char field so its replacement is a literal of the same type.
+        charPayload = T.VProd (T.VPtr T.AUnit) (T.VRaw NP.nameTpChar)
+        charResult = T.VPtr (T.ABox charPayload)
+        body = T.Deref T.Unique (T.Var arg) z
+          (T.UnboxRu z p r (T.Unpair T.Owned (T.Var p) a b
+            (T.Let q (T.VReuse 24 Nothing) (T.Ret (T.Var r))
+              (T.Free q (T.Ret (T.Ptr (T.ABox charPayload) (T.Box value)))))))
+        (prog,errs) = TR.reuseProgram (program [(arg,T.Unique,charResult)] charResult body)
+        cenv = CG.CEnv (T.progName prog) [] [] M.empty newtypesEmpty []
+        (_,source,errors) = CG.cgenModule cenv prog
+    errs `shouldBe` []
+    TC.checkProgram prog `shouldBe` []
+    TL.checkLinear prog `shouldBe` []
+    errors `shouldBe` []
+    source `shouldSatisfy` isInfixOf "reuse_payload"
+    source `shouldSatisfy` isInfixOf "->p.f1 ="
+    source `shouldSatisfy` (not . isInfixOf "->p.f0 =")
+    source `shouldSatisfy` isInfixOf "} else {"
+  it "keeps dup effects when matching field stores are omitted" $ do
+    let arg = n "arg"
+        z = n "box"
+        p = n "payload"
+        a = n "a"
+        b = n "b"
+        field = T.VPtr T.AUnit
+        payload = T.VProd field field
+        box = T.VPtr (T.ABox payload)
+        result = T.VProd box field
+        body = T.Deref T.Unique (T.Var arg) z
+          (T.UnboxRu z p r (T.Unpair T.Owned (T.Var p) a b
+            (T.Ret (T.Pair (T.Ptr (T.ABox payload)
+              (T.BoxAt r (T.Pair (T.DupV (T.Var a)) (T.Var b)))) (T.Var a)))))
+        prog = program [(arg,T.Unique,box)] result body
+        cenv = CG.CEnv (T.progName prog) [] [] M.empty newtypesEmpty []
+        (_,source,errors) = CG.cgenModule cenv prog
+    TC.checkProgram prog `shouldBe` []
+    TL.checkLinear prog `shouldBe` []
+    errors `shouldBe` []
+    source `shouldSatisfy` isInfixOf "kk_box_dup"
+    source `shouldSatisfy` isInfixOf "reuse_payload"
+    source `shouldSatisfy` (not . isInfixOf "->p.f0 =")
+    source `shouldSatisfy` (not . isInfixOf "->p.f1 =")
+  it "specializes credits through sums and existential payloads" $ do
+    let arg = n "arg"
+        z = n "box"
+        p = n "payload"
+        x = n "x"
+        a = n "a"
+        b = n "b"
+        field = T.VPtr T.AUnit
+        sumPayload = T.VSum [T.VProd field field,T.VUnit]
+        existsPayload = T.VExists [0] (T.VProd (T.VPtr (T.AVar 0)) (T.VRaw NP.nameTpChar))
+        rebuild payload value = T.Ret (T.Ptr (T.ABox payload) (T.BoxAt r value))
+        sumBody = T.CaseV T.Owned (T.Var p)
+          [(x,rebuild sumPayload (T.Inj 0 sumPayload (T.Var x))),
+           (x,rebuild sumPayload (T.Inj 1 sumPayload (T.Var x)))]
+        existsBody = T.Unpack T.Owned (T.Var p) [1] x
+          (T.Unpair T.Owned (T.Var x) a b
+            (rebuild existsPayload (T.Pack existsPayload [T.AVar 1] (T.Pair (T.Var a) (T.Var b)))))
+    forM_ [(sumPayload,sumBody),(existsPayload,existsBody)] $ \(payload,e) -> do
+      let result = T.VPtr (T.ABox payload)
+          prog = program [(arg,T.Unique,result)] result
+            (T.Deref T.Unique (T.Var arg) z (T.UnboxRu z p r e))
+          cenv = CG.CEnv (T.progName prog) [] [] M.empty newtypesEmpty []
+          (_,source,errors) = CG.cgenModule cenv prog
+      TC.checkProgram prog `shouldBe` []
+      TL.checkLinear prog `shouldBe` []
+      errors `shouldBe` []
+      source `shouldSatisfy` isInfixOf "reuse_payload"
+  it "equates a duplicate alias with the original payload" $ do
+    let arg = n "arg"
+        z = n "box"
+        p = n "payload"
+        y = n "duplicate"
+        payload = T.VPtr T.AUnit
+        result = T.VPtr (T.ABox payload)
+        body = T.Deref T.Unique (T.Var arg) z
+          (T.UnboxRu z p r (T.Let y payload (T.Ret (T.DupV (T.Var p)))
+            (T.Deref T.Owned (T.Var p) q (T.Drop q
+              (T.Ret (T.Ptr (T.ABox payload) (T.BoxAt r (T.Var y))))))))
+        -- A duplicate keeps the payload's bits, so the store is omitted (the dup still runs).
+        prog = program [(arg,T.Unique,result)] result body
+        cenv = CG.CEnv (T.progName prog) [] [] M.empty newtypesEmpty []
+        (_,source,errors) = CG.cgenModule cenv prog
+    TC.checkProgram prog `shouldBe` []
+    TL.checkLinear prog `shouldBe` []
+    errors `shouldBe` []
+    source `shouldSatisfy` isInfixOf "reuse_payload"
   it "checks boxed injection indices and sparse case coverage" $ do
     let sumType = sumA [T.AUnit,T.AUnit,T.AUnit]
         x = n "sum"
