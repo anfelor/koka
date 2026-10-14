@@ -15,7 +15,7 @@ module Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, checkE, inferE, infe
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Control.Monad( zipWithM_, unless )
+import Control.Monad( zipWithM_, unless, when )
 import Common.Name
 import Lib.PPrint( Pretty )
 import Backend.Typed.Syntax
@@ -76,6 +76,9 @@ inferE env g js expr
                      case t of
                        VReuse _ -> inferE env g js e
                        _ -> Left ("free of a non-credit: " ++ ppr t)
+      Dup x y e -> do a <- inferAVar g x
+                      when (containsReuse (A a)) (Left "cannot duplicate a reuse credit")
+                      inferE env (M.insert y (A a) g) js e
       IsUnique x e1 e2 -> do _ <- inferAVar g x >>= boxContents >>= reuseSize
                              branches [inferE env g js e1, inferE env g js e2]
       UnboxRu v x r e -> do s <- inferAVar g v >>= boxContents
@@ -215,6 +218,12 @@ inferAVar g x
          A a -> return a
          V _ -> Left ("boxed operand " ++ show x ++ " at the unboxed type " ++ ppr t)
 
+checkShape :: AType -> Q ()
+checkShape a = unless (isShape a) (Left ("sum alternatives must be shapes: " ++ ppr a))
+
+noHeapCredit :: VType -> Q ()
+noHeapCredit t = when (containsReuse (V t)) (Left "cannot store reuse credits in a heap block")
+
 inferA :: Env -> Gamma -> AVal -> Q AType
 inferA env g val
   = case val of
@@ -223,24 +232,31 @@ inferA env g val
                  _ -> Left ("unknown function " ++ show f)
       UnitA -> return AUnit
       Inl a v -> case a of
-                   ASum l _ -> checkA env g v l >> return a
+                   ASum l _ -> checkShape a >> checkA env g v l >> return a
                    _ -> Left ("inl into " ++ ppr a)
       Inr a v -> case a of
-                   ASum _ r -> checkA env g v r >> return a
+                   ASum _ r -> checkShape a >> checkA env g v r >> return a
                    _ -> Left ("inr into " ++ ppr a)
       Roll a v -> do b <- unrollT env a
                      checkA env g v b
                      return a
-      Box v -> ABox <$> inferV env g v
-      OpenCon c tys v -> case M.lookup c (envSigs env) of
-                           Just (SigCon tvs f n) | length tvs == length tys
-                             -> checkV env g v (inst tvs tys f) >> return (ACon n tys)
-                           _ -> Left ("unknown open constructor " ++ show c)
-      Lam ps r e -> do checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) M.empty e r
+      Box v -> do t <- inferV env g v
+                  noHeapCredit t
+                  return (ABox t)
+      OpenCon c tys v
+        -> case M.lookup c (envSigs env) of
+             Just (SigCon tvs f n) | length tvs == length tys
+               -> do noHeapCredit (inst tvs tys f)
+                     checkV env g v (inst tvs tys f)
+                     return (ACon n tys)
+             _ -> Left ("unknown open constructor " ++ show c)
+      Lam ps r e -> do when (any containsReuse [t | x <- S.toList (fvA val), Just t <- [M.lookup x g]])
+                         (Left "cannot capture reuse credits in a closure")
+                       checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) M.empty e r
                        return (AFun [(m,t) | (_,m,t) <- ps] r)
-      DupA x -> inferAVar g x
       BoxIn x v -> do tx <- inferV env g (Var x)
                       tv <- inferV env g v
+                      noHeapCredit tv
                       case tx of
                         VPtr (ACon n args)
                           | Just (TypeDef _ tvs (Just body) (Just linfo)) <- M.lookup n (envTypes env)
@@ -249,10 +265,12 @@ inferA env g val
                         _ -> Left ("writing " ++ ppr tv ++ " into " ++ ppr tx)
       BoxAt r v -> do tr <- inferV env g (Var r)
                       tv <- inferV env g v
+                      noHeapCredit tv
                       case tr of
-                        VReuse n -> do m <- reuseSize tv
-                                       unless (n == m) (Left ("reuse of a block of " ++ show n ++ " bytes for " ++ show m ++ " bytes"))
-                                       return (ABox tv)
+                        VReuse n
+                          -> do m <- reuseSize tv
+                                unless (n == m) (Left ("reuse of a block of " ++ show n ++ " bytes for " ++ show m ++ " bytes"))
+                                return (ABox tv)
                         _ -> Left ("allocation at " ++ ppr tr ++ " of " ++ ppr tv)
 
 inferV :: Env -> Gamma -> VVal -> Q VType
@@ -277,7 +295,9 @@ inferV env g val
                         VExists bs b | length bs == length tys
                           -> checkV env g v (inst bs tys b) >> return t
                         _ -> Left ("pack into " ++ ppr t)
-      DupV v -> inferV env g v
+      DupV v -> do t <- inferV env g v
+                   when (containsReuse (V t)) (Left "cannot duplicate a reuse credit")
+                   return t
       TyApp v tys -> do tv <- inferV env g v
                         case tv of
                           VPtr (AForall tvs a) | length tvs == length tys -> return (VPtr (inst tvs tys a))

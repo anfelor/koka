@@ -25,13 +25,6 @@ type K = VExpr -> VExpr
 compose :: [K] -> K
 compose = foldr (.) id
 
--- Bind a boxed value through a pointer and immediately dereference it.
--- The caller supplies a fresh name from its own pass's supply.
-letA :: Monad m => m Name -> Name -> AType -> AVal -> m K
-letA fresh x a v
-  = do p <- fresh
-       return (Let p (VPtr a) (Ret (Ptr a v)) . Deref Owned (Var p) x)
-
 -- Discard an owned value by destructuring it down to boxed operands and credits.
 -- The caller supplies fresh names from its own pass's supply.
 dropValue :: Monad m => m Name -> Name -> Ty -> VExpr -> m VExpr
@@ -94,6 +87,35 @@ isTrivial t
                    AApp _ _  -> False
                    ALam _ _  -> False
 
+-- Boxed sum alternatives must have a tag determined by their construction.
+isShape :: AType -> Bool
+isShape a = case a of
+  AUnit -> True
+  ABox _ -> True
+  ASum l r -> isShape l && isShape r
+  _ -> False
+
+-- Credits have ownership but no reference count: duplication cannot create another owner.
+containsReuse :: Ty -> Bool
+containsReuse (V v) = case v of
+  VPtr a -> containsReuse (A a)
+  VProd a b -> containsReuse (V a) || containsReuse (V b)
+  VSum ts -> any (containsReuse . V) ts
+  VExists _ b -> containsReuse (V b)
+  VUnit -> False
+  VRaw _ -> False
+  VReuse _ -> True
+containsReuse (A a) = case a of
+  ABox v -> containsReuse (V v)
+  ASum a b -> containsReuse (A a) || containsReuse (A b)
+  AForall _ b -> containsReuse (A b)
+  ALam _ b -> containsReuse (A b)
+  ACon _ ts -> any (containsReuse . A) ts
+  AApp _ ts -> any (containsReuse . A) ts
+  AVar _ -> False
+  AFun _ _ -> False
+  AUnit -> False
+
 tapp :: VVal -> [AType] -> VVal
 tapp v []  = v
 tapp v tys = TyApp v tys
@@ -132,7 +154,6 @@ descendA fn fa fv val
       Roll a v       -> Roll a <$> fa v
       Box v          -> Box <$> fv v
       OpenCon c ts v -> OpenCon c ts <$> fv v
-      DupA x         -> DupA <$> fn x
       BoxAt r v      -> BoxAt <$> fn r <*> fv v
       BoxIn x v      -> BoxIn <$> fn x <*> fv v
       Fun _          -> pure val
@@ -181,6 +202,7 @@ descendE fn fv fe expr
       Gen tvs e             -> Gen tvs <$> fe [] e
       Drop x e              -> Drop <$> fn x <*> fe [] e
       Free r e              -> Free <$> fn r <*> fe [] e
+      Dup x y e             -> (\x' -> Dup x' y) <$> fn x <*> fe [y] e
       IsUnique x e1 e2      -> IsUnique <$> fn x <*> fe [] e1 <*> fe [] e2
       UnboxRu v x r e       -> (\v' -> UnboxRu v' x r) <$> fn v <*> fe [x,r] e
       Join j ps e1 e2       -> Join j ps <$> fe [x | (x,_,_) <- ps] e1 <*> fe [] e2
@@ -276,6 +298,7 @@ destructAOf expr
       App{} -> Nothing
       CaseLit{} -> Nothing
       Gen{} -> Nothing
+      Dup{} -> Nothing
       Drop{} -> Nothing
       Free{} -> Nothing
       IsUnique{} -> Nothing
@@ -301,6 +324,7 @@ destructVOf expr
       App{} -> Nothing
       CaseLit{} -> Nothing
       Gen{} -> Nothing
+      Dup{} -> Nothing
       Drop{} -> Nothing
       Free{} -> Nothing
       IsUnique{} -> Nothing
@@ -327,6 +351,7 @@ isRead expr
       App{}       -> False
       CaseLit{}   -> False
       Gen{}       -> False
+      Dup{}       -> False
       Drop{}      -> False
       Free{}      -> False
       IsUnique{}  -> False
@@ -353,6 +378,7 @@ keepsPointer expr
       App{}       -> False
       CaseLit{}   -> False
       Gen{}       -> False
+      Dup{}       -> False
       Drop{}      -> False
       Free{}      -> False
       IsUnique{}  -> False

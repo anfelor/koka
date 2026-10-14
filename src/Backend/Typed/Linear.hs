@@ -155,7 +155,7 @@ ownedV :: Env -> Gamma -> VVal -> L ()
 ownedV env g val
   = case val of
       Var x -> consume g x
-      DupV v -> borrowedV env g v
+      DupV v -> liftE (inferV env g val) >> borrowedV env g v
       Glob _ _ -> do t <- V <$> liftE (inferV env g val)
                      unless (isTrivial t) (fail ("owned use of global " ++ show val))
       UnitV -> return ()
@@ -173,7 +173,6 @@ ownedA :: Env -> Gamma -> AVal -> L ()
 ownedA env g val
   = case val of
       Fun _ -> liftE (inferA env g val) >>= ownedParams
-      DupA x -> inspect g x
       Lam ps _ e
         -> do unless (all (\(_,m,_) -> m == Owned) ps) (fail ("closure with parameters that are not owned: " ++ show val))
               let caps = S.toList (fvA val)
@@ -285,6 +284,13 @@ checkE env g js expr
       Gen _ e -> checkE env g M.empty e
       Drop x e -> consume g x >> checkE env g js e
       Free r e -> consume g r >> checkE env g js e
+      Dup x y e -> do a <- liftE (inferAVar g x)
+                      when (containsReuse (A a)) (fail "cannot duplicate a reuse credit")
+                      inspect g x
+                      let bs = [(y,A a)]
+                      addVars bs owned'
+                      checkE env (bindAll bs g) js e
+                      leave bs
       IsUnique x e1 e2 -> do promote x
                              d <- get
                              unless (maybe False owns (M.lookup x d)) (fail ("uniqueness test of a variable that is not owned: " ++ show x))

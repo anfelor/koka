@@ -149,6 +149,9 @@ ruE expr
               case t of
                 V (VReuse n) -> offer r n return (Free r) e
                 _ -> fail ("free of a non-credit: " ++ show r)
+      Dup x y e
+        -> do t <- typeOfName x
+              Dup x y <$> bind [(y,t)] (ruE e)
       IsUnique x e1 e2
         -> do es <- branches [([],e1),([],e2)]
               return (IsUnique x (es !! 0) (es !! 1))
