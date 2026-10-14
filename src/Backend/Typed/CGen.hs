@@ -28,7 +28,7 @@ import Kind.Newtypes
 import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Types( inst, prodV )
+import Backend.Typed.Types( inst, prodV, sumWidth )
 import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, unrollT, openFields, boxContents, reuseSize )
 import Backend.Typed.TypeInfo( conFieldTypes )
 import Backend.Typed.Names( nameSetCtxPath, nameLazyFree )
@@ -134,31 +134,17 @@ ctOf :: Ty -> G CT
 ctOf (V t) = ctype t
 ctOf (A _) = return CBox
 
--- how the alternatives of a boxed sum are represented (see `genAIn` and `genBox` in a sum):
--- units, and boxes of units, are immediate tags; other boxes are heap blocks
-data Repr = RBlock | RImm
-          deriving (Eq)
-
-reprs :: AType -> G (Maybe [Repr])
-reprs a
-  = case a of
-      ASum l r -> do rl <- reprs l
-                     rr <- reprs r
-                     return ((++) <$> rl <*> rr)
-      AUnit    -> return (Just [RImm])
-      ABox t   -> do ct <- ctype t
-                     return (Just [case ct of { CUnit -> RImm; _ -> RBlock }])
-      AFun _ _    -> return Nothing
-      AForall _ _ -> return Nothing
-      AVar _      -> return Nothing
-      AApp _ _    -> return Nothing
-      ACon _ _    -> return Nothing
-      ALam _ _    -> return Nothing
+-- Translate a binary shape decision using the pointer bit when it identifies
+-- the two sides; otherwise the decision uses their tag intervals.
+pointerTest :: String -> AType -> AType -> Maybe String
+pointerTest ve left right
+  = case (shapeIsHeap left,shapeIsHeap right) of
+      (Just l,Just r) | l /= r -> Just ((if l then "" else "!") ++ "kk_datatype_is_ptr(kk_datatype_unbox(" ++ ve ++ "))")
+      _ -> Nothing
 
 -- size of a boxed sum
 sumSize :: AType -> Int
-sumSize (ASum a b) = sumSize a + sumSize b
-sumSize _ = 1
+sumSize = sumWidth
 
 -- values
 
@@ -205,9 +191,8 @@ genAIn cx inSum pos val
       Fun f -> staticFun f
       UnitA -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" ++ show (pos+1) ++ "))")
       Roll _ v -> genAIn cx inSum pos v
-      Inl _ v -> genAIn cx True pos v
-      Inr (ASum l _) v -> genAIn cx True (pos + sumSize l) v
-      Inr _ _ -> failG "inr into a non-sum"
+      InjA i (ASum _) v -> genAIn cx True (pos + i) v
+      InjA _ _ _ -> failG "injection into a non-sum"
       Box v -> genBox cx inSum (pos+1) Fresh v
       BoxAt r v -> genBox cx inSum (pos+1) (At r) v
       BoxIn x v -> genBox cx inSum (pos+1) (In x) v
@@ -604,34 +589,38 @@ genE cx dest expr
               genAlias cx dest (localName v) (Just v) x a (S.insert x (cxNamed cx)) e
       Unbox _ v x e -> genUnbox cx dest v x e
       UnboxLazy v x e -> genUnbox cx dest v x e
-      CaseA _ v (x,e1) (y,e2)
-        -> do A (ASum l r) <- tyOfName cx v
+      SplitA _ v k (x,e1) (y,e2)
+        -> do A (ASum ts) <- tyOfName cx v
               let ve = localName v
                   off = M.findWithDefault 0 v (cxOffsets cx)
-                  offs = cxOffsets cx
-                  named z = if S.member v (cxNamed cx) then S.insert z (cxNamed cx) else cxNamed cx
-              s1 <- genE (bindVar cx{ cxOffsets = M.insert x off offs, cxInSum = S.insert x (cxInSum cx), cxNamed = named x } x (A l)) dest e1
-              s2 <- genE (bindVar cx{ cxOffsets = M.insert y (off + sumSize l) offs, cxInSum = S.insert y (cxInSum cx), cxNamed = named y } y (A r)) dest e2
+                  (ls,rs) = span ((< k) . fst) ts
+                  boundary = off + k
+              left <- genSumBranch cx dest v off x (ASum ls) e1
+              right <- genSumBranch cx dest v off y (ASum rs) e2
               tg <- fresh "t"
-              repL <- reprs l
-              repR <- reprs r
-              -- if one side only has heap blocks and the other only immediates, the pointer
-              -- bit decides (as Koka's `is-Leaf`) without reading the tag from the header
-              let test = case (repL,repR) of
-                           (Just ls, Just rs)
-                             | all (== RBlock) ls, all (== RImm) rs -> Just ("kk_datatype_is_ptr(kk_datatype_unbox(" ++ ve ++ "))")
-                             | all (== RImm) ls, all (== RBlock) rs -> Just ("!kk_datatype_is_ptr(kk_datatype_unbox(" ++ ve ++ "))")
-                           _ -> Nothing
-                  start = case test of
-                            Just c  -> ["{ if (" ++ c ++ ") {"]
-                            Nothing -> ["{ kk_tag_t " ++ tg ++ " = kk_datatype_tag(kk_datatype_unbox(" ++ ve ++ "),_ctx);",
-                                        "  if (" ++ tg ++ " <= " ++ show (off + sumSize l) ++ ") {"]
-              return (start ++
-                      ["    kk_box_t " ++ localName x ++ " = " ++ ve ++ ";"]
-                      ++ map ("    " ++) s1 ++
-                      ["  } else {",
-                       "    kk_box_t " ++ localName y ++ " = " ++ ve ++ ";"]
-                      ++ map ("    " ++) s2 ++ ["  }", "}"])
+              let (header,test) = case pointerTest ve (ASum ls) (ASum rs) of
+                                   Just c -> ([],c)
+                                   Nothing -> ([tagDecl tg ve],tg ++ " <= " ++ show boundary)
+              return (["{"] ++ map ("  " ++) (header ++ ifChain [(test,left),("true",right)]) ++ ["}"])
+      CaseA _ v alts def
+        -> do A (ASum ts) <- tyOfName cx v
+              let ve = localName v
+                  off = M.findWithDefault 0 v (cxOffsets cx)
+              brs <- forM alts $ \(i,x,e) -> do
+                ti <- maybe (failG "invalid boxed case index") return (lookup i ts)
+                body <- genSumBranch cx dest v (off + i) x ti e
+                return ([off + i + 1 .. off + i + sumSize ti],body)
+              fallback <- case def of
+                            Just (x,e) -> Just <$> genSumBranch cx dest v off x
+                              (ASum [(i,t) | (i,t) <- ts, i `notElem` [j | (j,_,_) <- alts]]) e
+                            Nothing -> return Nothing
+              tg <- fresh "t"
+              -- Match owns partitioning. Only a single runtime tag with a
+              -- default needs an equality branch; nested sums cover multiple tags.
+              let dispatch = case (brs,fallback) of
+                    ([([tag],body)],Just other) -> ifChain [(tg ++ " == " ++ show tag,body),("true",other)]
+                    _ -> switchCases tg brs fallback
+              return (["{"] ++ map ("  " ++) (tagDecl tg ve : dispatch) ++ ["}"])
       CaseV _ v alts
         -> do t@(VSum ts) <- tyOf cx v
               ve <- genV cx v
@@ -647,11 +636,13 @@ genE cx dest expr
                                            Just _ -> ctName cti ++ " " ++ localName x ++ " = " ++ z ++ "._cons.c" ++ show i ++ ";"
                                            Nothing -> ctName cti ++ " " ++ localName x ++ " = kk_Unit;"
                                        _ -> ""
-                              test = case ct of
-                                       CEnum _ -> z ++ " == " ++ show i
-                                       _ -> "kk_value_tag_eq(" ++ z ++ "._tag,kk_value_tag(" ++ show (i+1) ++ "))"
-                          return (test, bind : s)
-              return ([ "{ " ++ ctName ct ++ " " ++ z ++ " = " ++ ve ++ ";" ] ++ ifChain brs ++ ["}"])
+                          return ([i], bind : s)
+              let tag = case ct of { CEnum _ -> z; _ -> "kk_smallint_from_integer(" ++ z ++ "._tag) - 1" }
+                  dispatch = case brs of
+                    [(_,body)] -> body
+                    [(_,left),(_,right)] -> ifChain [("(" ++ tag ++ ") == 0",left),("true",right)]
+                    _ -> switchCases tag brs (Just ["kt_unreachable();"])
+              return ([ "{ " ++ ctName ct ++ " " ++ z ++ " = " ++ ve ++ ";" ] ++ dispatch ++ ["}"])
       CaseLit v alts def
         -> do tv <- tyOf cx v
               ve <- genV cx v
@@ -717,14 +708,37 @@ childrenV v = case v of
 
 childrenA :: AVal -> [(VVal, VVal -> AVal)]
 childrenA v = case v of
-  Inl a w -> [(u,Inl a . rebuild) | (u,rebuild) <- childrenA w]
-  Inr a w -> [(u,Inr a . rebuild) | (u,rebuild) <- childrenA w]
+  InjA i a w -> [(u,InjA i a . rebuild) | (u,rebuild) <- childrenA w]
   Roll a w -> [(u,Roll a . rebuild) | (u,rebuild) <- childrenA w]
   Box w -> [(w,Box)]
   OpenCon c ts w -> [(w,OpenCon c ts)]
   BoxAt r w -> [(w,BoxAt r)]
   BoxIn x w -> [(w,BoxIn x)]
   _ -> []
+
+-- A partition binder is an alias with a different static sum and tag origin.
+genSumBranch :: Ctx -> Dest -> Name -> Int -> Name -> AType -> VExpr -> G [String]
+genSumBranch cx dest v off x t e
+  = do let named = if S.member v (cxNamed cx) then S.insert x (cxNamed cx) else cxNamed cx
+           cx' = (bindVar cx x (A t)){ cxOffsets = M.insert x off (cxOffsets cx),
+                                      cxInSum = S.insert x (cxInSum cx), cxNamed = named }
+       body <- genE cx' dest e
+       return (["kk_box_t " ++ localName x ++ " = " ++ localName v ++ ";"] ++ body)
+
+tagDecl :: String -> String -> String
+tagDecl tg ve = "kk_tag_t " ++ tg ++ " = kk_datatype_tag(kk_datatype_unbox(" ++ ve ++ "),_ctx);"
+
+-- Exhaustive boxed cases also accept the dummy result of an effect yield:
+-- the final arm is the default, without emitting its body twice.
+switchCases :: String -> [([Int],[String])] -> Maybe [String] -> [String]
+switchCases tag brs def
+  = ["switch (" ++ tag ++ ") {"]
+    ++ concat [branch (map (\t -> "case " ++ show t ++ ":") tags
+                      ++ ["default:" | Nothing <- [def], i == length brs - 1]) body
+              | (i,(tags,body)) <- zip [0..] brs]
+    ++ maybe [] (branch ["default:"]) def ++ ["}"]
+  where
+    branch labels body = labels ++ ["{"] ++ map ("  " ++) body ++ ["  break;","}"]
 
 ifChain :: [(String,[String])] -> [String]
 ifChain [] = []

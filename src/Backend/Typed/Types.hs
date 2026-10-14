@@ -8,7 +8,7 @@
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Types( Sub, Types(..), inst
-                          , rep, boxrep, boxA, isPtr, varV, forallA, prodV, splitSum
+                          , rep, boxrep, boxA, isPtr, varV, forallA, prodV, sumTypes, sumAlts, sumWidth
                           , vtInt, vtString, vtChar, vtFloat, atAny
                           ) where
 
@@ -64,12 +64,21 @@ forallA :: [TVar] -> AType -> AType
 forallA [] a  = a
 forallA tvs a = AForall tvs a
 
--- the n alternatives of a right-nested boxed sum
-splitSum :: Int -> AType -> [AType]
-splitSum n a
+-- the alternatives of a boxed sum (a singleton datatype has no sum wrapper)
+sumTypes :: AType -> [AType]
+sumTypes a
   = case a of
-      ASum l r | n > 1 -> l : splitSum (n-1) r
+      ASum ts -> map snd ts
       _ -> [a]
+
+-- The index is the start of an alternative's runtime tag interval, not its
+-- position in the list. Filtering alternatives therefore preserves their tags.
+sumAlts :: [AType] -> [(Int,AType)]
+sumAlts ts = zip (scanl (+) 0 (map sumWidth ts)) ts
+
+sumWidth :: AType -> Int
+sumWidth (ASum ts) = maximum (0 : [i + sumWidth t | (i,t) <- ts])
+sumWidth _ = 1
 
 prodV :: [VType] -> VType
 prodV []     = VUnit
@@ -103,7 +112,7 @@ substA sub a
       AApp v ts     -> applyA (M.findWithDefault (AVar v) v sub) (map (substA sub) ts)
       ACon n ts     -> ACon n (map (substA sub) ts)
       ABox t        -> ABox (substV sub t)
-      ASum x y      -> ASum (substA sub x) (substA sub y)
+      ASum ts       -> ASum [(i,substA sub t) | (i,t) <- ts]
       AFun ps r     -> AFun [(m,substV sub p) | (m,p) <- ps] (substV sub r)
       AForall tvs b -> AForall tvs (substA (foldr M.delete sub tvs) b)
       ALam tvs b    -> ALam tvs (substA (foldr M.delete sub tvs) b)
@@ -139,7 +148,7 @@ ftvA a
       AApp v ts     -> v : concatMap ftvA ts
       ACon _ ts     -> concatMap ftvA ts
       ABox t        -> ftvV t
-      ASum x y      -> ftvA x ++ ftvA y
+      ASum ts       -> concatMap (ftvA . snd) ts
       AFun ps r     -> concatMap (ftvV . snd) ps ++ ftvV r
       AForall vs b  -> filter (`notElem` vs) (ftvA b)
       ALam vs b     -> filter (`notElem` vs) (ftvA b)
@@ -177,7 +186,7 @@ boxFunA a
       AForall tvs b -> AForall tvs (boxFunA b)
       ABox _        -> a
       AUnit         -> a
-      ASum _ _      -> a
+      ASum _        -> a
       AVar _        -> a
       AApp _ _      -> a
       ACon _ _      -> a
@@ -187,7 +196,8 @@ boxA :: VType -> AType
 boxA t
   = case t of
       VUnit   -> AUnit
-      VSum ts | not (null ts) -> foldr1 ASum (map boxA ts)
+      VSum [s]    -> boxA s
+      VSum ts | not (null ts) -> ASum (sumAlts (map boxA ts))
       VSum _      -> ABox t
       VPtr _      -> ABox t
       VProd _ _   -> ABox t
@@ -217,7 +227,7 @@ eqA s t
       (ACon n ss, ACon m ts)  -> n == m && eqAs ss ts
       (AApp v ss, AApp w ts)  -> v == w && eqAs ss ts
       (ABox a, ABox b)        -> eqV a b
-      (ASum a b, ASum c d)    -> eqA a c && eqA b d
+      (ASum ss, ASum ts)      -> map fst ss == map fst ts && eqAs (map snd ss) (map snd ts)
       (AFun ps r, AFun qs s') -> eqVs (map snd ps) (map snd qs) && eqV r s'
       (AForall as a, AForall bs b) | length as == length bs
         -> eqA a (inst bs (map AVar as) b)
@@ -260,8 +270,8 @@ matchAWith tvs sub pat t
       ABox p    -> case t of
                      ABox s -> matchVWith tvs sub p s
                      _ -> Nothing
-      ASum p q  -> case t of
-                     ASum s u -> matchAWith tvs sub p s >>= \sub' -> matchAWith tvs sub' q u
+      ASum ps   -> case t of
+                     ASum ts | map fst ps == map fst ts -> matchAs sub (map snd ps) (map snd ts)
                      _ -> Nothing
       AFun ps r -> case t of
                      AFun qs s | length ps == length qs

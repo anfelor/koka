@@ -574,10 +574,28 @@ elabBoxedCase :: DataInfo -> [AType] -> VVal -> [C.Branch] -> E VExpr
 elabBoxedCase info vargs v brs
   = do p <- fresh "d"
        z <- fresh "z"
-       shapes <- conShapes info vargs
        let cons = dataInfoConstrs info
-       body <- caseChain fresh shapes z (\i y -> conBranch vargs (cons !! i) (Left y) (findBranch (cons !! i) brs))
+           wild = [b | b@(C.Branch [C.PatWild] _) <- brs]
+           matches c (C.Branch [C.PatCon pc _ _ _ _ _ _ _] _) = getName pc == conInfoName c
+           matches _ _ = False
+           selected = [(i,c) | (i,c) <- zip [0..] cons, null wild || any (matches c) brs]
+       body <- case cons of
+                 [con] -> conBranch vargs con (Left z) (findBranch con brs)
+                 _ -> do alts <- mapM (boxedAlt vargs brs) selected
+                         def <- case wild of
+                                  b:_ | length selected < length cons -> do
+                                    y <- fresh "default"
+                                    e <- branchBody b
+                                    return (Just (y,e))
+                                  _ -> return Nothing
+                         return (CaseA Owned z alts def)
        return (Deref Owned v p (Unroll Owned p z body))
+
+boxedAlt :: [AType] -> [C.Branch] -> (Int,ConInfo) -> E (Int,Name,VExpr)
+boxedAlt vargs brs (i,con)
+  = do y <- fresh "y"
+       e <- conBranch vargs con (Left y) (findBranch con brs)
+       return (i,y,e)
 
 elabValueCase :: DataInfo -> [AType] -> VVal -> [C.Branch] -> E VExpr
 elabValueCase info vargs v brs

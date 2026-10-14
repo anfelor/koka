@@ -36,7 +36,8 @@ prettyA a
   = case a of
       ABox t        -> text "Box" <.> parens (prettyV t)
       AUnit         -> text "1"
-      ASum x y      -> parens (prettyA x <+> text "+" <+> prettyA y)
+      ASum ts       -> parens (hsep (punctuate (text " +")
+                        [text (show i) <.> text ":" <.> prettyA t | (i,t) <- ts]))
       AFun ps r     -> parens (commaSep [mode m <.> prettyV p | (m,p) <- ps]) <+> text "->" <+> prettyV r
       AForall vs b  -> text "forall" <+> hsep (map tv vs) <.> text "." <+> prettyA b
       AVar v        -> tv v
@@ -75,8 +76,7 @@ prettyAVal val
   = case val of
       Fun f      -> nm f
       UnitA      -> text "()"
-      Inl _ v    -> text "inl" <+> atomAVal v
-      Inr _ v    -> text "inr" <+> atomAVal v
+      InjA i _ v -> text ("inj-a" ++ show i) <+> atomAVal v
       Roll _ v   -> text "roll" <+> atomAVal v
       Box v      -> text "box" <+> atomVal v
       OpenCon c ts v -> nm c <.> brackets (commaSep (map prettyA ts)) <+> atomVal v
@@ -134,7 +134,9 @@ prettyExpr expr
       App f vs -> nm f <.> parens (commaSep (map prettyVal vs))
       Unpair m v x y e -> text "let" <.> mode m <+> parens (nm x <.> comma <+> nm y) <+> text "=" <+> prettyVal v <+> text "in" <-> prettyExpr e
       CaseV m v alts -> text "case" <.> mode m <+> prettyVal v <+> text "of" <-> indent 2 (vcat [text ("inj" ++ show i) <+> nm x <+> text "->" <+> align (prettyExpr e) | (i,(x,e)) <- zip [0::Int ..] alts])
-      CaseA m v (x,e1) (y,e2) -> text "case" <.> mode m <+> nm v <+> text "of" <-> indent 2 (vcat [text "inl" <+> nm x <+> text "->" <+> align (prettyExpr e1), text "inr" <+> nm y <+> text "->" <+> align (prettyExpr e2)])
+      SplitA m v k (x,e1) (y,e2) -> text "split" <.> mode m <+> nm v <+> text "at" <+> text (show k) <+> text "of"
+                                    <-> indent 2 (vcat [nm x <+> text "->" <+> align (prettyExpr e1), nm y <+> text "->" <+> align (prettyExpr e2)])
+      CaseA m v alts def -> text "case" <.> mode m <+> nm v <+> text "of" <-> indent 2 (vcat ([text ("inj-a" ++ show i) <+> nm x <+> text "->" <+> align (prettyExpr e) | (i,x,e) <- alts] ++ maybe [] (\(x,e) -> [text "_" <+> nm x <+> text "->" <+> align (prettyExpr e)]) def))
       Deref m v x e -> text "let" <.> mode m <+> text "ptr" <+> nm x <+> text "=" <+> prettyVal v <+> text "in" <-> prettyExpr e
       Unroll m v x e -> text "let" <.> mode m <+> text "roll" <+> nm x <+> text "=" <+> nm v <+> text "in" <-> prettyExpr e
       Unbox m v x e -> text "let" <.> mode m <+> text "box" <+> nm x <+> text "=" <+> nm v <+> text "in" <-> prettyExpr e
