@@ -17,7 +17,7 @@ import Data.Functor.Identity( Identity(..) )
 import Common.Name
 import Common.NamePrim( nameTpFieldAddr, nameTpReuse )
 import Backend.Typed.Syntax
-import Backend.Typed.Types( Types(..), inst )
+import Backend.Typed.Types( Types(..), inst, sumAlts, sumWidth )
 
 -- A continuation that wraps an expression.
 type K = VExpr -> VExpr
@@ -78,7 +78,7 @@ isTrivial t
                    VReuse _     -> False
     trivialA a = case a of
                    AUnit     -> True
-                   ASum x y  -> trivialA x && trivialA y
+                   ASum ts   -> all (trivialA . snd) ts
                    ACon n _  -> n `elem` [nameTpFieldAddr, nameTpReuse]
                    ABox _    -> False
                    AFun _ _  -> False
@@ -92,7 +92,8 @@ isShape :: AType -> Bool
 isShape a = case a of
   AUnit -> True
   ABox _ -> True
-  ASum l r -> isShape l && isShape r
+  ASum ts -> not (null ts) && all (\(i,t) -> i >= 0 && isShape t) ts
+             && and [i + sumWidth t <= j | ((i,t),(j,_)) <- zip ts (drop 1 ts)]
   _ -> False
 
 -- Credits have ownership but no reference count: duplication cannot create another owner.
@@ -107,7 +108,7 @@ containsReuse (V v) = case v of
   VReuse _ -> True
 containsReuse (A a) = case a of
   ABox v -> containsReuse (V v)
-  ASum a b -> containsReuse (A a) || containsReuse (A b)
+  ASum ts -> any (containsReuse . A . snd) ts
   AForall _ b -> containsReuse (A b)
   ALam _ b -> containsReuse (A b)
   ACon _ ts -> any (containsReuse . A) ts
@@ -121,26 +122,24 @@ tapp v []  = v
 tapp v tys = TyApp v tys
 
 sumOf :: [AType] -> AType
-sumOf = foldr1 ASum
+sumOf [a] = a
+sumOf ts = ASum (sumAlts ts)
 
 injA :: [AType] -> Int -> AVal -> AVal
 injA [_] 0 v = v
-injA ss 0 v  = Inl (sumOf ss) v
-injA ss i v  = Inr (sumOf ss) (injA (tail ss) (i-1) v)
+injA ss i v = InjA (fst (sumAlts ss !! i)) (sumOf ss) v
 
 -- a case on each alternative of a boxed sum `a`; the branch gets the alternative, a variable at a
 -- boxed type that it may only destructure
-caseChain :: MonadFail m => (String -> m Name) -> [AType] -> Name -> (Int -> Name -> m VExpr) -> m VExpr
-caseChain fresh shapes a branch = go 0 shapes a
-  where
-    go i [_] v = branch i v
-    go _ [] _ = fail "empty case chain"
-    go i (_:rest) v
-      = do y <- fresh "y"
-           z <- fresh "z"
-           b1 <- branch i y
-           b2 <- go (i+1) rest z
-           return (CaseA Owned v (y,b1) (z,b2))
+caseSum :: MonadFail m => (String -> m Name) -> [AType] -> Name -> (Int -> Name -> m VExpr) -> m VExpr
+caseSum fresh shapes a branch
+  = case shapes of
+      [] -> fail "empty case"
+      [_] -> branch 0 a
+      _ -> do alts <- mapM (\i -> do y <- fresh "y"
+                                     e <- branch i y
+                                     return (fst (sumAlts shapes !! i),y,e)) [0 .. length shapes - 1]
+              return (CaseA Owned a alts Nothing)
 
 -- one-level traversals
 
@@ -149,8 +148,7 @@ caseChain fresh shapes a branch = go 0 shapes a
 descendA :: Applicative f => (Name -> f Name) -> (AVal -> f AVal) -> (VVal -> f VVal) -> AVal -> f AVal
 descendA fn fa fv val
   = case val of
-      Inl a v        -> Inl a <$> fa v
-      Inr a v        -> Inr a <$> fa v
+      InjA i a v     -> InjA i a <$> fa v
       Roll a v       -> Roll a <$> fa v
       Box v          -> Box <$> fv v
       OpenCon c ts v -> OpenCon c ts <$> fv v
@@ -191,7 +189,8 @@ descendE fn fv fe expr
       App f vs              -> App <$> fn f <*> traverse fv vs
       Unpair m v x y e      -> (\v' -> Unpair m v' x y) <$> fv v <*> fe [x,y] e
       CaseV m v alts        -> CaseV m <$> fv v <*> traverse (\(x,e) -> (,) x <$> fe [x] e) alts
-      CaseA m v (x,e1) (y,e2) -> (\v' e1' e2' -> CaseA m v' (x,e1') (y,e2')) <$> fn v <*> fe [x] e1 <*> fe [y] e2
+      CaseA m v alts def   -> CaseA m <$> fn v <*> traverse (\(i,x,e) -> (,,) i x <$> fe [x] e) alts <*> traverse (\(x,e) -> (,) x <$> fe [x] e) def
+      SplitA m v k (x,e1) (y,e2) -> SplitA m <$> fn v <*> pure k <*> ((,) x <$> fe [x] e1) <*> ((,) y <$> fe [y] e2)
       Deref m v x e         -> (\v' -> Deref m v' x) <$> fv v <*> fe [x] e
       Unroll m v x e        -> (\v' -> Unroll m v' x) <$> fn v <*> fe [x] e
       Unbox m v x e         -> (\v' -> Unbox m v' x) <$> fn v <*> fe [x] e
@@ -282,7 +281,11 @@ data Destruct v = Destruct{ dsMode :: Mode, dsScrut :: v, dsAlts :: [([Name],VEx
 destructAOf :: VExpr -> Maybe (Destruct Name)
 destructAOf expr
   = case expr of
-      CaseA m v (x,e1) (y,e2) -> Just (Destruct m v [([x],e1),([y],e2)] (\m' v' es -> CaseA m' v' (x,es !! 0) (y,es !! 1)))
+      SplitA m v k (x,e1) (y,e2) -> Just (Destruct m v [([x],e1),([y],e2)]
+                                      (\m' v' es -> SplitA m' v' k (x,head es) (y,last es)))
+      CaseA m v alts def -> Just (Destruct m v ([([x],e) | (_,x,e) <- alts] ++ maybe [] (\(x,e) -> [([x],e)]) def)
+                                  (\m' v' es -> CaseA m' v' [(i,x,e) | ((i,x,_),e) <- zip alts es]
+                                    (fmap (\(x,_) -> (x,last es)) def)))
       Unroll m v x e        -> Just (Destruct m v [([x],e)] (\m' v' es -> Unroll m' v' x (head es)))
       Unbox m v x e         -> Just (Destruct m v [([x],e)] (\m' v' es -> Unbox m' v' x (head es)))
       UnboxLazy v x e       -> Just (Destruct Borrowed v [([x],e)] (\_ v' es -> UnboxLazy v' x (head es)))
@@ -309,6 +312,7 @@ destructAOf expr
 destructVOf :: VExpr -> Maybe (Destruct VVal)
 destructVOf expr
   = case expr of
+      SplitA{} -> Nothing
       Unpair m v x y e      -> Just (Destruct m v [([x,y],e)] (\m' v' es -> Unpair m' v' x y (head es)))
       CaseV m v alts        -> Just (Destruct m v [([x],e) | (x,e) <- alts] (\m' v' es -> CaseV m' v' (zip (map fst alts) es)))
       Deref m v x e         -> Just (Destruct m v [([x],e)] (\m' v' es -> Deref m' v' x (head es)))
@@ -336,6 +340,7 @@ destructVOf expr
 isRead :: VExpr -> Bool
 isRead expr
   = case expr of
+      SplitA{}    -> False
       Unbox{}     -> True
       UnboxLazy{} -> True
       CaseOpen{}  -> True
@@ -363,6 +368,7 @@ isRead expr
 keepsPointer :: VExpr -> Bool
 keepsPointer expr
   = case expr of
+      SplitA{}    -> True
       CaseA{}     -> True
       Deref{}     -> True
       Unroll{}    -> True

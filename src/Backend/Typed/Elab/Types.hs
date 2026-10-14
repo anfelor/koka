@@ -17,12 +17,13 @@ import Core.Core( conReprAllocSize, getConRepr )
 import Kind.Newtypes
 import Type.Type( typevarId, conInfoName, conInfoIsLazy )
 import Backend.Typed.Syntax
+import Backend.Typed.Common( sumOf )
 import Backend.Typed.TypeInfo
 
 refBody :: Newtypes -> DataInfo -> Tr (Maybe AType)
 refBody nt info
   | dataDefIsOpen (dataInfoDef info) || null (dataInfoConstrs info) = Right Nothing
-  | otherwise = Just . foldr1 ASum <$> mapM (conShape nt vargs) (dataInfoConstrs info)
+  | otherwise = Just . sumOf <$> mapM (conShape nt vargs) (dataInfoConstrs info)
   where
     vargs = map (AVar . typevarId) (filter tvarStar (dataInfoParams info))
 
