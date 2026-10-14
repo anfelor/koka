@@ -17,7 +17,7 @@ import Data.Functor.Identity( Identity(..) )
 import Common.Name
 import Common.NamePrim( nameTpFieldAddr, nameTpReuse )
 import Backend.Typed.Syntax
-import Backend.Typed.Types( Types(..), inst, sumAlts, sumWidth )
+import Backend.Typed.Types( Types(..), inst, sumAlts, sumWidth, mapReuseContents )
 
 -- A continuation that wraps an expression.
 type K = VExpr -> VExpr
@@ -57,7 +57,7 @@ dropValue fresh x t e
                     s' = inst tvs (map AVar bs) s
                 body <- dropValue fresh y (V s') (Ret UnitV)
                 return (Let u VUnit (Unpack Owned (Var x) bs y body) e)
-        VReuse _ -> return (Free x e)
+        VReuse _ _ -> return (Free x e)
         VUnit -> return e
         VRaw _ -> return e
 
@@ -75,7 +75,7 @@ isTrivial t
                    VSum ts      -> all trivialV ts
                    VExists _ b  -> trivialV b
                    VPtr a       -> trivialA a
-                   VReuse _     -> False
+                   VReuse _ _     -> False
     trivialA a = case a of
                    AUnit     -> True
                    ASum ts   -> all (trivialA . snd) ts
@@ -105,7 +105,7 @@ containsReuse (V v) = case v of
   VExists _ b -> containsReuse (V b)
   VUnit -> False
   VRaw _ -> False
-  VReuse _ -> True
+  VReuse _ _ -> True
 containsReuse (A a) = case a of
   ABox v -> containsReuse (V v)
   ASum ts -> any (containsReuse . A . snd) ts
@@ -233,14 +233,32 @@ fvE = getConst . descendE (Const . S.singleton) (Const . fvV) (\xs e -> Const (f
 replaceA :: M.Map Name VVal -> AVal -> AVal
 replaceA sub val
   = case val of
-      Lam ps r e -> Lam ps r (replaceE (foldr M.delete sub [x | (x,_,_) <- ps]) e)
+      Lam ps r e -> let sub' = foldr M.delete sub [x | (x,_,_) <- ps]
+                    in Lam [(x,m,replaceVType sub' t) | (x,m,t) <- ps]
+                         (replaceVType sub' r) (replaceE sub' e)
+      InjA i a v -> InjA i (replaceAType sub a) (replaceA sub v)
+      Roll a v -> Roll (replaceAType sub a) (replaceA sub v)
+      OpenCon c ts v -> OpenCon c (map (replaceAType sub) ts) (replaceV sub v)
       _ -> mapA (replaceName sub) (replaceA sub) (replaceV sub) val
 
 replaceV :: M.Map Name VVal -> VVal -> VVal
 replaceV sub val
   = case val of
       Var x -> M.findWithDefault val x sub
+      Glob x ts -> Glob x (map (replaceAType sub) ts)
+      Inj i t v -> Inj i (replaceVType sub t) (replaceV sub v)
+      Ptr a v -> Ptr (replaceAType sub a) (replaceA sub v)
+      Pack t ts v -> Pack (replaceVType sub t) (map (replaceAType sub) ts) (replaceV sub v)
+      TyApp v ts -> TyApp (replaceV sub v) (map (replaceAType sub) ts)
       _ -> mapV (replaceA sub) (replaceV sub) val
+
+replaceVType :: M.Map Name VVal -> VType -> VType
+replaceVType sub = mapReuseContents (fmap (replaceV sub))
+
+replaceAType :: M.Map Name VVal -> AType -> AType
+replaceAType sub a = case replaceVType sub (VPtr a) of
+                      VPtr b -> b
+                      _ -> a
 
 replaceName :: M.Map Name VVal -> Name -> Name
 replaceName sub x = maybe x varOf (M.lookup x sub)
@@ -249,7 +267,14 @@ replaceE :: M.Map Name VVal -> VExpr -> VExpr
 replaceE sub expr
   | M.null sub = expr
   | otherwise = runIdentity (descendE (Identity . replaceName sub) (Identity . replaceV sub)
-                  (\xs e -> Identity (replaceE (foldr M.delete sub xs) e)) expr)
+                  (\xs e -> Identity (replaceE (foldr M.delete sub xs) e)) annotated)
+  where
+    annotated = case expr of
+      Let x t e1 e2 -> Let x (replaceVType sub t) e1 e2
+      Call f ts vs -> Call f (map (replaceAType sub) ts) vs
+      Join j ps e1 e2 -> let sub' = foldr M.delete sub [x | (x,_,_) <- ps]
+                        in Join j [(x,m,replaceVType sub' t) | (x,m,t) <- ps] e1 e2
+      _ -> expr
 
 -- renaming includes boxed operands as well as unboxed variables
 renameA :: M.Map Name Name -> AVal -> AVal

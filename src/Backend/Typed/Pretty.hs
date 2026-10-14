@@ -57,7 +57,7 @@ prettyV t
       VPtr a@(AVar _)   -> prettyA a <.> text "*"
       VPtr a@(ACon _ _) -> prettyA a <.> text "*"
       VPtr a     -> parens (prettyA a) <.> text "*"
-      VReuse n   -> text ("reuse" ++ show n)
+      VReuse n contents -> text ("reuse" ++ show n) <.> maybe empty (brackets . prettyVal) contents
       VUnit      -> text "I"
       VSum ts    -> parens (hsep (punctuate (text " (+)") (map prettyV ts)))
       VProd x y  -> parens (prettyV x <+> text "(x)" <+> prettyV y)

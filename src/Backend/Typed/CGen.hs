@@ -28,8 +28,8 @@ import Kind.Newtypes
 import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Types( inst, prodV, sumWidth )
-import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, unrollT, openFields, boxContents, reuseSize )
+import Backend.Typed.Types( inst, prodV, sumWidth, Types(..) )
+import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, unrollT, openFields, boxContents, reuseSize, contentsOfAlt, contentsValueOfAlt )
 import Backend.Typed.TypeInfo( conFieldTypes )
 import Backend.Typed.Names( nameSetCtxPath, nameLazyFree )
 import Backend.Typed.Layout
@@ -50,8 +50,11 @@ data CEnv = CEnv{ ceModName   :: Name
 data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [String], stDecls :: [String], stWrappers :: S.Set Name }
 
 -- `cxJoins`: the label and the parameters of each join point in scope
+-- `cxValues`: expanded, allocation-free values used only for payload comparison
+-- `cxAliases` and `cxPayloads`: pointer identities and projected payloads for RC cancellation
 data Ctx = Ctx{ cxEnv :: Env, cxCEnv :: CEnv, cxGamma :: Gamma, cxOffsets :: M.Map Name Int, cxInSum :: S.Set Name, cxNamed :: S.Set Name, cxSelf :: Maybe (Name,[Name])
-              , cxJoins :: M.Map Name (String,[Name]) }
+              , cxJoins :: M.Map Name (String,[Name]), cxValues :: M.Map Name VVal
+              , cxAliases :: M.Map Name Name, cxPayloads :: M.Map Name VVal }
 
 type G a = M () St a
 
@@ -271,13 +274,64 @@ genBox cx inSum tag at v
                  case at of
                    Fresh -> return ("({ " ++ bt ++ "* " ++ x ++ " = kk_block_alloc_as(" ++ bt ++ "," ++ scan ++ ",(kk_tag_t)" ++ show tag ++ ",_ctx); "
                                     ++ x ++ "->p = " ++ e ++ "; " ++ box)
-                   At r  -> return ("({ _Static_assert(sizeof(" ++ bt ++ ") == " ++ show (blockSize ct) ++ ",\"kt_reuse\"); "
-                                    ++ bt ++ "* " ++ x ++ " = kk_block_alloc_at_as(" ++ bt ++ "," ++ localName r ++ "," ++ scan ++ ",0,(kk_tag_t)" ++ show tag ++ ",_ctx); "
-                                    ++ x ++ "->p = " ++ e ++ "; " ++ box)
+                   At r  -> do matches <- reuseMatches cx r t v
+                               let alloc = "kk_block_alloc_at_as(" ++ bt ++ "," ++ localName r ++ "," ++ scan ++ ",0,(kk_tag_t)" ++ show tag ++ ",_ctx)"
+                                   start = "({ _Static_assert(sizeof(" ++ bt ++ ") == " ++ show (blockSize ct) ++ ",\"kt_reuse\"); "
+                                   saved = length (filter id matches)
+                               if saved < 1 + ((1 + length matches) `div` 4)
+                                 then return (start ++ bt ++ "* " ++ x ++ " = " ++ alloc ++ "; " ++ x ++ "->p = " ++ e ++ "; " ++ box)
+                                 else do y <- fresh "reuse_payload"
+                                         let field i = case ct of
+                                                         CProd _ _ -> ".f" ++ show i
+                                                         _ -> ""
+                                             writes = concat [x ++ "->p" ++ field i ++ " = " ++ y ++ field i ++ "; "
+                                                             | (i,same) <- zip [0..] matches, not same]
+                                         -- Evaluate once before testing the credit: dups still run
+                                         -- even when their corresponding stores are omitted.
+                                         -- A described credit is a unique block of the same payload type,
+                                         -- so its header only needs the new tag.
+                                         return (start ++ ctName ct ++ " " ++ y ++ " = " ++ e ++ "; " ++ bt ++ "* " ++ x ++ "; "
+                                                 ++ "if kk_likely(" ++ localName r ++ " != kk_reuse_null) { "
+                                                 ++ x ++ " = (" ++ bt ++ "*)" ++ localName r ++ "; " ++ x ++ "->_block.header.tag = (kk_tag_t)" ++ show tag ++ "; " ++ writes
+                                                 ++ "} else { " ++ x ++ " = kk_block_alloc_as(" ++ bt ++ "," ++ scan ++ ",(kk_tag_t)" ++ show tag ++ ",_ctx); "
+                                                 ++ x ++ "->p = " ++ y ++ "; } " ++ box)
                    In y  -> do v <- fresh "v"
                                return ("({ " ++ ctName ct ++ " " ++ v ++ " = " ++ e ++ "; "
                                        ++ bt ++ "* " ++ x ++ " = (" ++ bt ++ "*)kt_block_clear(kk_datatype_as_ptr(kk_datatype_unbox(" ++ localName y ++ "),_ctx)," ++ scan ++ ",(kk_tag_t)" ++ show tag ++ ",_ctx); "
                                        ++ x ++ "->p = " ++ v ++ "; " ++ box)
+
+-- Compare only structurally identical payloads with the same layout. A dup
+-- preserves a field's bits, but its reference-count effect must still run.
+-- Sums are treated as whole fields so their inactive/padding slots are kept safe.
+reuseMatches :: Ctx -> Name -> VType -> VVal -> G [Bool]
+reuseMatches cx r t v
+  = do rt <- tyOfName cx r
+       case rt of
+         V (VReuse _ (Just old))
+           -> do ot <- tyOf cx old
+                 return (if alphaEq t ot then match t (replaceV (cxValues cx) old) (replaceV (cxValues cx) v) else [])
+         _ -> return []
+  where
+    -- Aggregate duplication preserves every field's bits, including when only
+    -- part of the payload matches. genBox still evaluates all RC effects.
+    match s (DupV old) new = match s old new
+    match s old (DupV new) = match s old new
+    match s old new
+      | old == new = replicate (length (leaves s)) True
+    match (VProd a b) (Pair p q) (Pair x y) = match a p x ++ match b q y
+    match (VExists vs s) (Pack _ ts p) (Pack _ us x)
+      | ts == us = match (inst vs ts s) p x
+    match s _ _ = replicate (length (leaves s)) False
+
+-- Expose the same fields in credit contents and saved aggregate descriptions.
+-- A scrutinee that renames another aggregate exposes that aggregate's fields too.
+contentsCtx :: Ctx -> VExpr -> Ty -> Int -> [Name] -> Ctx
+contentsCtx cx expr t i xs = cx{ cxGamma = contentsOfAlt expr t i xs (cxGamma cx)
+                             , cxValues = renamed (M.map refine (cxValues cx)), cxPayloads = M.map refine (cxPayloads cx) }
+  where refine = contentsValueOfAlt expr t i xs
+        renamed values = case fmap dsScrut (destructVOf expr) of
+                           Just s@(Var x) | Just (Var w) <- M.lookup x (cxValues cx) -> M.insert w (refine s) values
+                           _ -> values
 
 -- `[deref]` and `[unroll]` keep the pointer (and its tag offset in an enclosing sum)
 genAlias :: Ctx -> Dest -> String -> Maybe Name -> Name -> AType -> S.Set Name -> VExpr -> G [String]
@@ -286,26 +340,38 @@ genAlias cx dest ve source x a named e
                            Just z -> (M.findWithDefault 0 z (cxOffsets cx), S.member z (cxInSum cx))
                            _ -> (0,False)
            cxInSum' = if inSum then S.insert x (cxInSum cx) else cxInSum cx
-       s <- genE (bindVar cx{ cxOffsets = M.insert x off (cxOffsets cx), cxInSum = cxInSum', cxNamed = named } x (A a)) dest e
+       s <- genE (aliasCtx cx source x (bindVar cx{ cxOffsets = M.insert x off (cxOffsets cx), cxInSum = cxInSum', cxNamed = named } x (A a))) dest e
        return (["kk_box_t " ++ localName x ++ " = " ++ ve ++ ";"] ++ s)
 
-genUnbox :: Ctx -> Dest -> Name -> Name -> VExpr -> G [String]
-genUnbox cx dest v x e
+genUnbox :: Bool -> Ctx -> Dest -> Name -> Name -> VExpr -> G [String]
+genUnbox track cx dest v x e
   = do A (ABox t) <- tyOfName cx v
        let ve = localName v
        ct <- ctype t
        let member set = S.member v (set cx)
-       ue <- unboxV cx (member cxInSum) (member cxNamed) t ve
-       s <- genE (bindVar cx x (V t)) dest e
+           -- Scalar unbox helpers can consume the box themselves. For immediate
+           -- scalars this removes the generic drop; heap-backed scalars still
+           -- release their storage through the runtime's owned unbox path.
+           scalar = case ct of
+                      CPrim p -> case primBox p of { Just _ -> True; _ -> False }
+                      CEnum _ -> True
+                      _       -> False
+           (mode,body) = case e of
+                           Drop z rest | z == v, scalar, not (member cxInSum) -> (Owned,rest)
+                           _ -> (Borrowed,e)
+       ue <- unboxV cx mode (member cxInSum) (member cxNamed) t ve
+       let cx' = (bindVar cx x (V t)){ cxPayloads = if track then M.insert (aliasRoot cx v) (Var x) (cxPayloads cx) else M.empty }
+       s <- genE cx' dest body
        return ([ctName ct ++ " " ++ localName x ++ " = " ++ ue ++ ";"] ++ s)
 
 -- the payload of a box; only a box at a type variable can be Koka's `box-any`
-unboxV :: Ctx -> Bool -> Bool -> VType -> String -> G String
-unboxV cx inSum named t e
+unboxV :: Ctx -> Mode -> Bool -> Bool -> VType -> String -> G String
+unboxV cx mode inSum named t e
   = do ct <- ctype t
+       let borrow = if owning mode then "KK_OWNED" else "KK_BORROWED"
        case ct of
-         CPrim p | not inSum, Just (_,unbox) <- primBox p -> return (unbox ++ "(" ++ e ++ ",KK_BORROWED,_ctx)")
-         CEnum _ | not inSum -> return ("(" ++ ctName ct ++ ")kk_int32_unbox(" ++ e ++ ",KK_BORROWED,_ctx)")
+         CPrim p | not inSum, Just (_,unbox) <- primBox p -> return (unbox ++ "(" ++ e ++ "," ++ borrow ++ ",_ctx)")
+         CEnum _ | not inSum -> return ("(" ++ ctName ct ++ ")kk_int32_unbox(" ++ e ++ "," ++ borrow ++ ",_ctx)")
          CUnit -> return "kk_Unit"
          _ -> do bt <- blockType ct
                  x <- fresh "ub"
@@ -368,7 +434,7 @@ genLam cx ps r e
        rct  <- ctype r
        let structDef = sname ++ " { struct kk_function_s _base; " ++ concat [ctName ct ++ " c" ++ show i ++ "; " | (i,ct) <- fields] ++ "};\n"
            g'  = M.union (M.fromList ([(x,V t) | (x,_,t) <- ps])) (cxGamma cx)
-           cx' = cx{ cxGamma = g', cxSelf = Nothing, cxJoins = M.empty }
+           cx' = cx{ cxGamma = g', cxSelf = Nothing, cxJoins = M.empty, cxValues = M.empty, cxAliases = M.empty, cxPayloads = M.empty }
        body <- genE cx' DReturn e
        let loads = [ctName ct ++ " " ++ localName x ++ " = " ++ dupExpr ct ("_self->c" ++ show i) ++ ";" | (i,ct) <- fields, let x = caps !! i]
            fun = "static " ++ ctName rct ++ " " ++ fname ++ "(kk_function_t _fself" ++ concat [", " ++ ctName ct ++ " " ++ localName x | ((x,_,_),ct) <- zip ps pcts] ++ ", kk_context_t* _ctx) {\n"
@@ -479,7 +545,95 @@ indent :: [String] -> String
 indent = concatMap (\l -> "  " ++ l ++ "\n")
 
 bindVar :: Ctx -> Name -> Ty -> Ctx
-bindVar cx x t = cx{ cxGamma = M.insert x t (cxGamma cx) }
+bindVar cx x t = cx{ cxGamma = M.insert x t (cxGamma cx)
+                  , cxValues = M.filter (S.notMember x . fvV) (M.delete x (cxValues cx))
+                  , cxAliases = M.filter (/= x) (M.delete x (cxAliases cx))
+                  , cxPayloads = M.filter (S.notMember x . fvV) (M.delete x (cxPayloads cx)) }
+
+-- Pointer aliases and payload projections identify ownership slots, independently
+-- of the aggregate descriptions used to omit stores.
+aliasRoot :: Ctx -> Name -> Name
+aliasRoot cx x = M.findWithDefault x x (cxAliases cx)
+
+aliasCtx :: Ctx -> Maybe Name -> Name -> Ctx -> Ctx
+aliasCtx source (Just z) x target
+  = target{ cxAliases = M.insert x (aliasRoot source z) (cxAliases target) }
+aliasCtx _ Nothing _ target = target
+
+-- A nested alias is retained before its parent's payload is taken, then the
+-- corresponding payload field is discarded. Cancel that pair: the field's
+-- ownership transfers to the alias instead. DropSpec's shared path still copies
+-- the payload, so this also preserves the reference when the parent is shared.
+-- Search only a straight-line RC/projection prefix, crossing exactly the known
+-- payload transfer; calls, allocations and child uniqueness tests stop it.
+cancelRetain :: Ctx -> Name -> VExpr -> Maybe VExpr
+cancelRetain cx retained = before
+  where
+    root = aliasRoot cx retained
+    before expr = case expr of
+      Dup x y e -> Dup x y <$> before e
+      Let x t e1@(Ret (DupV (Var _))) e -> Let x t e1 <$> before e
+      Let q t transfer e
+        | IsUnique z (UnboxRu z' p r (Ret (Pair (Var p') (Var r'))))
+            (Unbox Borrowed zs ps (Let ys _ (Ret (DupV (Var ps'))) (Drop zs' (Ret (Pair (Var ys') (NoReuse _)))))) <- transfer
+        , z == z', p == p', r == r', z == zs, zs == zs', ps == ps', ys == ys'
+        , Just payload <- M.lookup (aliasRoot cx z) (cxPayloads cx)
+        -> Let q t transfer <$> after (M.singleton q (Pair payload UnitV)) e
+      _ -> Nothing
+    after values expr = case expr of
+      Unpair Owned v x y e
+        | Pair a b <- replaceV values v
+        -> Unpair Owned v x y <$> after (M.insert x a (M.insert y b values)) e
+      Deref Owned v x e
+        | Var z <- replaceV values v
+        -> Deref Owned v x <$> after (M.insert x (Var (aliasRoot cx z)) values) e
+      Unroll Owned z x e
+        -> Unroll Owned z x <$> after (M.insert x (M.findWithDefault (Var (aliasRoot cx z)) z values) values) e
+      Drop x e
+        | Just (Var z) <- M.lookup x values
+        , aliasRoot cx z == root -> Just e
+        | otherwise -> Drop x <$> after values e
+      Free r e -> Free r <$> after values e
+      _ -> Nothing
+
+-- DropSpec's transfer pairs a payload with the credit of the block it was taken from.
+-- That block still contains the payload (an empty credit describes nothing), but the
+-- typed IR cannot name it in the pair's type. Rebind the credit with that description,
+-- so that a reuse of the credit can omit unchanged field stores.
+describeTransfer :: Name -> VType -> VExpr -> VExpr -> G VExpr
+describeTransfer q (VProd _ (VReuse n Nothing))
+                 (IsUnique z (UnboxRu z' p r (Ret (Pair (Var p') (Var r')))) _) (Unpair m (Var q') y c e)
+  | z == z', p == p', r == r', q == q'
+  = do c' <- newHiddenName <$> fresh "credit"
+       return (Unpair m (Var q) y c' (Let c (VReuse n (Just (Var y))) (Ret (Var c')) e))
+describeTransfer _ _ _ e = return e
+
+-- Record aggregate structure, and renames at any type (such as the fields Perceus
+-- re-destructures one by one): a rename keeps the bits of its source. Other scalar
+-- and pointer values stay conservative: unfolding a box or closure allocation would
+-- confuse equal payloads with identical pointers. Descriptions are expanded on
+-- insertion so rebinding any of their free variables invalidates them directly.
+valueCtx :: Ctx -> Name -> VType -> VExpr -> Ctx -> Ctx
+valueCtx source x t (Ret v) target
+  | aggregate t || rename v, structural v, let value = replaceV (cxValues source) v, S.notMember x (fvV value)
+  = target{ cxValues = M.insert x value (cxValues target) }
+  where
+    rename (Var _) = True
+    rename (DupV w) = rename w
+    rename _ = False
+    aggregate (VProd _ _) = True
+    aggregate (VSum _) = True
+    aggregate (VExists _ _) = True
+    aggregate _ = False
+    structural (Var _) = True
+    structural (DupV w) = structural w
+    structural (Pair a b) = structural a && structural b
+    structural (Inj _ _ w) = structural w
+    structural (Pack _ _ w) = structural w
+    structural UnitV = True
+    structural (Lit _) = True
+    structural _ = False
+valueCtx _ _ _ _ target = target
 
 genE :: Ctx -> Dest -> VExpr -> G [String]
 genE cx dest expr
@@ -500,8 +654,12 @@ genE cx dest expr
       Let x t e1 e2
         -> do ct <- ctype t
               s1 <- genE cx (DAssign (localName x)) e1
-              let cx' = (bindVar cx x (V t)){ cxOffsets = offsetOf cx e1 x, cxInSum = inSumOf cx e1 x, cxNamed = namedOf cx e1 x }
-              s2 <- genE cx' dest e2
+              let source = case e1 of
+                             Ret _ -> cx
+                             _ -> cx{ cxPayloads = M.empty }
+                  cx' = (bindVar source x (V t)){ cxOffsets = offsetOf cx e1 x, cxInSum = inSumOf cx e1 x, cxNamed = namedOf cx e1 x }
+              e2' <- describeTransfer x t e1 e2
+              s2 <- genE (valueCtx cx x t e1 cx') dest e2'
               return ([ctName ct ++ " " ++ localName x ++ ";"] ++ s1 ++ s2)
       Drop x e
         -> do t <- tyOfName cx x
@@ -513,8 +671,11 @@ genE cx dest expr
               return (dropStmt CReuse (localName r) : s)
       Dup x y e
         -> do a <- liftC (inferAVar (cxGamma cx) x)
-              genAlias cx dest (dupExpr CBox (localName x)) (Just x) y a
-                (if S.member x (cxNamed cx) then S.insert y (cxNamed cx) else cxNamed cx) e
+              let (value,body) = case cancelRetain cx x e of
+                                   Just rest -> (localName x,rest)
+                                   Nothing -> (dupExpr CBox (localName x),e)
+              genAlias cx dest value (Just x) y a
+                (if S.member x (cxNamed cx) then S.insert y (cxNamed cx) else cxNamed cx) body
       IsUnique x e1 e2
         -> do s1 <- genE cx dest e1
               s2 <- genE cx dest e2
@@ -526,8 +687,8 @@ genE cx dest expr
               let ve = localName v
               ct <- ctype t
               let inSum = S.member v (cxInSum cx)
-              ue <- unboxV cx inSum True t ve   -- a unique box is never `box-any`
-              s <- genE (bindVar (bindVar cx x (V t)) r (V (VReuse n))) dest e
+              ue <- unboxV cx Borrowed inSum True t ve   -- a unique box is never `box-any`
+              s <- genE (bindVar (bindVar cx x (V t)) r (V (VReuse n (Just (Var x))))) dest e
               return ([ctName ct ++ " " ++ localName x ++ " = " ++ ue ++ ";",
                        "kk_reuse_t " ++ localName r ++ " = kk_datatype_as_ptr(kk_datatype_unbox(" ++ ve ++ "),_ctx);"] ++ s)
       Gen _ e -> genE cx dest e
@@ -567,15 +728,16 @@ genE cx dest expr
               py <- projLeaves (VProd a b) z (length (leaves a)) b
               cta <- ctype a
               ctb <- ctype b
-              s <- genE (bindVar (bindVar cx x (V a)) y (V b)) dest e
+              s <- genE (contentsCtx (bindVar (bindVar cx x (V a)) y (V b)) expr (V (VProd a b)) 0 [x,y]) dest e
               return ([ctName wct ++ " " ++ z ++ " = " ++ ve ++ ";",
                        ctName cta ++ " " ++ localName x ++ " = " ++ px ++ ";",
                        ctName ctb ++ " " ++ localName y ++ " = " ++ py ++ ";"] ++ s)
-      Unpack _ v _ x e
-        -> do VExists bs t <- tyOf cx v
+      Unpack _ v tvs x e
+        -> do whole@(VExists bs body) <- tyOf cx v
+              let t = inst bs (map AVar tvs) body
               ve <- genV cx v
               ct <- ctype t
-              s <- genE (bindVar cx x (V t)) dest e
+              s <- genE (contentsCtx (bindVar cx x (V t)) expr (V whole) 0 [x]) dest e
               return ([ctName ct ++ " " ++ localName x ++ " = " ++ ve ++ ";"] ++ s)
       Deref _ v x e
         -> do VPtr a <- tyOf cx v
@@ -587,8 +749,8 @@ genE cx dest expr
         -> do A t <- tyOfName cx v
               a <- liftC (unrollT (cxEnv cx) t)
               genAlias cx dest (localName v) (Just v) x a (S.insert x (cxNamed cx)) e
-      Unbox _ v x e -> genUnbox cx dest v x e
-      UnboxLazy v x e -> genUnbox cx dest v x e
+      Unbox _ v x e -> genUnbox True cx dest v x e
+      UnboxLazy v x e -> genUnbox False cx dest v x e
       SplitA _ v k (x,e1) (y,e2)
         -> do A (ASum ts) <- tyOfName cx v
               let ve = localName v
@@ -628,7 +790,7 @@ genE cx dest expr
               ct <- ctype t
               brs <- forM (zip3 [0..] ts alts) $ \(i,ti,(x,e)) ->
                        do cti <- ctype ti
-                          s <- genE (bindVar cx x (V ti)) dest e
+                          s <- genE (contentsCtx (bindVar cx x (V ti)) expr (V t) i [x]) dest e
                           let bind = case ct of
                                        CEnum _ -> ctName cti ++ " " ++ localName x ++ " = kk_Unit;"
                                        CSum _ alts' ->
@@ -722,7 +884,7 @@ genSumBranch cx dest v off x t e
   = do let named = if S.member v (cxNamed cx) then S.insert x (cxNamed cx) else cxNamed cx
            cx' = (bindVar cx x (A t)){ cxOffsets = M.insert x off (cxOffsets cx),
                                       cxInSum = S.insert x (cxInSum cx), cxNamed = named }
-       body <- genE cx' dest e
+       body <- genE (aliasCtx cx (Just v) x cx') dest e
        return (["kk_box_t " ++ localName x ++ " = " ++ localName v ++ ";"] ++ body)
 
 tagDecl :: String -> String -> String
@@ -938,14 +1100,14 @@ genDef env cenv def
         -> do pcts <- mapM (\(_,_,t) -> ctype t) args
               rct  <- ctype res
               let g  = M.fromList [(x,V t) | (x,_,t) <- args]
-                  cx = Ctx env cenv g M.empty S.empty S.empty (Just (f,[x | (x,_,_) <- args])) M.empty
+                  cx = Ctx env cenv g M.empty S.empty S.empty (Just (f,[x | (x,_,_) <- args])) M.empty M.empty M.empty M.empty
               ss <- genE cx DReturn body
               let sig = ctName rct ++ " " ++ cName f ++ "(" ++ concat [ctName ct ++ " " ++ localName x ++ ", " | ((x,_,_),ct) <- zip args pcts] ++ "kk_context_t* _ctx)"
               let label = if any ("goto kt_tailcall;" `isInfixOf`) ss then "  kt_tailcall: ;\n" else ""
               return (sig ++ ";\n", sig ++ " {\n" ++ label ++ indent ss ++ "}\n", "")
       DefVal x _ t body
         -> do ct <- ctype t
-              let cx = Ctx env cenv M.empty M.empty S.empty S.empty Nothing M.empty
+              let cx = Ctx env cenv M.empty M.empty S.empty S.empty Nothing M.empty M.empty M.empty M.empty
               ss <- genE cx DReturn body
               let initf = cName x ++ "_init"
               return ("extern " ++ ctName ct ++ " " ++ cName x ++ ";\n",
@@ -960,7 +1122,7 @@ genWrapper env cenv f
         -> do pcts <- mapM (ctype . snd) ps
               rct  <- ctype r
               let xs  = [newHiddenName ("p" ++ show i) | i <- [0..length ps - 1]]
-                  cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) M.empty S.empty S.empty Nothing M.empty
+                  cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) M.empty S.empty S.empty Nothing M.empty M.empty M.empty M.empty
               body <- genCall cx DReturn f (map AVar tvs) (map Var xs)
               let sig = "static " ++ ctName rct ++ " " ++ cName f ++ "_fun(kk_function_t _fself" ++ concat [", " ++ ctName ct ++ " " ++ localName x | (x,ct) <- zip xs pcts] ++ ", kk_context_t* _ctx)"
               return (sig ++ ";\n", sig ++ " {\n  kk_function_static_drop(_fself,_ctx);\n" ++ indent body ++ "}\n")
@@ -1071,6 +1233,10 @@ runtimeHeader = unlines
   , "static inline kk_block_t* kt_block_clear(kk_block_t* b, kk_ssize_t scan_fsize, kk_tag_t tag, kk_context_t* _ctx) {"
   , "  b->header.scan_fsize = (uint8_t)scan_fsize; b->header.tag = tag;"
   , "  return b;"
+  , "}"
+  , "// credits come from box blocks, which are always allocated with `kk_malloc_small`"
+  , "static inline void kt_reuse_drop(kk_reuse_t r, kk_context_t* _ctx) {"
+  , "  if (r != kk_reuse_null) { kk_assert_internal(kk_block_is_unique(r)); kk_free_small(r,_ctx); }"
   , "}"
   , "static inline bool kt_box_is_any(kk_box_t b, kk_context_t* _ctx) {"
   , "  return (kk_box_is_ptr(b) && kk_block_has_tag(kk_ptr_unbox(b,_ctx), KK_TAG_BOX_ANY));"

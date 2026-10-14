@@ -13,6 +13,8 @@
   `free` of a credit (from drop specialization) keeps the credit instead. A box of the same
   size that is allocated in the continuation of the drop uses that block. A credit
   that is used in some branch of a case is freed in the other branches.
+  Credit descriptions follow payload destructuring and credit aliases, allowing
+  code generation to specialize `box@r` by omitting unchanged field stores.
   Closures get no credits. The body of a join point (which runs at most once) asks
   its jumps for the credits it needs as extra parameters: an allocation that finds
   no credit adds one. A jump passes an available credit of each size, or an empty one.
@@ -27,7 +29,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, boxContents, reuseSize )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, boxContents, reuseSize, inferE, contentsOfAlt, unrollT )
 
 -- credits with the size of their block
 type Credits = [(Name,Int)]
@@ -50,8 +52,8 @@ credits = gets rsCredits
 setCredits :: Credits -> R ()
 setCredits cs = modify (\s -> s{ rsCredits = cs })
 
-asked :: R [Name]
-asked = gets (maybe [] (map fst) . rsAsked)
+asked :: R Credits
+asked = gets (fromMaybe [] . rsAsked)
 
 -- use up a credit
 spend :: Name -> R ()
@@ -112,23 +114,30 @@ ruE expr
        env <- asks reEnv
        tss <- liftE (altTypes env (V t) expr)
        v   <- ruV (dsScrut ds)
-       es  <- branches [(zip xs ts,e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
+       es  <- branchesAt expr (V t) [(zip xs ts,e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
        return (dsBuild ds (dsMode ds) v es)
 ruE expr
   | Just ds <- destructAOf expr
   = do t <- typeOfName (dsScrut ds)
        env <- asks reEnv
        tss <- liftE (altTypes env t expr)
-       es <- branches [(zip xs ts,e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
+       es <- branchesAt expr t [(zip xs ts,e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
        return (dsBuild ds (dsMode ds) (dsScrut ds) es)
 ruE expr
   = case expr of
-      Let x t e1 e2 -> Let x t <$> ruE e1 <*> bind [(x,V t)] (ruE e2)
+      Let x t e1 e2
+        -> do e1' <- ruE e1
+              -- Keep descriptions that are still in scope through credit aliases.
+              re <- ask
+              t' <- case t of
+                      VReuse _ Nothing -> liftE (inferE (reEnv re) (reGamma re) M.empty e1')
+                      _ -> return t
+              Let x t' e1' <$> bind [(x,V t')] (ruE e2)
       Join j ps e1 e2
         -> do (e1',as) <- scope (Just []) (bind [(x,V t) | (x,_,t) <- ps] (ruE e1))
               let rs = fromMaybe [] as
               e2' <- local (\re -> re{ reJoins = M.insert j (map snd rs) (reJoins re) }) (ruE e2)
-              return (Join j (ps ++ [(r,Owned,VReuse n) | (r,n) <- rs]) e1' e2')
+              return (Join j (ps ++ [(r,Owned,VReuse n Nothing) | (r,n) <- rs]) e1' e2')
       Jump j vs
         -> do vs' <- mapM ruV vs
               ns  <- asks (M.findWithDefault [] j . reJoins)
@@ -140,14 +149,20 @@ ruE expr
       Drop x e
         -> do g <- asks reGamma
               a <- liftE (inferAVar g x)
+              env <- asks reEnv
               case boxContents a >>= reuseSize of
                 Right n -> do r <- fresh
                               offer r n (dropReuse x r n) (Drop x) e
+                -- A single-constructor datatype (such as FIP padding) can hide
+                -- a reusable box. Unrolling transfers ownership without copying.
+                Left _ | Right b@(ABox s) <- unrollT env a, Right _ <- reuseSize s
+                  -> do y <- fresh
+                        Unroll Owned x y <$> bind [(y,A b)] (ruE (Drop y e))
                 Left _ -> Drop x <$> ruE e
       Free r e
         -> do t <- typeOfName r
               case t of
-                V (VReuse n) -> offer r n return (Free r) e
+                V (VReuse n _) -> offer r n return (Free r) e
                 _ -> fail ("free of a non-credit: " ++ show r)
       Dup x y e
         -> do t <- typeOfName x
@@ -159,7 +174,7 @@ ruE expr
         -> do g <- asks reGamma
               s <- liftE (inferAVar g v >>= boxContents)
               n <- liftE (reuseSize s)
-              UnboxRu v x r <$> bind [(x,V s),(r,V (VReuse n))] (ruE e)
+              UnboxRu v x r <$> bind [(x,V s),(r,V (VReuse n (Just (Var x))))] (ruE e)
       Ret _ -> plain
       Call _ _ _ -> plain
       App _ _ -> plain
@@ -182,7 +197,8 @@ ruE expr
 offer :: Name -> Int -> (VExpr -> R VExpr) -> (VExpr -> VExpr) -> VExpr -> R VExpr
 offer r n use unusedOp e
   = do credits >>= setCredits . ((r,n) :)
-       e' <- bind [(r,V (VReuse n))] (ruE e)
+       t <- asks (M.findWithDefault (V (VReuse n Nothing)) r . reGamma)
+       e' <- bind [(r,t)] (ruE e)
        unused <- any ((== r) . fst) <$> credits
        if unused then do spend r
                          return (unusedOp e')
@@ -196,20 +212,30 @@ dropReuse x r n e
        g <- asks reGamma
        s <- liftE (inferAVar g x >>= boxContents)
        body <- dropValue fresh y (V s) (Ret (Var r'))
-       return (Let r (VReuse n) (IsUnique x (UnboxRu x y r' body)
+       return (Let r (VReuse n Nothing) (IsUnique x (UnboxRu x y r' body)
                                                 (Drop x (Ret (NoReuse n))))
                  e)
 
--- every branch starts with the same credits; credits used in some branch are freed in the others
+-- every branch starts with the same credits, plus those that earlier branches asked for;
+-- credits used in some branch are freed in the others
 branches :: [([(Name,Ty)],VExpr)] -> R [VExpr]
-branches alts
+branches = branchesWith (\_ _ -> id)
+
+branchesAt :: VExpr -> Ty -> [([(Name,Ty)],VExpr)] -> R [VExpr]
+branchesAt expr t = branchesWith (\i xs re -> re{ reGamma = contentsOfAlt expr t i xs (reGamma re) })
+
+branchesWith :: (Int -> [Name] -> REnv -> REnv) -> [([(Name,Ty)],VExpr)] -> R [VExpr]
+branchesWith refine alts
   = do cs <- credits
-       rs <- mapM (\(bs,e) -> do setCredits cs
-                                 as <- asked
-                                 e' <- bind bs (ruE e)
-                                 left <- credits
-                                 as' <- asked
-                                 return (e', [r | (r,_) <- cs, r `notElem` map fst left] ++ (as' \\ as))) alts
+       as0 <- asked
+       rs <- sequence [do as <- asked
+                          let avail = cs ++ (as \\ as0)
+                          setCredits avail
+                          e' <- local (refine i (map fst bs)) (bind bs (ruE e))
+                          left <- credits
+                          as' <- asked
+                          return (e', [r | (r,_) <- avail ++ (as' \\ as), r `notElem` map fst left])
+                      | (i,(bs,e)) <- zip [0..] alts]
        let usedAny = nub (concatMap snd rs)
        setCredits [c | c <- cs, fst c `notElem` usedAny]
        return [foldr Free e [r | r <- usedAny, r `notElem` used] | (e,used) <- rs]
