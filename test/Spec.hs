@@ -19,6 +19,15 @@ import Test.Hspec
 import Test.Hspec.Core.Runner
 import Test.Hspec.Core.Formatters hiding (Error)
 import qualified NameSpec(spec)
+import qualified Data.Map as M
+import qualified Common.Name as N
+import qualified Backend.Typed.Syntax as T
+import qualified Backend.Typed.Query as TQ
+import qualified Backend.Typed.Check as TC
+import qualified Backend.Typed.Linear as TL
+import qualified Backend.Typed.CGen as CG
+import Kind.Newtypes (newtypesEmpty)
+
 
 commonFlags :: [String]
 commonFlags = ["-c", "-v0", "--console=raw",
@@ -310,6 +319,7 @@ main = do
                     mapM_ (\(backend,out) -> withBackend backend $
                                               do when (backend == BackendTyped) $
                                                    do typedStdTest out
+                                                      typedIRTest
                                                       typedBuildTest options
                                                  discoverTests (initialCfg options backend) (pwd </> "test"))
                           (zip runBackends precompiled)
@@ -326,6 +336,65 @@ backendName BackendTyped = "typed"
 typedStdTest :: String -> Spec
 typedStdTest out
   = it "std" $ filter ("typed " `isPrefixOf`) (lines out) `shouldBe` []
+
+-- Credits are linear unboxed values; boxed duplicates must preserve their original sum tag.
+typedIRTest :: Spec
+typedIRTest = describe "typed IR ownership" $ do
+  let n = N.newName
+      r = n "r"
+      q = n "q"
+      j = n "j"
+      credit = T.VReuse 16
+      env = TQ.Env M.empty M.empty
+      gamma = M.singleton r (T.V credit)
+      program args result body = T.Program (n "typed-ir") M.empty M.empty
+        [T.DefFun (n "test") [] args result body]
+      transfer = program [(r,T.Owned,credit)] credit
+        (T.Join j [(q,T.Owned,credit)] (T.Ret (T.Var q)) (T.Jump j [T.Var r]))
+  it "transfers credits through returns and joins" $ do
+    TC.checkProgram transfer `shouldBe` []
+    TL.checkLinear transfer `shouldBe` []
+  it "frees credits and rejects dropping them as boxed operands" $ do
+    let prog = program [(r,T.Owned,credit)] T.VUnit (T.Free r (T.Ret T.UnitV))
+    TC.checkProgram prog `shouldBe` []
+    TL.checkLinear prog `shouldBe` []
+    TQ.inferE env gamma M.empty (T.Drop r (T.Ret T.UnitV)) `shouldSatisfy` isLeft
+  it "rejects duplication of credits and aggregates containing credits" $ do
+    TQ.inferV env gamma (T.DupV (T.Var r)) `shouldSatisfy` isLeft
+    TQ.inferV env gamma (T.DupV (T.Pair T.UnitV (T.Var r))) `shouldSatisfy` isLeft
+  it "rejects an unconsumed credit" $
+    TL.checkLinear (program [(r,T.Owned,credit)] T.VUnit (T.Ret T.UnitV)) `shouldSatisfy` (not . null)
+  it "rejects credits in heap payloads and closure captures" $ do
+    TQ.inferA env gamma (T.Box (T.Var r)) `shouldSatisfy` isLeft
+    TQ.inferA env gamma (T.Lam [] T.VUnit (T.Free r (T.Ret T.UnitV))) `shouldSatisfy` isLeft
+  it "rejects opaque alternatives in boxed sums" $ do
+    let a = T.ASum T.AUnit (T.AFun [] T.VUnit)
+    TQ.inferA env M.empty (T.Inr a (T.Lam [] T.VUnit (T.Ret T.UnitV))) `shouldSatisfy` isLeft
+  it "preserves the tag offset when duplicating an operand of a sub-sum" $ do
+    let arg = n "arg"
+        x = n "x"
+        l = n "left"
+        y = n "subsum"
+        z = n "duplicate"
+        a = n "a"
+        b = n "b"
+        box = T.ABox (T.VPtr T.AUnit)
+        sumType = T.ASum T.AUnit (T.ASum box box)
+        done = T.Ret T.UnitV
+        body = T.Deref T.Owned (T.Var arg) x
+          (T.CaseA T.Owned x (l,done)
+            (y,T.Dup y z (T.Drop y
+              (T.CaseA T.Owned z (a,T.Drop a done) (b,T.Drop b done)))))
+        prog = program [(arg,T.Owned,T.VPtr sumType)] T.VUnit body
+        cenv = CG.CEnv (T.progName prog) [] [] M.empty newtypesEmpty []
+        (_,source,errors) = CG.cgenModule cenv prog
+    TC.checkProgram prog `shouldBe` []
+    TL.checkLinear prog `shouldBe` []
+    errors `shouldBe` []
+    source `shouldSatisfy` isInfixOf "<= 2"
+  where
+    isLeft (Left _) = True
+    isLeft _ = False
 
 -- Exercise the module lifecycle, rather than just the output of an executable:
 -- libraries need objects before any executable is built, and cached objects
