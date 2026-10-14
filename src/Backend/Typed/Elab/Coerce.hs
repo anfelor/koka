@@ -7,13 +7,14 @@
 -----------------------------------------------------------------------------
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Coerce( coerce, genVal, genPtr, injA, caseChain, tapp ) where
+module Backend.Typed.Elab.Coerce( coerce, genVal, genPtr ) where
 
 import qualified Data.Map as M
 import Common.Name
 import Backend.Typed.Syntax
+import Backend.Typed.Common
 import Backend.Typed.Types
-import Backend.Typed.ElabMonad
+import Backend.Typed.Elab.Monad
 import Backend.Typed.Pretty( ppr )
 
 -- a pointer to a value `w : A`, generalized at `(∀ā. A)*`
@@ -28,18 +29,6 @@ genPtr t@(VPtr (AForall tvs _)) v
   = do x <- fresh "l"
        return (Let x t (Gen tvs (Ret v)), Var x)
 genPtr _ v = return (id, v)
-
-tapp :: VVal -> [AType] -> VVal
-tapp v []  = v
-tapp v tys = TyApp v tys
-
-sumOf :: [AType] -> AType
-sumOf = foldr1 ASum
-
-injA :: [AType] -> Int -> AVal -> AVal
-injA [_] 0 v = v
-injA ss 0 v  = Inl (sumOf ss) v
-injA ss i v  = Inr (sumOf ss) (injA (tail ss) (i-1) v)
 
 coerce :: VType -> VType -> VVal -> E (K,VVal)
 coerce from to v
@@ -101,7 +90,7 @@ unboxAV t a
       VUnit -> return (id, UnitV)
       VSum ts | length ts > 1 ->
         do r <- fresh "s"
-           body <- caseChain (map boxA ts) a (unboxAlt t ts)
+           body <- caseChain fresh (map boxA ts) a (unboxAlt t ts)
            return (Let r t body, Var r)
       VSum _      -> unbox
       VPtr _      -> unbox
@@ -117,20 +106,6 @@ unboxAlt :: VType -> [VType] -> Int -> Name -> E VExpr
 unboxAlt t ts i y
   = do (k,w) <- unboxAV (ts !! i) y
        return (k (Ret (Inj i t w)))
-
--- a case on each alternative of a boxed sum `a`; the branch gets the alternative, a variable at a
--- boxed type that it may only destructure
-caseChain :: [AType] -> Name -> (Int -> Name -> E VExpr) -> E VExpr
-caseChain shapes a branch = go 0 shapes a
-  where
-    go i [_] v = branch i v
-    go _ [] _ = failE "empty case chain"
-    go i (_:rest) v
-      = do y <- fresh "y"
-           z <- fresh "z"
-           b1 <- branch i y
-           b2 <- go (i+1) rest z
-           return (CaseA Owned v (y,b1) (z,b2))
 
 ptrA :: VType -> AType
 ptrA (VPtr a) = a
