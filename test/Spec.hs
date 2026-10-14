@@ -25,6 +25,9 @@ import qualified Backend.Typed.Syntax as T
 import qualified Backend.Typed.Query as TQ
 import qualified Backend.Typed.Check as TC
 import qualified Backend.Typed.Linear as TL
+import qualified Backend.Typed.Passes.Anf as TA
+import qualified Backend.Typed.Passes.Contify as TF
+import qualified Backend.Typed.Passes.Perceus as TP
 import qualified Backend.Typed.CGen as CG
 import Kind.Newtypes (newtypesEmpty)
 
@@ -320,6 +323,7 @@ main = do
                                               do when (backend == BackendTyped) $
                                                    do typedStdTest out
                                                       typedIRTest
+                                                      typedPassTest
                                                       typedBuildTest options
                                                  discoverTests (initialCfg options backend) (pwd </> "test"))
                           (zip runBackends precompiled)
@@ -395,6 +399,76 @@ typedIRTest = describe "typed IR ownership" $ do
   where
     isLeft (Left _) = True
     isLeft _ = False
+
+-- Check the passes directly so Core optimization cannot erase the examples.
+typedPassTest :: Spec
+typedPassTest = describe "typed IR normalization" $ do
+  let n = N.newName
+      f = n "f"
+      x = n "x"
+      y = n "y"
+      z = n "z"
+      g = n "g"
+      ft = T.AFun [(T.Owned,T.VUnit)] T.VUnit
+      lam = T.Ptr ft (T.Lam [(x,T.Owned,T.VUnit)] T.VUnit (T.Ret (T.Var y)))
+      app = T.Deref T.Owned (T.Var f) g (T.App g [T.UnitV])
+      program body = T.Program (n "passes") M.empty M.empty
+        [T.DefFun (n "test") [] [(y,T.Owned,T.VUnit)] T.VUnit body]
+      cont body = TF.contifyProgram (program (T.Let f (T.VPtr ft) (T.Ret lam) body))
+  it "closes tail-called closures over their typed captures" $ do
+    let (prog,errs) = cont (T.CaseLit (T.Lit (T.LitChar 'a')) [(T.LitChar 'a',app)] app)
+    errs `shouldBe` []
+    TC.checkProgram prog `shouldBe` []
+    case map T.defBody (T.progDefs prog) of
+      [T.Join j [(p,T.Owned,T.VUnit),(q,T.Owned,T.VUnit)] (T.Ret (T.Var capture))
+        (T.CaseLit _ [(_,T.Jump k [T.UnitV,T.Var arg])] (T.Jump l _))] -> do
+          p `shouldBe` x
+          capture `shouldBe` q
+          arg `shouldBe` y
+          k `shouldBe` j
+          l `shouldBe` j
+      body -> expectationFailure (show body)
+    let (linear,rcErrs) = TP.perceusProgram prog
+    rcErrs `shouldBe` []
+    TC.checkProgram linear `shouldBe` []
+    TL.checkLinear linear `shouldBe` []
+  it "contifies closures inside a scrutinee lambda" $ do
+    let nested = T.Let f (T.VPtr ft) (T.Ret lam) app
+        value = T.Ptr ft (T.Lam [(x,T.Owned,T.VUnit)] T.VUnit nested)
+        (prog,errs) = TF.contifyProgram (program (T.Deref T.Owned value g (T.Ret T.UnitV)))
+    errs `shouldBe` []
+    TC.checkProgram prog `shouldBe` []
+    case map T.defBody (T.progDefs prog) of
+      [T.Deref _ (T.Ptr _ (T.Lam _ _ T.Join{})) _ _] -> return ()
+      es -> expectationFailure (show es)
+  it "keeps escaping closures and non-tail calls as closures" $ do
+    let escaping = T.Let z (T.VPtr ft) (T.Ret (T.Var f)) app
+        nonTail = T.Let z T.VUnit app (T.Ret T.UnitV)
+    forM_ [escaping,nonTail] $ \body -> do
+      let (prog,errs) = cont body
+      errs `shouldBe` []
+      TC.checkProgram prog `shouldBe` []
+      case map T.defBody (T.progDefs prog) of
+        [T.Let h _ _ _] -> h `shouldBe` f
+        e -> expectationFailure (show e)
+  it "does not capture a shadowed closure capture at a jump" $ do
+    let (prog,errs) = cont (T.Let y T.VUnit (T.Ret T.UnitV) app)
+    errs `shouldBe` []
+    TC.checkProgram prog `shouldBe` []
+    case map T.defBody (T.progDefs prog) of
+      [T.Let h _ _ _] -> h `shouldBe` f
+      e -> expectationFailure (show e)
+  it "freshens let binders when flattening nested computations" $ do
+    let nested = T.Let x T.VUnit
+          (T.Let y T.VUnit (T.Ret T.UnitV) (T.Ret (T.Var y))) (T.Ret (T.Var y))
+        prog = TA.anfProgram (program nested)
+    TC.checkProgram prog `shouldBe` []
+    case map T.defBody (T.progDefs prog) of
+      [T.Let q _ _ (T.Let _ _ (T.Ret (T.Var inner)) (T.Ret (T.Var outer)))] -> do
+        q `shouldNotBe` y
+        inner `shouldBe` q
+        outer `shouldBe` y
+      e -> expectationFailure (show e)
 
 -- Exercise the module lifecycle, rather than just the output of an executable:
 -- libraries need objects before any executable is built, and cached objects

@@ -33,10 +33,8 @@ library
       Backend.Typed.CGen
       Backend.Typed.Check
       Backend.Typed.Common
-      Backend.Typed.Elab.Anf
       Backend.Typed.Elab.Coerce
       Backend.Typed.Elab.Common
-      Backend.Typed.Elab.Contify
       Backend.Typed.Elab.FromCore
       Backend.Typed.Elab.Match
       Backend.Typed.Elab.Monad
@@ -45,6 +43,8 @@ library
       Backend.Typed.Linear
       Backend.Typed.Monad
       Backend.Typed.Names
+      Backend.Typed.Passes.Anf
+      Backend.Typed.Passes.Contify
       Backend.Typed.Passes.DropSpec
       Backend.Typed.Passes.Lazy
       Backend.Typed.Passes.Perceus
