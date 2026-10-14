@@ -16,7 +16,7 @@
   Before that, join points with at most one jump are inlined: the jump becomes a binding
   of the parameters to the arguments (aliases that copy propagation then removes).
 -}
-module Backend.Typed.Simplify( simplifyProgram ) where
+module Backend.Typed.Passes.Simplify( simplifyProgram ) where
 
 import qualified Data.Map as M
 import Data.Monoid( Sum(..) )
@@ -24,6 +24,7 @@ import Data.Functor.Const( Const(..) )
 import Data.Functor.Identity( Identity(..) )
 import Common.Name
 import Backend.Typed.Syntax
+import Backend.Typed.Common
 
 simplifyProgram :: Program -> Program
 simplifyProgram prog = prog{ progDefs = map simplifyDef (progDefs prog) }

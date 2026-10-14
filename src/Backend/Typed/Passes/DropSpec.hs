@@ -23,12 +23,13 @@
   The shared branch is the original code. Freeing the credit releases the block, unless
   `Reuse` uses it for an allocation in `e`.
 -}
-module Backend.Typed.DropSpec( dropSpecProgram ) where
+module Backend.Typed.Passes.DropSpec( dropSpecProgram ) where
 
 import Common.Name
 import Backend.Typed.Syntax
+import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Check( reuseSize )
+import Backend.Typed.Query( reuseSize )
 
 type D a = State Int a
 

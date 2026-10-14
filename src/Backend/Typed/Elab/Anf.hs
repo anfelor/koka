@@ -6,10 +6,11 @@
 -- found in the LICENSE file at the root of this distribution.
 -----------------------------------------------------------------------------
 
-module Backend.Typed.Anf( anfCore, isValue ) where
+module Backend.Typed.Elab.Anf( anfCore ) where
 
 import Common.Unique
 import Core.Core
+import Backend.Typed.Elab.Common( isValue, isConExpr )
 
 anfCore :: Core -> Unique Core
 anfCore core
@@ -24,23 +25,6 @@ anfDef :: Def -> Unique Def
 anfDef def
   = do e <- anfExpr (defExpr def)
        return def{ defExpr = e }
-
-isValue :: Expr -> Bool
-isValue expr
-  = case expr of
-      Var _ _       -> True
-      Lit _         -> True
-      Con _ _       -> True
-      Lam _ _ _     -> True
-      TypeLam _ e   -> isValue e
-      TypeApp e _   -> isValue e
-      App f args    -> isConExpr f && all isValue args
-      _             -> False
-
-isConExpr :: Expr -> Bool
-isConExpr (Con _ _)     = True
-isConExpr (TypeApp e _) = isConExpr e
-isConExpr _             = False
 
 anfExpr :: Expr -> Unique Expr
 anfExpr expr

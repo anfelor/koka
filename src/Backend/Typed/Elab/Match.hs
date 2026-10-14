@@ -18,11 +18,12 @@
   up. If that duplicates tests, they become a join point of their own instead
   (`fallback`), which every failure of the rows before jumps to.
 -}
-module Backend.Typed.Match( matchCore, nameUnreachable, nameSetCtxPath, isJoinName ) where
+module Backend.Typed.Elab.Match( matchCore ) where
 
 import Data.List( nubBy, findIndex )
 import qualified Data.Set as S
 import Common.Name
+import Backend.Typed.Names
 import Common.Unique
 import Kind.Newtypes( Newtypes, newtypesLookupAny )
 import Type.Type
@@ -31,15 +32,6 @@ import Core.CoreVar( freeLocals, (|~>) )
 
 type Bind = (TName,TName)
 type Row  = ([Bind],[Pattern],[Guard])
-
-nameUnreachable :: Name
-nameUnreachable = newHiddenName "typed-unreachable"
-
-nameSetCtxPath :: Name
-nameSetCtxPath = newHiddenName "typed-set-ctx-path"
-
-isJoinName :: Name -> Bool
-isJoinName x = hiddenNameStartsWith x "join"
 
 matchCore :: Newtypes -> Core -> Unique Core
 matchCore nt core
@@ -215,7 +207,7 @@ specialize env xs i rows p@(PatCon c _ repr targs exists tres info skip)
 specialize env xs i rows p@(PatLit _)
   = do body <- compile env (dropAt i xs) [(bs,dropAt i ps,gs) | (bs,ps,gs) <- rows, let q = ps !! i, not (isRefutable q) || sameHead p q]
        return (Branch [p] [Guard exprTrue body])
-specialize _ _ _ _ _ = error "Backend.Typed.Match.specialize: unexpected pattern"
+specialize _ _ _ _ _ = error "Backend.Typed.Elab.Match.specialize: unexpected pattern"
 
 -- without default rows the constructors are complete unless the rows are followed by a fallback
 defaultBranch :: Env -> [TName] -> Int -> [Row] -> Unique [Branch]
