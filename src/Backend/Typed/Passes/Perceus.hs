@@ -202,12 +202,12 @@ letVal :: Name -> Ty -> VVal -> P K
 letVal x (V s) v = return (Let x s (Ret v))
 letVal _ (A _) _ = fail "cannot bind an unboxed value at a boxed type"
 
--- Boxed duplicates are bound through a pointer and immediately dereferenced.
+-- Boxed duplicates remain named operands; unboxed duplicates are values.
 dupAs :: [(Name,Name,Ty)] -> P K
 dupAs xs = foldr (.) id <$> mapM dupOne xs
   where
     dupOne (x,x',V t) = return (Let x' t (Ret (DupV (Var x))))
-    dupOne (x,x',A a) = letA (fresh "p") x' a (DupA x)
+    dupOne (x,x',A _) = return (Dup x x')
 
 tyOfVar :: PEnv -> Name -> P Ty
 tyOfVar pe x = maybe (fail ("unknown variable " ++ show x)) return (M.lookup x (peGamma pe))
@@ -276,6 +276,8 @@ percE' pe owned expr
       Gen tvs e -> Gen tvs <$> percE' pe owned e
       Drop x e -> Drop x <$> percE' pe owned e
       Free r e -> Free r <$> percE' pe owned e
+      Dup x y e -> do t <- tyOfVar pe x
+                      Dup x y <$> percE (bind pe [(y,t)]) (owned `S.union` ownedOf [(y,t)]) e
       CaseLit v alts def
         -> do alts' <- mapM (\(l,e) -> (,) l <$> percE pe owned e) alts
               def'  <- percE pe owned def
@@ -442,7 +444,6 @@ occurrences val = case val of
 occurrencesA :: AVal -> [Name]
 occurrencesA val = case val of
   Lam{} -> S.toList (fvA val)
-  DupA _ -> []
   _ -> getConst (descendA (Const . (:[])) (Const . occurrencesA) (Const . occurrences) val)
 
 useVal :: PEnv -> M.Map Name Int -> Mode -> Int -> VVal -> P (K,Int,VVal)
@@ -473,7 +474,6 @@ useA pe lastOcc i val
               e' <- percE inner own e1
               k <- dupAs [(x,x',tyOf x) | (x,x') <- renames]
               return (k, i + length caps, Lam ps r e')
-      DupA _ -> return (id,i,val)
       _ -> useChildren pe lastOcc i (descendA stepName (stepA pe lastOcc) (stepV pe lastOcc) val)
   where
     moves x j = M.lookup x lastOcc == Just j

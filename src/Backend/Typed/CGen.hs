@@ -134,7 +134,7 @@ ctOf :: Ty -> G CT
 ctOf (V t) = ctype t
 ctOf (A _) = return CBox
 
--- how the alternatives of a boxed sum are represented (see `genSumIn` and `genBox` in a sum):
+-- how the alternatives of a boxed sum are represented (see `genAIn` and `genBox` in a sum):
 -- units, and boxes of units, are immediate tags; other boxes are heap blocks
 data Repr = RBlock | RImm
           deriving (Eq)
@@ -193,18 +193,24 @@ genV cx val
                       ++ setAlt ++ x ++ "; })")
       Pair _ _ -> do t <- tyOf cx val
                      genProd cx t (prodLeafVals val)
+
+-- Injections only contain construction forms, so their tag can be passed down to
+-- the allocation. Existing boxed operands are duplicated by the expression `Dup`.
 genA :: Ctx -> AVal -> G String
-genA cx val
+genA cx = genAIn cx False 0
+
+genAIn :: Ctx -> Bool -> Int -> AVal -> G String
+genAIn cx inSum pos val
   = case val of
       Fun f -> staticFun f
-      UnitA -> genSum cx 0 val
-      DupA x -> return (dupExpr CBox (localName x))
-      Roll _ v -> genA cx v
-      Inl _ _ -> genSum cx 0 val
-      Inr _ _ -> genSum cx 0 val
-      Box v -> genBox cx False 1 Fresh v
-      BoxAt r v -> genBox cx False 1 (At r) v
-      BoxIn x v -> genBox cx False 1 (In x) v
+      UnitA -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" ++ show (pos+1) ++ "))")
+      Roll _ v -> genAIn cx inSum pos v
+      Inl _ v -> genAIn cx True pos v
+      Inr (ASum l _) v -> genAIn cx True (pos + sumSize l) v
+      Inr _ _ -> failG "inr into a non-sum"
+      Box v -> genBox cx inSum (pos+1) Fresh v
+      BoxAt r v -> genBox cx inSum (pos+1) (At r) v
+      BoxIn x v -> genBox cx inSum (pos+1) (In x) v
       OpenCon c tys v -> genOpenCon cx c tys v
       Lam ps r e -> genLam cx ps r e
 
@@ -258,26 +264,6 @@ projLeaves whole e start part
                  y <- fresh "q"
                  return ("({ " ++ pname ++ " " ++ y ++ "; " ++ concat [y ++ ".f" ++ show j ++ " = (" ++ e ++ ").f" ++ show (start+j) ++ "; " | j <- [0..n-1]] ++ y ++ "; })")
          _ -> return e
-
--- boxed sums
-genSum :: Ctx -> Int -> AVal -> G String
-genSum cx = genSumIn cx False
-
-genSumIn :: Ctx -> Bool -> Int -> AVal -> G String
-genSumIn cx inSum pos val
-  = case val of
-      Inl a v -> case a of
-                   ASum _ _ -> genSumIn cx True pos v
-                   _ -> failG "inl"
-      Inr a v -> case a of
-                   ASum l _ -> genSumIn cx True (pos + sumSize l) v
-                   _ -> failG "inr"
-      UnitA -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" ++ show (pos+1) ++ "))")
-      Box v -> genBox cx inSum (pos+1) Fresh v
-      BoxAt r v -> genBox cx inSum (pos+1) (At r) v
-      BoxIn x v -> genBox cx inSum (pos+1) (In x) v
-      _ | pos == 0 -> genA cx val
-      _ -> failG ("injection of a value of a sub-sum: " ++ show val)
 
 -- where the block of a box comes from
 data Alloc = Fresh | At Name | In Name
@@ -540,6 +526,10 @@ genE cx dest expr
       Free r e
         -> do s <- genE cx dest e
               return (dropStmt CReuse (localName r) : s)
+      Dup x y e
+        -> do a <- liftC (inferAVar (cxGamma cx) x)
+              genAlias cx dest (dupExpr CBox (localName x)) (Just x) y a
+                (if S.member x (cxNamed cx) then S.insert y (cxNamed cx) else cxNamed cx) e
       IsUnique x e1 e2
         -> do s1 <- genE cx dest e1
               s2 <- genE cx dest e2
@@ -923,7 +913,6 @@ copyOf v
   = case v of
       Var z -> Just z
       DupV w -> copyOf w
-      Ptr _ (DupA z) -> Just z   -- a boxed value is bound by `let p = ret (ptr v) in let ptr x = p`
       _ -> Nothing
 
 -- definitions
