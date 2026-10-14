@@ -56,12 +56,12 @@ prettyV t
       VPtr a@(AVar _)   -> prettyA a <.> text "*"
       VPtr a@(ACon _ _) -> prettyA a <.> text "*"
       VPtr a     -> parens (prettyA a) <.> text "*"
+      VReuse n   -> text ("reuse" ++ show n)
       VUnit      -> text "I"
       VSum ts    -> parens (hsep (punctuate (text " (+)") (map prettyV ts)))
       VProd x y  -> parens (prettyV x <+> text "(x)" <+> prettyV y)
       VRaw n     -> nm n
       VExists vs t -> parens (text "exists" <+> hsep (map tv vs) <.> text "." <+> prettyV t)
-      VReuse n   -> text ("reuse" ++ show n)
 
 prettyT :: Ty -> Doc
 prettyT (A a) = prettyA a
@@ -82,7 +82,6 @@ prettyAVal val
       OpenCon c ts v -> nm c <.> brackets (commaSep (map prettyA ts)) <+> atomVal v
       Lam ps r e -> text "fn" <.> parens (commaSep [mode m <.> nm x <+> colon <+> prettyV t | (x,m,t) <- ps])
                     <+> colon <+> prettyV r <+> text "->" <-> indent 2 (prettyExpr e)
-      DupA x      -> text "dup" <+> nm x
       BoxAt r v   -> text "box@" <.> nm r <+> atomVal v
       BoxIn x v   -> text "box-in@" <.> nm x <+> atomVal v
 
@@ -142,6 +141,7 @@ prettyExpr expr
       UnboxLazy v x e -> text "let-lazy box" <+> nm x <+> text "=" <+> nm v <+> text "in" <-> prettyExpr e
       Unpack m v vs x e -> text "let" <.> mode m <+> text "pack" <.> brackets (commaSep (map tv vs)) <+> nm x <+> text "=" <+> prettyVal v <+> text "in" <-> prettyExpr e
       CaseLit v alts def -> text "case" <+> prettyVal v <+> text "of" <-> indent 2 (vcat ([prettyLit l <+> text "->" <+> align (prettyExpr e) | (l,e) <- alts] ++ [text "_ ->" <+> align (prettyExpr def)]))
+      Dup x y e -> text "let" <+> nm y <+> text "= dup" <+> nm x <+> text "in" <-> prettyExpr e
       Drop x e -> text "drop" <+> nm x <.> semi <-> prettyExpr e
       Free r e -> text "free" <+> nm r <.> semi <-> prettyExpr e
       IsUnique x e1 e2 -> text "if-unique" <+> nm x <-> indent 2 (vcat [text "then" <+> align (prettyExpr e1), text "else" <+> align (prettyExpr e2)])

@@ -195,12 +195,6 @@ data AVal
   -- same arrow type as top-level functions, but only owned parameters.
   | Lam [(Name,Mode,VType)] VType VExpr
 
-  --  ──────────────── [dup]
-  --   x :^ A ⊢ dup x : A
-  --
-  -- A borrowed boxed variable can be duplicated into an owned boxed value.
-  | DupA Name
-
   --   Γ ⊢ v : V    |V| = n
   --  ────────────────────────────── [box-at]
   --   Γ, r : ◇n ⊢ box@r v : Box V
@@ -227,7 +221,7 @@ data VVal
   -- As in the paper, a variable is only a value at an unboxed type. A variable `x :q A` at a boxed
   -- type (bound by `[case]` on `A + B`, `[deref]` or `[unroll]`) is only an *operand*: the
   -- scrutinee of a destructuring form, the variable of `[drop]` or `[if-unique]`, the value of
-  -- `[dup]` or the function of `[app]`. It can only be stored again through `DupA`.
+  -- `[dup]` or the function of `[app]`. It cannot be stored again as a boxed value.
   = Var Name
 
   --   x : ∀ā. V ∈ Σ
@@ -287,8 +281,7 @@ data VVal
   --  ────────────────────── [no-reuse]
   --   ∅ ⊢ no-reuse n : ◇n
   --
-  -- The empty credit: an allocation in it is fresh. Passed by a jump that has no credit for a
-  -- parameter of its join point.
+  -- An empty credit, passed when a join asks for a block that is unavailable.
   | NoReuse Int
   deriving (Show)
 
@@ -417,6 +410,14 @@ data VExpr
   --
   -- Free the block of a reuse credit, or do nothing if the credit is empty.
   | Free Name VExpr
+
+  --   Γ, x :^ A, y : A ⊢ e : W    A contains no reuse credits
+  --  ──────────────────────────────────────────── [dup-a]
+  --   Γ, x :^ A ⊢ let y = dup x in e : W
+  --
+  -- Duplicate a boxed operand into another operand, preserving its enclosing sum's tag.
+  -- It produces no AVal that could be injected into a different sum.
+  | Dup Name Name VExpr
 
   --   Γ, x :! Box V ⊢ e₁ : W    Γ, x : Box V ⊢ e₂ : W    |V| defined
   --  ──────────────────────────────────────────────────────────────── [if-unique]
