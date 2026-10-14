@@ -13,9 +13,9 @@ import Common.Syntax( Platform )
 import Kind.Newtypes
 import qualified Core.Core as C
 import Backend.Typed.Syntax
-import Backend.Typed.Elab.Contify( contifyCore )
+import Backend.Typed.Passes.Contify( contifyProgram )
 import Backend.Typed.Elab.Match( matchCore )
-import Backend.Typed.Elab.Anf( anfCore )
+import Backend.Typed.Passes.Anf( anfProgram )
 import Backend.Typed.Elab.FromCore( elabProgram )
 import Backend.Typed.Check( checkProgram )
 import Backend.Typed.Passes.Simplify( simplifyProgram )
@@ -28,9 +28,9 @@ import Backend.Typed.Linear( checkLinear )
 -- returns the program after Perceus (and reuse) and messages labeled by the phase that produced them
 typedFromCore :: Platform -> Bool -> Newtypes -> [C.Core] -> Int -> C.Core -> (Program,[(String,String)])
 typedFromCore platform enableReuse nt imports uniq core
-  = let (acore,_)             = runUnique uniq (contifyCore core >>= matchCore nt >>= anfCore)
+  = let (acore,_)             = runUnique uniq (matchCore nt core)
         (prog,elabErrs,notes) = elabProgram platform nt imports acore
-        passes                = [("simplify",False,pure' simplifyProgram), ("perceus",True,perceusProgram), ("lazy",True,lazyProgram)
+        passes                = [("anf",False,pure' anfProgram), ("contify",False,contifyProgram), ("simplify",False,pure' simplifyProgram), ("perceus",True,perceusProgram), ("lazy",True,lazyProgram)
                                   ,("dropspec",True,pure' dropSpecProgram)] ++ [("reuse",True,reuseProgram) | enableReuse]
         (dsprog,msgs)         = runPasses prog (label "check" (checkProgram prog)) passes
     in (dsprog, label "elab" elabErrs ++ msgs ++ label "note" notes)
