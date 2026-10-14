@@ -47,6 +47,7 @@ library
       Backend.Typed.Passes.Contify
       Backend.Typed.Passes.DropSpec
       Backend.Typed.Passes.Lazy
+      Backend.Typed.Passes.Match
       Backend.Typed.Passes.Perceus
       Backend.Typed.Passes.Reuse
       Backend.Typed.Passes.Simplify

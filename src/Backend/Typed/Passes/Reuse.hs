@@ -168,6 +168,7 @@ ruE expr
       Unpair{} -> plain
       CaseV{} -> plain
       CaseA{} -> plain
+      SplitA{} -> plain
       Deref{} -> plain
       Unroll{} -> plain
       Unbox{} -> plain

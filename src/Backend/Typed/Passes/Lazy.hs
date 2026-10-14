@@ -24,7 +24,7 @@ import Common.Name
 import Common.NamePrim( nameLazyMemoize, nameLazyMemoizeTarget, nameDataTypePtrIsUnique )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Types( inst, splitSum, varV )
+import Backend.Typed.Types( inst, sumTypes, varV )
 import Backend.Typed.Layout( layout, blockSize )
 import Backend.Typed.Names( nameLazyFree )
 import Backend.Typed.Monad
@@ -75,7 +75,7 @@ memoize :: TypeDefs -> Targets -> AType -> VVal -> VVal -> Z VExpr
 memoize tdefs targets t target v
   = case (t, target) of
       (ACon tname targs, Var x) | Just tdef <- M.lookup tname tdefs, Just linfo <- tdefLazy tdef, Just body <- tdefBody tdef
-        -> let shapes = splitSum (length (lazyCons linfo)) (inst (tdefParams tdef) targs body)
+        -> let shapes = sumTypes (inst (tdefParams tdef) targs body)
            in case conOf v of
                 Just (i,w,rebuild) | inPlace linfo shapes (M.lookup x targets) i
                   -> return (Ret (rebuild (BoxIn x w)))
@@ -117,8 +117,7 @@ conOf :: VVal -> Maybe (Int, VVal, AVal -> VVal)
 conOf (Ptr t (Roll t' s)) = fmap (\(i,w,re) -> (i, w, Ptr t . Roll t' . re)) (go s)
   where
     go (Box w)   = Just (0, w, id)
-    go (Inl a s') = fmap (\(_,w,re) -> (0, w, Inl a . re)) (go s')
-    go (Inr a s') = fmap (\(i,w,re) -> (i+1, w, Inr a . re)) (go s')
+    go (InjA i a (Box w)) = Just (i, w, InjA i a)
     go _         = Nothing
 conOf _ = Nothing
 

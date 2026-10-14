@@ -22,12 +22,14 @@ import qualified NameSpec(spec)
 import qualified Data.Map as M
 import qualified Common.Name as N
 import qualified Backend.Typed.Syntax as T
+import qualified Backend.Typed.Types as TT
 import qualified Backend.Typed.Query as TQ
 import qualified Backend.Typed.Check as TC
 import qualified Backend.Typed.Linear as TL
 import qualified Backend.Typed.Passes.Anf as TA
 import qualified Backend.Typed.Passes.Contify as TF
 import qualified Backend.Typed.Passes.Perceus as TP
+import qualified Backend.Typed.Passes.Match as TM
 import qualified Backend.Typed.CGen as CG
 import Kind.Newtypes (newtypesEmpty)
 
@@ -344,7 +346,8 @@ typedStdTest out
 -- Credits are linear unboxed values; boxed duplicates must preserve their original sum tag.
 typedIRTest :: Spec
 typedIRTest = describe "typed IR ownership" $ do
-  let n = N.newName
+  let sumA = T.ASum . TT.sumAlts
+      n = N.newName
       r = n "r"
       q = n "q"
       j = n "j"
@@ -372,8 +375,8 @@ typedIRTest = describe "typed IR ownership" $ do
     TQ.inferA env gamma (T.Box (T.Var r)) `shouldSatisfy` isLeft
     TQ.inferA env gamma (T.Lam [] T.VUnit (T.Free r (T.Ret T.UnitV))) `shouldSatisfy` isLeft
   it "rejects opaque alternatives in boxed sums" $ do
-    let a = T.ASum T.AUnit (T.AFun [] T.VUnit)
-    TQ.inferA env M.empty (T.Inr a (T.Lam [] T.VUnit (T.Ret T.UnitV))) `shouldSatisfy` isLeft
+    let a = sumA [T.AUnit, T.AFun [] T.VUnit]
+    TQ.inferA env M.empty (T.InjA 1 a (T.Lam [] T.VUnit (T.Ret T.UnitV))) `shouldSatisfy` isLeft
   it "preserves the tag offset when duplicating an operand of a sub-sum" $ do
     let arg = n "arg"
         x = n "x"
@@ -383,19 +386,191 @@ typedIRTest = describe "typed IR ownership" $ do
         a = n "a"
         b = n "b"
         box = T.ABox (T.VPtr T.AUnit)
-        sumType = T.ASum T.AUnit (T.ASum box box)
+        sumType = sumA [T.AUnit, sumA [box,box]]
         done = T.Ret T.UnitV
         body = T.Deref T.Owned (T.Var arg) x
-          (T.CaseA T.Owned x (l,done)
-            (y,T.Dup y z (T.Drop y
-              (T.CaseA T.Owned z (a,T.Drop a done) (b,T.Drop b done)))))
+          (T.CaseA T.Owned x [(0,l,done),
+            (1,y,T.Dup y z (T.Drop y
+              (T.CaseA T.Owned z [(0,a,T.Drop a done),(1,b,T.Drop b done)] Nothing)))] Nothing)
         prog = program [(arg,T.Owned,T.VPtr sumType)] T.VUnit body
         cenv = CG.CEnv (T.progName prog) [] [] M.empty newtypesEmpty []
         (_,source,errors) = CG.cgenModule cenv prog
     TC.checkProgram prog `shouldBe` []
     TL.checkLinear prog `shouldBe` []
     errors `shouldBe` []
-    source `shouldSatisfy` isInfixOf "<= 2"
+    -- Both the outer sum and the duplicated sub-sum use tags 2 and 3.
+    [ws | line <- lines source, let ws = words line, take 1 ws == ["case"]]
+      `shouldBe` [["case","1:"],["case","2:"],["case","3:"],["case","2:"],["case","3:"]]
+  it "checks boxed injection indices and sparse case coverage" $ do
+    let sumType = sumA [T.AUnit,T.AUnit,T.AUnit]
+        x = n "sum"
+        y = n "alternative"
+        d = n "default"
+        done = T.Ret T.UnitV
+        ctx = M.singleton x (T.A sumType)
+        infer e = TQ.inferE env ctx M.empty e
+    forM_ [-1,3] $ \i ->
+      TQ.inferA env M.empty (T.InjA i sumType T.UnitA) `shouldSatisfy` isLeft
+    TQ.inferA env M.empty (T.InjA 2 sumType T.UnitA) `shouldBe` Right sumType
+    infer (T.CaseA T.Owned x [(2,y,done)] (Just (d,done))) `shouldBe` Right T.VUnit
+    forM_ [T.CaseA T.Owned x [(2,y,done)] Nothing,
+           T.CaseA T.Owned x [(2,y,done),(2,d,done)] (Just (d,done)),
+           T.CaseA T.Owned x [(3,y,done)] (Just (d,done))] $ \e ->
+      infer e `shouldSatisfy` isLeft
+  it "keeps one default and consumes its residual sum through Perceus" $ do
+    let arg = n "arg"
+        x = n "sum"
+        y = n "alternative"
+        d = n "default"
+        sumType = sumA (replicate 4 (T.ABox (T.VPtr T.AUnit)))
+        body = T.Deref T.Owned (T.Var arg) x
+          (T.CaseA T.Owned x [(2,y,T.Ret T.UnitV)] (Just (d,T.Ret T.UnitV)))
+        input = program [(arg,T.Owned,T.VPtr sumType)] T.VUnit body
+        (prog,errs) = TP.perceusProgram input
+        cenv = CG.CEnv (T.progName prog) [] [] M.empty newtypesEmpty []
+        (_,source,errors) = CG.cgenModule cenv prog
+    errs `shouldBe` []
+    TC.checkProgram prog `shouldBe` []
+    TL.checkLinear prog `shouldBe` []
+    errors `shouldBe` []
+    source `shouldSatisfy` isInfixOf "== 3"
+    source `shouldNotSatisfy` isInfixOf "== 1"
+    source `shouldNotSatisfy` isInfixOf "== 2"
+    source `shouldNotSatisfy` isInfixOf "== 4"
+  it "narrows defaults without renumbering constructor indices" $ do
+    let x = n "sum"
+        y = n "alternative"
+        d = n "default"
+        box = T.ABox (T.VPtr T.AUnit)
+        sumType = T.ASum [(0,box),(2,box),(5,box)]
+        rest = T.ASum [(0,box),(5,box)]
+        done = T.Ret T.UnitV
+        expr = T.CaseA T.Owned x [(2,y,T.Drop y done)] (Just (d,T.Drop d done))
+        ctx = M.singleton x (T.A sumType)
+    TQ.altTypes env (T.A sumType) expr `shouldBe` Right [[T.A box],[T.A rest]]
+    TQ.inferE env ctx M.empty expr `shouldBe` Right T.VUnit
+    TQ.inferE env (M.singleton d (T.A rest)) M.empty
+      (T.CaseA T.Owned d [(2,y,done)] (Just (x,done))) `shouldSatisfy` isLeft
+    TQ.inferA env M.empty (T.InjA 2 rest (T.Box T.UnitV)) `shouldSatisfy` isLeft
+    TQ.altTypes env (T.A sumType)
+      (T.CaseA T.Owned x [(i,y,done) | i <- [0,2,5]] (Just (d,done))) `shouldSatisfy` isLeft
+    forM_ [T.ASum [(0,box),(0,box)], T.ASum [(2,box),(0,box)],
+           T.ASum [(-1,box)], T.ASum [(0,sumA [box,box]),(1,box)]] $ \bad ->
+      TQ.altTypes env (T.A bad) (T.CaseA T.Owned x [] (Just (d,done))) `shouldSatisfy` isLeft
+  it "preserves gapped default tags through nested matching and duplication" $ do
+    let arg = n "arg"
+        x = n "sum"
+        y = n "selected"
+        d = n "default"
+        z = n "copy"
+        a = n "first"
+        b = n "last"
+        box = T.ABox (T.VPtr T.AUnit)
+        done = T.Ret T.UnitV
+        body = T.Deref T.Owned (T.Var arg) x
+          (T.CaseA T.Owned x [(2,y,T.Drop y done)]
+            (Just (d,T.Dup d z (T.Drop d
+              (T.CaseA T.Owned z [(0,a,T.Drop a done),(5,b,T.Drop b done)] Nothing)))))
+        prog = program [(arg,T.Owned,T.VPtr (T.ASum [(0,box),(2,box),(5,box)]))] T.VUnit body
+        cenv = CG.CEnv (T.progName prog) [] [] M.empty newtypesEmpty []
+        (_,source,errors) = CG.cgenModule cenv prog
+    TC.checkProgram prog `shouldBe` []
+    TL.checkLinear prog `shouldBe` []
+    errors `shouldBe` []
+    source `shouldSatisfy` isInfixOf "== 3"
+    [ws | line <- lines source, let ws = words line, take 1 ws == ["case"]]
+      `shouldBe` [["case","1:"],["case","6:"]]
+  it "splits sparse heap matches while keeping immediate defaults and ownership modes" $ do
+    let arg = n "arg"
+        x = n "sum"
+        y = n "alternative"
+        d = n "default"
+        box = T.ABox (T.VPtr T.AUnit)
+        done = T.Ret T.UnitV
+        make mode ts i = program [(arg,if mode == T.Unique then T.Unique else T.Owned,T.VPtr (T.ASum ts))] T.VUnit
+          (T.Deref (if mode == T.Unique then T.Unique else T.Owned) (T.Var arg) x
+            (T.CaseA mode x [(i,y,if mode == T.Borrowed then T.Drop x done else T.Drop y done)]
+              (Just (d,if mode == T.Borrowed then T.Drop x done else T.Drop d done))))
+    forM_ [T.Owned,T.Borrowed,T.Unique] $ \mode ->
+      forM_ [[(0,box),(1,T.AUnit)],[(0,T.AUnit),(1,box)],[(2,box),(7,T.AUnit)]] $ \ts -> do
+        let i = head [j | (j,t) <- ts, t == box]
+            (prog,errs) = TM.matchProgram (make mode ts i)
+            cenv = CG.CEnv (T.progName prog) [] [] M.empty newtypesEmpty []
+            (_,source,errors) = CG.cgenModule cenv prog
+        errs `shouldBe` []
+        TC.checkProgram prog `shouldBe` []
+        TL.checkLinear prog `shouldBe` []
+        errors `shouldBe` []
+        case map T.defBody (T.progDefs prog) of
+          [T.Deref _ _ _ T.SplitA{}] -> return ()
+          es -> expectationFailure (show es)
+        source `shouldSatisfy` isInfixOf "kk_datatype_is_ptr("
+    let original = make T.Owned [(0,T.AUnit),(1,box)] 0
+        (unchanged,errs) = TM.matchProgram original
+    errs `shouldBe` []
+    map (show . T.defBody) (T.progDefs unchanged) `shouldBe` map (show . T.defBody) (T.progDefs original)
+    let sharedDefault = make T.Owned [(0,T.AUnit),(1,box),(2,box)] 1
+        (stillSparse,sparseErrs) = TM.matchProgram sharedDefault
+    sparseErrs `shouldBe` []
+    map (show . T.defBody) (T.progDefs stillSparse) `shouldBe` map (show . T.defBody) (T.progDefs sharedDefault)
+  it "checks sum partition boundaries and transfers ownership to each side" $ do
+    let arg = n "arg"
+        x = n "sum"
+        l = n "left"
+        r = n "right"
+        sumType = sumA (replicate 5 (T.ABox (T.VPtr T.AUnit)))
+        done = T.Ret T.UnitV
+        split k mode = T.SplitA mode x k (l,T.Drop l done) (r,T.Drop r done)
+        ctx = M.singleton x (T.A sumType)
+        make mode = program [(arg,mode,T.VPtr sumType)] T.VUnit
+                      (T.Deref mode (T.Var arg) x (split 2 mode))
+    TQ.altTypes env (T.A sumType) (split 2 T.Owned) `shouldBe`
+      Right [[T.A (T.ASum (take 2 (TT.sumAlts (replicate 5 (T.ABox (T.VPtr T.AUnit))))))],
+             [T.A (T.ASum (drop 2 (TT.sumAlts (replicate 5 (T.ABox (T.VPtr T.AUnit))))))]]
+    forM_ [-1,0,5,6] $ \k ->
+      TQ.inferE env ctx M.empty (split k T.Owned) `shouldSatisfy` isLeft
+    forM_ [T.Owned,T.Unique] $ \mode -> do
+      TC.checkProgram (make mode) `shouldBe` []
+      TL.checkLinear (make mode) `shouldBe` []
+    let borrowed = program [(arg,T.Owned,T.VPtr sumType)] T.VUnit
+          (T.Deref T.Owned (T.Var arg) x
+            (T.SplitA T.Borrowed x 2 (l,T.Drop x done) (r,T.Drop x done)))
+    TC.checkProgram borrowed `shouldBe` []
+    TL.checkLinear borrowed `shouldBe` []
+  it "partitions exhaustive matches and preserves sparse defaults" $ do
+    let arg = n "arg"
+        x = n "sum"
+        d = n "default"
+        box = T.ABox (T.VPtr T.AUnit)
+        done = T.Ret T.UnitV
+        make ts alts def = program [(arg,T.Owned,T.VPtr (sumA ts))] T.VUnit
+          (T.Deref T.Owned (T.Var arg) x (T.CaseA T.Owned x alts def))
+        alts = [(i,n ("alt" ++ show i),T.Drop (n ("alt" ++ show i)) done) | i <- [0..5]]
+    forM_ [(replicate 6 box,3),(T.AUnit : replicate 5 box,1),
+           ([T.AUnit,box],1),([box,T.AUnit],1)] $ \(ts,k) -> do
+      let (prog,errs) = TM.matchProgram (make ts (take (length ts) alts) Nothing)
+      errs `shouldBe` []
+      TC.checkProgram prog `shouldBe` []
+      TL.checkLinear prog `shouldBe` []
+      case map T.defBody (T.progDefs prog) of
+        [T.Deref _ _ _ (T.SplitA _ _ actual _ _)] -> actual `shouldBe` k
+        es -> expectationFailure (show es)
+      let (again,againErrs) = TM.matchProgram prog
+      againErrs `shouldBe` []
+      map (show . T.defBody) (T.progDefs again) `shouldBe` map (show . T.defBody) (T.progDefs prog)
+    let sparse = make (replicate 6 box) [alts !! 4] (Just (d,T.Drop d done))
+    let (sparse',sparseErrs) = TM.matchProgram sparse
+    sparseErrs `shouldBe` []
+    map (show . T.defBody) (T.progDefs sparse') `shouldBe` map (show . T.defBody) (T.progDefs sparse)
+  it "rejects an owned default that loses the sum" $ do
+    let arg = n "arg"
+        x = n "sum"
+        y = n "alternative"
+        d = n "default"
+        sumType = sumA [T.ABox (T.VPtr T.AUnit),T.ABox (T.VPtr T.AUnit)]
+        body = T.Deref T.Owned (T.Var arg) x
+          (T.CaseA T.Owned x [(0,y,T.Drop y (T.Ret T.UnitV))] (Just (d,T.Ret T.UnitV)))
+    TL.checkLinear (program [(arg,T.Owned,T.VPtr sumType)] T.VUnit body) `shouldSatisfy` (not . null)
   where
     isLeft (Left _) = True
     isLeft _ = False

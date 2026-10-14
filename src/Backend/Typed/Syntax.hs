@@ -76,8 +76,10 @@ owning m
 
 -- boxed types A, B: what a pointer points to.
 --
--- - Shapes `Box V`, `1` and `A + B` have known tags and can be destructured by `[case]` and
+-- - Shapes `Box V`, `1` and `⊕ᵢ Aᵢ` have known tags and can be destructured by `[case]` and
 --   `[unbox]`. The alternatives of a sum must be shapes: `a + 1` or `T⟨B̄⟩ + 1` has no known tags.
+--   Sum indices are sorted, nonnegative starts of nonoverlapping tag intervals.
+--   A nested sum occupies its tag width; gaps retain excluded alternatives' tag positions.
 -- - `a`, `a⟨B̄⟩` and `T⟨B̄⟩` without a definition are opaque: a value of such a type can only be
 --   passed around.
 -- - `λā.A` only occurs as the argument of a higher-kinded variable, and applying it is
@@ -86,7 +88,7 @@ owning m
 --   `μt.A[B̄/ā]` with the recursive occurrences replaced by `t`.
 data AType = ABox VType                 -- Box V
            | AUnit                      -- 1
-           | ASum AType AType           -- A + B, binary and right-nested
+           | ASum [(Int,AType)]         -- ⊕ᵢ Aᵢ, indexed by stable zero-based tag positions
            | AFun [(Mode,VType)] VType  -- (q̄ V̄) -> W, for top-level functions and closures alike
            | AForall [TVar] AType       -- ∀ā. A
            | AVar TVar                  -- a
@@ -156,15 +158,10 @@ data AVal
   --   ∅ ⊢ () : 1
   | UnitA
 
-  --   Γ ⊢ v : A
-  --  ──────────────────── [inl]
-  --   Γ ⊢ inl v : A + B
-  | Inl AType AVal
-
-  --   Γ ⊢ v : B
-  --  ──────────────────── [inr]
-  --   Γ ⊢ inr v : A + B
-  | Inr AType AVal
+  --   Γ ⊢ v : Aᵢ
+  --  ──────────────────────── [inj-a]
+  --   Γ ⊢ injᵢ v : ⊕ⱼ Aⱼ
+  | InjA Int AType AVal
 
   --   Γ ⊢ v : unroll(T⟨B̄⟩)
   --  ──────────────────────── [roll]
@@ -219,7 +216,7 @@ data VVal
   --   x :q V ⊢ x :q V
   --
   -- As in the paper, a variable is only a value at an unboxed type. A variable `x :q A` at a boxed
-  -- type (bound by `[case]` on `A + B`, `[deref]` or `[unroll]`) is only an *operand*: the
+  -- type (bound by `[case]` on `⊕ᵢ Aᵢ`, `[deref]` or `[unroll]`) is only an *operand*: the
   -- scrutinee of a destructuring form, the variable of `[drop]` or `[if-unique]`, the value of
   -- `[dup]` or the function of `[app]`. It cannot be stored again as a boxed value.
   = Var Name
@@ -321,7 +318,7 @@ data VExpr
   -- Destructuring takes a mode: owned destructuring consumes the scrutinee and its binders are
   -- owned (a move); borrowed destructuring gives binders borrowed from the scrutinee. Unique
   -- destructuring consumes a unique scrutinee and its binders are unique; it is only allowed
-  -- where the binder is the scrutinee's pointer: `[case]` on `A + B`, `[deref]`, `[unroll]` and
+  -- where the binder is the scrutinee's pointer: `[case]` on `⊕ᵢ Aᵢ`, `[deref]`, `[unroll]` and
   -- `[unpack]` (`keepsPointer`).
   --
   --   Γ₁ ⊢ v :q V₁ ⊗ V₂    Γ₂, x :q V₁, y :q V₂ ⊢ e : W
@@ -334,10 +331,23 @@ data VExpr
   --   Γ₁, Γ₂ ⊢ case_q v of { injᵢ xᵢ -> eᵢ } : W
   | CaseV Mode VVal [(Name,VExpr)]
 
-  --   Γ₁ ⊢ v :q A + B    Γ₂, x :q A ⊢ e₁ : W    Γ₂, y :q B ⊢ e₂ : W
-  --  ──────────────────────────────────────────────────────────────── [case]
-  --   Γ₁, Γ₂ ⊢ case_q v of { inl x -> e₁; inr y -> e₂ } : W
-  | CaseA Mode Name (Name,VExpr) (Name,VExpr)
+  --   Γ₁ ⊢ v :q ⊕ⱼ∈J Aⱼ    Γ₂, xᵢ :q Aᵢ ⊢ eᵢ : W (i ∈ I)    Γ₂, d :q ⊕ⱼ∈J\I Aⱼ ⊢ e : W
+  --  ────────────────────────────────────────────────────────────────────────── [case-a]
+  --   Γ₁, Γ₂ ⊢ case_q v of { injᵢ xᵢ -> eᵢ; _ d -> e } : W
+  --
+  -- Indices must belong to the sum and be distinct. Without a default every alternative occurs.
+  -- The default excludes the matched indices without renumbering the remainder;
+  -- it must be nonempty. No allocation or retagging occurs, at any mode.
+  | CaseA Mode Name [(Int,Name,VExpr)] (Maybe (Name,VExpr))
+
+  --   Γ₁ ⊢ v :q ⊕ᵢ∈J Aᵢ    Γ₂, x :q ⊕ᵢ∈J,i<k Aᵢ ⊢ e₁ : W    Γ₂, y :q ⊕ᵢ∈J,i≥k Aᵢ ⊢ e₂ : W
+  --  ────────────────────────────────────────────────────────────────────────────── [split-a]
+  --   Γ₁, Γ₂ ⊢ split_q v at k of { x -> e₁; y -> e₂ } : W
+  --
+  -- Both sides must be nonempty. Both binders retain the original indices,
+  -- pointer and runtime tags. Even singleton partitions keep their sum wrapper.
+  -- Like CaseA, this supports owned, borrowed and unique modes without repacking.
+  | SplitA Mode Name Int (Name,VExpr) (Name,VExpr)
 
   --   Γ₁ ⊢ v :q A*    Γ₂, x :q A ⊢ e : W
   --  ───────────────────────────────────── [deref]
