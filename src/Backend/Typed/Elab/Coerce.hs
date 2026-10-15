@@ -7,7 +7,7 @@
 -----------------------------------------------------------------------------
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Elab.Coerce( coerce, genVal, genPtr ) where
+module Backend.Typed.Elab.Coerce( coerce, genVal, genPtr, applyFun ) where
 
 import qualified Data.Map as M
 import Common.Name
@@ -129,10 +129,36 @@ funPair a b
 wrapFun :: [TVar] -> [TVar] -> [(Mode,VType)] -> VType -> [(Mode,VType)] -> VType -> VVal -> E (K,VVal)
 wrapFun tvs itvs ps r qs s v
   = do ys <- mapM (const (fresh "w")) qs
-       g  <- fresh "g"
        (ks,args) <- unzip <$> mapM (\((_,q),(_,p),y) -> coerce q p (Var y)) (zip3 qs ps ys)
        x  <- fresh "r"
        (kr,res) <- coerce r s (Var x)
-       let body = Deref Owned (tapp v (map AVar itvs)) g (compose ks (Let x r (App g args) (kr (Ret res))))
+       call <- applyFun (tapp v (map AVar itvs)) args
+       let body = compose ks (Let x r call (kr (Ret res)))
            lam  = Lam [(y,m,q) | (y,(m,q)) <- zip ys qs] s body
        genVal (VPtr (forallA tvs (AFun qs s))) lam
+
+-- Immediately applied coercion adapters need no closure. Bind arguments outside
+-- the lambda's scope first, so its parameters cannot capture names in later arguments.
+-- A top-level function is called directly rather than through its static closure.
+applyFun :: VVal -> [VVal] -> E VExpr
+applyFun (Ptr _ (Lam ps _ body)) args
+  = do xs <- mapM (const (fresh "arg")) args
+       let bind (x,t,v) = Let x t (Ret v)
+           actuals = [(x,t,v) | (x,(_,_,t),v) <- zip3 xs ps args]
+           formals = [(p,t,Var x) | ((p,_,t),x) <- zip ps xs]
+       return (compose (map bind actuals ++ map bind formals) body)
+applyFun fv args
+  | Just (f,tys) <- knownFun fv []
+  = return (Call f tys args)
+  | otherwise
+  = do g <- fresh "f"
+       return (Deref Owned fv g (App g args))
+
+-- a top-level function applied to all its type arguments; as a closure its parameters are owned
+knownFun :: VVal -> [AType] -> Maybe (Name,[AType])
+knownFun v tys
+  = case v of
+      TyApp w tys'                                           -> knownFun w (tys' ++ tys)
+      Ptr (AForall tvs _) (Fun f) | length tvs == length tys -> Just (f,tys)
+      Ptr (AFun _ _) (Fun f)      | null tys                 -> Just (f,tys)
+      _                                                      -> Nothing
