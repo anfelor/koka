@@ -15,6 +15,7 @@ import Control.Monad( foldM )
 import Common.Name
 import Common.NamePrim( nameFieldAddrOf )
 import Common.Syntax( isDefFun, ParamInfo(..), Platform )
+import qualified Common.Syntax as Syntax
 import Kind.Newtypes
 import Type.Type
 import qualified Core.Core as C
@@ -36,8 +37,7 @@ elabProgram :: Platform -> Newtypes -> [C.Core] -> C.Core -> (Program,[String],[
 elabProgram platform nt imports core
   = let defs    = C.flattenDefGroups (C.coreProgDefs core)
         isigs   = M.fromList [(n,withModes (if n == nameFieldAddrOf then Borrow : drop 1 pinfos else pinfos) sig) | (n,(tp,isFun,pinfos)) <- M.toList (importSigs (core:imports)), Right sig <- [typeSig nt tp isFun]]
-        lsigs   = M.fromList [(C.defName d,sig) | d <- defs, Right sig <- [typeSig nt (C.defType d) (isDefFun (C.defSort d))]]
-        env0    = Env nt S.empty S.empty (M.union lsigs isigs)
+        env0    = Env nt S.empty S.empty isigs
         tdefs   = typeDefs platform nt
         run (sigs,ds,errs,notes) def
           = let label msg = show (C.defName def) ++ ": " ++ msg
@@ -58,8 +58,9 @@ elabFunDef :: C.Def -> [TName] -> C.Expr -> E (Def,Sig)
 elabFunDef def pars body
   = do (tvs,args,res) <- funSig (typeOf (C.defExpr def))
        body' <- withTVars tvs (withLocals (map getName pars) (elabExprAt res body))
-       let args' = [(getName p,m,t) | (p,(m,t)) <- zip pars args]
-       return (DefFun (C.defName def) tvs args' res body', SigFun tvs args res)
+       let params = withParamModes (defParamInfos def) args
+           args' = [(getName p,m,t) | (p,(m,t)) <- zip pars params]
+       return (DefFun (C.defName def) tvs args' res body', SigFun tvs params res)
 
 elabValDef :: C.Def -> E (Def,Sig)
 elabValDef def
@@ -70,15 +71,25 @@ elabValDef def
 
 importSigs :: [C.Core] -> M.Map Name (Type,Bool,[ParamInfo])
 importSigs cores
-  = M.fromList ([(C.defName d, (C.defType d, isDefFun (C.defSort d), [])) | c <- cores, d <- C.flattenDefGroups (C.coreProgDefs c)]
+  = M.fromList ([(C.defName d, (C.defType d, isDefFun (C.defSort d), defParamInfos d)) | c <- cores, d <- C.flattenDefGroups (C.coreProgDefs c)]
                 ++ [(C.externalName x, (C.externalType x, True, C.externalParams x)) | c <- cores, x@(C.External{}) <- C.coreProgExternals c])
 
--- only externals borrow parameters: their C code expects it
+defParamInfos :: C.Def -> [ParamInfo]
+defParamInfos def
+  = case C.defSort def of
+      Syntax.DefFun pinfos _ -> pinfos
+      _ -> []
+
+-- Preserve the same calling convention for definitions and imported call sites.
 withModes :: [ParamInfo] -> Sig -> Sig
 withModes pinfos sig
   = case sig of
-      SigFun tvs ps r -> SigFun tvs [(if pinfo == Borrow then Borrowed else m, t) | ((m,t),pinfo) <- zip ps (pinfos ++ repeat Own)] r
+      SigFun tvs ps r -> SigFun tvs (withParamModes pinfos ps) r
       _ -> sig
+
+withParamModes :: [ParamInfo] -> [(Mode,VType)] -> [(Mode,VType)]
+withParamModes pinfos ps
+  = [(if pinfo == Borrow then Borrowed else m, t) | ((m,t),pinfo) <- zip ps (pinfos ++ repeat Own)]
 
 typeSig :: Newtypes -> Type -> Bool -> Tr Sig
 typeSig nt tp isFun
