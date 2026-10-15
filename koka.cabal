@@ -45,12 +45,14 @@ library
       Backend.Typed.Names
       Backend.Typed.Passes.Anf
       Backend.Typed.Passes.Contify
+      Backend.Typed.Passes.JoinArgs
       Backend.Typed.Passes.DropSpec
       Backend.Typed.Passes.Lazy
       Backend.Typed.Passes.Match
       Backend.Typed.Passes.Perceus
       Backend.Typed.Passes.Reuse
       Backend.Typed.Passes.Simplify
+      Backend.Typed.Passes.SinkJoins
       Backend.Typed.Pretty
       Backend.Typed.Query
       Backend.Typed.Syntax
