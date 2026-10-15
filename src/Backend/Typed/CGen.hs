@@ -436,17 +436,24 @@ genLam cx ps r e
            g'  = M.union (M.fromList ([(x,V t) | (x,_,t) <- ps])) (cxGamma cx)
            cx' = cx{ cxGamma = g', cxSelf = Nothing, cxJoins = M.empty, cxValues = M.empty, cxAliases = M.empty, cxPayloads = M.empty }
        body <- genE cx' DReturn e
-       let loads = [ctName ct ++ " " ++ localName x ++ " = " ++ dupExpr ct ("_self->c" ++ show i) ++ ";" | (i,ct) <- fields, let x = caps !! i]
+       -- Transfer captures from unique closures; shared closures retain their own references.
+       let loads = [ctName ct ++ " " ++ localName (caps !! i) ++ " = _self->c" ++ show i ++ ";" | (i,ct) <- fields]
+           dups = [x ++ " = " ++ dupExpr ct x ++ ";" | (i,ct) <- fields, needsRC ct, let x = localName (caps !! i)]
            fun = "static " ++ ctName rct ++ " " ++ fname ++ "(kk_function_t _fself" ++ concat [", " ++ ctName ct ++ " " ++ localName x | ((x,_,_),ct) <- zip ps pcts] ++ ", kk_context_t* _ctx) {\n"
-                 ++ (if null caps then "  kk_function_drop(_fself,_ctx);\n"
-                     else "  " ++ sname ++ "* _self = kk_function_as(" ++ sname ++ "*,_fself,_ctx);\n" ++ concatMap (\l -> "  " ++ l ++ "\n") loads ++ "  kk_function_drop(_fself,_ctx);\n")
+                 ++ (if null caps then "  kk_function_static_drop(_fself,_ctx);\n"
+                     else "  " ++ sname ++ "* _self = kk_function_as(" ++ sname ++ "*,_fself,_ctx);\n" ++ concatMap (\l -> "  " ++ l ++ "\n") loads
+                          ++ "  kk_drop_match(_self,{ " ++ unwords dups ++ " },{},_ctx);\n")
                  ++ indent body ++ "}\n"
-       emitDecl (structDef ++ fun)
+       emitDecl ((if null caps then "" else structDef) ++ fun)
        x <- fresh "c"
-       return ("({ " ++ sname ++ "* " ++ x ++ " = kk_function_alloc_as(" ++ sname ++ "," ++ show scan ++ ",_ctx); "
-               ++ x ++ "->_base.fun = kk_kkfun_ptr_box(&" ++ fname ++ ",_ctx); "
-               ++ concat [x ++ "->c" ++ show i ++ " = " ++ localName (caps !! i) ++ "; " | (i,_) <- fields]
-               ++ "kk_datatype_box(kk_datatype_from_base(&" ++ x ++ "->_base,_ctx)); })")
+       -- A capture-free closure can share a static function block.
+       if null caps
+         then return ("({ kk_define_static_function(" ++ x ++ "," ++ fname ++ ",_ctx); "
+                      ++ "kk_datatype_box(kk_function_static_dup(" ++ x ++ ",_ctx)); })")
+         else return ("({ " ++ sname ++ "* " ++ x ++ " = kk_function_alloc_as(" ++ sname ++ "," ++ show scan ++ ",_ctx); "
+                      ++ x ++ "->_base.fun = kk_kkfun_ptr_box(&" ++ fname ++ ",_ctx); "
+                      ++ concat [x ++ "->c" ++ show i ++ " = " ++ localName (caps !! i) ++ "; " | (i,_) <- fields]
+                      ++ "kk_datatype_box(kk_datatype_from_base(&" ++ x ++ "->_base,_ctx)); })")
 
 lamFree :: [(Name,Mode,VType)] -> VExpr -> S.Set Name
 lamFree ps e = fvA (Lam ps VUnit e)
