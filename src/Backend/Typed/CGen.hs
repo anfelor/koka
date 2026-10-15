@@ -793,9 +793,14 @@ genE cx dest expr
               genAlias cx dest value (Just x) y a
                 (if S.member x (cxNamed cx) then S.insert y (cxNamed cx) else cxNamed cx) body
       IsUnique x e1 e2
-        -> do s1 <- genE cx dest e1
+        -> do t <- liftC (inferVar (cxGamma cx) x)
+              s1 <- genE cx dest e1
               s2 <- genE cx dest e2
-              return (["if (kk_block_is_unique(kk_datatype_as_ptr(kk_datatype_unbox(" ++ localName x ++ "),_ctx))) {"]
+              let d = "kk_datatype_unbox(" ++ localName x ++ ")"
+                  test = case t of
+                           V _ -> "kk_datatype_is_unique(" ++ d ++ ",_ctx)"   -- a lazy value may be immediate
+                           A _ -> "kk_block_is_unique(kk_datatype_as_ptr(" ++ d ++ ",_ctx))"
+              return (["if (" ++ test ++ ") {"]
                       ++ map ("  " ++) s1 ++ ["} else {"] ++ map ("  " ++) s2 ++ ["}"])
       UnboxRu v x r e
         -> do t <- liftC (inferAVar (cxGamma cx) v >>= boxContents)
