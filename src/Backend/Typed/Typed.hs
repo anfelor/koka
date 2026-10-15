@@ -24,6 +24,8 @@ import Backend.Typed.Passes.Lazy( lazyProgram )
 import Backend.Typed.Passes.Reuse( reuseProgram )
 import Backend.Typed.Passes.DropSpec( dropSpecProgram )
 import Backend.Typed.Passes.Match( matchProgram )
+import Backend.Typed.Passes.SinkJoins( sinkJoinsProgram )
+import Backend.Typed.Passes.JoinArgs( joinArgsProgram )
 import Backend.Typed.Linear( checkLinear )
 
 -- returns the program after Perceus (and reuse) and messages labeled by the phase that produced them
@@ -33,7 +35,7 @@ typedFromCore platform enableReuse nt imports uniq core
         (prog,elabErrs,notes) = elabProgram platform nt imports acore
         passes                = [("anf",False,pure' anfProgram), ("contify",False,contifyProgram), ("simplify",False,pure' simplifyProgram), ("perceus",True,perceusProgram), ("lazy",True,lazyProgram)
                                   ,("dropspec",True,pure' dropSpecProgram)] ++ [("reuse",True,reuseProgram) | enableReuse]
-                                  ++ [("match",True,matchProgram)]
+                                  ++ [("match",True,matchProgram), ("sinkjoins",True,pure' sinkJoinsProgram), ("joinargs",True,pure' joinArgsProgram)]
         (dsprog,msgs)         = runPasses prog (label "check" (checkProgram prog)) passes
     in (dsprog, label "elab" elabErrs ++ msgs ++ label "note" notes)
   where

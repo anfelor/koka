@@ -18,7 +18,7 @@
   Contexts and judgements
 
     Γ ::= ∅ | Γ, x :q t                         variables
-    J ::= ∅ | J, j : (q̄ V̄) -> W                 join points in scope
+    J ::= ∅ | J, j : Γ_c; (q̄ V̄) -> W           join points in scope, with their captures
     Σ                                          signatures (`Sigs`)
 
     Γ ⊢ a :q A       the boxed value a has type A
@@ -453,19 +453,23 @@ data VExpr
   -- `[if-unique]` it makes `drop-reuse` of a box derivable.
   | UnboxRu Name Name Name VExpr
 
-  --   x̄ :q̄ V̄ | J ⊢ e₁ : W    Γ | J, j : (q̄ V̄) -> W ⊢ e₂ : W
-  --  ──────────────────────────────────────────────────────── [join]
-  --   Γ | J ⊢ join j(x̄ :q̄ V̄) = e₁ in e₂ : W
+  --   Γ_c, x̄ :q̄ V̄ | J ⊢ e₁ : W    Γ, Γ_c | J, j : Γ_c; (q̄ V̄) -> W ⊢ e₂ : W
+  --  ──────────────────────────────────────────────────────────────────── [join]
+  --   Γ, Γ_c | J ⊢ join j(x̄ :q̄ V̄) = e₁ in e₂ : W
   --
-  -- A join point is closed over ordinary variables (only its parameters are free in its body)
-  -- and not recursive (`j` is not in scope in its body). Its body may jump to outer joins.
+  -- A join point captures the owned variables Γ_c that are free in its body, and is not
+  -- recursive (`j` is not in scope in its body). Its body may jump to outer joins.
   -- Since J is reset outside of tail positions, a jump cannot escape
-  -- and is always a tail call. Perceus only produces owned parameters.
+  -- and is always a tail call. Perceus only produces owned parameters and closed join
+  -- points (Γ_c = ∅); only `JoinArgs`, the last pass, introduces captures. A captured
+  -- variable must not be bound again in e₂, so every jump sees the same variable.
   | Join Name [(Name,Mode,VType)] VExpr VExpr
 
-  --   j : (q̄ V̄) -> W ∈ J    Γᵢ ⊢ vᵢ :qᵢ Vᵢ
-  --  ─────────────────────────────────────── [jump]
-  --   Γ₁, ..., Γₙ | J ⊢ jump j(v₁, ..., vₙ) : W
+  --   j : Γ_c; (q̄ V̄) -> W ∈ J    Γᵢ ⊢ vᵢ :qᵢ Vᵢ
+  --  ──────────────────────────────────────────────── [jump]
+  --   Γ_c, Γ₁, ..., Γₙ | J ⊢ jump j(v₁, ..., vₙ) : W
+  --
+  -- A jump passes the captured variables to the join point as well as its arguments.
   | Jump Name [VVal]
   deriving (Eq,Show)
 

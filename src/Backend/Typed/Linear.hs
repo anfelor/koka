@@ -26,8 +26,9 @@
   are unique too. Any borrowed use of a unique variable, or of a variable borrowed from it,
   may duplicate the reference, after which it is only owned.
 
-  The body of a join point is closed and checked like the body of a function; a jump
-  is checked like a call. Nothing follows a jump in its branch, so the variables left
+  The body of a join point is checked like the body of a function whose owned parameters
+  include the variables it captures; a jump is checked like a call that also consumes the
+  captured variables. Nothing follows a jump in its branch, so the variables left
   at a jump (including the parents of borrowed arguments) are compared with the other
   branches and consumed after the whole join.
 
@@ -64,8 +65,8 @@ type Delta = M.Map Name Status
 
 type L a = M () Delta a
 
--- the modes of the parameters of the join points in scope
-type Joins = M.Map Name [Mode]
+-- the modes of the parameters of the join points in scope, and the variables they capture
+type Joins = M.Map Name ([Mode],[Name])
 
 checkLinear :: Program -> [String]
 checkLinear prog
@@ -265,15 +266,16 @@ checkE env g js expr
                           addVars [(x,V t)] owned'
                           checkE env (M.insert x (V t) g) js e2
                           leave [(x,V t)]
-      Call f _ vs -> args (paramModes env f (length vs)) vs
+      Call f _ vs -> args [] (paramModes env f (length vs)) vs
       Jump j vs -> case M.lookup j js of
-                     Just ms -> args ms vs
+                     Just (ms,caps) -> args caps ms vs
                      Nothing -> fail ("jump to unknown join point " ++ show j)
-      Join j ps e1 e2 -> do d <- get
-                            put (paramDelta ps)
-                            scopeEnd (checkE env (M.fromList [(x,V t) | (x,_,t) <- ps]) js e1)
+      Join j ps e1 e2 -> do let caps = [x | x <- S.toList (fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps]), not (trivialVar g x)]
+                            d <- get
+                            put (paramDelta ps `M.union` M.fromList [(x,owned') | x <- caps])
+                            scopeEnd (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) js e1)
                             put d
-                            checkE env g (M.insert j [m | (_,m,_) <- ps] js) e2
+                            checkE env g (M.insert j ([m | (_,m,_) <- ps],caps) js) e2
       App f vs -> do ft <- liftE (inferVar g f)
                      case ft of
                        A a -> ownedParams a
@@ -306,10 +308,12 @@ checkE env g js expr
                                branches (map (checkE env g js) (def : map snd alts))
       _ -> fail "unexpected destructuring form"
   where
-    -- owned and unique arguments first: a borrowed argument must not be derived from one of them
-    args ms vs = do sequence_ [ownedV env g v | (Owned,v) <- zip ms vs]
-                    sequence_ [uniqueV g v | (Unique,v) <- zip ms vs]
-                    sequence_ [borrowedV env g v | (Borrowed,v) <- zip ms vs]
+    -- owned and unique arguments (and captured variables) first: a borrowed argument must not
+    -- be derived from one of them
+    args caps ms vs = do sequence_ [ownedV env g v | (Owned,v) <- zip ms vs]
+                         mapM_ (consume g) caps
+                         sequence_ [uniqueV g v | (Unique,v) <- zip ms vs]
+                         sequence_ [borrowedV env g v | (Borrowed,v) <- zip ms vs]
 
 destruct :: Env -> Gamma -> Joins -> Mode -> Bool -> Maybe Name -> L () -> L () -> L () -> [([(Name,Ty)],VExpr)] -> L ()
 destruct env g js m keeps name own unique borrow alts

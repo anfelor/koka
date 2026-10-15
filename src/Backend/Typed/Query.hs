@@ -135,7 +135,11 @@ inferExpr env g js expr
                             n <- reuseSize s
                             checkBinders g [x,r]
                             inferE env (bindAll [(x,V s),(r,V (VReuse n (Just (Var x))))] g) js e
-      Join j ps e1 e2 -> do t <- inferE env (M.fromList [(x,V p) | (x,_,p) <- ps]) js e1
+      Join j ps e1 e2 -> do let xs = [x | (x,_,_) <- ps]
+                            unless (S.disjoint (fvE e1 `S.difference` S.fromList xs) (S.fromList (bindersE e2)))
+                              (Left ("join point " ++ show j ++ " captures a variable that is bound again in its scope"))
+                            checkBinders g xs
+                            t <- inferE env (bindAll [(x,V p) | (x,_,p) <- ps] g) js e1
                             checkE env g (M.insert j ([p | (_,_,p) <- ps],t) js) e2 t
                             return t
       Jump j vs -> case M.lookup j js of
