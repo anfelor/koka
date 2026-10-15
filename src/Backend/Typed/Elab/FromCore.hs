@@ -181,12 +181,11 @@ elabApp f args resTp
        case mbsig of
          Just (g,sig@(SigFun _ _ _),gtp,tys)
            -> do (tysD,params,res) <- instFun g sig gtp tys
-                 callWith (Call g tysD) params res args resTp
+                 callWith (return . Call g tysD) params res args resTp
          _ -> do (k1,fv) <- elabVal f
-                 g <- fresh "f"
                  (params,res) <- funType f
-                 body <- callWith (App g) (map snd params) res args resTp
-                 return (k1 (Deref Owned fv g body))
+                 body <- callWith (applyFun fv) (map snd params) res args resTp
+                 return (k1 body)
 
 globalOf :: C.Expr -> E (Maybe (Name,Sig,Type,[Type]))
 globalOf f
@@ -252,13 +251,14 @@ funType f = do t <- vt (typeOf f)
                  VPtr (AFun params res) -> return (params,res)
                  _ -> failE ("expecting a function value: " ++ ppr t)
 
-callWith :: ([VVal] -> VExpr) -> [VType] -> VType -> [C.Expr] -> Type -> E VExpr
+callWith :: ([VVal] -> E VExpr) -> [VType] -> VType -> [C.Expr] -> Type -> E VExpr
 callWith call params res args resTp
   = do (ks,vs) <- unzip <$> mapM (\(p,arg) -> elabValAt p arg) (zip params args)
        expect <- vt resTp
        r <- fresh "r"
        (kr,vr) <- coerce res expect (Var r)
-       let body = if alphaEq res expect then call vs else Let r res (call vs) (kr (Ret vr))
+       app <- call vs
+       let body = if alphaEq res expect then app else Let r res app (kr (Ret vr))
        return (compose ks body)
 
 splitTypeApp :: C.Expr -> (Maybe (TName,C.VarInfo),[Type])
