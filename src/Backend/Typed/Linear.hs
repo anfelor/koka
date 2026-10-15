@@ -22,9 +22,11 @@
 
   A unique variable is owned and holds the only reference to its block, so `UnboxRu` may
   take its contents and keep its block as a credit. An owned variable is unique in the
-  first branch of `IsUnique`; unique parameters, and the binders of unique destructuring,
-  are unique too. Any borrowed use of a unique variable, or of a variable borrowed from it,
-  may duplicate the reference, after which it is only owned.
+  first branch of `IsUnique`; unique parameters, the binders of unique destructuring, and a
+  `let` of a unique value (a unique variable, a fresh context, an append or `ctx-copy c`) are
+  unique too. A context is plugged or appended only through a unique value. Any borrowed use
+  of a unique variable, or of a variable borrowed from it, may duplicate the reference, after
+  which it is only owned.
 
   The body of a join point is checked like the body of a function whose owned parameters
   include the variables it captures; a jump is checked like a call that also consumes the
@@ -167,6 +169,11 @@ ownedV env g val
       Ptr _ _ -> children
       Pack _ _ _ -> children
       TyApp _ _ -> children
+      Hole -> return ()
+      Context _ k -> ownedV env g k
+      Plug c v -> uniqueV env g c >> ownedV env g v
+      Append c d -> uniqueV env g c >> uniqueV env g d
+      CtxCopy c -> ownedV env g c
   where
     children = void (descendV (\a -> ownedA env g a >> return a) (\v -> ownedV env g v >> return v) val)
 
@@ -193,12 +200,24 @@ ownedA env g val
       BoxAt r v -> consume g r >> ownedV env g v
       BoxIn x v -> consume g x >> ownedV env g v
 
--- a unique value is a unique variable
-uniqueV :: Gamma -> VVal -> L ()
-uniqueV g val
+-- a unique value is a unique variable or a fresh context
+uniqueV :: Env -> Gamma -> VVal -> L ()
+uniqueV env g val
   = case val of
       Var x -> uniqueName g x
-      _ -> fail ("unique use of a value that is not a variable: " ++ show val)
+      Context _ k -> ownedV env g k
+      CtxCopy c -> ownedV env g c
+      Append c d -> uniqueV env g c >> uniqueV env g d
+      _ -> fail ("unique use of a value that is not unique: " ++ show val)
+
+isUniqueV :: Delta -> VVal -> Bool
+isUniqueV d val
+  = case val of
+      Var x -> isUnique d x
+      Context _ _ -> True
+      CtxCopy _ -> True
+      Append _ _ -> True
+      _ -> False
 
 uniqueName :: Gamma -> Name -> L ()
 uniqueName g x
@@ -257,13 +276,17 @@ checkE env g js expr
        let v = dsScrut ds
            name = case v of { Var z -> Just z; _ -> Nothing }
        destruct env g js (dsMode ds) (keepsPointer expr) name
-         (ownedV env g v) (uniqueV g v) (borrowedV env g v)
+         (ownedV env g v) (uniqueV env g v) (borrowedV env g v)
          [(zip xs ts,e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
 checkE env g js expr
   = case expr of
       Ret v -> ownedV env g v
-      Let x t e1 e2 -> do checkE env g M.empty e1
-                          addVars [(x,V t)] owned'
+      Let x t e1 e2 -> do d <- get
+                          let st = case e1 of
+                                     Ret v | isUniqueV d v -> unique'
+                                     _ -> owned'
+                          checkE env g M.empty e1
+                          addVars [(x,V t)] st
                           checkE env (M.insert x (V t) g) js e2
                           leave [(x,V t)]
       Call f _ vs -> args [] (paramModes env f (length vs)) vs
@@ -312,7 +335,7 @@ checkE env g js expr
     -- be derived from one of them
     args caps ms vs = do sequence_ [ownedV env g v | (Owned,v) <- zip ms vs]
                          mapM_ (consume g) caps
-                         sequence_ [uniqueV g v | (Unique,v) <- zip ms vs]
+                         sequence_ [uniqueV env g v | (Unique,v) <- zip ms vs]
                          sequence_ [borrowedV env g v | (Borrowed,v) <- zip ms vs]
 
 destruct :: Env -> Gamma -> Joins -> Mode -> Bool -> Maybe Name -> L () -> L () -> L () -> [([(Name,Ty)],VExpr)] -> L ()

@@ -67,6 +67,7 @@ boxLeaf t v
       VRaw _      -> Box v
       VExists _ _ -> Box v
       VReuse _ _    -> Box v
+      VCtx _ _    -> Box v
 
 boxAlt :: [VType] -> (AVal -> E VExpr) -> (Int,VType) -> E (Name,VExpr)
 boxAlt ts k (i,ti)
@@ -98,6 +99,7 @@ unboxAV t a
       VRaw _      -> unbox
       VExists _ _ -> unbox
       VReuse _ _    -> unbox
+      VCtx _ _    -> unbox
   where
     unbox = do x <- fresh "x"   -- as `boxA`
                return (Unbox Owned a x, Var x)

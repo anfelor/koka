@@ -120,7 +120,12 @@ inferExpr env g js expr
       CaseLit v alts def -> do vt <- inferV env g v
                                mapM_ (\(l,_) -> expect vt (litType l)) alts
                                branches (inferE env g js def : [inferE env g js e | (_,e) <- alts])
-      Drop x e -> inferAVar g x >> inferE env g js e
+      Drop x e -> do t <- inferVar g x
+                     case t of
+                       V (VCtx _ _) -> return ()
+                       V _ -> Left ("drop of an unboxed value: " ++ ppr t)
+                       A _ -> return ()
+                     inferE env g js e
       Free r e -> do t <- inferV env g (Var r)
                      case t of
                        VReuse _ _ -> inferE env g js e
@@ -320,6 +325,7 @@ checkReuseTy env g ty = case ty of
     VProd a b -> checkReuseTy env g (V a) >> checkReuseTy env g (V b)
     VSum ts -> mapM_ (checkReuseTy env g . V) ts
     VExists _ b -> checkReuseTy env g (V b)
+    VCtx a b -> checkReuseTy env g (A a) >> checkReuseTy env g (A b)
     VUnit -> return ()
     VRaw _ -> return ()
   A a -> case a of
@@ -384,7 +390,7 @@ inferA env g val
              _ -> Left ("unknown open constructor " ++ show c)
       Lam ps r e -> do when (any containsReuse [t | x <- S.toList (fvA val), Just t <- [M.lookup x g]])
                          (Left "cannot capture reuse credits in a closure")
-                       checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) M.empty e r
+                       checkE env (bindAll [(x,V t) | (x,_,t) <- ps] (M.delete nameHole g)) M.empty e r
                        return (AFun [(m,t) | (_,m,t) <- ps] r)
       BoxIn x v -> do tx <- inferV env g (Var x)
                       tv <- inferV env g v
@@ -428,6 +434,27 @@ inferV env g val
                         VExists bs b | length bs == length tys
                           -> checkV env g v (inst bs tys b) >> return t
                         _ -> Left ("pack into " ++ ppr t)
+      Hole -> case M.lookup nameHole g of
+                Just (V t) -> return t
+                _ -> Left "hole outside of a context"
+      Context b k -> do unless (isCtxValue k) (Left ("ill-formed context: " ++ ppr val))
+                        t <- inferV env (M.insert nameHole (V (VPtr b)) g) k
+                        case t of
+                          VPtr a -> return (VCtx a b)
+                          _ -> Left ("context of a non-pointer: " ++ ppr t)
+      Plug c v -> do t <- inferV env g c
+                     case t of
+                       VCtx a b -> checkV env g v (VPtr b) >> return (VPtr a)
+                       _ -> Left ("plugging a non-context: " ++ ppr t)
+      Append c d -> do tc <- inferV env g c
+                       td <- inferV env g d
+                       case (tc,td) of
+                         (VCtx a b, VCtx b' c') | alphaEq b b' -> return (VCtx a c')
+                         _ -> Left ("appending " ++ ppr td ++ " to " ++ ppr tc)
+      CtxCopy c -> do t <- inferV env g c
+                      case t of
+                        VCtx _ _ -> return t
+                        _ -> Left ("unsharing a non-context: " ++ ppr t)
       DupV v -> do t <- inferV env g v
                    when (containsReuse (V t)) (Left "cannot duplicate a reuse credit")
                    return t

@@ -50,6 +50,22 @@
       is `z`'s pointer. Consuming an alias, or testing it with `[if-unique]`, consumes `z` and
       makes the alias owned (unique if `z` was); the variables borrowed from `z` are then borrowed
       from it.
+
+  Constructor contexts
+
+    A context `c : ctx⟨A,B⟩` is an `A` with one hole of type `B*` (Koka's `cctx<a,b>`). At run
+    time it is either empty (`ctx □`, with A = B) or a pointer `res` to a block b₀ together with
+    the address of the hole, a field of a block bₙ, such that:
+    - the path b₀, ..., bₙ consists of blocks allocated by `[ctx]` (or copied by the runtime),
+      and the header of each bᵢ records the index of the field that leads to bᵢ₊₁ (or that is
+      the hole, for bₙ): the *context path*;
+    - each bᵢ with i > 0 is referenced only by bᵢ₋₁;
+    - the hole holds a placeholder that is not a pointer, so dropping `res` skips it.
+    A unique context `c :! ctx⟨A,B⟩` also holds the only reference to `res`, so the whole path
+    is unique and `[plug]` writes into the hole in place. Duplicating a context shares `res`
+    and demotes it to owned; `[ctx-copy]` copies the path of an owned context when `res` is
+    shared, after which it can be plugged in place.
+    The type has no destructuring rule, so nothing else can reach into the path.
 -}
 module Backend.Typed.Syntax where
 
@@ -103,8 +119,10 @@ data AType = ABox VType                 -- Box V
 --   shape, an immediate value with its tag).
 -- - Types are equal up to renaming of bound variables and β-reduction of type lambdas.
 -- - A type is trivial (`Common.isTrivial`) if it contains no pointers: `𝟙`, raw types, sums,
---   products and existentials of trivial types, and `@field-addr*` and `@reuse*` (named types
---   that are not reference counted).
+--   products and existentials of trivial types, and `@reuse*` (a named type that is not
+--   reference counted).
+-- - `ctx⟨A,B⟩` is an abstract pair of a pointer and a field address (see "Constructor
+--   contexts" above). It is not trivial and has the layout of `A* ⊗ B*`.
 -- - `|V|` is the size of the heap block of a `Box V` (`Layout.blockSize`); it is only defined when
 --   the payload is always a heap block (`Layout.isBlock`).
 data VType = VPtr AType                 -- A*
@@ -114,6 +132,7 @@ data VType = VPtr AType                 -- A*
            | VRaw Name                  -- raw: unboxed primitives (`int32`, `float64`, `char`, ...)
            | VExists [TVar] VType       -- ∃ā. V
            | VReuse Int (Maybe VVal)    -- ◇n[p]: if nonempty, an n-byte block containing p
+           | VCtx AType AType           -- ctx⟨A,B⟩: an A with a hole of type B*
            deriving (Eq,Show)
 
 -- p is an unevaluated structural value describing the original contents.
@@ -145,8 +164,9 @@ data Lit = LitInt Integer
          deriving (Eq,Show)
 
 -- Values `Γ ⊢ v :q t`. A borrowed value is an atom: a variable, a global, a literal, `()`, a
--- function, or a type application of one of these. A unique value is a variable. All other values
--- are owned. (The paper also allows borrowed pairs and injections.)
+-- function, or a type application of one of these. A unique value is a variable, a context
+-- `ctx K`, `c₁ ++ c₂` or `ctx-copy c`. All other values are owned. (The paper also allows borrowed pairs
+-- and injections.)
 --
 -- Boxed values `Γ ⊢ a :q A`; boxed variables occur only as named operands.
 data AVal
@@ -284,6 +304,61 @@ data VVal
   --
   -- An empty credit, passed when a join asks for a block that is unavailable.
   | NoReuse Int
+
+  -- Constructor contexts (see "Constructor contexts" at the top). A context is built from a
+  -- one-hole value K whose hole lies in a field of a block that K allocates:
+  --
+  --   K ::= □ | ptr C          C ::= roll C | injᵢ C | box F | box@r F
+  --   F ::= K | (F, v) | (v, F)
+  --
+  -- The hole is a linear variable of the context, so it occurs exactly once, and it only
+  -- occurs in K (not in the values v beside the path, nor in a closure).
+  --
+  --  ───────────────── [hole]
+  --   □ : B* ⊢ □ : B*
+  | Hole
+
+  --   Γ, □ : B* ⊢ K : A*    K ≠ □
+  --  ───────────────────────────── [ctx]
+  --   Γ ⊢ ctx K :! ctx⟨A,B⟩
+  --
+  --  ────────────────────────── [ctx-empty]
+  --   ∅ ⊢ ctx □ :! ctx⟨A,A⟩
+  --
+  -- A fresh context is unique. The annotation is the hole's type `B`. Code generation records
+  -- the context path in the headers of the blocks that K allocates on the path to the hole,
+  -- which it locates by the position of `□` (no constructor or field names are involved).
+  | Context AType VVal
+
+  --   Γ₁ ⊢ c₁ :! ctx⟨A,B⟩    Γ₂ ⊢ c₂ :! ctx⟨B,C⟩
+  --  ──────────────────────────────────────────── [ctx-append]
+  --   Γ₁, Γ₂ ⊢ c₁ ++ c₂ :! ctx⟨A,C⟩
+  --
+  -- Plugs the `res` of `c₂` into the hole of `c₁` in place and keeps the hole of `c₂`; an empty
+  -- `c₂` gives `c₁`. The paths of both are unique, so the path of the result is too. Extending
+  -- a context with a fresh one, `c ++ ctx K` with K ≠ □, is TRMC's step
+  -- (`kk_cctx_extend_linear`); code generation knows that `ctx K` is not empty.
+  | Append VVal VVal
+
+  --   Γ₁ ⊢ c :! ctx⟨A,B⟩    Γ₂ ⊢ v : B*
+  --  ─────────────────────────────────── [plug]
+  --   Γ₁, Γ₂ ⊢ c[v] : A*
+  --
+  -- Fills the hole in place without checking uniqueness (`kk_cctx_apply_linear`); the empty
+  -- context gives `v` itself. A context that may be shared is copied first (`[ctx-copy]`),
+  -- which is Koka's `cctx/(++.)` (`kk_cctx_apply`).
+  | Plug VVal VVal
+
+  --   Γ ⊢ c : ctx⟨A,B⟩
+  --  ───────────────────────────── [ctx-copy]
+  --   Γ ⊢ ctx-copy c :! ctx⟨A,B⟩
+  --
+  -- Makes a context unique by copying its path if `res` is shared (`kk_cctx_copy`). Elaboration
+  -- uses it to plug or append a context that may be shared (Koka's `cctx/(++)` copies both
+  -- arguments), and where a closure (such as the
+  -- continuation of an effect that may resume more than once) passes a captured context to a
+  -- unique parameter.
+  | CtxCopy VVal
   deriving (Eq,Show)
 
 -- Expressions `Γ | J ⊢ e : W` (always unboxed).
@@ -302,6 +377,10 @@ data VExpr
   --   Γ₁, ^Γ₂ | ∅ ⊢ e₁ : V    Γ₂, x : V | J ⊢ e₂ : W
   --  ─────────────────────────────────────────────────── [let]
   --   Γ₁, Γ₂ | J ⊢ let x : V = e₁ in e₂ : W
+  --
+  --   Γ₁ ⊢ v :! V    Γ₂, x :! V | J ⊢ e : W
+  --  ─────────────────────────────────────────── [let-unique]
+  --   Γ₁, Γ₂ | J ⊢ let x : V = ret v in e : W
   | Let Name VType VExpr VExpr
 
   --   f : ∀ā. (q̄ V̄) -> W ∈ Σ    Γᵢ ⊢ vᵢ :qᵢ Vᵢ[B̄/ā]
@@ -411,12 +490,13 @@ data VExpr
   -- `gen ā. ret (ptr v)`.
   | Gen [TVar] VExpr
 
-  --       Γ ⊢ e : W
-  --  ─────────────────────────── [drop]
-  --   Γ, x : A ⊢ drop x; e : W
+  --       Γ ⊢ e : W                             Γ ⊢ e : W
+  --  ─────────────────────────── [drop]   ───────────────────────────────── [drop-ctx]
+  --   Γ, x : A ⊢ drop x; e : W            Γ, x : ctx⟨A,B⟩ ⊢ drop x; e : W
   --
-  -- Unboxed values are destructured to drop their boxed components (`Common.dropValue`).
-  -- The paper's `[dropru]` is derived
+  -- Other unboxed values are destructured to drop their boxed components (`Common.dropValue`).
+  -- A context is not: dropping it drops its `res` through the runtime, which skips the
+  -- placeholder in the hole. The paper's `[dropru]` is derived
   -- from `[if-unique]` and `[unbox-ru]` (`Reuse.dropReuse`):
   --
   --   let r = drop-reuse x in e  ≜  let r = (if-unique x then (let box y @ r' = x in discard y; ret r')
@@ -460,9 +540,11 @@ data VExpr
   -- A join point captures the owned variables Γ_c that are free in its body, and is not
   -- recursive (`j` is not in scope in its body). Its body may jump to outer joins.
   -- Since J is reset outside of tail positions, a jump cannot escape
-  -- and is always a tail call. Perceus only produces owned parameters and closed join
-  -- points (Γ_c = ∅); only `JoinArgs`, the last pass, introduces captures. A captured
-  -- variable must not be bound again in e₂, so every jump sees the same variable.
+  -- and is always a tail call. Join points only have owned parameters, except for contexts
+  -- that are plugged in place (unique, see `[plug]`). Perceus only produces closed join
+  -- points (Γ_c = ∅); only `JoinArgs`, the last pass, introduces captures, and only for
+  -- owned parameters. A captured variable must not be bound again in e₂, so every jump sees
+  -- the same variable.
   | Join Name [(Name,Mode,VType)] VExpr VExpr
 
   --   j : Γ_c; (q̄ V̄) -> W ∈ J    Γᵢ ⊢ vᵢ :qᵢ Vᵢ

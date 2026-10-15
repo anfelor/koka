@@ -7,7 +7,7 @@
 -----------------------------------------------------------------------------
 
 module Backend.Typed.Elab.Monad( Env(..), St(..), E
-                              , runE, failE, tr, env, withLocals, withTVars
+                              , runE, failE, tr, env, withLocals, withTVars, withHole, inClosure
                               , fresh, recordSig, note, vt
                               ) where
 
@@ -20,7 +20,12 @@ import Backend.Typed.Syntax
 import Backend.Typed.TypeInfo
 import Backend.Typed.Monad
 
-data Env = Env{ envNT :: Newtypes, envLocals :: S.Set Name, envTVars :: S.Set TVar, envSigs :: Sigs }
+-- `envHoles`: the variables bound to the parts of a constructor context under construction:
+-- a value that contains the hole, or (`Nothing`) the address of the hole. They are not bound
+-- in the IR; their uses become parts of a `ctx` value.
+-- `envCaptured`: the locals that the innermost closure captures.
+data Env = Env{ envNT :: Newtypes, envLocals :: S.Set Name, envTVars :: S.Set TVar, envSigs :: Sigs
+              , envHoles :: M.Map Name (Maybe VVal), envCaptured :: S.Set Name }
 
 data St = St{ stUniq :: Int, stSigs :: Sigs, stNotes :: [String] }
 
@@ -39,7 +44,14 @@ env :: E Env
 env = ask
 
 withLocals :: [Name] -> E a -> E a
-withLocals xs = local (\e -> e{ envLocals = foldr S.insert (envLocals e) xs })
+withLocals xs = local (\e -> e{ envLocals = foldr S.insert (envLocals e) xs, envCaptured = foldr S.delete (envCaptured e) xs })
+
+-- the body of a closure, which captures the locals in scope
+inClosure :: E a -> E a
+inClosure = local (\e -> e{ envCaptured = envLocals e })
+
+withHole :: Name -> Maybe VVal -> E a -> E a
+withHole x v = local (\e -> e{ envHoles = M.insert x v (envHoles e) })
 
 withTVars :: [TVar] -> E a -> E a
 withTVars tvs = local (\e -> e{ envTVars = foldr S.insert (envTVars e) tvs })

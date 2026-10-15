@@ -68,6 +68,9 @@ layout t
                                      (orderFields (zip [0..] cts))
       VUnit       -> CUnit
       VPtr _      -> CBox
+      -- Koka's `cctx`: `res` and the address of the hole, which is boxed as a value
+      -- (`kk_field_addr_t`), so duplicating and dropping it does nothing
+      VCtx a b    -> layout (VProd (VPtr a) (VPtr b))
   where
     altLayout s = case layout s of
                     CUnit -> Nothing
@@ -84,6 +87,7 @@ leaves t
       VSum _ -> [t]
       VRaw _ -> [t]
       VReuse _ _ -> [t]
+      VCtx a b -> [VPtr a, VPtr b]
 
 enumSize :: Int -> Int
 enumSize n
