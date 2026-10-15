@@ -253,6 +253,7 @@ instance Hashable Flags where
     where
       relevantFlags = [
           show $ targetPlatform flags,
+          show $ typedC flags,
           -- show $ stackSize flags,
           -- show $ heapSize flags,
           show $ simplify flags,
@@ -493,7 +494,7 @@ options = (\(xss,yss) -> (concat xss, concat yss)) $ unzip
  , flag   []    ["showfcore"]      (\b f -> f{showFinalCore=b})     "show final core (with backend optimizations)"
  , flag   []    ["checktyped"]     (\b f -> f{checkTyped=b})        "elaborate into the typed backend IR and check it"
  , flag   []    ["showtyped"]      (\b f -> f{showTyped=b})         "show the typed backend IR (implies --checktyped)"
- , flag   []    ["typedc"]         (\b f -> f{typedC=b})            "generate C with the typed backend (as <exe>_typed)"
+ , flag   []    ["typedc"]         (\b f -> f{typedC=b})            "build only with the typed backend (as <exe>_typed)"
  , flag   []    ["showcoretypes"]  (\b f -> f{showCoreTypes=b})     "show full types in core"
  , flag   []    ["showtypeids"]    (\b f -> f{showTypeIds=b})       "show numeric type variable ids"
  , flag   []    ["showcs"]         (\b f -> f{showAsmCS=b})         "show generated c#"

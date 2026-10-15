@@ -795,7 +795,7 @@ typedPassTest = describe "typed IR normalization" $ do
 -- must be reused or rebuilt together with their interfaces.
 typedBuildTest :: Options -> Spec
 typedBuildTest options
-  = describe "build" $ it "compiles and caches both backend objects per module" $
+  = describe "build" $ it "compiles and caches only the selected backend objects per module" $
       bracket scratch removeDirectoryRecursive $ \dir -> do
         let out = dir </> "build"
             dep = dir </> "dependency.kk"
@@ -824,8 +824,12 @@ typedBuildTest options
         removeFile (obj "dependency")
         void $ run False ["-l"] wrapper
         doesFileExist (obj "dependency") `shouldReturn` True
+        regularBefore <- getModificationTime (obj "dependency")
+        removeFile (obj "wrapper")
         void $ run True ["-l"] wrapper
         doesFileExist (obj "kt_dependency") `shouldReturn` True
+        getModificationTime (obj "dependency") `shouldReturn` regularBefore
+        doesFileExist (obj "wrapper") `shouldReturn` False
         before <- mapM getModificationTime [obj "dependency", obj "kt_dependency"]
         void $ run True ["-l"] wrapper
         mapM getModificationTime [obj "dependency", obj "kt_dependency"] `shouldReturn` before
@@ -836,14 +840,14 @@ typedBuildTest options
         -- The regex dependency is transitive from main, so its include paths
         -- must be handled by its own module build rather than the final link.
         run True ["-e", "--buildname=program"] main `shouldReturn` "True"
-        readProcessWithExitCode (exe "program") [] "" `shouldReturn` (ExitSuccess, "True\n", "")
+        doesFileExist (exe "program") `shouldReturn` False
         readProcessWithExitCode (exe "program_typed") [] "" `shouldReturn` (ExitSuccess, "True\n", "")
         -- Give the changed source a strictly newer timestamp without sleeping.
         ifaceTime <- getModificationTime (out </> "dependency.kki")
         writeFile dep (dependency "other")
         setModificationTime dep (addUTCTime 1 ifaceTime)
         run True ["-e", "--buildname=program"] main `shouldReturn` "False"
-        readProcessWithExitCode (exe "program") [] "" `shouldReturn` (ExitSuccess, "False\n", "")
+        doesFileExist (exe "program") `shouldReturn` False
         readProcessWithExitCode (exe "program_typed") [] "" `shouldReturn` (ExitSuccess, "False\n", "")
         -- A C-only rebuild leaves typed artifacts behind. Enabling typed C
         -- again must rebuild them even though their own sources are unchanged.
