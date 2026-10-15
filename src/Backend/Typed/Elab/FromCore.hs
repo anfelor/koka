@@ -11,9 +11,9 @@ module Backend.Typed.Elab.FromCore( elabProgram ) where
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.List( find )
-import Control.Monad( foldM )
+import Control.Monad( foldM, unless )
 import Common.Name
-import Common.NamePrim( nameFieldAddrOf )
+import Common.NamePrim( nameFieldAddrOf, nameCCtxHoleCreate, nameCCtxCreate, nameCCtxExtend, nameCCtxApply, nameCCtxEmpty, nameCCtxCompose, nameCCtxComposeExtend )
 import Common.Syntax( isDefFun, ParamInfo(..), Platform )
 import qualified Common.Syntax as Syntax
 import Kind.Newtypes
@@ -27,17 +27,17 @@ import Backend.Typed.TypeInfo
 import Backend.Typed.Types
 import Backend.Typed.Elab.Monad
 import Backend.Typed.Elab.Coerce
-import Backend.Typed.Names( nameUnreachable, nameSetCtxPath, isJoinName )
-import Backend.Typed.Elab.Common( isValue )
+import Backend.Typed.Names( nameUnreachable, isJoinName )
+import Backend.Typed.Elab.Common( isValue, linearContexts, isLinearContextPrim )
 import Backend.Typed.Pretty( ppr )
 
 -- programs
 
 elabProgram :: Platform -> Newtypes -> [C.Core] -> C.Core -> (Program,[String],[String])
 elabProgram platform nt imports core
-  = let defs    = C.flattenDefGroups (C.coreProgDefs core)
-        isigs   = M.fromList [(n,withModes (if n == nameFieldAddrOf then Borrow : drop 1 pinfos else pinfos) sig) | (n,(tp,isFun,pinfos)) <- M.toList (importSigs (core:imports)), Right sig <- [typeSig nt tp isFun]]
-        env0    = Env nt S.empty S.empty isigs
+  = let defs    = filter (not . isContextAccessor) (C.flattenDefGroups (C.coreProgDefs core))
+        isigs   = M.fromList [(n,withModes modes sig) | (n,(tp,isFun,modes)) <- M.toList (importSigs (core:imports)), Right sig <- [typeSig nt tp isFun]]
+        env0    = Env nt S.empty S.empty isigs M.empty S.empty
         tdefs   = typeDefs platform nt
         run (sigs,ds,errs,notes) def
           = let label msg = show (C.defName def) ++ ": " ++ msg
@@ -46,6 +46,11 @@ elabProgram platform nt imports core
                  Left err -> (sigs, ds, errs ++ [label err], notes)
         (sigs,ds,errs,notes) = foldl run (M.empty,[],[],[]) defs
     in (Program (C.coreProgName core) tdefs sigs ds, errs, notes)
+
+-- Koka's accessors of the fields of its abstract `cctx` would expose the hole. A context is
+-- abstract in the IR, so they are left out.
+isContextAccessor :: C.Def -> Bool
+isContextAccessor def = C.defName def `elem` [newLocallyQualified "std/core/types" "cctx" f | f <- ["res","holeptr"]]
 
 elabDef :: C.Def -> E (Def,Sig)
 elabDef def
@@ -58,7 +63,7 @@ elabFunDef :: C.Def -> [TName] -> C.Expr -> E (Def,Sig)
 elabFunDef def pars body
   = do (tvs,args,res) <- funSig (typeOf (C.defExpr def))
        body' <- withTVars tvs (withLocals (map getName pars) (elabExprAt res body))
-       let params = withParamModes (defParamInfos def) args
+       let params = withParamModes (defModes def) args
            args' = [(getName p,m,t) | (p,(m,t)) <- zip pars params]
        return (DefFun (C.defName def) tvs args' res body', SigFun tvs params res)
 
@@ -69,27 +74,37 @@ elabValDef def
        body <- withTVars tvs (elabExprAt t (stripTypeLam (C.defExpr def)))
        return (DefVal (C.defName def) tvs t body, SigVal tvs t)
 
-importSigs :: [C.Core] -> M.Map Name (Type,Bool,[ParamInfo])
+importSigs :: [C.Core] -> M.Map Name (Type,Bool,[Mode])
 importSigs cores
-  = M.fromList ([(C.defName d, (C.defType d, isDefFun (C.defSort d), defParamInfos d)) | c <- cores, d <- C.flattenDefGroups (C.coreProgDefs c)]
-                ++ [(C.externalName x, (C.externalType x, True, C.externalParams x)) | c <- cores, x@(C.External{}) <- C.coreProgExternals c])
+  = M.fromList ([(C.defName d, (C.defType d, isDefFun (C.defSort d), defModes d)) | c <- cores, d <- C.flattenDefGroups (C.coreProgDefs c)]
+                ++ [(C.externalName x, (C.externalType x, True, [paramMode p False | p <- C.externalParams x])) | c <- cores, x@(C.External{}) <- C.coreProgExternals c])
 
-defParamInfos :: C.Def -> [ParamInfo]
-defParamInfos def
+-- The parameter modes of a function: borrowed as Koka infers, and unique for a context that
+-- the body plugs or extends in place.
+defModes :: C.Def -> [Mode]
+defModes def
   = case C.defSort def of
-      Syntax.DefFun pinfos _ -> pinfos
+      Syntax.DefFun pinfos _
+        -> case splitLam (C.defExpr def) of
+             Just (_,pars,body) -> let linear = linearContexts body
+                                   in [paramMode p (S.member (getName x) linear) | (x,p) <- zip pars (pinfos ++ repeat Own)]
+             Nothing -> [paramMode p False | p <- pinfos]
       _ -> []
 
+paramMode :: ParamInfo -> Bool -> Mode
+paramMode Borrow _     = Borrowed
+paramMode _ True       = Unique
+paramMode _ False      = Owned
+
 -- Preserve the same calling convention for definitions and imported call sites.
-withModes :: [ParamInfo] -> Sig -> Sig
-withModes pinfos sig
+withModes :: [Mode] -> Sig -> Sig
+withModes modes sig
   = case sig of
-      SigFun tvs ps r -> SigFun tvs (withParamModes pinfos ps) r
+      SigFun tvs ps r -> SigFun tvs (withParamModes modes ps) r
       _ -> sig
 
-withParamModes :: [ParamInfo] -> [(Mode,VType)] -> [(Mode,VType)]
-withParamModes pinfos ps
-  = [(if pinfo == Borrow then Borrowed else m, t) | ((m,t),pinfo) <- zip ps (pinfos ++ repeat Own)]
+withParamModes :: [Mode] -> [(Mode,VType)] -> [(Mode,VType)]
+withParamModes modes ps = [(m,t) | ((_,t),m) <- zip ps (modes ++ repeat Owned)]
 
 typeSig :: Newtypes -> Type -> Bool -> Tr Sig
 typeSig nt tp isFun
@@ -127,7 +142,8 @@ elabExpr expr
   = case expr of
       C.Let [] body -> elabExpr body
       C.Let (C.DefNonRec (C.Def{ C.defName = j, C.defExpr = C.Lam pars _ e1 }) : dgs) body | isJoinName j
-        -> do ps  <- mapM (\p -> (\t -> (getName p,Owned,t)) <$> vt (tnameType p)) pars
+        -> do let linear = linearContexts e1
+              ps  <- mapM (\p -> (\t -> (getName p,paramMode Own (S.member (getName p) linear),t)) <$> vt (tnameType p)) pars
               e1' <- withLocals (map getName pars) (elabExpr e1)
               Join j ps e1' <$> elabExpr (C.Let dgs body)
       C.App (C.Var (TName j tp) _) args | isJoinName j, Just (pars,_,_) <- splitFunType tp
@@ -135,10 +151,7 @@ elabExpr expr
                                                               elabValAt t arg) (zip pars args)
               return (compose ks (Jump j vs))
       C.Let (C.DefNonRec def : dgs) body
-        -> do t  <- vt (C.defType def)
-              e1 <- elabExprAt t (C.defExpr def)
-              e2 <- withLocals [C.defName def] (elabExpr (C.Let dgs body))
-              return (Let (C.defName def) t e1 e2)
+        -> elabLet def (C.Let dgs body)
       C.Let (C.DefRec defs : _) _
         -> failE ("local recursive definition: " ++ show (map C.defName defs))
       C.TypeLam tvs e | not (any tvarStar tvs) -> elabExpr e
@@ -148,6 +161,21 @@ elabExpr expr
       C.App f args | not (isConApp f) -> elabApp f args (typeOf expr)
       _ -> do (k,v) <- elabVal expr
               return (k (Ret v))
+
+-- The parts of a context under construction are not bound: their uses become parts of the
+-- `ctx` value (see `elabCtx`).
+elabLet :: C.Def -> C.Expr -> E VExpr
+elabLet def body
+  = do en <- env
+       let x = C.defName def
+       if isFieldAddr en (C.defExpr def) then withHole x Nothing (elabExpr body)
+       else if hasHole en (C.defExpr def)
+         then do (k,v) <- elabVal (C.defExpr def)
+                 k <$> withHole x (Just v) (elabExpr body)
+         else do t  <- vt (C.defType def)
+                 e1 <- elabExprAt t (C.defExpr def)
+                 e2 <- withLocals [x] (elabExpr body)
+                 return (Let x t e1 e2)
 
 elabGen :: [TVar] -> C.Expr -> Type -> E VExpr
 elabGen tvs e tp
@@ -177,11 +205,38 @@ isConApp _               = False
 
 elabApp :: C.Expr -> [C.Expr] -> Type -> E VExpr
 elabApp f args resTp
+  | isPrim nameCCtxEmpty f
+  = do t <- vt resTp
+       b <- holeType t
+       return (Ret (Context b Hole))
+  | isPrim nameCCtxCreate f, [res,addr] <- args
+  = elabCtx Nothing res addr resTp
+  | isPrim nameCCtxExtend f, [acc,res,addr] <- args
+  = elabCtx (Just (isLinearContextPrim f, acc)) res addr resTp
+  | isPrim nameCCtxApply f, [acc,_] <- args
+  = do t <- vt (typeOf acc)
+       (a,b) <- case t of
+                  VCtx a b -> return (a,b)
+                  _ -> failE ("plugging a non-context: " ++ ppr t)
+       let shared = not (isLinearContextPrim f)
+       callWith (\[c,v] -> return (Ret (Plug (ctxCopy shared c) v))) [t, VPtr b] (VPtr a) args resTp
+  | isPrim nameCCtxCompose f
+  = do t <- vt resTp
+       ts <- mapM (vt . typeOf) args
+       callWith (\[c,d] -> return (Ret (Append (CtxCopy c) (CtxCopy d)))) ts t args resTp
+  | any (`isPrim` f) [nameCCtxHoleCreate, nameFieldAddrOf]
+  = failE "a hole outside of a context"
+  -- extends with the hole of a context that may be shared, without copying its path
+  | isPrim nameCCtxComposeExtend f
+  = failE "unsupported context primitive: @cctx-compose-extend"
+elabApp f args resTp
   = do mbsig <- globalOf f
        case mbsig of
-         Just (g,sig@(SigFun _ _ _),gtp,tys)
+         Just (g,sig@(SigFun _ ps _),gtp,tys)
            -> do (tysD,params,res) <- instFun g sig gtp tys
-                 callWith (return . Call g tysD) params res args resTp
+                 e <- env
+                 let copies = [m == Unique && captured e arg | ((m,_),arg) <- zip ps args] ++ repeat False
+                 callWith (return . Call g tysD . zipWith ctxCopy copies) params res args resTp
          _ -> do (k1,fv) <- elabVal f
                  (params,res) <- funType f
                  body <- callWith (applyFun fv) (map snd params) res args resTp
@@ -296,6 +351,7 @@ elabVal :: C.Expr -> E (K,VVal)
 elabVal expr
   = case expr of
       C.Var (TName x tp) _ | x == nameUnreachable -> unreachable tp
+      C.App f [] | isPrim nameCCtxHoleCreate f -> return (id, Hole)
       C.Var (TName x tp) info -> elabVar x tp info []
       C.TypeApp (C.Var (TName x tp) info) tys -> elabVar x tp info tys
       C.Lit lit -> return (id, Lit (elabLit lit))
@@ -354,7 +410,7 @@ etaCon con pars eff
 elabLam :: VType -> [TName] -> C.Expr -> E AVal
 elabLam (VPtr (AFun qs res)) pars body
   = do (ps,ks) <- unzip <$> mapM lamParam (zip pars qs)
-       body' <- withLocals (map getName pars) (elabExprAt res body)
+       body' <- inClosure (withLocals (map getName pars) (elabExprAt res body))
        return (Lam ps res (compose ks body'))
 elabLam t _ _ = failE ("expecting a function type for a lambda: " ++ ppr t)
 
@@ -381,7 +437,14 @@ elabLit lit
 elabVar :: Name -> Type -> C.VarInfo -> [Type] -> E (K,VVal)
 elabVar x tp info tys
   = do e <- env
-       expect <- vt (typeOf (mkTypeApp (C.Var (TName x tp) info) tys))
+       case M.lookup x (envHoles e) of
+         Just (Just v) -> return (id, v)
+         Just Nothing  -> failE ("the address of a hole outside of a context: " ++ show x)
+         Nothing       -> elabNamed e x tp info tys
+
+elabNamed :: Env -> Name -> Type -> C.VarInfo -> [Type] -> E (K,VVal)
+elabNamed e x tp info tys
+  = do expect <- vt (typeOf (mkTypeApp (C.Var (TName x tp) info) tys))
        if S.member x (envLocals e)
          then do tys' <- instArgs tp tys
                  instLocal x tp tys' expect
@@ -427,15 +490,8 @@ instA a _ = a
 elabCon :: C.Expr -> [C.Expr] -> E (K,VVal)
 elabCon conExpr args
   = do (info,vargs) <- dataArgs (resultType (typeOf conExpr))
-       (k,v) <- elabConArgs info vargs conExpr args
-       case stripTypeApp conExpr of
-         C.Con (TName cname _) repr | Just (C.CtxField fname) <- C.conReprCtxPath repr
-           -> do t <- vt (resultType (typeOf conExpr))
-                 x <- fresh "cp"
-                 let a = -3
-                 recordSig nameSetCtxPath (SigFun [a] [(Owned,varV a),(Owned,vtString),(Owned,vtString)] (varV a))
-                 return (k . Let x t (Call nameSetCtxPath [rep t] [v, Lit (LitString (show cname)), Lit (LitString (show (getName fname)))]), Var x)
-         _ -> return (k,v)
+       -- the context path of a constructor (`conReprCtxPath`) is recorded by `[ctx]` instead
+       elabConArgs info vargs conExpr args
 
 elabConArgs :: DataInfo -> [AType] -> C.Expr -> [C.Expr] -> E (K,VVal)
 elabConArgs info vargs conExpr args
@@ -544,6 +600,69 @@ conShapes :: DataInfo -> [AType] -> E [AType]
 conShapes info vargs
   = do e <- env
        mapM (tr . conShape (envNT e) vargs) (dataInfoConstrs info)
+
+-- constructor contexts
+
+-- `@cctx-create(K, addr)` and `@cctx-extend(c, K, addr)` (that is, `c ++ ctx K`), where `addr`
+-- is the address of the hole of `K` (`@field-addr-of`): the position of the hole in `K`
+-- determines it. A context is plugged or appended to in place where `Core.CTail` knows it to be
+-- unique (a linear primitive); otherwise it is first copied if it is shared.
+elabCtx :: Maybe (Bool,C.Expr) -> C.Expr -> C.Expr -> Type -> E VExpr
+elabCtx mbAcc res addr resTp
+  = do en <- env
+       unless (isFieldAddr en addr) (failE "a context whose hole is not the field of a constructor")
+       t <- vt resTp
+       b <- holeType t
+       (k1,v) <- elabVal res
+       case mbAcc of
+         Nothing -> return (k1 (Ret (Context b v)))
+         Just (linear,acc)
+           -> do (k0,c) <- elabVal acc
+                 return (k0 (k1 (Ret (Append (ctxCopy (not linear) c) (Context b v)))))
+
+-- A closure (such as the continuation of an effect that may resume more than once) only owns
+-- the contexts that it captures: it copies one that it passes to a unique parameter (if it is
+-- shared).
+captured :: Env -> C.Expr -> Bool
+captured e arg
+  = case arg of
+      C.Var x _ -> S.member (getName x) (envCaptured e)
+      _ -> False
+
+ctxCopy :: Bool -> VVal -> VVal
+ctxCopy True v = CtxCopy v
+ctxCopy False v = v
+
+-- the type of the hole of a context
+holeType :: VType -> E AType
+holeType t
+  = case t of
+      VCtx _ b -> return b
+      _ -> failE ("expecting a context: " ++ ppr t)
+
+-- the address of the hole of a context under construction: `@field-addr-of` or a variable
+-- bound to it
+isFieldAddr :: Env -> C.Expr -> Bool
+isFieldAddr en expr
+  = case expr of
+      C.App f _ -> isPrim nameFieldAddrOf f
+      C.Var x _ -> M.lookup (getName x) (envHoles en) == Just Nothing
+      _ -> False
+
+-- a value that contains the hole of a context under construction
+hasHole :: Env -> C.Expr -> Bool
+hasHole en expr
+  = case expr of
+      C.App f [] | isPrim nameCCtxHoleCreate f -> True
+      C.App f args | isConApp f -> any (hasHole en) args
+      C.Var x _ -> maybe False (/= Nothing) (M.lookup (getName x) (envHoles en))
+      _ -> False
+
+isPrim :: Name -> C.Expr -> Bool
+isPrim name f
+  = case stripTypeApp f of
+      C.Var (TName g _) _ -> g == name
+      _ -> False
 
 -- matching
 

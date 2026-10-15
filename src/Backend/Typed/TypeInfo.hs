@@ -20,7 +20,7 @@ import Data.List( elemIndex )
 import Common.Name
 import Common.NamePrim
 import Common.Syntax( dataDefIsValue )
-import Kind.Kind( Kind, hasKindStarResult, isKindStar, extractKindFun )
+import Kind.Kind( Kind, kindStar, hasKindStarResult, isKindStar, extractKindFun )
 import Kind.Newtypes
 import Type.Type
 import Backend.Typed.Syntax
@@ -87,6 +87,8 @@ dataInfoOf nt name
   = maybe (Left ("unknown datatype: " ++ show name)) Right (newtypesLookupAny name nt)
 
 elabCon :: Newtypes -> Name -> [Type] -> Tr VType
+elabCon nt name [a,b] | name == nameTpCCtxx
+  = VCtx <$> elabArg nt kindStar a <*> elabArg nt kindStar b
 elabCon nt name args
   = do info  <- dataInfoOf nt name
        vargs <- elabArgs nt (dataInfoParams info) args

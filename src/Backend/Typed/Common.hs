@@ -13,9 +13,10 @@ module Backend.Typed.Common where
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
+import Data.Monoid( Sum(..) )
 import Data.Functor.Identity( Identity(..) )
 import Common.Name
-import Common.NamePrim( nameTpFieldAddr, nameTpReuse )
+import Common.NamePrim( nameTpReuse )
 import Backend.Typed.Syntax
 import Backend.Typed.Types( Types(..), inst, sumAlts, sumWidth, mapReuseContents )
 
@@ -58,6 +59,7 @@ dropValue fresh x t e
                 body <- dropValue fresh y (V s') (Ret UnitV)
                 return (Let u VUnit (Unpack Owned (Var x) bs y body) e)
         VReuse _ _ -> return (Free x e)
+        VCtx _ _ -> return (Drop x e)
         VUnit -> return e
         VRaw _ -> return e
 
@@ -76,10 +78,11 @@ isTrivial t
                    VExists _ b  -> trivialV b
                    VPtr a       -> trivialA a
                    VReuse _ _     -> False
+                   VCtx _ _     -> False
     trivialA a = case a of
                    AUnit     -> True
                    ASum ts   -> all (trivialA . snd) ts
-                   ACon n _  -> n `elem` [nameTpFieldAddr, nameTpReuse]
+                   ACon n _  -> n == nameTpReuse
                    ABox _    -> False
                    AFun _ _  -> False
                    AForall _ _ -> False
@@ -106,6 +109,7 @@ containsReuse (V v) = case v of
   VUnit -> False
   VRaw _ -> False
   VReuse _ _ -> True
+  VCtx _ _ -> False
 containsReuse (A a) = case a of
   ABox v -> containsReuse (V v)
   ASum ts -> any (containsReuse . A . snd) ts
@@ -116,6 +120,43 @@ containsReuse (A a) = case a of
   AVar _ -> False
   AFun _ _ -> False
   AUnit -> False
+
+-- the name under which the type of the hole is bound in the one-hole value of a context
+nameHole :: Name
+nameHole = newHiddenName "hole"
+
+-- the one-hole values `K` of `[ctx]`: the hole occurs once, in a field of a block that `K`
+-- allocates, or `K` is the hole itself (the empty context)
+isCtxValue :: VVal -> Bool
+isCtxValue k
+  = holes k == 1 && (k == Hole || path k)
+  where
+    path v = case v of
+               Ptr _ a -> block a
+               _ -> False
+    block a = case a of
+                Roll _ b -> block b
+                InjA _ _ b -> block b
+                Box v -> field v
+                BoxAt _ v -> field v
+                _ -> False
+    field v = case v of
+                Hole -> True
+                Pair x y | holes x == 1 -> field x
+                         | otherwise -> field y
+                _ -> path v
+
+-- the occurrences of the hole, except in nested contexts and closures (which do not bind it)
+holes :: VVal -> Int
+holes = getSum . holesV
+  where
+    holesV v = case v of
+                 Hole -> Sum 1
+                 Context _ _ -> Sum 0
+                 _ -> getConst (descendV (Const . holesA) (Const . holesV) v)
+    holesA a = case a of
+                 Lam{} -> Sum 0
+                 _ -> getConst (descendA (const (Const (Sum 0))) (Const . holesA) (Const . holesV) a)
 
 tapp :: VVal -> [AType] -> VVal
 tapp v []  = v
@@ -167,6 +208,11 @@ descendV fa fv val
       Pack t ts v    -> Pack t ts <$> fv v
       TyApp v ts     -> (`TyApp` ts) <$> fv v
       DupV v         -> DupV <$> fv v
+      Context b v    -> Context b <$> fv v
+      Plug c v       -> Plug <$> fv c <*> fv v
+      CtxCopy v      -> CtxCopy <$> fv v
+      Append c d     -> Append <$> fv c <*> fv d
+      Hole           -> pure val
       Var _          -> pure val
       Glob _ _       -> pure val
       UnitV          -> pure val
@@ -267,6 +313,7 @@ replaceV sub val
       Ptr a v -> Ptr (replaceAType sub a) (replaceA sub v)
       Pack t ts v -> Pack (replaceVType sub t) (map (replaceAType sub) ts) (replaceV sub v)
       TyApp v ts -> TyApp (replaceV sub v) (map (replaceAType sub) ts)
+      Context b v -> Context (replaceAType sub b) (replaceV sub v)
       _ -> mapV (replaceA sub) (replaceV sub) val
 
 replaceVType :: M.Map Name VVal -> VType -> VType

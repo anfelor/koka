@@ -63,6 +63,7 @@ prettyV t
       VProd x y  -> parens (prettyV x <+> text "(x)" <+> prettyV y)
       VRaw n     -> nm n
       VExists vs t -> parens (text "exists" <+> hsep (map tv vs) <.> text "." <+> prettyV t)
+      VCtx a b   -> text "ctx" <.> angles (commaSep [prettyA a, prettyA b])
 
 prettyT :: Ty -> Doc
 prettyT (A a) = prettyA a
@@ -100,6 +101,11 @@ prettyVal val
       TyApp v ts  -> atomVal v <.> brackets (commaSep (map prettyA ts))
       DupV v      -> text "dup" <+> atomVal v
       NoReuse n   -> text ("no-reuse" ++ show n)
+      Hole        -> text "hole"
+      Context _ v -> text "ctx" <+> atomVal v
+      Plug c v    -> atomVal c <.> brackets (prettyVal v)
+      CtxCopy v   -> text "ctx-copy" <+> atomVal v
+      Append c d  -> atomVal c <+> text "++" <+> atomVal d
 
 atomAVal :: AVal -> Doc
 atomAVal v
@@ -114,6 +120,9 @@ atomVal v
       Inj _ _ _ -> parens (prettyVal v)
       Ptr _ _   -> parens (prettyVal v)
       DupV _    -> parens (prettyVal v)
+      Context _ _ -> parens (prettyVal v)
+      CtxCopy _ -> parens (prettyVal v)
+      Append _ _ -> parens (prettyVal v)
       _         -> prettyVal v
 
 prettyLit :: Lit -> Doc

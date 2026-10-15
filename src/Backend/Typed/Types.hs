@@ -66,6 +66,7 @@ mapReuseContents f = goV
       VProd a b -> VProd (goV a) (goV b)
       VExists vs b -> VExists vs (goV b)
       VReuse n p -> VReuse n (f p)
+      VCtx a b -> VCtx (goA a) (goA b)
       VUnit -> t
       VRaw _ -> t
     goA a = case a of
@@ -127,6 +128,7 @@ substV sub t
       VUnit     -> t
       VRaw _    -> t
       VReuse n p -> VReuse n (fmap (substContents sub) p)
+      VCtx a b  -> VCtx (substA sub a) (substA sub b)
 
 substA :: Sub -> AType -> AType
 substA sub a
@@ -163,6 +165,7 @@ ftvV t
       VUnit         -> []
       VRaw _        -> []
       VReuse _ p    -> maybe [] ftvContents p
+      VCtx a b      -> ftvA a ++ ftvA b
 
 ftvA :: AType -> [TVar]
 ftvA a
@@ -187,6 +190,7 @@ isPtr t
       VRaw _      -> False
       VExists _ _ -> False
       VReuse _ _    -> False
+      VCtx _ _    -> False
 
 -- the boxed type that instantiates a type variable for a Koka type argument of type `V` (Koka's
 -- `box`); a closure there takes and returns `boxrep`s of its types (Koka's `boxedFunType`).
@@ -227,6 +231,7 @@ boxA t
       VRaw _      -> ABox t
       VExists _ _ -> ABox t
       VReuse _ _    -> ABox t
+      VCtx _ _    -> ABox t
 
 eqV :: VType -> VType -> Bool
 eqV s t
@@ -237,6 +242,7 @@ eqV s t
       (VExists as a, VExists bs b) | length as == length bs
         -> eqV a (inst bs (map AVar as) b)
       (VReuse n p, VReuse m q) -> n == m && eqContentsMaybe p q
+      (VCtx a b, VCtx c d)   -> eqA a c && eqA b d
       _                      -> s == t
 
 -- Contents are descriptions, so only their structural forms need type substitution.
@@ -296,6 +302,7 @@ matchVWith tvs sub pat t
       (VSum ps, VSum ts) | length ps == length ts
         -> foldM (\sb (p,s) -> matchVWith tvs sb p s) sub (zip ps ts)
       (VProd p q, VProd s u) -> matchVWith tvs sub p s >>= \sub' -> matchVWith tvs sub' q u
+      (VCtx p q, VCtx s u)   -> matchAWith tvs sub p s >>= \sub' -> matchAWith tvs sub' q u
       (VExists as p, VExists bs s) | length as == length bs
         -> matchVWith tvs sub p (inst bs (map AVar as) s)
       _ -> if pat == t then Just sub else Nothing
