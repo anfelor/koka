@@ -34,7 +34,7 @@ typedFromCore platform enableReuse nt imports uniq core
   = let (acore,_)             = runUnique uniq (matchCore nt core)
         (prog,elabErrs,notes) = elabProgram platform nt imports acore
         passes                = [("anf",False,pure' anfProgram), ("contify",False,contifyProgram), ("simplify",False,pure' simplifyProgram), ("perceus",True,perceusProgram), ("lazy",True,lazyProgram)
-                                  ,("dropspec",True,pure' dropSpecProgram)] ++ [("reuse",True,reuseProgram) | enableReuse]
+                                  ,("dropspec",True,dropSpecProgram)] ++ [("reuse",True,reuseProgram) | enableReuse]
                                   ++ [("match",True,matchProgram), ("sinkjoins",True,pure' sinkJoinsProgram), ("joinargs",True,pure' joinArgsProgram)]
         (dsprog,msgs)         = runPasses prog (label "check" (checkProgram prog)) passes
     in (dsprog, label "elab" elabErrs ++ msgs ++ label "note" notes)

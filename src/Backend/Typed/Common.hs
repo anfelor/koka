@@ -217,7 +217,7 @@ descendV fa fv val
       Glob _ _       -> pure val
       UnitV          -> pure val
       Lit _          -> pure val
-      NoReuse _      -> pure val
+      NoReuse _ _    -> pure val   -- a description is not an operand
 
 mapA :: (Name -> Name) -> (AVal -> AVal) -> (VVal -> VVal) -> AVal -> AVal
 mapA fn fa fv = runIdentity . descendA (Identity . fn) (Identity . fa) (Identity . fv)
@@ -314,10 +314,14 @@ replaceV sub val
       Pack t ts v -> Pack (replaceVType sub t) (map (replaceAType sub) ts) (replaceV sub v)
       TyApp v ts -> TyApp (replaceV sub v) (map (replaceAType sub) ts)
       Context b v -> Context (replaceAType sub b) (replaceV sub v)
+      NoReuse n p -> NoReuse n (fmap (replaceContents sub) p)
       _ -> mapV (replaceA sub) (replaceV sub) val
 
 replaceVType :: M.Map Name VVal -> VType -> VType
-replaceVType sub = mapReuseContents (fmap (replaceV sub))
+replaceVType sub = mapReuseContents (fmap (replaceContents sub))
+
+replaceContents :: M.Map Name VVal -> Contents -> Contents
+replaceContents sub (Contents k p t) = Contents k (replaceV sub p) (replaceVType sub t)
 
 replaceAType :: M.Map Name VVal -> AType -> AType
 replaceAType sub a = case replaceVType sub (VPtr a) of

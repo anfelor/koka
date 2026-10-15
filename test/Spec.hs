@@ -382,47 +382,70 @@ typedIRTest = describe "typed IR ownership" $ do
         x = n "payload"
         payload = T.VPtr T.AUnit
         result = T.VPtr (T.ABox payload)
-        described = T.VReuse 16 (Just (T.Var x))
+        described = T.VReuse 16 (Just (T.Contents 1 (T.Var x) payload))
         body = T.Deref T.Unique (T.Var arg) z
           (T.UnboxRu z x r (T.Let q described (T.Ret (T.Var r))
             (T.Ret (T.Ptr (T.ABox payload) (T.BoxAt q (T.Var x))))))
         prog = program [(arg,T.Unique,result)] result body
     TC.checkProgram prog `shouldBe` []
     TL.checkLinear prog `shouldBe` []
-  it "refines reuse contents when the payload is destructured" $ do
+  it "refines reuse contents when the payload is destructured, also out of their scope" $ do
     let z = n "box"
         x = n "payload"
         a = n "a"
         b = n "b"
         payload = T.VProd (T.VPtr T.AUnit) (T.VPtr T.AUnit)
-        described = T.VReuse 24 (Just (T.Pair (T.Var a) (T.Var b)))
+        described = T.VReuse 24 (Just (T.Contents 1 (T.Pair (T.Var a) (T.Var b)) payload))
         ctx = M.singleton z (T.A (T.ABox payload))
         body = T.UnboxRu z x r (T.Unpair T.Owned (T.Var x) a b
           (T.Let q described (T.Ret (T.Var r)) (T.Ret (T.Var q))))
-    TQ.inferE env ctx M.empty body `shouldBe` Right (T.VReuse 24 Nothing)
-  it "forgets local reuse descriptions and rejects fabricated identities" $ do
+    TQ.inferE env ctx M.empty body `shouldBe` Right described
+  it "keeps reuse descriptions out of their scope and rejects fabricated identities" $ do
     let z = n "box"
         x = n "payload"
         y = n "other"
         payload = T.VPtr T.AUnit
+        described = T.VReuse 16 (Just (T.Contents 1 (T.Var x) payload))
         ctx = M.fromList [(z,T.A (T.ABox payload)),(y,T.V payload)]
         extract = T.UnboxRu z x r (T.Ret (T.Var r))
         forged = T.UnboxRu z x r
-          (T.Let q (T.VReuse 16 (Just (T.Var y))) (T.Ret (T.Var r)) (T.Ret (T.Var q)))
-    TQ.inferE env ctx M.empty extract `shouldBe` Right credit
+          (T.Let q (T.VReuse 16 (Just (T.Contents 1 (T.Var y) payload))) (T.Ret (T.Var r)) (T.Ret (T.Var q)))
+    TQ.inferE env ctx M.empty extract `shouldBe` Right described
     TQ.inferE env ctx M.empty forged `shouldSatisfy` isLeft
-    TQ.inferE env ctx M.empty
-      (T.UnboxRu z x r (T.Let x payload (T.Ret (T.Var y)) (T.Ret (T.Var r)))) `shouldSatisfy` isLeft
-    TQ.inferE env ctx M.empty
-      (T.Let q (T.VReuse 16 (Just (T.Var x))) extract (T.Ret (T.Var q))) `shouldSatisfy` isLeft
+    TQ.inferE env (M.insert z (T.AAt (T.InSum 3) (T.ABox payload)) ctx) M.empty extract
+      `shouldBe` Right (T.VReuse 16 (Just (T.Contents 4 (T.Var x) payload)))
+    TQ.inferE env ctx M.empty (T.UnboxRu z x r
+      (T.Let q (T.VReuse 16 (Just (T.Contents 2 (T.Var x) payload))) (T.Ret (T.Var r)) (T.Ret (T.Var q))))
+      `shouldSatisfy` isLeft
+    TQ.inferE env ctx M.empty (T.Let q described extract (T.Ret (T.Var q))) `shouldBe` Right described
+  it "binds a name in a reuse description again only to an alias of its value" $ do
+    let arg = n "arg"
+        z = n "box"
+        p = n "payload"
+        a = n "a"
+        b = n "b"
+        charPayload = T.VProd (T.VPtr T.AUnit) (T.VRaw NP.nameTpChar)
+        rebind e1 = program [(arg,T.Unique,T.VPtr (T.ABox charPayload))] T.VUnit
+          (T.Deref T.Unique (T.Var arg) z (T.UnboxRu z p r (T.Unpair T.Owned (T.Var p) a b
+            (T.Let b (T.VRaw NP.nameTpChar) e1 (T.Free r (T.Ret T.UnitV))))))
+        alias = rebind (T.Ret (T.Var b))
+        other = rebind (T.Ret (T.Lit (T.LitChar 'y')))
+    TC.checkProgram alias `shouldBe` []
+    TL.checkLinear alias `shouldBe` []
+    TC.checkProgram other `shouldBe` []
+    TL.checkLinear other `shouldSatisfy` (not . null)
   it "checks description structure and size, and allows empty described credits" $ do
     let x = n "payload"
         ctx = M.singleton x (T.V (T.VPtr T.AUnit))
-        check t = TQ.checkE env ctx M.empty (T.Ret (T.NoReuse 16)) t
-    check (T.VReuse 16 (Just (T.Var x))) `shouldBe` Right ()
-    forM_ [T.VReuse 24 (Just (T.Var x)),
-           T.VReuse 16 (Just (T.DupV (T.Var x))),
-           T.VReuse 16 (Just (T.Ptr (T.ABox (T.VPtr T.AUnit)) (T.Box (T.Var x))))] $ \t ->
+        unit = T.VPtr T.AUnit
+        described = Just (T.Contents 1 (T.Var x) unit)
+        check t = TQ.checkE env ctx M.empty (T.Ret (T.NoReuse 16 Nothing)) t
+    check (T.VReuse 16 described) `shouldBe` Right ()
+    TQ.inferV env M.empty (T.NoReuse 16 described) `shouldBe` Right (T.VReuse 16 described)
+    forM_ [T.VReuse 24 described,
+           T.VReuse 16 (Just (T.Contents 0 (T.Var x) unit)),
+           T.VReuse 16 (Just (T.Contents 1 (T.DupV (T.Var x)) unit)),
+           T.VReuse 16 (Just (T.Contents 1 (T.Ptr (T.ABox unit) (T.Box (T.Var x))) unit))] $ \t ->
       check t `shouldSatisfy` isLeft
   it "rejects opaque alternatives in boxed sums" $ do
     let a = sumA [T.AUnit, T.AFun [] T.VUnit]
@@ -592,7 +615,8 @@ typedIRTest = describe "typed IR ownership" $ do
         done = T.Ret T.UnitV
         expr = T.CaseA T.Owned x [(2,y,T.Drop y done)] (Just (d,T.Drop d done))
         ctx = M.singleton x (T.A sumType)
-    TQ.altTypes env (T.A sumType) expr `shouldBe` Right [[T.A box],[T.A rest]]
+    TQ.altTypes env (T.A sumType) expr `shouldBe` Right [[T.AAt (T.InSum 2) box],[T.AAt (T.InSum 0) rest]]
+    TQ.altTypes env (T.AAt (T.InSum 3) sumType) expr `shouldBe` Right [[T.AAt (T.InSum 5) box],[T.AAt (T.InSum 3) rest]]
     TQ.inferE env ctx M.empty expr `shouldBe` Right T.VUnit
     TQ.inferE env (M.singleton d (T.A rest)) M.empty
       (T.CaseA T.Owned d [(2,y,done)] (Just (x,done))) `shouldSatisfy` isLeft
@@ -670,8 +694,8 @@ typedIRTest = describe "typed IR ownership" $ do
         make mode = program [(arg,mode,T.VPtr sumType)] T.VUnit
                       (T.Deref mode (T.Var arg) x (split 2 mode))
     TQ.altTypes env (T.A sumType) (split 2 T.Owned) `shouldBe`
-      Right [[T.A (T.ASum (take 2 (TT.sumAlts (replicate 5 (T.ABox (T.VPtr T.AUnit))))))],
-             [T.A (T.ASum (drop 2 (TT.sumAlts (replicate 5 (T.ABox (T.VPtr T.AUnit))))))]]
+      Right [[T.AAt (T.InSum 0) (T.ASum (take 2 (TT.sumAlts (replicate 5 (T.ABox (T.VPtr T.AUnit))))))],
+             [T.AAt (T.InSum 0) (T.ASum (drop 2 (TT.sumAlts (replicate 5 (T.ABox (T.VPtr T.AUnit))))))]]
     forM_ [-1,0,5,6] $ \k ->
       TQ.inferE env ctx M.empty (split k T.Owned) `shouldSatisfy` isLeft
     forM_ [T.Owned,T.Unique] $ \mode -> do

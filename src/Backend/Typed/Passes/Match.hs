@@ -22,7 +22,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, boxContents, reuseSize )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuBinds )
 import Backend.Typed.Layout( shapeIsHeap )
 
 type Match a = M (Env,Gamma) (Int,Set.Set Name) a
@@ -77,10 +77,8 @@ matchE expr
                       Dup x y <$> bind [(y,t)] (matchE e)
       UnboxRu v x r e
         -> do (_,g) <- ask
-              A a <- liftE (inferVar g v)
-              t <- liftE (boxContents a)
-              n <- liftE (reuseSize t)
-              UnboxRu v x r <$> bind [(x,V t),(r,V (VReuse n (Just (Var x))))] (matchE e)
+              bs <- liftE (unboxRuBinds g v x r)
+              UnboxRu v x r <$> bind bs (matchE e)
       _ -> descendE pure matchV (\_ -> matchE) expr
 
 partition :: Mode -> Name -> [(Int,AType)] -> [(Int,Name,VExpr)] -> Maybe (Name,VExpr) -> Match VExpr
