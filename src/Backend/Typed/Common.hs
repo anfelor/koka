@@ -207,6 +207,23 @@ descendE fn fv fe expr
       Join j ps e1 e2       -> Join j ps <$> fe [x | (x,_,_) <- ps] e1 <*> fe [] e2
       Jump j vs             -> Jump j <$> traverse fv vs
 
+-- the arguments of each jump to a join point; jumps are never inside values, and an inner
+-- join of the same name shadows it
+jumpArgs :: Name -> VExpr -> [[VVal]]
+jumpArgs j expr
+  = case expr of
+      Jump k vs | k == j -> [vs]
+      Join k _ e1 _ | k == j -> jumpArgs j e1
+      _ -> getConst (descendE (const (Const [])) (const (Const [])) (\_ e -> Const (jumpArgs j e)) expr)
+
+-- replace each jump to a join point
+substJump :: Name -> ([VVal] -> VExpr) -> VExpr -> VExpr
+substJump j f expr
+  = case expr of
+      Jump k vs | k == j -> f vs
+      Join k ps e1 e2 | k == j -> Join k ps (substJump j f e1) e2
+      _ -> runIdentity (descendE Identity Identity (\_ e -> Identity (substJump j f e)) expr)
+
 varOf :: VVal -> Name
 varOf (Var y) = y
 varOf v       = error ("Backend.Typed.Common.varOf: not a variable: " ++ show v)

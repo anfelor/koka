@@ -20,8 +20,6 @@ module Backend.Typed.Passes.Simplify( simplifyProgram ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Data.Monoid( Sum(..) )
-import Data.Functor.Const( Const(..) )
 import Data.Functor.Identity( Identity(..) )
 import Common.Name
 import Backend.Typed.Syntax
@@ -42,7 +40,7 @@ inlineE expr
         -> let e1' = inlineE e1
                e2' = inlineE e2
                bindArgs vs = foldr (\((x,_,t),v) e -> Let x t (Ret v) e) e1' (zip ps vs)
-           in case jumpsTo j e2' of
+           in case length (jumpArgs j e2') of
                 0 -> e2'
                 1 -> substJump j bindArgs e2'
                 _ -> Join j ps e1' e2'
@@ -56,21 +54,6 @@ inlineA val
   = case val of
       Lam ps r e -> Lam ps r (inlineE e)
       _          -> mapA id inlineA inlineV val
-
--- jumps are never inside values; an inner join of the same name shadows
-jumpsTo :: Name -> VExpr -> Int
-jumpsTo j expr
-  = case expr of
-      Jump k _ | k == j -> 1
-      Join k _ e1 _ | k == j -> jumpsTo j e1
-      _ -> getSum (getConst (descendE (const (Const 0)) (const (Const 0)) (\_ e -> Const (Sum (jumpsTo j e))) expr))
-
-substJump :: Name -> ([VVal] -> VExpr) -> VExpr -> VExpr
-substJump j f expr
-  = case expr of
-      Jump k vs | k == j -> f vs
-      Join k ps e1 e2 | k == j -> Join k ps (substJump j f e1) e2
-      _ -> runIdentity (descendE Identity Identity (\_ e -> Identity (substJump j f e)) expr)
 
 copyE :: M.Map Name Name -> VExpr -> VExpr
 copyE sub expr
