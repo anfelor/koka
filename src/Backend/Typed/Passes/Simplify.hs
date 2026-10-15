@@ -19,6 +19,7 @@
 module Backend.Typed.Passes.Simplify( simplifyProgram ) where
 
 import qualified Data.Map as M
+import qualified Data.Set as S
 import Data.Monoid( Sum(..) )
 import Data.Functor.Const( Const(..) )
 import Data.Functor.Identity( Identity(..) )
@@ -77,7 +78,27 @@ copyE sub expr
       Let x _ (Ret (Var y)) e
         | let y' = M.findWithDefault y y sub, y' `notElem` bindersE e
         -> copyE (M.insert x y' sub) e
-      _ -> runIdentity (descendE (Identity . (\x -> M.findWithDefault x x sub)) (Identity . copyV sub) (\xs e -> Identity (copyE (shadow xs sub) e)) expr)
+      _ -> inlineApply (runIdentity (descendE (Identity . (\x -> M.findWithDefault x x sub)) (Identity . copyV sub) (\xs e -> Identity (copyE (shadow xs sub) e)) expr))
+
+-- Copy propagation exposes let-bound adapters that elaboration cannot fuse.
+-- Inline only an immediate, single call, including one whose result is let-bound.
+-- Parameter bindings must not capture names in the actual arguments.
+inlineApply :: VExpr -> VExpr
+inlineApply expr
+  = case expr of
+      Let f _ (Ret (Ptr _ (Lam ps _ body))) rest
+        -> let apply (Deref Owned (Var x) g (App h vs))
+                 | x == f, g == h, length ps == length vs
+                 , all (S.notMember f . fvV) vs
+                 , all (\(p,_,_) -> all (S.notMember p . fvV) vs) ps
+                 = Just (foldr (\((p,_,t),v) e -> Let p t (Ret v) e) body (zip ps vs))
+               apply _ = Nothing
+           in case rest of
+                Let x t call e | S.notMember f (fvE e), Just body' <- apply call
+                  -> Let x t body' e
+                _ | Just body' <- apply rest -> body'
+                _ -> expr
+      _ -> expr
 
 copyV :: M.Map Name Name -> VVal -> VVal
 copyV sub val
