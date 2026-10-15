@@ -372,31 +372,27 @@ codeGenC sourceFile newtypes borrowed0 imported unique0 term flags sequential en
 
       -- return the C compilation and final link as a separate IO action to increase concurrency
       return $ \fullImports ->
-               do -- Compile every enabled representation with the same module configuration.
+               do -- Compile the selected representation with the module configuration.
                   mapM_ (\base -> ccompile term flags cc base extraIncDirs [base ++ ".c"])
                         (cModuleBases flags progName outBase)
                   case (entry,mainDoc) of
                     (Just (entryName,_),Just regularMain)
-                            -> do let backends = [(moduleNameToPath,"",regularMain)] ++
-                                                 [(TC.ktFileName,"_typed",codeGenTypedMain flags progName entryName fullImports) | typedC flags]
-                                      link (moduleFile,suffix,doc) = do
-                                        let mainBase = joinPath (dirname outBase) (moduleFile progName ++ "_main")
-                                        writeDocW 120 (mainBase ++ ".c") doc
-                                        ccompile term flags cc mainBase extraIncDirs [mainBase ++ ".c"]
-                                        codeGenLinkC term flags sequential cc progName fullImports outBase moduleFile suffix [ccObjFile cc mainBase] clibs
-                                  results <- mapM link backends
-                                  -- --typedc produces both executables and runs the typed one.
-                                  return (case results of
-                                            [LinkExe exe _,LinkExe _ run] -> LinkExe exe run
-                                            res:_ -> res
-                                            [] -> LinkDone)
+                            -> do let (moduleFile,suffix,doc)
+                                        = if typedC flags
+                                            then (TC.ktFileName,"_typed",codeGenTypedMain flags progName entryName fullImports)
+                                            else (moduleNameToPath,"",regularMain)
+                                      mainBase = joinPath (dirname outBase) (moduleFile progName ++ "_main")
+                                  writeDocW 120 (mainBase ++ ".c") doc
+                                  ccompile term flags cc mainBase extraIncDirs [mainBase ++ ".c"]
+                                  codeGenLinkC term flags sequential cc progName fullImports outBase moduleFile suffix [ccObjFile cc mainBase] clibs
                     _ -> return LinkDone
 
 
 -- The same module artifacts are compiled, copied and validated for both backends.
 cModuleBases :: Flags -> ModuleName -> FilePath -> [FilePath]
 cModuleBases flags modName outBase
-  = outBase : [joinPath (dirname outBase) (TC.ktFileName modName) | typedC flags]
+  = [outBase | not (typedC flags)] ++
+    [joinPath (dirname outBase) (TC.ktFileName modName) | typedC flags]
 
 -- link obj's and create an executable
 codeGenLinkC :: Terminal -> Flags -> (IO () -> IO ()) -> CC -> ModuleName -> [Module]
