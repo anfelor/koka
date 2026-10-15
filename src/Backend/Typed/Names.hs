@@ -7,15 +7,12 @@
 -----------------------------------------------------------------------------
 
 -- Internal names shared by the Core and typed IR passes.
-module Backend.Typed.Names( nameUnreachable, nameSetCtxPath, nameLazyFree, isJoinName ) where
+module Backend.Typed.Names( nameUnreachable, nameLazyFree, isJoinName ) where
 
 import Common.Name
 
 nameUnreachable :: Name
 nameUnreachable = newHiddenName "typed-unreachable"
-
-nameSetCtxPath :: Name
-nameSetCtxPath = newHiddenName "typed-set-ctx-path"
 
 isJoinName :: Name -> Bool
 isJoinName x = hiddenNameStartsWith x "join"

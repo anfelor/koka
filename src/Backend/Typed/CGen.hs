@@ -18,6 +18,7 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Char( isAlphaNum, ord, isDigit )
 import Data.List( isInfixOf )
+import Data.Maybe( fromMaybe )
 import qualified Numeric
 import Control.Monad( forM, when )
 import Common.Name
@@ -30,8 +31,7 @@ import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types( inst, prodV, sumWidth, Types(..) )
 import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, unrollT, openFields, boxContents, reuseSize, contentsOfAlt, contentsValueOfAlt )
-import Backend.Typed.TypeInfo( conFieldTypes )
-import Backend.Typed.Names( nameSetCtxPath, nameLazyFree )
+import Backend.Typed.Names( nameLazyFree )
 import Backend.Typed.Layout
 import Backend.Typed.Monad
 
@@ -182,6 +182,105 @@ genV cx val
                       ++ setAlt ++ x ++ "; })")
       Pair _ _ -> do t <- tyOf cx val
                      genProd cx t (prodLeafVals val)
+      Hole -> return "kk_box_null()"   -- the placeholder (`kk_cctx_hole`)
+      Context b k -> genCtx cx b k
+      Plug c v -> genV cx v >>= plug cx c
+      Append c d -> genAppend cx c d
+      CtxCopy c -> do ct <- tyOf cx c >>= ctype
+                      ce <- genV cx c
+                      x <- fresh "c"
+                      return ("({ " ++ ctName ct ++ " " ++ x ++ " = " ++ ce ++ "; kt_ctx_copy(&" ++ x ++ ".f0,&" ++ x ++ ".f1,_ctx); " ++ x ++ "; })")
+
+-- a context is `res` and the address of its hole; the empty context has neither
+genCtx :: Ctx -> AType -> VVal -> G String
+genCtx cx b k
+  = do ct <- tyOf cx (Context b k) >>= ctype
+       case k of
+         Hole -> makeCtx ct ([],"kk_box_null()","kk_box_null()")
+         _ -> genHolePath (bindVar cx nameHole (V (VPtr b))) k >>= makeCtx ct
+
+makeCtx :: CT -> ([String],String,String) -> G String
+makeCtx ct (ss,res,hole)
+  = do x <- fresh "ctx"
+       return ("({ " ++ concat ss ++ ctName ct ++ " " ++ x ++ "; " ++ x ++ ".f0 = " ++ res ++ "; " ++ x ++ ".f1 = " ++ hole ++ "; " ++ x ++ "; })")
+
+-- Appending a fresh context that is not empty plugs its `res` into the hole and keeps its hole
+-- (`kk_cctx_extend_linear`); otherwise the runtime tests whether the second context is empty.
+genAppend :: Ctx -> VVal -> VVal -> G String
+genAppend cx c d
+  = do ct <- tyOf cx (Append c d) >>= ctype
+       case d of
+         Context b k | k /= Hole
+           -> do (ss,r,h) <- genHolePath (bindVar cx nameHole (V (VPtr b))) k
+                 res <- plug cx c r
+                 makeCtx ct (ss,res,h)
+         _ -> do ce <- genV cx c
+                 de <- genV cx d
+                 x <- fresh "c"
+                 y <- fresh "c"
+                 return ("({ " ++ ctName ct ++ " " ++ x ++ " = " ++ ce ++ "; " ++ ctName ct ++ " " ++ y ++ " = " ++ de ++ "; "
+                         ++ "kt_ctx_append(&" ++ x ++ ".f0,&" ++ x ++ ".f1," ++ y ++ ".f0," ++ y ++ ".f1,_ctx); " ++ x ++ "; })")
+
+-- fill the hole of a unique context in place (`kk_cctx_apply_linear`); a copy of a context
+-- is filled in place if it is unique and copied with the child otherwise (`kk_cctx_apply`)
+plug :: Ctx -> VVal -> String -> G String
+plug cx c ve
+  = do let (fill,c') = case c of
+                         CtxCopy c0 -> ("kt_ctx_copy_plug",c0)
+                         _          -> ("kt_ctx_plug",c)
+       ct <- tyOf cx c' >>= ctype
+       ce <- genV cx c'
+       x <- fresh "c"
+       return ("({ " ++ ctName ct ++ " " ++ x ++ " = " ++ ce ++ "; " ++ fill ++ "(" ++ x ++ ".f0," ++ x ++ ".f1," ++ ve ++ ",_ctx); })")
+
+-- Allocate a one-hole value (`genBox` records the context path in the header of each block on
+-- the path to the hole): the statements, `res` and the address of the hole (`kk_field_addr_t`).
+-- The address is bound before the context is used, as in `kk_cctx_extend_linear`.
+genHolePath :: Ctx -> VVal -> G ([String],String,String)
+genHolePath cx k
+  = do r <- fresh "r"
+       h <- fresh "h"
+       ke <- genV cx k
+       fields <- pathFields k
+       bs <- mapM (const (fresh "b")) fields
+       let parents = ("kk_datatype_unbox(" ++ r ++ ")") :
+                     ["kk_datatype_unbox(((" ++ bt ++ "*)" ++ x ++ ")->" ++ f ++ ")" | (x,(bt,f)) <- zip bs fields]
+           steps = ["kk_block_t* " ++ x ++ " = kk_datatype_as_ptr(" ++ parent ++ ",_ctx); " | (x,parent) <- zip bs parents]
+           (bt,f) = last fields
+           hole = "kk_box_t " ++ h ++ " = kk_internal_ptr_box(&((" ++ bt ++ "*)" ++ last bs ++ ")->" ++ f ++ ",_ctx); "
+       return (("kk_box_t " ++ r ++ " = " ++ ke ++ "; ") : steps ++ [hole], r, h)
+  where
+    -- the type of each block on the path, and the member that leads to the hole
+    pathFields v = case v of
+                     Ptr _ a -> block a
+                     _ -> failG ("not a one-hole value: " ++ show v)
+    block a = case a of
+                Roll _ w -> block w
+                InjA _ _ w -> block w
+                Box v -> payload v
+                BoxAt _ v -> payload v
+                _ -> failG ("not a one-hole value: " ++ show a)
+    payload v = do ct <- tyOf cx v >>= ctype
+                   bt <- blockType ct
+                   (member,inner) <- holeMember cx ct v
+                   rest <- maybe (return []) pathFields inner
+                   return ((bt,member) : rest)
+
+-- the member of a payload that leads to the hole, and the nested one-hole value there
+holeMember :: Ctx -> CT -> VVal -> G (String,Maybe VVal)
+holeMember cx ct v
+  = do (j,inner) <- leaf v 0
+       let member = case ct of
+                      CProd _ _ -> "p.f" ++ show j
+                      _ -> "p"
+       return (member,inner)
+  where
+    leaf v i = case v of
+                 Hole -> return (i,Nothing)
+                 Pair x y | holes x == 1 -> leaf x i
+                          | otherwise -> do tx <- tyOf cx x
+                                            leaf y (i + length (leaves tx))
+                 _ -> return (i,Just v)
 
 -- Injections only contain construction forms, so their tag can be passed down to
 -- the allocation. Existing boxed operands are duplicated by the expression `Dup`.
@@ -257,7 +356,8 @@ projLeaves whole e start part
 data Alloc = Fresh | At Name | In Name
 
 -- a box: freshly allocated, in the block of a reuse credit, or over the block of a lazy value
--- (whose old fields were taken, see `Lazy`, and whose reference count is kept)
+-- (whose old fields were taken, see `Lazy`, and whose reference count is kept). A box on the
+-- path of a one-hole value records the context path with its header (see `genHolePath`).
 genBox :: Ctx -> Bool -> Int -> Alloc -> VVal -> G String
 genBox cx inSum tag at v
   = do t <- tyOf cx v
@@ -269,13 +369,22 @@ genBox cx inSum tag at v
          CUnit -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" ++ show tag ++ "))")
          _ -> do bt <- blockType ct
                  x <- fresh "b"
+                 cpath <- if holes v == 1
+                            then do (member,_) <- holeMember cx ct v
+                                    return (Just ("(uint8_t)kk_field_index_of(" ++ bt ++ "," ++ member ++ ")"))
+                            else return Nothing
                  let scan = show (scanOf ct)
                      box  = "kk_datatype_box(kk_datatype_from_base(" ++ x ++ ",_ctx)); })"
+                     allocAt r = "kk_block_alloc_at_as(" ++ bt ++ "," ++ r ++ "," ++ scan ++ "," ++ fromMaybe "0" cpath ++ ",(kk_tag_t)" ++ show tag ++ ",_ctx)"
+                     allocFresh = case cpath of
+                                    Nothing -> "kk_block_alloc_as(" ++ bt ++ "," ++ scan ++ ",(kk_tag_t)" ++ show tag ++ ",_ctx)"
+                                    Just _ -> allocAt "kk_reuse_null"
+                     setPath = maybe "" (\i -> x ++ "->_block.header._field_idx = " ++ i ++ "; ") cpath
                  case at of
-                   Fresh -> return ("({ " ++ bt ++ "* " ++ x ++ " = kk_block_alloc_as(" ++ bt ++ "," ++ scan ++ ",(kk_tag_t)" ++ show tag ++ ",_ctx); "
+                   Fresh -> return ("({ " ++ bt ++ "* " ++ x ++ " = " ++ allocFresh ++ "; "
                                     ++ x ++ "->p = " ++ e ++ "; " ++ box)
                    At r  -> do matches <- reuseMatches cx r t v
-                               let alloc = "kk_block_alloc_at_as(" ++ bt ++ "," ++ localName r ++ "," ++ scan ++ ",0,(kk_tag_t)" ++ show tag ++ ",_ctx)"
+                               let alloc = allocAt (localName r)
                                    start = "({ _Static_assert(sizeof(" ++ bt ++ ") == " ++ show (blockSize ct) ++ ",\"kt_reuse\"); "
                                    saved = length (filter id matches)
                                if saved < 1 + ((1 + length matches) `div` 4)
@@ -292,13 +401,13 @@ genBox cx inSum tag at v
                                          -- so its header only needs the new tag.
                                          return (start ++ ctName ct ++ " " ++ y ++ " = " ++ e ++ "; " ++ bt ++ "* " ++ x ++ "; "
                                                  ++ "if kk_likely(" ++ localName r ++ " != kk_reuse_null) { "
-                                                 ++ x ++ " = (" ++ bt ++ "*)" ++ localName r ++ "; " ++ x ++ "->_block.header.tag = (kk_tag_t)" ++ show tag ++ "; " ++ writes
-                                                 ++ "} else { " ++ x ++ " = kk_block_alloc_as(" ++ bt ++ "," ++ scan ++ ",(kk_tag_t)" ++ show tag ++ ",_ctx); "
+                                                 ++ x ++ " = (" ++ bt ++ "*)" ++ localName r ++ "; " ++ x ++ "->_block.header.tag = (kk_tag_t)" ++ show tag ++ "; " ++ setPath ++ writes
+                                                 ++ "} else { " ++ x ++ " = " ++ allocFresh ++ "; "
                                                  ++ x ++ "->p = " ++ y ++ "; } " ++ box)
                    In y  -> do v <- fresh "v"
                                return ("({ " ++ ctName ct ++ " " ++ v ++ " = " ++ e ++ "; "
                                        ++ bt ++ "* " ++ x ++ " = (" ++ bt ++ "*)kt_block_clear(kk_datatype_as_ptr(kk_datatype_unbox(" ++ localName y ++ "),_ctx)," ++ scan ++ ",(kk_tag_t)" ++ show tag ++ ",_ctx); "
-                                       ++ x ++ "->p = " ++ v ++ "; " ++ box)
+                                       ++ setPath ++ x ++ "->p = " ++ v ++ "; " ++ box)
 
 -- Compare only structurally identical payloads with the same layout. A dup
 -- preserves a field's bits, but its reference-count effect must still run.
@@ -971,8 +1080,6 @@ openFieldExpr c fields kfields names ve
 
 genCall :: Ctx -> Dest -> Name -> [AType] -> [VVal] -> G [String]
 genCall cx dest f tys vs
-  | f == nameFieldAddrOf = genFieldAddr cx dest vs
-  | f == nameSetCtxPath  = genSetCtxPath cx dest vs
   | f == nameLazyFree, [v] <- vs
   = do e <- genV cx v
        return (["kk_block_free(kk_datatype_as_ptr(kk_datatype_unbox(" ++ e ++ "),_ctx),_ctx);"] ++ assignTo dest CUnit "kk_Unit")
@@ -1199,47 +1306,6 @@ genWrapper env cenv f
               return (sig ++ ";\n", sig ++ " {\n  kk_function_static_drop(_fself,_ctx);\n" ++ indent body ++ "}\n")
       _ -> failG ("wrapper for unknown function " ++ show f)
 
--- the address of a field in a constructor (for constructor contexts)
-genFieldAddr :: Ctx -> Dest -> [VVal] -> G [String]
-genFieldAddr cx dest [obj, Lit (LitString conStr), Lit (LitString fieldStr)]
-  = do (bt,path) <- fieldLocation cx obj conStr fieldStr
-       e <- genV cx obj
-       return (assignTo dest CBox ("kk_field_addr_create(&((" ++ bt ++ "*)kk_datatype_as_ptr(kk_datatype_unbox(" ++ e ++ "),_ctx))->" ++ path ++ ",_ctx)"))
-genFieldAddr _ _ vs = failG ("unexpected field address arguments: " ++ show vs)
-
--- set the context path of a constructor to the field leading to the hole
-genSetCtxPath :: Ctx -> Dest -> [VVal] -> G [String]
-genSetCtxPath cx dest [obj, Lit (LitString conStr), Lit (LitString fieldStr)]
-  = do (bt,path) <- fieldLocation cx obj conStr fieldStr
-       e <- genV cx obj
-       x <- fresh "cp"
-       return (["{ kk_box_t " ++ x ++ " = " ++ e ++ ";",
-                "  kk_block_field_idx_set(kk_datatype_as_ptr(kk_datatype_unbox(" ++ x ++ "),_ctx), (uint8_t)kk_field_index_of(" ++ bt ++ "," ++ path ++ "));"]
-               ++ map ("  " ++) (assignTo dest CBox x) ++ ["}"])
-genSetCtxPath _ _ vs = failG ("unexpected context path arguments: " ++ show vs)
-
-fieldLocation :: Ctx -> VVal -> String -> String -> G (String,String)
-fieldLocation cx obj conStr fieldStr
-  = do t <- tyOf cx obj
-       args <- case t of
-                 VPtr (ACon _ args) -> return args
-                 _ -> failG ("field address of " ++ show t)
-       let cname = readQualified conStr
-           fname = unqualify (readQualified fieldStr)
-       ci <- conInfoOf cx cname
-       fields <- liftC (conFieldTypes (ceNewtypes (cxCEnv cx)) args ci)
-       let names = map fst (conInfoParams ci)
-           k = length (takeWhile (/= fname) names)
-           j = sum (map (length . leaves) (take k fields))
-           payload = prodV fields
-       when (k >= length names) (failG ("unknown field " ++ show fname))
-       ct <- ctype payload
-       bt <- blockType ct
-       let path = case ct of
-                    CProd _ _ -> "p.f" ++ show j
-                    _ -> "p"
-       return (bt,path)
-
 -- modules
 
 cgenModule :: CEnv -> Program -> (String,String,[String])
@@ -1301,6 +1367,36 @@ runtimeHeader = unlines
   , "#define kt_unbox_datatype(b) kk_datatype_unbox(b)"
   , "#define kt_unreachable() kk_fatal_error(EFAULT,\"typed backend: unreachable\")"
   , "#define kt_unreachable_value(ctx) (kt_unreachable(), kk_box_null())"
+  , "// plug the hole of a unique context (`kk_cctx_apply_linear`); an empty context has no hole"
+  , "static inline kk_box_t kt_ctx_plug(kk_box_t res, kk_box_t hole, kk_box_t child, kk_context_t* _ctx) {"
+  , "  if kk_likely(!kk_box_eq(hole,kk_box_null())) {"
+  , "    kk_assert_internal(kk_block_is_unique(kk_ptr_unbox(res,_ctx)));"
+  , "    *kk_internal_ptr_unbox(hole,_ctx) = child;"
+  , "    return res;"
+  , "  }"
+  , "  return child;"
+  , "}"
+  , "// append a unique context to a unique one: plug its `res` into the hole and keep its hole"
+  , "static inline void kt_ctx_append(kk_box_t* res, kk_box_t* hole, kk_box_t res2, kk_box_t hole2, kk_context_t* _ctx) {"
+  , "  if (!kk_box_eq(hole2,kk_box_null())) { *res = kt_ctx_plug(*res,*hole,res2,_ctx); *hole = hole2; }"
+  , "}"
+  , "// copy the path of a shared context (`kk_cctx_copy`), which consumes the shared `res`"
+  , "static inline void kt_ctx_copy(kk_box_t* res, kk_box_t* hole, kk_context_t* _ctx) {"
+  , "  if (!kk_box_eq(*hole,kk_box_null()) && !kk_block_is_unique(kk_ptr_unbox(*res,_ctx))) {"
+  , "    kk_box_t* h = NULL;"
+  , "    *res = kk_cctx_copy(*res,kk_internal_ptr_unbox(*hole,_ctx),&h,_ctx);"
+  , "    *hole = kk_internal_ptr_box(h,_ctx);"
+  , "  }"
+  , "}"
+  , "// plug the hole of a context that may be shared (`kk_cctx_apply`): copy its path if it is"
+  , "static inline kk_box_t kt_ctx_copy_plug(kk_box_t res, kk_box_t hole, kk_box_t child, kk_context_t* _ctx) {"
+  , "  if kk_unlikely(kk_box_eq(hole,kk_box_null())) return child;"
+  , "  if kk_likely(kk_block_is_unique(kk_ptr_unbox(res,_ctx))) {"
+  , "    *kk_internal_ptr_unbox(hole,_ctx) = child;"
+  , "    return res;"
+  , "  }"
+  , "  return kk_cctx_copy_apply(res,kk_internal_ptr_unbox(hole,_ctx),child,_ctx);"
+  , "}"
   , "static inline kk_block_t* kt_block_clear(kk_block_t* b, kk_ssize_t scan_fsize, kk_tag_t tag, kk_context_t* _ctx) {"
   , "  b->header.scan_fsize = (uint8_t)scan_fsize; b->header.tag = tag;"
   , "  return b;"

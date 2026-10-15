@@ -148,17 +148,22 @@ ruE expr
               return (CaseLit v (zip (map fst alts) es) (last es))
       Drop x e
         -> do g <- asks reGamma
-              a <- liftE (inferAVar g x)
+              t <- liftE (inferVar g x)
               env <- asks reEnv
-              case boxContents a >>= reuseSize of
-                Right n -> do r <- fresh
-                              offer r n (dropReuse x r n) (Drop x) e
-                -- A single-constructor datatype (such as FIP padding) can hide
-                -- a reusable box. Unrolling transfers ownership without copying.
-                Left _ | Right b@(ABox s) <- unrollT env a, Right _ <- reuseSize s
-                  -> do y <- fresh
-                        Unroll Owned x y <$> bind [(y,A b)] (ruE (Drop y e))
-                Left _ -> Drop x <$> ruE e
+              case t of
+                V _ -> Drop x <$> ruE e   -- a context, whose block is not reused
+                A a -> dropA env a
+          where
+            dropA env a
+              = case boxContents a >>= reuseSize of
+                  Right n -> do r <- fresh
+                                offer r n (dropReuse x r n) (Drop x) e
+                  -- A single-constructor datatype (such as FIP padding) can hide
+                  -- a reusable box. Unrolling transfers ownership without copying.
+                  Left _ | Right b@(ABox s) <- unrollT env a, Right _ <- reuseSize s
+                    -> do y <- fresh
+                          Unroll Owned x y <$> bind [(y,A b)] (ruE (Drop y e))
+                  Left _ -> Drop x <$> ruE e
       Free r e
         -> do t <- typeOfName r
               case t of
@@ -243,7 +248,8 @@ branchesWith refine alts
 -- values: inner boxes are allocated first
 
 ruV :: VVal -> R VVal
-ruV = descendV ruA ruV
+ruV (Context b k) = Context b <$> bind [(nameHole,V (VPtr b))] (ruV k)
+ruV v = descendV ruA ruV v
 
 ruA :: AVal -> R AVal
 ruA val

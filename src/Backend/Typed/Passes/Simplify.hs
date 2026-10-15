@@ -15,6 +15,11 @@
 
   Before that, join points with at most one jump are inlined: the jump becomes a binding
   of the parameters to the arguments (aliases that copy propagation then removes).
+
+  Afterwards, a fresh context that is only appended is inlined: elaboration binds the
+  argument of `c ++ ctx K` (Koka's `cctx/(++)`) and copies it as if it may be shared,
+  but the literal is unique, and appended in place it extends `c` without testing
+  whether it is empty (see `genAppend` in `CGen`).
 -}
 module Backend.Typed.Passes.Simplify( simplifyProgram ) where
 
@@ -29,7 +34,7 @@ simplifyProgram :: Program -> Program
 simplifyProgram prog = prog{ progDefs = map simplifyDef (progDefs prog) }
 
 simplifyDef :: Def -> Def
-simplifyDef def = def{ defBody = copyE M.empty (inlineE (defBody def)) }
+simplifyDef def = def{ defBody = freshE (copyE M.empty (inlineE (defBody def))) }
 
 -- join points
 
@@ -97,3 +102,33 @@ copyA sub val
 
 shadow :: [Name] -> M.Map Name Name -> M.Map Name Name
 shadow xs sub = foldr M.delete sub xs
+
+-- fresh contexts
+
+freshE :: VExpr -> VExpr
+freshE expr
+  = case expr of
+      Let x t (Ret k@(Context _ _)) e
+        | Just e' <- appendFresh x k e -> freshE e'
+        | otherwise -> Let x t (Ret (freshV k)) (freshE e)
+      _ -> runIdentity (descendE Identity (Identity . freshV) (\_ e -> Identity (freshE e)) expr)
+
+-- inline the fresh context `x = k` into an append that follows immediately and is its only use
+appendFresh :: Name -> VVal -> VExpr -> Maybe VExpr
+appendFresh x k expr
+  = case expr of
+      Let y t (Ret v) e | Just v' <- append v, S.notMember x (fvE e) -> Just (Let y t (Ret v') e)
+      Ret v | Just v' <- append v -> Just (Ret v')
+      _ -> Nothing
+  where
+    append (Append c (CtxCopy (Var z))) | z == x, S.notMember x (fvV c) = Just (Append c k)
+    append _ = Nothing
+
+freshV :: VVal -> VVal
+freshV = mapV freshA freshV
+
+freshA :: AVal -> AVal
+freshA val
+  = case val of
+      Lam ps r e -> Lam ps r (freshE e)
+      _          -> mapA id freshA freshV val
