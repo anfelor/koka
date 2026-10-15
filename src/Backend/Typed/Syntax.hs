@@ -308,8 +308,7 @@ data VExpr
   --  ───────────────────────────────────────────────── [call]
   --   Γ₁, ..., Γₙ ⊢ f[B̄](v₁, ..., vₙ) : W[B̄/ā]
   --
-  -- Elaboration only gives our own functions owned parameters; borrowed parameters only occur
-  -- for externals.
+  -- Parameter modes come from the function's signature, including imported functions.
   | Call Name [AType] [VVal]
 
   --   Γ₀ ⊢ v : (V̄) -> W    Γᵢ ⊢ vᵢ : Vᵢ
