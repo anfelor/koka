@@ -47,9 +47,9 @@
       In particular a borrowed argument of a call cannot be one that is passed owned.
     - The binder of a borrowed `[case]`, `[deref]`, `[unroll]` or `[unpack]` at a boxed type `A`
       is an *alias* of the owned `z` (or of the owned variable that an alias is borrowed from): it
-      is `z`'s pointer. Consuming an alias, or testing it with `[if-unique]`, consumes `z` and
-      makes the alias owned (unique if `z` was); the variables borrowed from `z` are then borrowed
-      from it.
+      is `z`'s pointer. Consuming an alias, or testing it with `[if-unique]`, consumes or tests
+      `z` itself (so the alias is unique where `z` is), which invalidates the variables borrowed
+      from `z`.
 
   Constructor contexts
 
