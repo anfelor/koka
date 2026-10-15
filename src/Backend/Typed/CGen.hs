@@ -879,7 +879,7 @@ genE cx dest expr
               tg <- fresh "t"
               let (header,test) = case pointerTest ve ls rs of
                                    Just c -> ([],c)
-                                   Nothing -> ([tagDecl tg ve],tg ++ " <= " ++ show boundary)
+                                   Nothing -> ([tagDecl t tg ve],tg ++ " <= " ++ show boundary)
               return (["{"] ++ map ("  " ++) (header ++ ifChain [(test,left),("true",right)]) ++ ["}"])
       CaseA _ v alts def
         -> do t <- tyOfName cx v
@@ -898,7 +898,7 @@ genE cx dest expr
               let dispatch = case (brs,fallback) of
                     ([([tag],body)],Just other) -> ifChain [(tg ++ " == " ++ show tag,body),("true",other)]
                     _ -> switchCases tg brs fallback
-              return (["{"] ++ map ("  " ++) (tagDecl tg ve : dispatch) ++ ["}"])
+              return (["{"] ++ map ("  " ++) (tagDecl t tg ve : dispatch) ++ ["}"])
       CaseV _ v alts
         -> do t@(VSum ts) <- tyOf cx v
               ve <- genV cx v
@@ -1002,8 +1002,15 @@ genSumBranch cx dest v x t e
        body <- genE (aliasCtx cx (Just v) x cx') dest e
        return (["kk_box_t " ++ localName x ++ " = " ++ localName v ++ ";"] ++ body)
 
-tagDecl :: String -> String -> String
-tagDecl tg ve = "kk_tag_t " ++ tg ++ " = kk_datatype_tag(kk_datatype_unbox(" ++ ve ++ "),_ctx);"
+-- Read the tag of a boxed sum; when every alternative is a heap block, the
+-- tag is in the block header and needs no pointer test.
+tagDecl :: Ty -> String -> String -> String
+tagDecl t tg ve = "kk_tag_t " ++ tg ++ " = " ++ tagRead ++ ";"
+  where
+    d = "kk_datatype_unbox(" ++ ve ++ ")"
+    tagRead = case t of
+                A a | shapeIsHeap a == Just True -> "kk_block_tag(kk_datatype_as_ptr(" ++ d ++ ",_ctx))"
+                _ -> "kk_datatype_tag(" ++ d ++ ",_ctx)"
 
 -- Exhaustive boxed cases also accept the dummy result of an effect yield:
 -- the final arm is the default, without emitting its body twice.
