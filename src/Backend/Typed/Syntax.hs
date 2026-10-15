@@ -5,6 +5,7 @@
 -- terms of the Apache License, Version 2.0. A copy of the License can be
 -- found in the LICENSE file at the root of this distribution.
 -----------------------------------------------------------------------------
+{-# LANGUAGE PatternSynonyms #-}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 {- The typed intermediate language.
@@ -17,7 +18,8 @@
 
   Contexts and judgements
 
-    Γ ::= ∅ | Γ, x :q t                         variables
+    Γ ::= ∅ | Γ, x :q V | Γ, x :q Aπ            variables
+    π ::= · | @k                               positions of boxed operands
     J ::= ∅ | J, j : Γ_c; (q̄ V̄) -> W           join points in scope, with their captures
     Σ                                          signatures (`Sigs`)
 
@@ -29,6 +31,11 @@
     `^Γ` marks every variable of Γ as borrowed. J is passed unchanged to every subexpression in
     tail position and omitted from the rules where that is all that happens; it is reset to ∅
     where an expression is not in tail position.
+
+    A boxed operand is either whole (`·`, omitted) or lies at tag offset k of the sum it was
+    reached through (`@k`, bound by `[case-a]` and `[split-a]`): a box at `@k` is a heap block
+    with tag k+1, while a whole box may be Koka's `box`. `⌊·⌋ = 0` and `⌊@k⌋ = k`. Positions
+    are not part of types: they only record where an operand came from.
 
   Structural rules
 
@@ -131,17 +138,44 @@ data VType = VPtr AType                 -- A*
            | VProd VType VType          -- V ⊗ W
            | VRaw Name                  -- raw: unboxed primitives (`int32`, `float64`, `char`, ...)
            | VExists [TVar] VType       -- ∃ā. V
-           | VReuse Int (Maybe VVal)    -- ◇n[p]: if nonempty, an n-byte block containing p
+           | VReuse Int (Maybe Contents) -- ◇n[k; p : V]: if nonempty, an n-byte block with tag k containing p
            | VCtx AType AType           -- ctx⟨A,B⟩: an A with a hole of type B*
            deriving (Eq,Show)
 
--- p is an unevaluated structural value describing the original contents.
--- It carries no ownership; its names follow scope and substitution.
--- Descriptions may be forgotten and cannot escape their names' scope.
+-- The description `k; p : V` of a credit's block: the tag k in its header and its contents, an
+-- unevaluated structural value p of type V with |V| = n. It carries no ownership, and its names denote the values they were
+-- bound to, so they need not be in scope: a binder runs at most once on each path through a
+-- definition. A name in a description that is in scope may only be bound again to an alias of
+-- its value (`Linear`). Descriptions follow substitution, and may be forgotten but not invented.
+data Contents = Contents Int VVal VType
+              deriving (Eq,Show)
 
--- t ::= A | V
-data Ty = A AType | V VType
+-- t ::= Aπ | V
+data Ty = AAt Pos AType | V VType
           deriving (Eq,Show)
+
+-- π ::= · | @k (see "Contexts and judgements")
+data Pos = Whole | InSum Int
+           deriving (Eq,Show)
+
+position :: Ty -> Pos
+position t
+  = case t of
+      AAt p _ -> p
+      V _     -> Whole
+
+-- ⌊π⌋
+offset :: Pos -> Int
+offset p
+  = case p of
+      Whole   -> 0
+      InSum k -> k
+
+-- A boxed type at any position; built whole
+pattern A :: AType -> Ty
+pattern A a <- AAt _ a
+  where A a = AAt Whole a
+{-# COMPLETE A, V #-}
 
 -- a named type `T⟨ā⟩ := A`; without a body (`int`, `string`, ...) it cannot be unrolled
 data TypeDef = TypeDef{ tdefName :: Name, tdefParams :: [TVar], tdefBody :: Maybe AType, tdefLazy :: Maybe LazyInfo }
@@ -302,8 +336,14 @@ data VVal
   --  ────────────────────── [no-reuse]
   --   ∅ ⊢ no-reuse n : ◇n
   --
-  -- An empty credit, passed when a join asks for a block that is unavailable.
-  | NoReuse Int
+  --   |V| = n
+  --  ─────────────────────────────────────────────── [no-reuse-desc]
+  --   ∅ ⊢ no-reuse n [k; p : V] : ◇n[k; p : V]
+  --
+  -- An empty credit, passed when a join asks for a block that is unavailable. An empty credit
+  -- satisfies every description, so a pass can give it the description of the credit that other
+  -- branches return, and the branches then agree on it.
+  | NoReuse Int (Maybe Contents)
 
   -- Constructor contexts (see "Constructor contexts" at the top). A context is built from a
   -- one-hole value K whose hole lies in a field of a block that K allocates:
@@ -417,17 +457,18 @@ data VExpr
   -- For a variable scrutinee z, branch i substitutes injᵢ xᵢ in credit descriptions.
   | CaseV Mode VVal [(Name,VExpr)]
 
-  --   Γ₁ ⊢ v :q ⊕ⱼ∈J Aⱼ    Γ₂, xᵢ :q Aᵢ ⊢ eᵢ : W (i ∈ I)    Γ₂, d :q ⊕ⱼ∈J\I Aⱼ ⊢ e : W
-  --  ────────────────────────────────────────────────────────────────────────── [case-a]
+  --   Γ₁ ⊢ v :q (⊕ⱼ∈J Aⱼ)π    Γ₂, xᵢ :q Aᵢ@(⌊π⌋+i) ⊢ eᵢ : W (i ∈ I)    Γ₂, d :q (⊕ⱼ∈J\I Aⱼ)@⌊π⌋ ⊢ e : W
+  --  ──────────────────────────────────────────────────────────────────────────────────────── [case-a]
   --   Γ₁, Γ₂ ⊢ case_q v of { injᵢ xᵢ -> eᵢ; _ d -> e } : W
   --
   -- Indices must belong to the sum and be distinct. Without a default every alternative occurs.
   -- The default excludes the matched indices without renumbering the remainder;
-  -- it must be nonempty. No allocation or retagging occurs, at any mode.
+  -- it must be nonempty. No allocation or retagging occurs, at any mode. The binders lie at
+  -- the absolute tag offsets of their alternatives in the block of v.
   | CaseA Mode Name [(Int,Name,VExpr)] (Maybe (Name,VExpr))
 
-  --   Γ₁ ⊢ v :q ⊕ᵢ∈J Aᵢ    Γ₂, x :q ⊕ᵢ∈J,i<k Aᵢ ⊢ e₁ : W    Γ₂, y :q ⊕ᵢ∈J,i≥k Aᵢ ⊢ e₂ : W
-  --  ────────────────────────────────────────────────────────────────────────────── [split-a]
+  --   Γ₁ ⊢ v :q (⊕ᵢ∈J Aᵢ)π    Γ₂, x :q (⊕ᵢ∈J,i<k Aᵢ)@⌊π⌋ ⊢ e₁ : W    Γ₂, y :q (⊕ᵢ∈J,i≥k Aᵢ)@⌊π⌋ ⊢ e₂ : W
+  --  ──────────────────────────────────────────────────────────────────────────────────────── [split-a]
   --   Γ₁, Γ₂ ⊢ split_q v at k of { x -> e₁; y -> e₂ } : W
   --
   -- Both sides must be nonempty. Both binders retain the original indices,
@@ -510,9 +551,9 @@ data VExpr
   -- Free the block of a reuse credit, or do nothing if the credit is empty.
   | Free Name VExpr
 
-  --   Γ, x :^ A, y : A ⊢ e : W    A contains no reuse credits
+  --   Γ, x :^ Aπ, y : Aπ ⊢ e : W    A contains no reuse credits
   --  ──────────────────────────────────────────── [dup-a]
-  --   Γ, x :^ A ⊢ let y = dup x in e : W
+  --   Γ, x :^ Aπ ⊢ let y = dup x in e : W
   --
   -- Duplicate a boxed operand into another operand, preserving its enclosing sum's tag.
   -- It produces no AVal that could be injected into a different sum.
@@ -527,12 +568,13 @@ data VExpr
   -- evaluation with `typed-lazy-free : ∀a. (!a) -> 1`, which does not drop its (taken) fields.
   | IsUnique Name VExpr VExpr
 
-  --   Γ, x : V, r : ◇n[x] ⊢ e : W    |V| = n
-  --  ─────────────────────────────────────────────── [unbox-ru]
-  --   Γ, z :! Box V ⊢ let box x @ r = z in e : W
+  --   Γ, x : V, r : ◇n[⌊π⌋+1; x : V] ⊢ e : W    |V| = n
+  --  ─────────────────────────────────────────────────── [unbox-ru]
+  --   Γ, z :! (Box V)π ⊢ let box x @ r = z in e : W
   --
   -- A unique `Box V` splits into its contents and its block, the inverse of `[box-at]`. With
-  -- `[if-unique]` it makes `drop-reuse` of a box derivable.
+  -- `[if-unique]` it makes `drop-reuse` of a box derivable. The block of a box at offset k of
+  -- a sum has tag k+1 (a whole box has tag 1).
   | UnboxRu Name Name Name VExpr
 
   --   Γ_c, x̄ :q̄ V̄ | J ⊢ e₁ : W    Γ, Γ_c | J, j : Γ_c; (q̄ V̄) -> W ⊢ e₂ : W

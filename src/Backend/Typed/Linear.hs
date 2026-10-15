@@ -38,6 +38,13 @@
   include the variables it captures; a jump is checked like a call that also consumes the
   captured variables.
 
+  The names in the description of a credit denote the values they were bound to, also out of
+  their scope. The checker tracks the structural values of variables (`Values`): a variable is
+  an alias of a value built from variables whose values are not known structurally, which
+  denote themselves. A variable named in the description of a credit in scope may only be bound
+  again to an alias of its value (`bindValues`), so the description keeps its meaning; a jump
+  binds the parameters of a join point. A closed body starts without known values.
+
   This checks the modes of the typing rules in `Syntax` (the types are checked by `Check`).
   Keep it in sync with the rules: a change here must be reflected there, and vice versa.
 -}
@@ -52,7 +59,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, boxContents, reuseSize, paramModes )
+import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuBinds, paramModes, altPattern )
 
 -- how a variable reaches an owned block, its root: an owned variable or an alias is consumed
 -- through its root (itself, or the owned variable it is the pointer of); a borrowed variable
@@ -66,16 +73,24 @@ rootOf (Borrow r) = r
 -- the variables in scope that are not of a trivial type
 type Refs = M.Map Name Ref
 
+-- the variables with a known structural value; the others denote the value they were bound to
+type Values = M.Map Name VVal
+
+data Scope = Scope{ scRefs :: Refs, scValues :: Values }
+
 -- how a term uses a root: whether it borrows from it, and whether it consumes it (owned or unique)
 data Usage = Usage{ borrowed :: Bool, consumed :: Maybe Mode }
 
 -- the roots used by a term
 type Use = M.Map Name Usage
 
-type L a = M Refs () a
+-- the uses of an expression, and its value if it is known
+type Res = (Use, Maybe VVal)
 
--- the modes of the parameters of the join points in scope, and the variables they capture
-type Joins = M.Map Name ([Mode],[Name])
+type L a = M Scope () a
+
+-- the parameters of the join points in scope, and the variables they capture
+type Joins = M.Map Name ([(Name,Mode,VType)],[Name])
 
 checkLinear :: Program -> [String]
 checkLinear prog
@@ -88,7 +103,7 @@ checkDef env def
         -> run (M.fromList [(x,V t) | (x,_,t) <- args]) (params args) body
       DefVal _ _ _ body -> run M.empty [] body
   where
-    run g ps body = evalM (closed ps (checkE env g M.empty body)) M.empty ()
+    run g ps body = evalM (closed ps (checkE env g M.empty body)) (Scope M.empty M.empty) ()
 
 -- the parameters that are not of a trivial type
 params :: [(Name,Mode,VType)] -> [(Name,Mode)]
@@ -112,16 +127,26 @@ both (Usage b1 c1) (Usage b2 c2) = Usage (b1 || b2) (if c1 == Just Unique then c
 uses :: [L Use] -> L Use
 uses = foldM (\u c -> c >>= andThen u) M.empty
 
--- every branch must consume the same roots
-branches :: [Use] -> L Use
-branches us
-  = do case map consumedRoots us of
+-- a term with uses `u` is evaluated before an expression
+before :: L Use -> L Res -> L Res
+before c1 c2
+  = do u1 <- c1
+       (u2,v) <- c2
+       u <- andThen u1 u2
+       return (u,v)
+
+-- every branch must consume the same roots; the value is known if the branches agree on it
+branches :: [Res] -> L Res
+branches rs
+  = do case map (consumedRoots . fst) rs of
          (c1:rest) -> forM_ rest $ \c2 ->
                         unless (c1 == c2) (fail ("branches consume different variables: " ++ show c1 ++ " vs. " ++ show c2))
          [] -> return ()
-       return (M.unionsWith both us)
+       return (M.unionsWith both (map fst rs), agreed (map snd rs))
   where
     consumedRoots u = M.keys (M.filter ((/= Nothing) . consumed) u)
+    agreed (v:vs) | all (== v) vs = v
+    agreed _ = Nothing
 
 -- leaving the scope of new roots with their mode: they must be consumed (as unique only if they are)
 leave :: [(Name,Mode)] -> Use -> L Use
@@ -132,25 +157,100 @@ leave xs u
            Nothing -> fail ("owned variable is not consumed: " ++ show x)
        return (foldr (M.delete . fst) u xs)
 
+withRefs :: Refs -> L a -> L a
+withRefs rs = local (\sc -> sc{ scRefs = M.union rs (scRefs sc) })
+
 -- the scope of binders that are new roots with a mode
-roots :: Mode -> [(Name,Ty)] -> L Use -> L Use
+roots :: Mode -> [(Name,Ty)] -> L Res -> L Res
 roots m bs check
   = do let xs = [x | (x,t) <- bs, not (isTrivial t)]
-       u <- local (M.union (M.fromList [(x,Own x) | x <- xs])) check
-       leave [(x,m) | x <- xs] u
+       (u,v) <- withRefs (M.fromList [(x,Own x) | x <- xs]) check
+       u' <- leave [(x,m) | x <- xs] u
+       return (u',v)
 
--- a body (of a function, closure or join point) whose only variables are its parameters
-closed :: [(Name,Mode)] -> L Use -> L ()
+-- A body (of a function, closure or join point) whose only variables are its parameters. A
+-- variable outside it may be bound again on the way to it, so no values are known.
+closed :: [(Name,Mode)] -> L Res -> L ()
 closed ps check
-  = do u <- local (const (M.fromList [(x, if owning m then Own x else Borrow Nothing) | (x,m) <- ps])) check
+  = do (u,_) <- local (const (Scope (M.fromList [(x, if owning m then Own x else Borrow Nothing) | (x,m) <- ps]) M.empty)) check
        _ <- leave [(x,m) | (x,m) <- ps, owning m] u
        return ()
+
+-- values
+
+-- The value of a value in terms of variables without a known structural value. Credits have no
+-- identity, since descriptions never contain one.
+valueOf :: Gamma -> Values -> VVal -> Maybe VVal
+valueOf g vs val
+  = case val of
+      Var x | Just (V (VReuse _ _)) <- M.lookup x g -> Just UnitV
+            | Just v <- M.lookup x vs -> valueOf g vs v
+            | otherwise -> Just val
+      DupV v -> valueOf g vs v
+      NoReuse _ _ -> Just UnitV
+      Pair a b -> Pair <$> valueOf g vs a <*> valueOf g vs b
+      Inj i t v -> Inj i t <$> valueOf g vs v
+      Pack t ts v -> Pack t ts <$> valueOf g vs v
+      UnitV -> Just val
+      Lit _ -> Just val
+      _ -> Nothing
+
+-- the descriptions carried by a value of a type
+descriptions :: VType -> [Contents]
+descriptions t
+  = case t of
+      VReuse _ p -> maybe [] pure p
+      VProd a b -> descriptions a ++ descriptions b
+      VSum ts -> concatMap descriptions ts
+      VExists _ b -> descriptions b
+      _ -> []
+
+-- the variables named in the descriptions of the variables in scope, also through their values
+describedNames :: Gamma -> Scope -> S.Set Name
+describedNames g sc
+  = S.unions [fvV p `S.union` maybe S.empty fvV (valueOf g (scValues sc) p)
+             | x <- M.keys (scRefs sc), Just (V t) <- [M.lookup x g], Contents _ p _ <- descriptions t]
+
+-- Bind variables to their values (`Nothing` if unknown). A variable named in a description may
+-- only be bound again to an alias of its value; otherwise the values that name it are forgotten.
+bindValues :: Gamma -> [(Name,Maybe VVal)] -> L a -> L a
+bindValues g xs check = foldr bind check xs
+  where
+    bind :: (Name,Maybe VVal) -> L a -> L a
+    bind (x,v) k
+      = do sc <- ask
+           let vs = scValues sc
+               alias = v == valueOf g vs (Var x)
+           when (not alias && S.member x (describedNames g sc))
+             (fail ("variable named in the description of a credit is bound again to a different value: " ++ show x))
+           let forgotten = M.filter (S.notMember x . fvV) (M.delete x vs)
+               vs' = case v of
+                       _ | alias -> vs
+                       Just w | S.notMember x (fvV w) -> M.insert x w forgotten
+                       _ -> forgotten
+           local (\sc' -> sc'{ scValues = vs' }) k
+
+-- the values of the binders of an alternative whose scrutinee has the value `sv`; a scrutinee
+-- without a known structural value is refined to the pattern of the alternative
+altValues :: Gamma -> Maybe VVal -> Maybe VVal -> [Name] -> L a -> L a
+altValues g sv pat xs check
+  = case (pat,sv) of
+      (Just p, Just (Var y)) -> bindValues g unknown (local (\sc -> sc{ scValues = M.insert y p (scValues sc) }) check)
+      (Just p, Just w) | Just ms <- match p w -> bindValues g [(x, lookup x ms) | x <- xs] check
+      _ -> bindValues g unknown check
+  where
+    unknown = [(x,Nothing) | x <- xs]
+    match (Var x) w = Just [(x,w)]
+    match (Pair a b) (Pair c d) = (++) <$> match a c <*> match b d
+    match (Inj i _ a) (Inj j _ c) | i == j = match a c
+    match (Pack _ _ a) (Pack _ _ c) = match a c
+    match _ _ = Nothing
 
 -- variables
 
 refOf :: Name -> L Ref
 refOf x
-  = do rs <- ask
+  = do rs <- asks scRefs
        maybe (fail ("unbound variable " ++ show x)) return (M.lookup x rs)
 
 trivialVar :: Gamma -> Name -> Bool
@@ -190,7 +290,7 @@ ownedV env g val
                      return M.empty
       UnitV -> return M.empty
       Lit _ -> return M.empty
-      NoReuse _ -> return M.empty
+      NoReuse _ _ -> return M.empty
       Inj _ _ _ -> children
       Pair _ _ -> children
       Ptr _ _ -> children
@@ -253,12 +353,12 @@ ownedParams a = unless (all (== Owned) (modes a)) (fail ("closure with parameter
 
 -- expressions
 
-checkE :: Env -> Gamma -> Joins -> VExpr -> L Use
+checkE :: Env -> Gamma -> Joins -> VExpr -> L Res
 checkE env g js (UnboxLazy v x e)
   = do t   <- liftE (inferVar g v)
        [[tx]] <- liftE (altTypes env t (UnboxLazy v x e))
        let bs = [(x,tx)]
-       uses [inspect g v, roots Owned bs (checkE env (bindAll bs g) js e)]
+       before (inspect g v) (roots Owned bs (bindValues g [(x,Nothing)] (checkE env (bindAll bs g) js e)))
 checkE _ _ _ expr
   | isRead expr, Just ds <- destructAOf expr, owning (dsMode ds)
   = fail ("owned read of the contents of a box: " ++ show (dsScrut ds))
@@ -271,76 +371,99 @@ checkE env g js expr
              (fail ("unique destructuring of a value that is not a pointer: " ++ show v))
            t <- infer
            tss <- liftE (altTypes env t expr)
-           destruct env g js m (keepsPointer expr) v [(zip xs ts,e) | ((xs,e),ts) <- zip alts tss]
+           destruct env g js m (keepsPointer expr) v
+             [(altPattern expr t i xs, zip xs ts, e) | (i,((xs,e),ts)) <- zip [0..] (zip alts tss)]
 checkE env g js expr
   = case expr of
-      Ret v -> ownedV env g v
+      Ret v -> do u <- ownedV env g v
+                  vs <- asks scValues
+                  return (u, valueOf g vs v)
       -- the binder is unique if it is used as unique (and the value is unique)
-      Let x t e1 e2 -> do u2 <- local (M.insert x (Own x)) (checkE env (M.insert x (V t) g) js e2)
-                          let m = case e1 of
-                                    Ret _ | (M.lookup x u2 >>= consumed) == Just Unique -> Unique
-                                    _ -> Owned
-                          u1 <- case (m,e1) of
-                                  (Unique,Ret v) -> uniqueV env g v
-                                  _ -> checkE env g M.empty e1
-                          andThen u1 =<< leave [(x,m) | not (isTrivial (V t))] u2
-      Call f _ vs -> args [] (paramModes env f (length vs)) vs
+      Let x t e1 e2 -> do vs <- asks scValues
+                          r1 <- case e1 of
+                                  Ret v -> return (Left v)
+                                  _ -> Right <$> checkE env g M.empty e1
+                          let v1 = either (valueOf g vs) snd r1
+                          (u2,v) <- withRefs (M.singleton x (Own x))
+                                      (bindValues g [(x,v1)] (checkE env (M.insert x (V t) g) js e2))
+                          let unique = (M.lookup x u2 >>= consumed) == Just Unique
+                          (m,u1) <- case r1 of
+                                      Left w | unique -> (,) Unique <$> uniqueV env g w
+                                             | otherwise -> (,) Owned <$> ownedV env g w
+                                      Right (u,_) -> return (Owned,u)
+                          u <- andThen u1 =<< leave [(x,m) | not (isTrivial (V t))] u2
+                          return (u,v)
+      Call f _ vs -> unknown (args [] (paramModes env f (length vs)) vs)
       Jump j vs -> case M.lookup j js of
-                     Just (ms,caps) -> args caps ms vs
+                     Just (ps,caps) -> do bound ps caps vs
+                                          unknown (args caps [m | (_,m,_) <- ps] vs)
                      Nothing -> fail ("jump to unknown join point " ++ show j)
       Join j ps e1 e2 -> do let caps = [x | x <- S.toList (fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps]), not (trivialVar g x)]
                             closed (params ps ++ [(x,Owned) | x <- caps])
                                    (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) js e1)
-                            checkE env g (M.insert j ([m | (_,m,_) <- ps],caps) js) e2
+                            checkE env g (M.insert j (ps,caps) js) e2
       App f vs -> do ft <- liftE (inferVar g f)
                      case ft of
                        A a -> ownedParams a
                        _ -> fail "unboxed function operand"
-                     uses (consume g f : map (ownedV env g) vs)
-      Gen _ e -> checkE env g M.empty e
-      Drop x e -> uses [consume g x, checkE env g js e]
-      Free r e -> uses [consume g r, checkE env g js e]
+                     unknown (uses (consume g f : map (ownedV env g) vs))
+      Gen _ e -> unknown (fst <$> checkE env g M.empty e)
+      Drop x e -> before (consume g x) (checkE env g js e)
+      Free r e -> before (consume g r) (checkE env g js e)
       Dup x y e -> do a <- liftE (inferAVar g x)
                       when (containsReuse (A a)) (fail "cannot duplicate a reuse credit")
-                      let bs = [(y,A a)]
-                      uses [inspect g x, roots Owned bs (checkE env (bindAll bs g) js e)]
+                      t <- liftE (inferVar g x)
+                      let bs = [(y,t)]
+                      before (inspect g x) (roots Owned bs (bindValues g [(y,Nothing)] (checkE env (bindAll bs g) js e)))
       -- the test uses the root without borrowing from it, which is unique in the first branch
       IsUnique x e1 e2 -> do r <- refOf x
                              z <- case r of
                                     Own z -> return z
                                     Borrow _ -> fail ("uniqueness test of a variable that is not owned: " ++ show x)
-                             u1 <- checkE env g js e1
-                             u2 <- checkE env g js e2
-                             u <- branches [M.adjust (\s -> s{ consumed = Owned <$ consumed s }) z u1, u2]
-                             andThen (M.singleton z (Usage False Nothing)) u
+                             (u1,v1) <- checkE env g js e1
+                             r2 <- checkE env g js e2
+                             before (return (M.singleton z (Usage False Nothing)))
+                                    (branches [(M.adjust (\s -> s{ consumed = Owned <$ consumed s }) z u1, v1), r2])
       UnboxRu z x r e
-        -> do s <- liftE (inferAVar g z >>= boxContents)
-              n <- liftE (reuseSize s)
-              let bs = [(x,V s),(r,V (VReuse n (Just (Var x))))]
-              uses [uniqueName g z, roots Owned bs (checkE env (bindAll bs g) js e)]
-      CaseLit v alts def -> uses [borrowedV env g v, branches =<< mapM (checkE env g js) (def : map snd alts)]
+        -> do bs <- liftE (unboxRuBinds g z x r)
+              before (uniqueName g z) (roots Owned bs (bindValues g [(x,Nothing),(r,Nothing)] (checkE env (bindAll bs g) js e)))
+      CaseLit v alts def -> before (borrowedV env g v) (branches =<< mapM (checkE env g js) (def : map snd alts))
       _ -> fail "unexpected destructuring form"
   where
+    unknown c = do u <- c
+                   return (u,Nothing)
     -- owned and unique arguments (and captured variables) first: a borrowed argument must not
     -- be derived from one of them
     args caps ms vs = uses ([ownedV env g v | (Owned,v) <- zip ms vs] ++
                             map (consume g) caps ++
                             [uniqueV env g v | (Unique,v) <- zip ms vs] ++
                             [borrowedV env g v | (Borrowed,v) <- zip ms vs])
+    -- a jump binds the parameters that the descriptions of the parameters and captured
+    -- variables name, which must be aliases of the arguments
+    bound :: [(Name,Mode,VType)] -> [Name] -> [VVal] -> L ()
+    bound ps caps vs
+      = do values <- asks scValues
+           let named = S.unions [fvV p | t <- [t | (_,_,t) <- ps] ++ [t | x <- caps, Just (V t) <- [M.lookup x g]]
+                                       , Contents _ p _ <- descriptions t]
+           forM_ [(x,v) | ((x,_,_),v) <- zip ps vs, S.member x named] $ \(x,v) ->
+             unless (valueOf g values v == valueOf g values (Var x))
+               (fail ("variable named in the description of a credit is bound again to a different value: " ++ show x))
 
 -- the binders of a borrowed destructuring of `z` are borrowed from its root, except that one
 -- that keeps the pointer of an owned `z` (or of an alias) at a boxed type is an alias
-destruct :: Env -> Gamma -> Joins -> Mode -> Bool -> VVal -> [([(Name,Ty)],VExpr)] -> L Use
+destruct :: Env -> Gamma -> Joins -> Mode -> Bool -> VVal -> [(Maybe VVal,[(Name,Ty)],VExpr)] -> L Res
 destruct env g js m keeps v alts
-  = do rs <- ask
-       let ref = case v of { Var z -> M.lookup z rs; _ -> Nothing }
+  = do sc <- ask
+       let ref = case v of { Var z -> M.lookup z (scRefs sc); _ -> Nothing }
+           sv = valueOf g (scValues sc) v
            binders bs | owning m  = roots m bs
-                      | otherwise = local (M.union (M.fromList [(x, borrowedFrom ref t) | (x,t) <- bs]))
+                      | otherwise = withRefs (M.fromList [(x, borrowedFrom ref t) | (x,t) <- bs])
            use = case m of
                    Owned -> ownedV env g v
                    Unique -> uniqueV env g v
                    Borrowed -> borrowedV env g v
-       uses [use, branches =<< sequence [binders bs (checkE env (bindAll bs g) js e) | (bs,e) <- alts]]
+       before use (branches =<< sequence [binders bs (altValues g sv pat (map fst bs) (checkE env (bindAll bs g) js e))
+                                         | (pat,bs,e) <- alts])
   where
     borrowedFrom (Just (Own z)) t | keeps && isA t = Own z
     borrowedFrom r _ = Borrow (r >>= rootOf)
