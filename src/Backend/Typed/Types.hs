@@ -41,7 +41,7 @@ instance Types AType where
   matchWith = matchAWith
 
 instance Types Ty where
-  subst sub (A a) = A (substA sub a)
+  subst sub (AAt p a) = AAt p (substA sub a)
   subst sub (V t) = V (substV sub t)
   ftv (A a) = ftvA a
   ftv (V t) = ftvV t
@@ -57,7 +57,7 @@ inst :: Types t => [TVar] -> [AType] -> t -> t
 inst tvs tys = subst (M.fromList (zip tvs tys))
 
 -- Transform descriptions without changing the runtime type of a credit.
-mapReuseContents :: (Maybe VVal -> Maybe VVal) -> VType -> VType
+mapReuseContents :: (Maybe Contents -> Maybe Contents) -> VType -> VType
 mapReuseContents f = goV
   where
     goV t = case t of
@@ -246,25 +246,29 @@ eqV s t
       _                      -> s == t
 
 -- Contents are descriptions, so only their structural forms need type substitution.
-substContents :: Sub -> VVal -> VVal
-substContents sub v = case v of
-  Inj i t x -> Inj i (substV sub t) (substContents sub x)
-  Pair x y -> Pair (substContents sub x) (substContents sub y)
-  Pack t ts x -> Pack (substV sub t) (map (substA sub) ts) (substContents sub x)
-  TyApp x ts -> TyApp (substContents sub x) (map (substA sub) ts)
-  _ -> v
+substContents :: Sub -> Contents -> Contents
+substContents sub (Contents k p t) = Contents k (go p) (substV sub t)
+  where
+    go v = case v of
+      Inj i s x -> Inj i (substV sub s) (go x)
+      Pair x y -> Pair (go x) (go y)
+      Pack s ts x -> Pack (substV sub s) (map (substA sub) ts) (go x)
+      TyApp x ts -> TyApp (go x) (map (substA sub) ts)
+      _ -> v
 
-ftvContents :: VVal -> [TVar]
-ftvContents v = case v of
-  Inj _ t x -> ftvV t ++ ftvContents x
-  Pair x y -> ftvContents x ++ ftvContents y
-  Pack t ts x -> ftvV t ++ concatMap ftvA ts ++ ftvContents x
-  TyApp x ts -> ftvContents x ++ concatMap ftvA ts
-  _ -> []
+ftvContents :: Contents -> [TVar]
+ftvContents (Contents _ p t) = go p ++ ftvV t
+  where
+    go v = case v of
+      Inj _ s x -> ftvV s ++ go x
+      Pair x y -> go x ++ go y
+      Pack s ts x -> ftvV s ++ concatMap ftvA ts ++ go x
+      TyApp x ts -> go x ++ concatMap ftvA ts
+      _ -> []
 
-eqContentsMaybe :: Maybe VVal -> Maybe VVal -> Bool
+eqContentsMaybe :: Maybe Contents -> Maybe Contents -> Bool
 eqContentsMaybe Nothing Nothing = True
-eqContentsMaybe (Just p) (Just q) = eqContents p q
+eqContentsMaybe (Just (Contents k p s)) (Just (Contents l q t)) = k == l && eqV s t && eqContents p q
 eqContentsMaybe _ _ = False
 
 eqContents :: VVal -> VVal -> Bool

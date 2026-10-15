@@ -57,7 +57,7 @@ prettyV t
       VPtr a@(AVar _)   -> prettyA a <.> text "*"
       VPtr a@(ACon _ _) -> prettyA a <.> text "*"
       VPtr a     -> parens (prettyA a) <.> text "*"
-      VReuse n contents -> text ("reuse" ++ show n) <.> maybe empty (brackets . prettyVal) contents
+      VReuse n contents -> text ("reuse" ++ show n) <.> prettyContents contents
       VUnit      -> text "I"
       VSum ts    -> parens (hsep (punctuate (text " (+)") (map prettyV ts)))
       VProd x y  -> parens (prettyV x <+> text "(x)" <+> prettyV y)
@@ -86,6 +86,9 @@ prettyAVal val
       BoxAt r v   -> text "box@" <.> nm r <+> atomVal v
       BoxIn x v   -> text "box-in@" <.> nm x <+> atomVal v
 
+prettyContents :: Maybe Contents -> Doc
+prettyContents = maybe empty (\(Contents k p t) -> brackets (text (show k) <.> semi <+> prettyVal p <+> text ":" <+> prettyV t))
+
 prettyVal :: VVal -> Doc
 prettyVal val
   = case val of
@@ -100,7 +103,7 @@ prettyVal val
       Pack _ ts v -> text "pack" <.> brackets (commaSep (map prettyA ts)) <+> atomVal v
       TyApp v ts  -> atomVal v <.> brackets (commaSep (map prettyA ts))
       DupV v      -> text "dup" <+> atomVal v
-      NoReuse n   -> text ("no-reuse" ++ show n)
+      NoReuse n p -> text ("no-reuse" ++ show n) <.> prettyContents p
       Hole        -> text "hole"
       Context _ v -> text "ctx" <+> atomVal v
       Plug c v    -> atomVal c <.> brackets (prettyVal v)

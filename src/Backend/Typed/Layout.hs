@@ -17,7 +17,7 @@
   Structs are named by a hash of their layout so modules agree on them.
 -}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Layout( CT(..), layout, leaves, isEnum, orderFields, shapeIsHeap
+module Backend.Typed.Layout( CT(..), layout, leaves, leafSlots, isEnum, orderFields, shapeIsHeap
                            , ctName, scanOf, rawOf, needsRC
                            , structDefs, blockName, blockDef, blockSize, isBlock
                            , dupExpr, dropStmt, rawCType, primBox, fnv
@@ -40,7 +40,7 @@ data CT = CBox
         | CProd String [(Int,CT)]     -- leaves in memory order, with their position in the product
         | CSum String [Maybe CT]      -- the payload of each alternative (if not unit)
         | CReuse                      -- a reuse credit
-        deriving (Show)
+        deriving (Eq,Show)
 
 -- A uniform boxed shape can be distinguished by the pointer bit. Nothing means
 -- either a mixture of heap blocks and immediates or an opaque representation.
@@ -250,6 +250,14 @@ blockDef ct
 blockSize :: CT -> Int
 blockSize ct = fst (structSize [(8,4), sizeAlign ct])
 
+-- the offset and layout of each leaf of a payload, in the order of `leaves`
+leafSlots :: CT -> [(Int,CT)]
+leafSlots ct
+  = case ct of
+      CProd _ fs -> map snd (sortOn fst (zip (map fst fs) (zip (fieldOffsets (map (sizeAlign . snd) fs)) (map snd fs))))
+      CUnit -> []
+      _ -> [(0,ct)]
+
 -- a box of this payload is always a heap block (raw values may be boxed in place)
 isBlock :: CT -> Bool
 isBlock ct
@@ -281,6 +289,12 @@ structSize fields
   = let align = maximum (1 : map snd fields)
         end   = foldl' (\off (size,al) -> alignUp off al + size) 0 fields
     in (alignUp end align, align)
+
+fieldOffsets :: [(Int,Int)] -> [Int]
+fieldOffsets = go 0
+  where
+    go _ [] = []
+    go off ((size,al):fields) = let start = alignUp off al in start : go (start + size) fields
 
 alignUp :: Int -> Int -> Int
 alignUp n a = ((n + a - 1) `div` a) * a

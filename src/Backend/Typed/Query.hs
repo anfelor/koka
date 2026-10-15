@@ -10,8 +10,8 @@
 -- Type inference and environment queries shared by typed IR consumers.
 -- Keep inference in sync with the typing rules in Syntax.
 module Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, checkE, inferE, inferA, inferV
-                          , inferVar, inferAVar, altTypes, boxContents, reuseSize, unrollT, openFields
-                          , funSig, paramModes, contentsOfAlt, contentsValueOfAlt ) where
+                          , inferVar, inferAVar, altTypes, unboxRuBinds, boxContents, reuseSize, unrollT, openFields
+                          , funSig, paramModes, contentsOfAlt, contentsValueOfAlt, altPattern ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -45,22 +45,15 @@ expect t1 t2 = unless (alphaEq t1 t2) (Left ("type mismatch:\n  expected: " ++ p
 -- jumps are only allowed in tail position: the joins are not visible in a let-bound
 -- expression, a lambda or a generalization
 checkE :: Env -> Gamma -> Joins -> VExpr -> VType -> Q ()
-checkE env g js e t = do mapM_ (checkReuseTy env g) (M.elems g)
-                         checkReuseTy env g (V t)
+checkE env g js e t = do mapM_ checkReuseTy (M.elems g)
+                         checkReuseTy (V t)
                          case e of
                            Ret v -> checkV env g v t
                            _ -> inferE env g js e >>= expectV t
 
 inferE :: Env -> Gamma -> Joins -> VExpr -> Q VType
-inferE env g js e = do mapM_ (checkReuseTy env g) (M.elems g)
-                       scopedContents g <$> inferExpr env g js e
-
--- Local payload identities cannot escape through an ordinary result type.
-scopedContents :: Gamma -> VType -> VType
-scopedContents g = mapCredits keep
-  where
-    keep p@(Just v) | fvV v `S.isSubsetOf` M.keysSet g = p
-    keep _ = Nothing
+inferE env g js e = do mapM_ checkReuseTy (M.elems g)
+                       inferExpr env g js e
 
 -- Forgetting a description is allowed; inventing one is not.
 expectV :: VType -> VType -> Q ()
@@ -75,7 +68,7 @@ expectV expected actual
     forget _ t = t
 
 -- Forget only credits carried by a value, not contracts behind a pointer.
-mapCredits :: (Maybe VVal -> Maybe VVal) -> VType -> VType
+mapCredits :: (Maybe Contents -> Maybe Contents) -> VType -> VType
 mapCredits f t = case t of
   VReuse n p -> VReuse n (f p)
   VProd a b -> VProd (mapCredits f a) (mapCredits f b)
@@ -83,23 +76,11 @@ mapCredits f t = case t of
   VExists vs b -> VExists vs (mapCredits f b)
   _ -> t
 
--- A shadowed name would give an existing description a different identity.
-checkBinders :: Gamma -> [Name] -> Q ()
-checkBinders g xs = mapM_ check (M.elems g)
-  where
-    forget p@(Just v)
-      | not (S.null (fvV v `S.intersection` S.fromList xs)) = Nothing
-      | otherwise = p
-    forget Nothing = Nothing
-    check t = let v = case t of { V s -> s; A a -> VPtr a }
-              in unless (alphaEq v (mapReuseContents forget v))
-                   (Left "binder shadows a name in reuse contents")
-
 inferExpr :: Env -> Gamma -> Joins -> VExpr -> Q VType
 inferExpr env g js expr
   | Just ds <- destructAOf expr
-  = do t <- inferAVar g (dsScrut ds)
-       inferDestruct env g js expr (A t) (dsAlts ds)
+  = do t <- inferVar g (dsScrut ds)
+       inferDestruct env g js expr t (dsAlts ds)
   | Just ds <- destructVOf expr
   = do t <- inferV env g (dsScrut ds)
        inferDestruct env g js expr (V t) (dsAlts ds)
@@ -107,7 +88,6 @@ inferExpr env g js expr
   = case expr of
       Ret v -> inferV env g v
       Let x t e1 e2 -> do checkE env g M.empty e1 t
-                          checkBinders g [x]
                           inferE env (M.insert x (V t) g) js e2
       Call f tys vs -> do (ps,r) <- funSig env f tys
                           checkArgs env g ps vs
@@ -132,22 +112,19 @@ inferExpr env g js expr
                        _ -> Left ("free of a non-credit: " ++ ppr t)
       Dup x y e -> do a <- inferAVar g x
                       when (containsReuse (A a)) (Left "cannot duplicate a reuse credit")
-                      checkBinders g [y]
-                      inferE env (M.insert y (A a) g) js e
+                      t <- inferVar g x
+                      inferE env (M.insert y t g) js e
       IsUnique x e1 e2 -> do t <- inferVar g x
                              case t of
                                V (VPtr (ACon n _)) | Just TypeDef{ tdefLazy = Just _ } <- M.lookup n (envTypes env)
                                  -> return ()
                                _ -> () <$ (inferAVar g x >>= boxContents >>= reuseSize)
                              branches [inferE env g js e1, inferE env g js e2]
-      UnboxRu v x r e -> do s <- inferAVar g v >>= boxContents
-                            n <- reuseSize s
-                            checkBinders g [x,r]
-                            inferE env (bindAll [(x,V s),(r,V (VReuse n (Just (Var x))))] g) js e
+      UnboxRu v x r e -> do bs <- unboxRuBinds g v x r
+                            inferE env (bindAll bs g) js e
       Join j ps e1 e2 -> do let xs = [x | (x,_,_) <- ps]
                             unless (S.disjoint (fvE e1 `S.difference` S.fromList xs) (S.fromList (bindersE e2)))
                               (Left ("join point " ++ show j ++ " captures a variable that is bound again in its scope"))
-                            checkBinders g xs
                             t <- inferE env (bindAll [(x,V p) | (x,_,p) <- ps] g) js e1
                             checkE env g (M.insert j ([p | (_,_,p) <- ps],t) js) e2 t
                             return t
@@ -166,8 +143,7 @@ inferDestruct :: Env -> Gamma -> Joins -> VExpr -> Ty -> [([Name],VExpr)] -> Q V
 inferDestruct env g js expr t alts
   = do tss <- altTypes env t expr
        unless (length alts == length tss) (Left "wrong number of alternatives")
-       r <- branches [do checkBinders g xs
-                         inferE env (bindAll (zip xs ts) (contentsOfAlt expr t i xs g)) js e
+       r <- branches [inferE env (bindAll (zip xs ts) (contentsOfAlt expr t i xs g)) js e
                     | (i,((xs,e),ts)) <- zip [0..] (zip alts tss)]
        case expr of
          Unpack _ _ tvs x e -> unbound tvs (ftv r ++ ftvCtx (M.delete x g) e)
@@ -176,23 +152,27 @@ inferDestruct env g js expr t alts
 
 -- Expose payload structure in the descriptions carried by credits.
 contentsOfAlt :: VExpr -> Ty -> Int -> [Name] -> Gamma -> Gamma
-contentsOfAlt expr t i xs = M.map (rewrite (fmap (contentsValueOfAlt expr t i xs)))
+contentsOfAlt expr t i xs = M.map (rewrite (fmap (\(Contents k p s) -> Contents k (contentsValueOfAlt expr t i xs p) s)))
   where
     rewrite f (V s) = V (mapReuseContents f s)
-    rewrite f (A a) = case mapReuseContents f (VPtr a) of
-                       VPtr b -> A b
-                       _ -> A a
+    rewrite f (AAt p a) = case mapReuseContents f (VPtr a) of
+                            VPtr b -> AAt p b
+                            _ -> AAt p a
 
 -- Reconstruct a destructured value using the binders of its selected alternative.
 -- Both credit contents and code generation's aggregate descriptions use this.
 contentsValueOfAlt :: VExpr -> Ty -> Int -> [Name] -> VVal -> VVal
-contentsValueOfAlt expr t i xs = case (expr,t,xs) of
-  (Unpair _ (Var x) _ _ _, _, [a,b]) -> replace x (Pair (Var a) (Var b))
-  (CaseV _ (Var x) _, V s, [a]) -> replace x (Inj i s (Var a))
-  (Unpack _ (Var x) tvs _ _, V s, [a]) -> replace x (Pack s (map AVar tvs) (Var a))
+contentsValueOfAlt expr t i xs = case (fmap dsScrut (destructVOf expr), altPattern expr t i xs) of
+  (Just (Var x), Just p) -> replaceV (M.singleton x p)
   _ -> id
-  where
-    replace x v = replaceV (M.singleton x v)
+
+-- The scrutinee of an unboxed destructuring in its selected alternative, in terms of its binders.
+altPattern :: VExpr -> Ty -> Int -> [Name] -> Maybe VVal
+altPattern expr t i xs = case (expr,t,xs) of
+  (Unpair{}, _, [a,b]) -> Just (Pair (Var a) (Var b))
+  (CaseV{}, V s, [a]) -> Just (Inj i s (Var a))
+  (Unpack _ _ tvs _ _, V s, [a]) -> Just (Pack s (map AVar tvs) (Var a))
+  _ -> Nothing
 
 -- type variables bound by `gen` and `unpack` must not occur free in the context (or the result)
 unbound :: [TVar] -> [TVar] -> Q ()
@@ -211,20 +191,22 @@ altTypes env t expr
   = case (expr,t) of
       (Unpair{}, V (VProd a b)) -> return [[V a, V b]]
       (CaseV _ _ alts, V (VSum ts)) | length ts == length alts -> return [[V s] | s <- ts]
-      (SplitA _ _ k _ _, A a@(ASum ts)) -> do
+      (SplitA _ _ k _ _, AAt p a@(ASum ts)) -> do
         checkShape a
         let (ls,rs) = span ((< k) . fst) ts
+            at = AAt (InSum (offset p))
         unless (not (null ls) && not (null rs)) (Left "invalid boxed sum partition")
-        return [[A (ASum ls)], [A (ASum rs)]]
-      (CaseA _ _ alts def, A a@(ASum ts)) -> do
+        return [[at (ASum ls)], [at (ASum rs)]]
+      (CaseA _ _ alts def, AAt p a@(ASum ts)) -> do
         checkShape a
         let indices = [i | (i,_,_) <- alts]
             rest = [(i,t) | (i,t) <- ts, i `notElem` indices]
+            at i = AAt (InSum (offset p + i))
         unless (all (`elem` map fst ts) indices && S.size (S.fromList indices) == length indices)
           (Left "invalid boxed case indices")
         unless (maybe (null rest) (const (not (null rest))) def)
           (Left "incomplete boxed case")
-        return ([[A t] | i <- indices, Just t <- [lookup i ts]] ++ maybe [] (const [[A (ASum rest)]]) def)
+        return ([[at i t] | i <- indices, Just t <- [lookup i ts]] ++ maybe [] (const [[at 0 (ASum rest)]]) def)
       (Deref{}, V (VPtr a)) -> return [[A a]]
       (Unroll{}, A a) -> do b <- unrollT env a
                             return [[A b]]
@@ -234,6 +216,15 @@ altTypes env t expr
       (CaseOpen _ _ alts _, A a) -> do fs <- mapM (\(c,_,_) -> openFields env c a) alts
                                        return ([[V f] | f <- fs] ++ [[]])
       _ -> Left ("cannot destructure a value of type " ++ ppr t)
+
+-- the binders of `[unbox-ru]`: the contents of a unique box and the credit of its block, whose
+-- tag follows from the position of the box
+unboxRuBinds :: Gamma -> Name -> Name -> Name -> Q [(Name,Ty)]
+unboxRuBinds g z x r
+  = do t <- inferVar g z
+       s <- inferAVar g z >>= boxContents
+       n <- reuseSize s
+       return [(x,V s),(r,V (VReuse n (Just (Contents (offset (position t) + 1) (Var x) s))))]
 
 branches :: [Q VType] -> Q VType
 branches cs = do ts <- sequence cs
@@ -308,38 +299,40 @@ checkA :: Env -> Gamma -> AVal -> AType -> Q ()
 checkA env g val t = inferA env g val >>= expect t
 
 checkV :: Env -> Gamma -> VVal -> VType -> Q ()
-checkV env g val t = do checkReuseTy env g (V t)
+checkV env g val t = do checkReuseTy (V t)
                         case (val,t) of
-                          (NoReuse n, VReuse m _) | n == m -> return ()
+                          -- an empty credit satisfies every description
+                          (NoReuse n _, VReuse m _) | n == m -> () <$ inferV env g val
                           _ -> inferV env g val >>= expectV t
 
--- Descriptions are checked for scope and layout, but never used as owned values.
-checkReuseTy :: Env -> Gamma -> Ty -> Q ()
-checkReuseTy env g ty = case ty of
+-- Descriptions are checked for layout, but never used as owned values. Their names need not be in
+-- scope: the type of a description is part of it.
+checkReuseTy :: Ty -> Q ()
+checkReuseTy ty = case ty of
   V t -> case t of
     VReuse n p -> do when (n < 0) (Left "negative reuse size")
                      case p of
                        Nothing -> return ()
-                       Just v -> do structural v
-                                    s <- inferV env g v
-                                    noHeapCredit s
-                                    m <- reuseSize s
-                                    unless (n == m) (Left "reuse contents do not match the block size")
-    VPtr a -> checkReuseTy env g (A a)
-    VProd a b -> checkReuseTy env g (V a) >> checkReuseTy env g (V b)
-    VSum ts -> mapM_ (checkReuseTy env g . V) ts
-    VExists _ b -> checkReuseTy env g (V b)
-    VCtx a b -> checkReuseTy env g (A a) >> checkReuseTy env g (A b)
+                       Just (Contents k v s) -> do when (k < 1) (Left "reuse contents with an invalid tag")
+                                                   structural v
+                                                   noHeapCredit s
+                                                   m <- reuseSize s
+                                                   unless (n == m) (Left "reuse contents do not match the block size")
+    VPtr a -> checkReuseTy (A a)
+    VProd a b -> checkReuseTy (V a) >> checkReuseTy (V b)
+    VSum ts -> mapM_ (checkReuseTy . V) ts
+    VExists _ b -> checkReuseTy (V b)
+    VCtx a b -> checkReuseTy (A a) >> checkReuseTy (A b)
     VUnit -> return ()
     VRaw _ -> return ()
   A a -> case a of
-    ABox t -> checkReuseTy env g (V t)
-    ASum ts -> mapM_ (checkReuseTy env g . A . snd) ts
-    AFun ps r -> mapM_ (checkReuseTy env g . V) (map snd ps ++ [r])
-    AForall _ b -> checkReuseTy env g (A b)
-    ALam _ b -> checkReuseTy env g (A b)
-    ACon _ ts -> mapM_ (checkReuseTy env g . A) ts
-    AApp _ ts -> mapM_ (checkReuseTy env g . A) ts
+    ABox t -> checkReuseTy (V t)
+    ASum ts -> mapM_ (checkReuseTy . A . snd) ts
+    AFun ps r -> mapM_ (checkReuseTy . V) (map snd ps ++ [r])
+    AForall _ b -> checkReuseTy (A b)
+    ALam _ b -> checkReuseTy (A b)
+    ACon _ ts -> mapM_ (checkReuseTy . A) ts
+    AApp _ ts -> mapM_ (checkReuseTy . A) ts
     AVar _ -> return ()
     AUnit -> return ()
   where
@@ -406,7 +399,7 @@ inferA env g val
                           -> return (ABox tv)
                         _ -> Left ("writing " ++ ppr tv ++ " into " ++ ppr tx)
       BoxAt r v -> do tr <- inferV env g (Var r)
-                      checkReuseTy env g (V tr)
+                      checkReuseTy (V tr)
                       tv <- inferV env g v
                       noHeapCredit tv
                       case tr of
@@ -428,7 +421,9 @@ inferV env g val
                       _ -> Left ("unknown global value " ++ show x)
       UnitV -> return VUnit
       Lit l -> return (litType l)
-      NoReuse n -> return (VReuse n Nothing)
+      NoReuse n p -> do let t = VReuse n p
+                        checkReuseTy (V t)
+                        return t
       Inj i t v -> case t of
                      VSum ts | 0 <= i, i < length ts -> checkV env g v (ts !! i) >> return t
                      _ -> Left ("injection into " ++ ppr t)

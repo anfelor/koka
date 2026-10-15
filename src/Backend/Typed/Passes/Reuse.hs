@@ -29,7 +29,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, boxContents, reuseSize, inferE, contentsOfAlt, unrollT )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuBinds, boxContents, reuseSize, inferE, contentsOfAlt, unrollT )
 
 -- credits with the size of their block
 type Credits = [(Name,Int)]
@@ -142,7 +142,7 @@ ruE expr
         -> do vs' <- mapM ruV vs
               ns  <- asks (M.findWithDefault [] j . reJoins)
               rs  <- mapM takeCredit ns
-              return (Jump j (vs' ++ [maybe (NoReuse n) Var r | (r,n) <- zip rs ns]))
+              return (Jump j (vs' ++ [maybe (NoReuse n Nothing) Var r | (r,n) <- zip rs ns]))
       CaseLit v alts def
         -> do es <- branches [([],e) | e <- map snd alts ++ [def]]
               return (CaseLit v (zip (map fst alts) es) (last es))
@@ -177,9 +177,8 @@ ruE expr
               return (IsUnique x (es !! 0) (es !! 1))
       UnboxRu v x r e
         -> do g <- asks reGamma
-              s <- liftE (inferAVar g v >>= boxContents)
-              n <- liftE (reuseSize s)
-              UnboxRu v x r <$> bind [(x,V s),(r,V (VReuse n (Just (Var x))))] (ruE e)
+              bs <- liftE (unboxRuBinds g v x r)
+              UnboxRu v x r <$> bind bs (ruE e)
       Ret _ -> plain
       Call _ _ _ -> plain
       App _ _ -> plain
@@ -218,7 +217,7 @@ dropReuse x r n e
        s <- liftE (inferAVar g x >>= boxContents)
        body <- dropValue fresh y (V s) (Ret (Var r'))
        return (Let r (VReuse n Nothing) (IsUnique x (UnboxRu x y r' body)
-                                                (Drop x (Ret (NoReuse n))))
+                                                (Drop x (Ret (NoReuse n Nothing))))
                  e)
 
 -- every branch starts with the same credits, plus those that earlier branches asked for;
