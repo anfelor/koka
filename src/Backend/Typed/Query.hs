@@ -134,7 +134,11 @@ inferExpr env g js expr
                       when (containsReuse (A a)) (Left "cannot duplicate a reuse credit")
                       checkBinders g [y]
                       inferE env (M.insert y (A a) g) js e
-      IsUnique x e1 e2 -> do _ <- inferAVar g x >>= boxContents >>= reuseSize
+      IsUnique x e1 e2 -> do t <- inferVar g x
+                             case t of
+                               V (VPtr (ACon n _)) | Just TypeDef{ tdefLazy = Just _ } <- M.lookup n (envTypes env)
+                                 -> return ()
+                               _ -> () <$ (inferAVar g x >>= boxContents >>= reuseSize)
                              branches [inferE env g js e1, inferE env g js e2]
       UnboxRu v x r e -> do s <- inferAVar g v >>= boxContents
                             n <- reuseSize s

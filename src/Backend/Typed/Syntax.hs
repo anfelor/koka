@@ -518,11 +518,13 @@ data VExpr
   -- It produces no AVal that could be injected into a different sum.
   | Dup Name Name VExpr
 
-  --   Γ, x :! Box V ⊢ e₁ : W    Γ, x : Box V ⊢ e₂ : W    |V| defined
-  --  ──────────────────────────────────────────────────────────────── [if-unique]
-  --   Γ, x : Box V ⊢ if-unique x then e₁ else e₂ : W
+  --   Γ, x :! t ⊢ e₁ : W    Γ, x : t ⊢ e₂ : W    t = Box V with |V| defined, or t = T⟨B̄⟩* with T lazy
+  --  ───────────────────────────────────────────────────────────────────────────────────── [if-unique]
+  --   Γ, x : t ⊢ if-unique x then e₁ else e₂ : W
   --
-  -- Branches on whether a box is unique (`DropSpec`).
+  -- Branches on whether a box (`DropSpec`) or a lazy value (`Lazy`) is unique. A lazy value
+  -- may be immediate, and then it is not unique. `Lazy` frees a unique lazy value under
+  -- evaluation with `typed-lazy-free : ∀a. (!a) -> 1`, which does not drop its (taken) fields.
   | IsUnique Name VExpr VExpr
 
   --   Γ, x : V, r : ◇n[x] ⊢ e : W    |V| = n

@@ -21,7 +21,7 @@ module Backend.Typed.Passes.Lazy( lazyProgram ) where
 
 import qualified Data.Map as M
 import Common.Name
-import Common.NamePrim( nameLazyMemoize, nameLazyMemoizeTarget, nameDataTypePtrIsUnique )
+import Common.NamePrim( nameLazyMemoize, nameLazyMemoizeTarget )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types( inst, sumTypes, varV )
@@ -47,9 +47,7 @@ lazyProgram prog
                   Left err   -> (d, [show (defName d) ++ ": " ++ err])
         (defs,errs) = unzip (map run (progDefs prog))
         a     = -4
-        isUniqueSig = SigFun [a] [(Borrowed,varV a)] (VSum [VUnit,VUnit])
-        sigs = M.insert nameLazyFree (SigFun [a] [(Owned,varV a)] VUnit) $
-               M.insertWith (\_ old -> old) nameDataTypePtrIsUnique isUniqueSig (progSigs prog)
+        sigs = M.insert nameLazyFree (SigFun [a] [(Unique,varV a)] VUnit) (progSigs prog)
     in (prog{ progDefs = defs, progSigs = sigs }, concat errs)
 
 lazyE :: TypeDefs -> Targets -> VExpr -> Z VExpr
@@ -99,18 +97,13 @@ inPlace linfo shapes mbSize i
 indirect :: AType -> [AType] -> Int -> Name -> VVal -> Z VExpr
 indirect t shapes ind x v
   = do r <- fresh "r"
-       u <- fresh "u"
        d <- fresh "d"
-       yf <- fresh "f"
-       yt <- fresh "y"
        z <- fresh "z"
        a <- fresh "a"
        let ref = Ptr t (Roll t (injA shapes ind (BoxIn x (DupV (Var r)))))
            shared = Let d (VPtr t) (Ret ref) (Deref Owned (Var d) a (Drop a (Ret (Var r))))
            unique = Let z VUnit (Call nameLazyFree [t] [Var x]) (Ret (Var r))
-       return (Let r (VPtr t) (Ret v)
-                (Let u (VSum [VUnit,VUnit]) (Call nameDataTypePtrIsUnique [t] [Var x])
-                  (CaseV Owned (Var u) [(yf,shared),(yt,unique)])))
+       return (Let r (VPtr t) (Ret v) (IsUnique x unique shared))
 
 -- the constructor of a value of a lazy datatype: its index, payload, and how to rebuild it with another box
 conOf :: VVal -> Maybe (Int, VVal, AVal -> VVal)
