@@ -43,11 +43,14 @@ data CEnv = CEnv{ ceModName   :: Name
                 , ceExterns   :: M.Map Name External
                 , ceNewtypes  :: Newtypes
                 , ceDataInfos :: [DataInfo]
+                , ceInline    :: S.Set Name   -- small functions defined `static inline` in the header
                 }
 
 -- generation monad
 
-data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [String], stDecls :: [String], stWrappers :: S.Set Name }
+-- `stLocal`: whether the current definition uses declarations of the C file (static functions)
+data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [String], stDecls :: [String], stWrappers :: S.Set Name
+            , stLocal :: Bool }
 
 -- `cxJoins`: the label and the parameters of each join point in scope
 -- `cxValues`: expanded, allocation-free values used only for payload comparison
@@ -68,7 +71,7 @@ fresh :: String -> G String
 fresh s = state (\st -> ("_" ++ s ++ show (stUniq st), st{ stUniq = stUniq st + 1 }))
 
 emitDecl :: String -> G ()
-emitDecl d = modify (\st -> st{ stDecls = stDecls st ++ [d] })
+emitDecl d = modify (\st -> st{ stDecls = stDecls st ++ [d], stLocal = True })
 
 -- names
 
@@ -535,7 +538,7 @@ cstring s
 -- top-level functions as values
 staticFun :: Name -> G String
 staticFun f
-  = do modify (\st -> st{ stWrappers = S.insert f (stWrappers st) })
+  = do modify (\st -> st{ stWrappers = S.insert f (stWrappers st), stLocal = True })
        x <- fresh "f"
        return ("({ kk_define_static_function(" ++ x ++ "," ++ cName f ++ "_fun,_ctx); kk_datatype_box(" ++ x ++ "); })")
 
@@ -1304,16 +1307,22 @@ genWrapper env cenv f
 cgenModule :: CEnv -> Program -> (String,String,[String])
 cgenModule cenv prog
   = let env = envOf prog
-        genDefE :: Def -> G (Either String (String,String,String))
+        -- (prototype, definition in the header, definition in the C file, initialization)
+        genDefE :: Def -> G (Either String (String,String,String,String))
         genDefE d = do st <- get
-                       case runM (genDef env cenv d) () st of
+                       case runM (genDef env cenv d) () st{ stLocal = False } of
                          Left err -> return (Left (show (defName d) ++ ": " ++ err))
-                         Right (x,st') -> put st' >> return (Right x)
+                         Right ((p,c,i),st') -> do put st'
+                                                   return (Right (if inHeader d st' then ("static inline " ++ p,"static inline " ++ c,"",i) else (p,"",c,i)))
+        -- a small function is defined in the header unless it uses declarations of the C file
+        inHeader d st = S.member (defName d) (ceInline cenv) && isFun d && not (stLocal st)
+        isFun DefFun{} = True
+        isFun DefVal{} = False
         genAll = do rs <- mapM genDefE (progDefs prog)
                     ws <- gets (S.toList . stWrappers)
                     wdefs <- mapM (genWrapper env cenv) ws
                     return (rs,wdefs)
-    in case runM genAll () (St 0 M.empty [] [] S.empty) of
+    in case runM genAll () (St 0 M.empty [] [] S.empty False) of
          Left err -> ("","",[err])
          Right ((rs,wdefs),st)
            -> let ok    = [x | Right x <- rs]
@@ -1325,17 +1334,18 @@ cgenModule cenv prog
                           ++ runtimeHeader
                           ++ concat ["#include \"" ++ h ++ "\"\n" | h <- drop 1 (ceIncludes cenv)]
                           ++ concat [stStructs st M.! n | n <- stOrder st]
-                          ++ concat [p | (p,_,_) <- ok]
+                          ++ concat [p | (p,_,_,_) <- ok]
+                          ++ concat [h | (_,h,_,_) <- ok]
                           ++ "void " ++ ktInitName (ceModName cenv) ++ "(kk_context_t* _ctx);\n#endif\n"
                   csrc  = concat ["#include \"" ++ take (length h - 2) h ++ ".c\"\n" | h <- take 1 (ceIncludes cenv)]
                           ++ "#include \"" ++ "kt_" ++ encode (show (ceModName cenv)) ++ ".h\"\n"
                           ++ concat (map fst wdefs)
                           ++ concat (stDecls st)
-                          ++ concat [d | (_,d,_) <- ok]
+                          ++ concat [d | (_,_,d,_) <- ok]
                           ++ concat (map snd wdefs)
                           ++ "void " ++ ktInitName (ceModName cenv) ++ "(kk_context_t* _ctx) {\n  static bool _initialized = false;\n  if (_initialized) return;\n  _initialized = true;\n"
                           ++ concat ["  " ++ i ++ "(_ctx);\n" | i <- ceImportInits cenv]
-                          ++ concat [i | (_,_,i) <- ok]
+                          ++ concat [i | (_,_,_,i) <- ok]
                           ++ "}\n"
               in (hdr, csrc, errs)
 

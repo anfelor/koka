@@ -45,6 +45,7 @@ import Backend.C.FromCore         ( cFromCore )
 import Backend.Typed.Typed        ( typedFromCore )
 import qualified Backend.Typed.CGen as TC
 import qualified Data.Map as M
+import qualified Data.Set as S
 import qualified Common.NameMap as NM
 import Kind.Newtypes( newtypesTypeDefs )
 import Backend.Typed.Pretty()
@@ -291,6 +292,9 @@ codeGenTyped term flags imports mod
                                   ([moduleNameToPath (modName mod) ++ ".h"] ++ map (ktHeader . modName) imports)
                                   (map (TC.ktInitName . modName) imports)
                                   externs newtypes (map snd (NM.toList (newtypesTypeDefs newtypes)) ++ [info | c <- cores, Core.TypeDefGroup tds <- Core.coreProgTypeDefs c, Core.Data info <- tds])
+                                  -- as the C backend (`Backend.C.FromCore.genTopGroup`)
+                                  (S.fromList [Core.defName d | Core.DefNonRec d <- Core.coreProgDefs (fromJust (modCore mod)),
+                                                                Core.defInline d == InlineAlways || Core.isInlineable 5 d])
                 (hdr,csrc,errs) = TC.cgenModule cenv tprog
             createDirectoryIfMissing True outDir
             writeFile (joinPath outDir (ktHeader (modName mod))) hdr
