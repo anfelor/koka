@@ -57,7 +57,8 @@ data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [Strin
 -- `cxAliases` and `cxPayloads`: pointer identities and projected payloads for RC cancellation
 data Ctx = Ctx{ cxEnv :: Env, cxCEnv :: CEnv, cxGamma :: Gamma, cxNamed :: S.Set Name, cxSelf :: Maybe (Name,[Name])
               , cxJoins :: M.Map Name (String,[Name]), cxValues :: M.Map Name VVal
-              , cxAliases :: M.Map Name Name, cxPayloads :: M.Map Name VVal }
+              , cxAliases :: M.Map Name Name, cxPayloads :: M.Map Name VVal
+              , cxShared :: S.Set Name }   -- boxes known to be shared (the else branch of `IsUnique`)
 
 type G a = M () St a
 
@@ -778,6 +779,10 @@ genE cx dest expr
               s2 <- genE (valueCtx cx x t e1 cx') dest e2
               return ([ctName ct ++ " " ++ localName x ++ ";"] ++ s1 ++ s2)
       Drop x e
+        | S.member x (cxShared cx)   -- like Koka's C backend: a shared block only needs a decrement
+        -> do s <- genE cx dest e
+              return (("kk_block_decref(kk_datatype_as_ptr(kk_datatype_unbox(" ++ localName x ++ "),_ctx),_ctx);") : s)
+        | otherwise
         -> do t <- tyOfName cx x
               ct <- ctOf t
               s <- genE cx dest e
@@ -796,12 +801,12 @@ genE cx dest expr
       IsUnique x e1 e2
         -> do t <- liftC (inferVar (cxGamma cx) x)
               s1 <- genE cx dest e1
-              s2 <- genE cx dest e2
               let d = "kk_datatype_unbox(" ++ localName x ++ ")"
-                  test = case t of
-                           V _ -> "kk_datatype_is_unique(" ++ d ++ ",_ctx)"   -- a lazy value may be immediate
-                           A _ -> "kk_block_is_unique(kk_datatype_as_ptr(" ++ d ++ ",_ctx))"
-              return (["if (" ++ test ++ ") {"]
+                  (test,shared) = case t of
+                    V _ -> ("kk_datatype_is_unique(" ++ d ++ ",_ctx)", cxShared cx)   -- a lazy value may be immediate
+                    A _ -> ("kk_block_is_unique(kk_datatype_as_ptr(" ++ d ++ ",_ctx))", S.insert x (cxShared cx))
+              s2 <- genE cx{ cxShared = shared } dest e2
+              return (["if kk_likely(" ++ test ++ ") {"]
                       ++ map ("  " ++) s1 ++ ["} else {"] ++ map ("  " ++) s2 ++ ["}"])
       UnboxRu v x r e
         -> do tv <- tyOfName cx v
@@ -1274,14 +1279,14 @@ genDef env cenv def
         -> do pcts <- mapM (\(_,_,t) -> ctype t) args
               rct  <- ctype res
               let g  = M.fromList [(x,V t) | (x,_,t) <- args]
-                  cx = Ctx env cenv g S.empty (Just (f,[x | (x,_,_) <- args])) M.empty M.empty M.empty M.empty
+                  cx = Ctx env cenv g S.empty (Just (f,[x | (x,_,_) <- args])) M.empty M.empty M.empty M.empty S.empty
               ss <- genE cx DReturn body
               let sig = ctName rct ++ " " ++ cName f ++ "(" ++ concat [ctName ct ++ " " ++ localName x ++ ", " | ((x,_,_),ct) <- zip args pcts] ++ "kk_context_t* _ctx)"
               let label = if any ("goto kt_tailcall;" `isInfixOf`) ss then "  kt_tailcall: ;\n" else ""
               return (sig ++ ";\n", sig ++ " {\n" ++ label ++ indent ss ++ "}\n", "")
       DefVal x _ t body
         -> do ct <- ctype t
-              let cx = Ctx env cenv M.empty S.empty Nothing M.empty M.empty M.empty M.empty
+              let cx = Ctx env cenv M.empty S.empty Nothing M.empty M.empty M.empty M.empty S.empty
               ss <- genE cx DReturn body
               let initf = cName x ++ "_init"
               return ("extern " ++ ctName ct ++ " " ++ cName x ++ ";\n",
@@ -1296,7 +1301,7 @@ genWrapper env cenv f
         -> do pcts <- mapM (ctype . snd) ps
               rct  <- ctype r
               let xs  = [newHiddenName ("p" ++ show i) | i <- [0..length ps - 1]]
-                  cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) S.empty Nothing M.empty M.empty M.empty M.empty
+                  cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) S.empty Nothing M.empty M.empty M.empty M.empty S.empty
               body <- genCall cx DReturn f (map AVar tvs) (map Var xs)
               let sig = "static " ++ ctName rct ++ " " ++ cName f ++ "_fun(kk_function_t _fself" ++ concat [", " ++ ctName ct ++ " " ++ localName x | (x,ct) <- zip xs pcts] ++ ", kk_context_t* _ctx)"
               return (sig ++ ";\n", sig ++ " {\n  kk_function_static_drop(_fself,_ctx);\n" ++ indent body ++ "}\n")

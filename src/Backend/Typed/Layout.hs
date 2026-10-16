@@ -201,9 +201,12 @@ sumDef name alts scan
                   ++ "  } _cons;\n} " ++ name ++ ";\n"
                   ++ dupDropDefs name [("x._cons._fields[" ++ show i ++ "]", CBox) | i <- [0..scan-1]])
 
+-- `_dup` is always inlined, as in Koka's C backend, which dups the fields one by one:
+-- on a cold path (the shared branch of `IsUnique`) clang would otherwise call it out
+-- of line, which passes the struct through the stack and enlarges the caller's frame.
 dupDropDefs :: String -> [(String,CT)] -> String
 dupDropDefs name fs
-  = "static inline " ++ name ++ " " ++ name ++ "_dup(" ++ name ++ " x, kk_context_t* _ctx) {\n"
+  = "static inline __attribute__((always_inline)) " ++ name ++ " " ++ name ++ "_dup(" ++ name ++ " x, kk_context_t* _ctx) {\n"
     ++ concat ["  " ++ dupExpr ct f ++ ";\n" | (f,ct) <- fs]
     ++ "  return x;\n}\n"
     ++ "static inline void " ++ name ++ "_drop(" ++ name ++ " x, kk_context_t* _ctx) {\n"
