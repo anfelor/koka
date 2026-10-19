@@ -139,17 +139,21 @@ data AType = ABox VType                 -- Box V
 --   products and existentials of trivial types, and `@reuse*` (a named type that is not
 --   reference counted).
 -- - `ctx⟨A,B⟩` is an abstract pair of a pointer and a field address (see "Constructor
---   contexts" above). It is not trivial and has the layout of `A* ⊗ B*`.
+--   contexts" above). It is not trivial and has the layout of `A* ⊗ B*`. A nonempty context
+--   `ctx⁺⟨A,B⟩` is also a context `ctx⟨A,B⟩`, as a full credit is also a credit.
 -- - `|V|` is the size of the heap block of a `Box V` (`Layout.blockSize`); it is only defined when
 --   V has contents (`Layout.isBlock`).
+-- - A full credit `◆n[k; p : V]` is also a credit `◇n[k; p : V]` that may be empty: a value of
+--   the former can be used where the latter is expected (`Query.expectV`), and branches that
+--   disagree on it agree on the latter.
 data VType = VPtr AType                 -- A*
            | VUnit                      -- 𝟙
            | VSum [VType]               -- ⊕ᵢ Vᵢ, n-ary (a Koka value type with several constructors)
            | VProd VType VType          -- V ⊗ W
            | VRaw Name                  -- raw: unboxed primitives (`int32`, `float64`, `char`, ...)
            | VExists [TVar] VType       -- ∃ā. V
-           | VReuse Int (Maybe Contents) -- ◇n[k; p : V]: if nonempty, an n-byte block with tag k containing p
-           | VCtx AType AType           -- ctx⟨A,B⟩: an A with a hole of type B*
+           | VReuse Fill Int (Maybe Contents) -- ◇n[k; p : V] or ◆n[k; p : V]: if nonempty, an n-byte block with tag k containing p
+           | VCtx Fill AType AType      -- ctx⟨A,B⟩ or ctx⁺⟨A,B⟩: an A with a hole of type B*, nonempty if full
            deriving (Eq,Show)
 
 -- The description `k; p : V` of a credit's block: the tag k in its header and its contents, an
@@ -157,8 +161,14 @@ data VType = VPtr AType                 -- A*
 -- bound to, so they need not be in scope: a binder runs at most once on each path through a
 -- definition. A name in a description that is in scope may only be bound again to an alias of
 -- its value (`Linear`). Descriptions follow substitution, and may be forgotten but not invented.
-data Contents = Contents Int VVal VType
+-- The tag alone may be forgotten as well (`_; p : V`), so that code generation writes it.
+data Contents = Contents (Maybe Int) VVal VType
               deriving (Eq,Show)
+
+-- A full credit `◆n` holds a block; a credit `◇n` may be empty (`no-reuse`). Likewise, a full
+-- context `ctx⁺` has a `res` block, and a context `ctx` may be empty.
+data Fill = Full | MaybeEmpty
+          deriving (Eq,Show)
 
 -- t ::= A | V
 data Ty = A AType | V VType
@@ -292,7 +302,8 @@ data AVal
   --   Γ, r : ◇n ⊢ box@r v : Box V
   --
   -- A box allocated in the block of a reuse credit, or freshly if the credit is empty (the
-  -- paper's `[box]`, where the credit is anonymous).
+  -- paper's `[box]`, where the credit is anonymous). The block of a full credit `◆n` is
+  -- written in place without a test.
   | BoxAt Path VVal
 
   --   Γ ⊢ v : V    T⟨ā⟩ := A is lazy    Box V is an alternative of A[B̄/ā]
@@ -396,8 +407,8 @@ data VVal
   | Hole
 
   --   Γ, □ : B* ⊢ K : A*    K ≠ □
-  --  ───────────────────────────── [ctx]
-  --   Γ ⊢ ctx K :! ctx⟨A,B⟩
+  --  ────────────────────────────── [ctx]
+  --   Γ ⊢ ctx K :! ctx⁺⟨A,B⟩
   --
   --  ────────────────────────── [ctx-empty]
   --   ∅ ⊢ ctx □ :! ctx⟨A,A⟩
@@ -407,14 +418,15 @@ data VVal
   -- which it locates by the position of `□` (no constructor or field names are involved).
   | Context AType VVal
 
-  --   Γ₁ ⊢ c₁ :! ctx⟨A,B⟩    Γ₂ ⊢ c₂ :! ctx⟨B,C⟩
-  --  ──────────────────────────────────────────── [ctx-append]
-  --   Γ₁, Γ₂ ⊢ c₁ ++ c₂ :! ctx⟨A,C⟩
+  --   Γ₁ ⊢ c₁ :! ctx^f₁⟨A,B⟩    Γ₂ ⊢ c₂ :! ctx^f₂⟨B,C⟩
+  --  ──────────────────────────────────────────────────── [ctx-append]
+  --   Γ₁, Γ₂ ⊢ c₁ ++ c₂ :! ctx^(f₁ ∨ f₂)⟨A,C⟩
   --
   -- Plugs the `res` of `c₂` into the hole of `c₁` in place and keeps the hole of `c₂`; an empty
-  -- `c₂` gives `c₁`. The paths of both are unique, so the path of the result is too. Extending
-  -- a context with a fresh one, `c ++ ctx K` with K ≠ □, is TRMC's step
-  -- (`kk_cctx_extend_linear`); code generation knows that `ctx K` is not empty.
+  -- `c₂` gives `c₁`. The paths of both are unique, so the path of the result is too. The result
+  -- is nonempty if either context is. Extending a context with a nonempty one, such as
+  -- `c ++ ctx K` with K ≠ □, is TRMC's step (`kk_cctx_extend_linear`): code generation does not
+  -- test whether `c₂` is empty.
   | Append VVal VVal
 
   --   Γ₁ ⊢ c :! ctx⟨A,B⟩    Γ₂ ⊢ v : B*
@@ -426,9 +438,9 @@ data VVal
   -- which is Koka's `cctx/(++.)` (`kk_cctx_apply`).
   | Plug VVal VVal
 
-  --   Γ ⊢ c : ctx⟨A,B⟩
-  --  ───────────────────────────── [ctx-copy]
-  --   Γ ⊢ ctx-copy c :! ctx⟨A,B⟩
+  --   Γ ⊢ c : ctx^f⟨A,B⟩
+  --  ───────────────────────────────── [ctx-copy]
+  --   Γ ⊢ ctx-copy c :! ctx^f⟨A,B⟩
   --
   -- Makes a context unique by copying its path if `res` is shared (`kk_cctx_copy`). Elaboration
   -- uses it to plug or append a context that may be shared (Koka's `cctx/(++)` copies both
@@ -591,7 +603,8 @@ data VExpr
   --  ─────────────────────────── [free]
   --   Γ, r : ◇n ⊢ free r; e : W
   --
-  -- Free the block of a reuse credit, or do nothing if the credit is empty.
+  -- Free the block of a reuse credit, or do nothing if the credit is empty. A full credit `◆n`
+  -- is freed without a test.
   | Free Path VExpr
 
   --   Γ, x : t ⊢ e : W    t contains no reuse credits
@@ -612,7 +625,15 @@ data VExpr
   -- evaluation with `typed-lazy-free : ∀a. (!a) -> 1`, which does not drop its (taken) fields.
   | IsUnique Path VExpr VExpr
 
-  --   Γ, z.contents : V, r : ◇n[tag(z); z.contents : V] ⊢ e : W    |V| = n
+  --   Γ, r : ◆n[k; p : V] ⊢ e₁ : W    Γ ⊢ e₂ : W
+  --  ─────────────────────────────────────────────── [if-full]
+  --   Γ, r : ◇n[k; p : V] ⊢ if-full r then e₁ else e₂ : W
+  --
+  -- Branches on whether a credit holds a block (`ExpandReuse`): it is full in the first branch,
+  -- and empty in the second, where nothing is left to consume.
+  | IfFull Path VExpr VExpr
+
+  --   Γ, z.contents : V, r : ◆n[tag(z); z.contents : V] ⊢ e : W    |V| = n
   --  ──────────────────────────────────────────────────────────── [unbox-ru]
   --   Γ, z :! Box V, z.contents :^ V ⊢ let @ r = z in e : W
   --
@@ -626,14 +647,17 @@ data VExpr
   --  ──────────────────────────────────────────────────────────────────── [join]
   --   Γ, Γ_c | J ⊢ join j(x̄ :q̄ V̄) = e₁ in e₂ : W
   --
-  -- A join point captures the owned variables Γ_c that are free in its body (those that are
+  -- A join point captures the variables Γ_c that are free in its body (those that are
   -- not parts of other free variables, see "Structural rules"), and is not
-  -- recursive (`j` is not in scope in its body). Its body may jump to outer joins.
+  -- recursive (`j` is not in scope in its body). Its body may jump to outer joins. As it runs
+  -- at most once, in the scope of its definition, it may also capture unique and borrowed
+  -- variables (with their modes in Γ_c). Γ_c is a multiset: it holds an owned variable once
+  -- for each reference that e₁ consumes.
   -- Since J is reset outside of tail positions, a jump cannot escape
   -- and is always a tail call. Join points only have owned parameters, except for contexts
   -- that are plugged in place (unique, see `[plug]`). Perceus only produces closed join
-  -- points (Γ_c = ∅); only `JoinArgs`, the last pass, introduces captures, and only for
-  -- owned parameters. A captured variable must not be bound again in e₂, so every jump sees
+  -- points (Γ_c = ∅); only the late passes `JoinArgs` (for owned parameters) and
+  -- `ExpandReuse` introduce captures. A captured variable must not be bound again in e₂, so every jump sees
   -- the same variable. The descriptions in V̄ do not name the parameters x̄, as every jump
   -- binds them to different values (a jump can only pass an empty credit for them).
   | Join Name [(Path,Mode,VType)] VExpr VExpr

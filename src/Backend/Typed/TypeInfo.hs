@@ -88,7 +88,7 @@ dataInfoOf nt name
 
 elabCon :: Newtypes -> Name -> [Type] -> Tr VType
 elabCon nt name [a,b] | name == nameTpCCtxx
-  = VCtx <$> elabArg nt kindStar a <*> elabArg nt kindStar b
+  = VCtx MaybeEmpty <$> elabArg nt kindStar a <*> elabArg nt kindStar b
 elabCon nt name args
   = do info  <- dataInfoOf nt name
        vargs <- elabArgs nt (dataInfoParams info) args

@@ -66,8 +66,8 @@ mapReuseContents f = goV
       VSum ts -> VSum (map goV ts)
       VProd a b -> VProd (goV a) (goV b)
       VExists vs b -> VExists vs (goV b)
-      VReuse n p -> VReuse n (f p)
-      VCtx a b -> VCtx (goA a) (goA b)
+      VReuse fl n p -> VReuse fl n (f p)
+      VCtx fl a b -> VCtx fl (goA a) (goA b)
       VUnit -> t
       VRaw _ -> t
     goA a = case a of
@@ -129,8 +129,8 @@ substV sub t
       VExists tvs b -> VExists tvs (substV (foldr M.delete sub tvs) b)
       VUnit     -> t
       VRaw _    -> t
-      VReuse n p -> VReuse n (fmap (substContents sub) p)
-      VCtx a b  -> VCtx (substA sub a) (substA sub b)
+      VReuse f n p -> VReuse f n (fmap (substContents sub) p)
+      VCtx f a b -> VCtx f (substA sub a) (substA sub b)
 
 substA :: Sub -> AType -> AType
 substA sub a
@@ -167,8 +167,8 @@ ftvV t
       VExists vs b  -> filter (`notElem` vs) (ftvV b)
       VUnit         -> []
       VRaw _        -> []
-      VReuse _ p    -> maybe [] ftvContents p
-      VCtx a b      -> ftvA a ++ ftvA b
+      VReuse _ _ p  -> maybe [] ftvContents p
+      VCtx _ a b    -> ftvA a ++ ftvA b
 
 ftvA :: AType -> [TVar]
 ftvA a
@@ -193,8 +193,8 @@ isPtr t
       VProd _ _   -> False
       VRaw _      -> False
       VExists _ _ -> False
-      VReuse _ _    -> False
-      VCtx _ _    -> False
+      VReuse _ _ _  -> False
+      VCtx _ _ _  -> False
 
 -- the boxed type that instantiates a type variable for a Koka type argument of type `V` (Koka's
 -- `box`); a closure there takes and returns `boxrep`s of its types (Koka's `boxedFunType`).
@@ -248,8 +248,8 @@ shapeLeaves t
       VProd _ _   -> [ABox t]
       VRaw _      -> [ABox t]
       VExists _ _ -> [ABox t]
-      VReuse _ _    -> [ABox t]
-      VCtx _ _    -> [ABox t]
+      VReuse _ _ _  -> [ABox t]
+      VCtx _ _ _  -> [ABox t]
 
 eqV :: VType -> VType -> Bool
 eqV s t
@@ -259,8 +259,8 @@ eqV s t
       (VProd a b, VProd c d) -> eqV a c && eqV b d
       (VExists as a, VExists bs b) | length as == length bs
         -> eqV a (inst bs (map AVar as) b)
-      (VReuse n p, VReuse m q) -> n == m && eqContentsMaybe p q
-      (VCtx a b, VCtx c d)   -> eqA a c && eqA b d
+      (VReuse f n p, VReuse g m q) -> f == g && n == m && eqContentsMaybe p q
+      (VCtx f a b, VCtx g c d) -> f == g && eqA a c && eqA b d
       _                      -> s == t
 
 -- Contents are descriptions, so only their structural forms need type substitution.
@@ -346,7 +346,7 @@ matchVWith tvs sub pat t
       (VSum ps, VSum ts) | length ps == length ts
         -> foldM (\sb (p,s) -> matchVWith tvs sb p s) sub (zip ps ts)
       (VProd p q, VProd s u) -> matchVWith tvs sub p s >>= \sub' -> matchVWith tvs sub' q u
-      (VCtx p q, VCtx s u)   -> matchAWith tvs sub p s >>= \sub' -> matchAWith tvs sub' q u
+      (VCtx f p q, VCtx g s u) | f == g -> matchAWith tvs sub p s >>= \sub' -> matchAWith tvs sub' q u
       (VExists as p, VExists bs s) | length as == length bs
         -> matchVWith tvs sub p (inst bs (map AVar as) s)
       _ -> if pat == t then Just sub else Nothing
