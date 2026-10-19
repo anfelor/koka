@@ -38,6 +38,7 @@ prettyA :: AType -> Doc
 prettyA a
   = case a of
       ABox t        -> text "Box" <.> parens (prettyV t)
+      AScalar t     -> text "Scalar" <.> parens (prettyV t)
       AUnit         -> text "1"
       ASum ts       -> parens (hsep (punctuate (text " +")
                         [text (show i) <.> text ":" <.> prettyA t | (i,t) <- ts]))
@@ -83,6 +84,7 @@ prettyAVal val
       InjA i _ v -> text ("inj-a" ++ show i) <+> atomAVal v
       Roll _ v   -> text "roll" <+> atomAVal v
       Box v      -> text "box" <+> atomVal v
+      Scalar v   -> text "scalar" <+> atomVal v
       OpenCon c ts v -> nm c <.> brackets (commaSep (map prettyA ts)) <+> atomVal v
       Lam ps r e -> text "fn" <.> parens (commaSep [mode m <.> pv x <+> colon <+> prettyV t | (x,m,t) <- ps])
                     <+> colon <+> prettyV r <+> text "->" <-> indent 2 (prettyExpr e)

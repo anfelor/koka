@@ -325,6 +325,7 @@ ownedA env g val
       InjA _ _ v -> ownedA env g v
       Roll _ v -> ownedA env g v
       Box v -> ownedV env g v
+      Scalar v -> ownedV env g v
       OpenCon _ _ v -> ownedV env g v
       BoxAt r v -> uses [consume env g r, ownedV env g v]
       BoxIn x v -> uses [consume env g x, ownedV env g v]

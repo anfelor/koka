@@ -14,6 +14,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types
+import Backend.Typed.Layout( isScalar )
 import Backend.Typed.Elab.Monad
 import Backend.Typed.Pretty( ppr )
 
@@ -48,15 +49,16 @@ boxV t v
   | isMultiSum t = do r <- fresh "b"
                       body <- boxAV t v (return . Ret . Ptr (boxA t))
                       return (Let r (VPtr (boxA t)) body, Var r)
+  | isScalar t   = return (id, Ptr (AScalar t) (Scalar v))
   | otherwise    = return (id, Ptr (boxA t) (boxLeaf t v))
 
--- the boxed form `a : boxA(t)` of `v : t`, given to the continuation in every alternative
+-- the shape `a : shapeA(t)` of `v : t`, given to the continuation in every alternative
 boxAV :: VType -> VVal -> (AVal -> E VExpr) -> E VExpr
 boxAV t v k
   | VSum ts <- t, isMultiSum t = CaseV Owned v <$> mapM (boxAlt ts k) (zip [0..] ts)
   | otherwise                  = k (boxLeaf t v)
 
--- as `boxA` on a type that is not a sum of several alternatives
+-- as `shapeA` on a type that is not a sum of several alternatives
 boxLeaf :: VType -> VVal -> AVal
 boxLeaf t v
   = case t of
@@ -72,7 +74,7 @@ boxLeaf t v
 boxAlt :: [VType] -> (AVal -> E VExpr) -> (Int,VType) -> E (Path,VExpr)
 boxAlt ts k (i,ti)
   = do y <- fresh "y"
-       body <- boxAV ti (Var y) (k . injA (map boxA ts) i)
+       body <- boxAV ti (Var y) (k . injA (map shapeA ts) i)
        return (y, body)
 
 isMultiSum :: VType -> Bool
@@ -91,7 +93,7 @@ unboxAV t a
       VUnit -> return (id, UnitV)
       VSum ts | length ts > 1 ->
         do r <- fresh "s"
-           body <- caseSum fresh (map boxA ts) a (unboxAlt t ts)
+           body <- caseSum fresh (map shapeA ts) a (unboxAlt t ts)
            return (Let r t body, Var r)
       VSum _      -> unbox
       VPtr _      -> unbox
@@ -101,7 +103,7 @@ unboxAV t a
       VReuse _ _    -> unbox
       VCtx _ _    -> unbox
   where
-    unbox = do x <- fresh "x"   -- as `boxA`
+    unbox = do x <- fresh "x"   -- a box or a scalar
                return (Unbox Owned a x, Var x)
 
 unboxAlt :: VType -> [VType] -> Int -> Path -> E VExpr
@@ -111,7 +113,7 @@ unboxAlt t ts i y
 
 ptrA :: VType -> AType
 ptrA (VPtr a) = a
-ptrA t        = ABox t
+ptrA t        = boxA t
 
 instPoly :: [TVar] -> AType -> Sub -> VVal -> VType -> E (K,VVal)
 instPoly tvs a sub v to
