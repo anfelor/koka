@@ -53,9 +53,8 @@ data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [Strin
             , stLocal :: Bool }
 
 -- `cxJoins`: the label and the parameters of each join point in scope
--- `cxValues`: expanded, allocation-free values used only for payload comparison
 data Ctx = Ctx{ cxEnv :: Env, cxCEnv :: CEnv, cxGamma :: Gamma, cxNamed :: S.Set Path, cxSelf :: Maybe (Name,[Path])
-              , cxJoins :: M.Map Name (String,[Path]), cxValues :: M.Map Path VVal
+              , cxJoins :: M.Map Name (String,[Path])
               , cxShared :: S.Set Path }   -- boxes known to be shared (the else branch of `IsUnique`)
 
 type G a = M () St a
@@ -414,8 +413,9 @@ genBox cx tag at v
 
 -- The credit's old payload layout (by its scan size) and, for each leaf of the new payload,
 -- whether its C slot already holds its bits: the old payload has a leaf at the same offset,
--- with the same layout and the same value. Payloads of different types can thus share
--- slots. A dup preserves a field's bits, but its reference-count effect must still run.
+-- with the same layout and the same value (`Inline` makes equal values syntactically equal,
+-- so the payload names the variables of the description). Payloads of different types can
+-- thus share slots. A dup preserves a field's bits, but its reference-count effect must still run.
 -- Sums are treated as whole fields so their inactive/padding slots are kept safe.
 reuseMatches :: Ctx -> Path -> VType -> VVal -> G (Maybe (Int,[Bool]))
 reuseMatches cx r t v
@@ -424,7 +424,7 @@ reuseMatches cx r t v
          V (VReuse _ (Just (Contents _ old ot)))
            -> do oct <- ctype ot
                  ct <- ctype t
-                 let slots s w ctw = zip (leafSlots ctw) (leafValues s (substValues (cxValues cx) w))
+                 let slots s w ctw = zip (leafSlots ctw) (leafValues s w)
                      kept = slots ot old oct
                  return (Just (scanOf oct, [leaf `elem` kept | leaf <- slots t v ct]))
          _ -> return Nothing
@@ -561,7 +561,7 @@ genLam cx ps r e
        rct  <- ctype r
        let structDef = sname ++ " { struct kk_function_s _base; " ++ concat [ctName ct ++ " c" ++ show i ++ "; " | (i,ct) <- fields] ++ "};\n"
            g'  = M.union (M.fromList ([(x,V t) | (x,_,t) <- ps])) (cxGamma cx)
-           cx' = cx{ cxGamma = g', cxSelf = Nothing, cxJoins = M.empty, cxValues = M.empty }
+           cx' = cx{ cxGamma = g', cxSelf = Nothing, cxJoins = M.empty }
        body <- genE cx' DReturn e
        -- Transfer captures from unique closures; shared closures retain their own references.
        let loads = [ctName ct ++ " " ++ localName (caps !! i) ++ " = _self->c" ++ show i ++ ";" | (i,ct) <- fields]
@@ -679,45 +679,11 @@ indent :: [String] -> String
 indent = concatMap (\l -> "  " ++ l ++ "\n")
 
 bindVar :: Ctx -> Path -> Ty -> Ctx
-bindVar cx x t = cx{ cxGamma = M.insert x t (cxGamma cx)
-                  , cxValues = M.filter (S.notMember x . fvV) (M.delete x (cxValues cx)) }
+bindVar cx x t = cx{ cxGamma = M.insert x t (cxGamma cx) }
 
 -- Declare the C variable of a binder. A path is bound at most once in a scope (`Check`).
 declare :: String -> Path -> String -> String
 declare ctype x e = ctype ++ " " ++ localName x ++ " = " ++ e ++ ";"
-
--- Record aggregate structure, and renames at any type (such as the fields Perceus
--- re-destructures one by one): a rename keeps the bits of its source. Other scalar
--- and pointer values stay conservative: unfolding a box or closure allocation would
--- confuse equal payloads with identical pointers. Descriptions are expanded on
--- insertion so rebinding any of their free variables invalidates them directly.
-valueCtx :: Ctx -> Path -> VType -> VExpr -> Ctx -> Ctx
-valueCtx source x t (Ret v) target
-  | aggregate t || rename v, structural v, let value = substValues (cxValues source) v, S.notMember x (fvV value)
-  = target{ cxValues = M.insert x value (cxValues target) }
-  where
-    rename (Var _) = True
-    rename _ = False
-valueCtx _ _ _ _ target = target
-
-aggregate :: VType -> Bool
-aggregate t
-  = case t of
-      VProd _ _ -> True
-      VSum _ -> True
-      VExists _ _ -> True
-      _ -> False
-
-structural :: VVal -> Bool
-structural v
-  = case v of
-      Var _ -> True
-      Pair a b -> structural a && structural b
-      Inj _ _ w -> structural w
-      Pack _ _ w -> structural w
-      UnitV -> True
-      Lit _ -> True
-      _ -> False
 
 genE :: Ctx -> Dest -> VExpr -> G [String]
 genE cx dest expr
@@ -739,7 +705,7 @@ genE cx dest expr
         -> do ct <- ctype t
               s1 <- genE cx (DAssign (localName x)) e1
               let cx' = (bindVar cx x (V t)){ cxNamed = namedOf cx e1 x }
-              s2 <- genE (valueCtx cx x t e1 cx') dest e2
+              s2 <- genE cx' dest e2
               -- the binders of `e1` are out of scope in `e2`, and a path may be bound in both
               let block = case e1 of
                             Ret _ -> s1
@@ -1228,14 +1194,14 @@ genDef env cenv def
         -> do pcts <- mapM (\(_,_,t) -> ctype t) args
               rct  <- ctype res
               let g  = M.fromList [(x,V t) | (x,_,t) <- args]
-                  cx = Ctx env cenv g S.empty (Just (f,[x | (x,_,_) <- args])) M.empty M.empty S.empty
+                  cx = Ctx env cenv g S.empty (Just (f,[x | (x,_,_) <- args])) M.empty S.empty
               ss <- genE cx DReturn body
               let sig = ctName rct ++ " " ++ cName f ++ "(" ++ concat [ctName ct ++ " " ++ localName x ++ ", " | ((x,_,_),ct) <- zip args pcts] ++ "kk_context_t* _ctx)"
               let label = if any ("goto kt_tailcall;" `isInfixOf`) ss then "  kt_tailcall: ;\n" else ""
               return (sig ++ ";\n", sig ++ " {\n" ++ label ++ indent ss ++ "}\n", "")
       DefVal x _ t body
         -> do ct <- ctype t
-              let cx = Ctx env cenv M.empty S.empty Nothing M.empty M.empty S.empty
+              let cx = Ctx env cenv M.empty S.empty Nothing M.empty S.empty
               ss <- genE cx DReturn body
               let initf = cName x ++ "_init"
               return ("extern " ++ ctName ct ++ " " ++ cName x ++ ";\n",
@@ -1250,7 +1216,7 @@ genWrapper env cenv f
         -> do pcts <- mapM (ctype . snd) ps
               rct  <- ctype r
               let xs  = [root (newHiddenName ("p" ++ show i)) | i <- [0..length ps - 1]]
-                  cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) S.empty Nothing M.empty M.empty S.empty
+                  cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) S.empty Nothing M.empty S.empty
               body <- genCall cx DReturn f (map AVar tvs) (map Var xs)
               let sig = "static " ++ ctName rct ++ " " ++ cName f ++ "_fun(kk_function_t _fself" ++ concat [", " ++ ctName ct ++ " " ++ localName x | (x,ct) <- zip xs pcts] ++ ", kk_context_t* _ctx)"
               return (sig ++ ";\n", sig ++ " {\n  kk_function_static_drop(_fself,_ctx);\n" ++ indent body ++ "}\n")

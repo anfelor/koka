@@ -330,11 +330,18 @@ ownedA env g val
       BoxAt r v -> uses [consume env g r, ownedV env g v]
       BoxIn x v -> uses [consume env g x, ownedV env g v]
 
--- a unique value is a unique variable or a fresh context
+-- a unique value is a unique variable, a fresh context, or a structural value of unique values
 uniqueV :: Env -> Gamma -> VVal -> L Use
 uniqueV env g val
   = case val of
       Var x -> uniqueName env g x
+      UnitV -> return noUse
+      Lit _ -> do t <- V <$> liftE (inferV env g val)
+                  unless (trivialTy env t) (fail ("unique use of a shared literal: " ++ show val))
+                  return noUse
+      Inj _ _ w -> uniqueV env g w
+      Pair v w -> uses [uniqueV env g v, uniqueV env g w]
+      Pack _ _ w -> uniqueV env g w
       Context _ k -> ownedV env g k
       CtxCopy c -> ownedV env g c
       Append c d -> uses [uniqueV env g c, uniqueV env g d]
@@ -348,7 +355,10 @@ borrowedV env g val
       Lit _ -> return noUse
       UnitV -> return noUse
       TyApp v _ -> borrowedV env g v
-      _ -> fail ("borrowed use of a non-atomic value: " ++ show val)
+      Inj _ _ w -> borrowedV env g w
+      Pair v w -> uses [borrowedV env g v, borrowedV env g w]
+      Pack _ _ w -> borrowedV env g w
+      _ -> fail ("borrowed use of a value that is not structural: " ++ show val)
 
 -- closures only have owned parameters
 ownedParams :: AType -> L ()
