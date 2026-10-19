@@ -5,7 +5,6 @@
 -- terms of the Apache License, Version 2.0. A copy of the License can be
 -- found in the LICENSE file at the root of this distribution.
 -----------------------------------------------------------------------------
-{-# LANGUAGE PatternSynonyms #-}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 {- The typed intermediate language.
@@ -18,8 +17,7 @@
 
   Contexts and judgements
 
-    Γ ::= ∅ | Γ, x :q V | Γ, x :q Aπ            variables
-    π ::= · | @k                               positions of boxed operands
+    Γ ::= ∅ | Γ, x :q V | Γ, x :q A             variables
     J ::= ∅ | J, j : Γ_c; (q̄ V̄) -> W           join points in scope, with their captures
     Σ                                          signatures (`Sigs`)
 
@@ -32,10 +30,10 @@
     tail position and omitted from the rules where that is all that happens; it is reset to ∅
     where an expression is not in tail position.
 
-    A boxed operand is either whole (`·`, omitted) or lies at tag offset k of the sum it was
-    reached through (`@k`, bound by `[case-a]` and `[split-a]`): a box at `@k` is a heap block
-    with tag k+1, while a whole box may be Koka's `box`. `⌊·⌋ = 0` and `⌊@k⌋ = k`. Positions
-    are not part of types: they only record where an operand came from.
+    A boxed operand x reached through a sum (bound by `[case-a]` or `[split-a]`) lies at the
+    tag offset ⌊x⌋ of that sum, which its path determines (`Common.sumOffset`): the sum of the
+    indices of the `[case-a]` steps at its end. A box at offset k is a heap block with tag k+1,
+    while any other box may be Koka's `box`; ⌊x⌋ = 0 for an operand not reached through a sum.
 
   Structural rules
 
@@ -46,17 +44,25 @@
     - Variables of a trivial type are unrestricted: they may be weakened and contracted at either
       mode, and used owned or borrowed. They need no `dup` or `drop`. (Not in the paper.)
     - A unique variable `x :! t` is owned and holds the only reference to its block. It may be used
-      as an owned one. Any borrowed use of `x`, or of a variable borrowed from `x`, may duplicate the
+      as an owned one. Any borrowed use of `x`, or of a variable on its path, may duplicate the
       reference and demotes it to `x : t`; branches agree on the weaker status.
     - The paper scopes borrowing syntactically: `[let]` lends `^Γ₂` to the bound expression.
       Our IR borrows from an owned variable `z` anywhere (e.g. `case^ z` with `z` owned, as Perceus
-      produces), and the binders are *borrowed from* `z`: they become invalid once `z` is consumed.
-      In particular a borrowed argument of a call cannot be one that is passed owned.
-    - The binder of a borrowed `[case]`, `[deref]`, `[unroll]` or `[unpack]` at a boxed type `A`
-      is an *alias* of the owned `z` (or of the owned variable that an alias is borrowed from): it
-      is `z`'s pointer. Consuming an alias, or testing it with `[if-unique]`, consumes or tests
-      `z` itself (so the alias is unique where `z` is), which invalidates the variables borrowed
-      from `z`.
+      produces). The binders of a destructuring of `z` are its *parts*, named by their paths
+      (`z.fst`, see `Path`), and their borrowed uses become invalid once `z` is consumed. In
+      particular a borrowed argument of a call cannot be one that is passed owned.
+    - The parts of an owned variable are owned: consuming a part takes it out of its parent, and
+      the parent is consumed once all of its parts are: both components of a pair, the contents
+      and the credit of a box, or the binder of any other destructuring. The binder of `[case-a]`,
+      `[split-a]`, `[deref]`, `[unroll]` or `[unpack]` at a boxed type is the parent's pointer:
+      consuming it, or testing it with `[if-unique]`, consumes or tests the parent (so it is unique
+      where the parent is). Hence an owned destructuring of a variable is a borrowed one whose
+      binders are consumed, and only a unique destructuring needs its mode: it consumes a unique
+      scrutinee.
+    - A variable may hold several owned references (`[dup]` keeps the name), and Γ is a multiset:
+      `Γ, x : t, x : t` holds two. A reference held by a part outlives the consumption of its
+      parent, which consumes one reference of each of its parts. For example, after
+      `dup z.fst; drop z` the context still holds `z.fst : V`.
 
   Constructor contexts
 
@@ -150,32 +156,9 @@ data VType = VPtr AType                 -- A*
 data Contents = Contents Int VVal VType
               deriving (Eq,Show)
 
--- t ::= Aπ | V
-data Ty = AAt Pos AType | V VType
+-- t ::= A | V
+data Ty = A AType | V VType
           deriving (Eq,Show)
-
--- π ::= · | @k (see "Contexts and judgements")
-data Pos = Whole | InSum Int
-           deriving (Eq,Show)
-
-position :: Ty -> Pos
-position t
-  = case t of
-      AAt p _ -> p
-      V _     -> Whole
-
--- ⌊π⌋
-offset :: Pos -> Int
-offset p
-  = case p of
-      Whole   -> 0
-      InSum k -> k
-
--- A boxed type at any position; built whole
-pattern A :: AType -> Ty
-pattern A a <- AAt _ a
-  where A a = AAt Whole a
-{-# COMPLETE A, V #-}
 
 -- a named type `T⟨ā⟩ := A`; without a body (`int`, `string`, ...) it cannot be unrolled
 data TypeDef = TypeDef{ tdefName :: Name, tdefParams :: [TVar], tdefBody :: Maybe AType, tdefLazy :: Maybe LazyInfo }
@@ -196,6 +179,48 @@ data Lit = LitInt Integer
          | LitChar Char
          | LitString String
          deriving (Eq,Show)
+
+-- Variables are paths: a root followed by the steps of the destructurings that lead from the
+-- root to the variable, outermost first. For example, `z.snd.deref` is the binder of
+-- `let_q ptr x = z.snd` where `z.snd` is the binder of `let_q (z.fst, z.snd) = z`. The binders
+-- of other forms are roots, and a root is bound only once in a definition (`Check`; the pass
+-- `Paths` renames the variables after each pass).
+data Path = Path Name [Step]
+          deriving (Eq,Ord)
+
+-- the steps from the scrutinee of a destructuring form to its binders
+data Step = SFst | SSnd            -- [unpair]
+          | SInjV Int              -- [case]
+          | SPack                  -- [unpack]
+          | SDeref                 -- [deref]
+          | SRoll                  -- [unroll]
+          | SInjA Int | SRest      -- [case-a]: an alternative or the default
+          | SLo | SHi              -- [split-a]
+          | SContents | SCredit    -- [bunbox] and [unbox-ru]
+          | SOpen Name             -- [case-open]
+          deriving (Eq,Ord)
+
+instance Show Path where
+  show (Path x ss) = show x ++ concatMap (('.':) . show) ss
+
+instance Show Step where
+  show s = case s of
+             SFst      -> "fst"
+             SSnd      -> "snd"
+             SInjV i   -> "inj" ++ show i
+             SPack     -> "pack"
+             SDeref    -> "deref"
+             SRoll     -> "roll"
+             SInjA i   -> "inj" ++ show i
+             SRest     -> "rest"
+             SLo       -> "lo"
+             SHi       -> "hi"
+             SContents -> "contents"
+             SCredit   -> "credit"
+             SOpen c   -> show c
+
+root :: Name -> Path
+root x = Path x []
 
 -- Values `Γ ⊢ v :q t`. A borrowed value is an atom: a variable, a global, a literal, `()`, a
 -- function, or a type application of one of these. A unique value is a variable, a context
@@ -248,7 +273,7 @@ data AVal
   --
   -- A closure consumes its captures Γ, which are owned in its body (`⌊Γ⌋`). Closures have the
   -- same arrow type as top-level functions, but only owned parameters.
-  | Lam [(Name,Mode,VType)] VType VExpr
+  | Lam [(Path,Mode,VType)] VType VExpr
 
   --   Γ ⊢ v : V    |V| = n
   --  ────────────────────────────── [box-at]
@@ -256,7 +281,7 @@ data AVal
   --
   -- A box allocated in the block of a reuse credit, or freshly if the credit is empty (the
   -- paper's `[box]`, where the credit is anonymous).
-  | BoxAt Name VVal
+  | BoxAt Path VVal
 
   --   Γ ⊢ v : V    T⟨ā⟩ := A is lazy    Box V is an alternative of A[B̄/ā]
   --  ────────────────────────────────────────────────────────────────────── [box-in]
@@ -265,7 +290,7 @@ data AVal
   -- A box written over the block of the lazy value `x` under evaluation, keeping its reference
   -- count (`Lazy`). It is an update through a shared reference and only sound because `x` is
   -- locked and its old fields (taken by `[unbox-lazy]`) are not used again.
-  | BoxIn Name VVal
+  | BoxIn Path VVal
   deriving (Eq,Show)
 
 -- Unboxed values `Γ ⊢ v :q V`.
@@ -277,13 +302,13 @@ data VVal
   -- type (bound by `[case]` on `⊕ᵢ Aᵢ`, `[deref]` or `[unroll]`) is only an *operand*: the
   -- scrutinee of a destructuring form, the variable of `[drop]` or `[if-unique]`, the value of
   -- `[dup]` or the function of `[app]`. It cannot be stored again as a boxed value.
-  = Var Name
+  = Var Path
 
   --   x : ∀ā. V ∈ Σ
   --  ───────────────────────── [glob]
   --   ∅ ⊢ x[B̄] :^ V[B̄/ā]
   --
-  -- A top-level value is borrowed: an owned use needs a `dup` (unless its type is trivial).
+  -- A top-level value is borrowed: an owned use needs a `[dup-glob]` (unless its type is trivial).
   | Glob Name [AType]
 
   --  ────────────── [unit]
@@ -324,13 +349,11 @@ data VVal
   -- variable without a boxed one.
   | TyApp VVal [AType]
 
-  --   Γ ⊢ v :^ V
-  --  ──────────────── [dup]
-  --   Γ ⊢ dup v : V
+  --   x : ∀ā. V ∈ Σ
+  --  ────────────────────────────── [dup-glob]
+  --   ∅ ⊢ dup x[B̄] : V[B̄/ā]
   --
-  -- Keep unboxed duplication primitive so drop specialization and code generation can
-  -- duplicate a whole payload without expanding it into destructuring and reconstruction.
-  -- Reuse credits remain linear and cannot be duplicated.
+  -- An owned reference to a top-level value. Variables are duplicated in place (`[dup]`).
   | DupV VVal
 
   --  ────────────────────── [no-reuse]
@@ -421,7 +444,7 @@ data VExpr
   --   Γ₁ ⊢ v :! V    Γ₂, x :! V | J ⊢ e : W
   --  ─────────────────────────────────────────── [let-unique]
   --   Γ₁, Γ₂ | J ⊢ let x : V = ret v in e : W
-  | Let Name VType VExpr VExpr
+  | Let Path VType VExpr VExpr
 
   --   f : ∀ā. (q̄ V̄) -> W ∈ Σ    Γᵢ ⊢ vᵢ :qᵢ Vᵢ[B̄/ā]
   --  ───────────────────────────────────────────────── [call]
@@ -435,7 +458,7 @@ data VExpr
   --   Γ₀, Γ₁, ..., Γₙ ⊢ v(v₁, ..., vₙ) : W
   --
   -- Applying a closure consumes it, and all its parameters are owned (no `[bapp]`).
-  | App Name [VVal]
+  | App Path [VVal]
 
   -- Destructuring takes a mode: owned destructuring consumes the scrutinee and its binders are
   -- owned (a move); borrowed destructuring gives binders borrowed from the scrutinee. Unique
@@ -448,43 +471,43 @@ data VExpr
   --   Γ₁, Γ₂ ⊢ let_q (x, y) = v in e : W
   --
   -- For a variable scrutinee z, credit descriptions substitute (x,y) for z.
-  | Unpair Mode VVal Name Name VExpr
+  | Unpair Mode VVal Path Path VExpr
 
   --   Γ₁ ⊢ v :q ⊕ᵢ Vᵢ    Γ₂, xᵢ :q Vᵢ ⊢ eᵢ : W   (for each i)
   --  ────────────────────────────────────────────────────────── [case]
   --   Γ₁, Γ₂ ⊢ case_q v of { injᵢ xᵢ -> eᵢ } : W
   --
   -- For a variable scrutinee z, branch i substitutes injᵢ xᵢ in credit descriptions.
-  | CaseV Mode VVal [(Name,VExpr)]
+  | CaseV Mode VVal [(Path,VExpr)]
 
-  --   Γ₁ ⊢ v :q (⊕ⱼ∈J Aⱼ)π    Γ₂, xᵢ :q Aᵢ@(⌊π⌋+i) ⊢ eᵢ : W (i ∈ I)    Γ₂, d :q (⊕ⱼ∈J\I Aⱼ)@⌊π⌋ ⊢ e : W
-  --  ──────────────────────────────────────────────────────────────────────────────────────── [case-a]
+  --   Γ₁ ⊢ v :q ⊕ⱼ∈J Aⱼ    Γ₂, xᵢ :q Aᵢ ⊢ eᵢ : W (i ∈ I)    Γ₂, d :q ⊕ⱼ∈J\I Aⱼ ⊢ e : W
+  --  ──────────────────────────────────────────────────────────────────────────── [case-a]
   --   Γ₁, Γ₂ ⊢ case_q v of { injᵢ xᵢ -> eᵢ; _ d -> e } : W
   --
   -- Indices must belong to the sum and be distinct. Without a default every alternative occurs.
   -- The default excludes the matched indices without renumbering the remainder;
   -- it must be nonempty. No allocation or retagging occurs, at any mode. The binders lie at
-  -- the absolute tag offsets of their alternatives in the block of v.
-  | CaseA Mode Name [(Int,Name,VExpr)] (Maybe (Name,VExpr))
+  -- the absolute tag offsets of their alternatives in the block of v: ⌊xᵢ⌋ = ⌊v⌋+i and ⌊d⌋ = ⌊v⌋.
+  | CaseA Mode Path [(Int,Path,VExpr)] (Maybe (Path,VExpr))
 
-  --   Γ₁ ⊢ v :q (⊕ᵢ∈J Aᵢ)π    Γ₂, x :q (⊕ᵢ∈J,i<k Aᵢ)@⌊π⌋ ⊢ e₁ : W    Γ₂, y :q (⊕ᵢ∈J,i≥k Aᵢ)@⌊π⌋ ⊢ e₂ : W
-  --  ──────────────────────────────────────────────────────────────────────────────────────── [split-a]
+  --   Γ₁ ⊢ v :q ⊕ᵢ∈J Aᵢ    Γ₂, x :q ⊕ᵢ∈J,i<k Aᵢ ⊢ e₁ : W    Γ₂, y :q ⊕ᵢ∈J,i≥k Aᵢ ⊢ e₂ : W
+  --  ─────────────────────────────────────────────────────────────────────────── [split-a]
   --   Γ₁, Γ₂ ⊢ split_q v at k of { x -> e₁; y -> e₂ } : W
   --
   -- Both sides must be nonempty. Both binders retain the original indices,
-  -- pointer and runtime tags. Even singleton partitions keep their sum wrapper.
+  -- pointer and runtime tags (⌊x⌋ = ⌊y⌋ = ⌊v⌋). Even singleton partitions keep their sum wrapper.
   -- Like CaseA, this supports owned, borrowed and unique modes without repacking.
-  | SplitA Mode Name Int (Name,VExpr) (Name,VExpr)
+  | SplitA Mode Path Int (Path,VExpr) (Path,VExpr)
 
   --   Γ₁ ⊢ v :q A*    Γ₂, x :q A ⊢ e : W
   --  ───────────────────────────────────── [deref]
   --   Γ₁, Γ₂ ⊢ let_q ptr x = v in e : W
-  | Deref Mode VVal Name VExpr
+  | Deref Mode VVal Path VExpr
 
   --   Γ₁ ⊢ v :q T⟨B̄⟩    Γ₂, x :q unroll(T⟨B̄⟩) ⊢ e : W
   --  ──────────────────────────────────────────────────── [unroll]
   --   Γ₁, Γ₂ ⊢ let_q roll x = v in e : W
-  | Unroll Mode Name Name VExpr
+  | Unroll Mode Path Path VExpr
 
   --   Γ₁ ⊢ v :^ Box V    Γ₂, x :^ V ⊢ e : W
   --  ──────────────────────────────────────── [bunbox]
@@ -492,7 +515,7 @@ data VExpr
   --
   -- Reading the contents of a box is always borrowed. The paper's owned `[unbox]`, which keeps
   -- the block as a credit, is `[unbox-ru]` and requires the box to be unique.
-  | Unbox Mode Name Name VExpr
+  | Unbox Mode Path Path VExpr
 
   --   Γ₁ ⊢ v :^ Box V    Γ₂, x : V ⊢ e : W
   --  ─────────────────────────────────────────── [unbox-lazy]
@@ -501,14 +524,14 @@ data VExpr
   -- Takes the contents of a box of the lazy value under evaluation without duplicating them
   -- (`Perceus`); the box is left *hollow* until `[box-in]` writes over it or it is freed. In the
   -- calculus this needs a hollow box type (a shared `◇n`). Trusted by `Linear`.
-  | UnboxLazy Name Name VExpr
+  | UnboxLazy Path Path VExpr
 
   --   Γ₁ ⊢ v :q ∃ā. V    Γ₂, x :q V[b̄/ā] ⊢ e : W    b̄ ∉ ftv(Γ₂, W)
   --  ────────────────────────────────────────────────────────────────── [unpack]
   --   Γ₁, Γ₂ ⊢ let_q pack[b̄] x = v in e : W
   --
   -- For a variable scrutinee z, credit descriptions substitute pack[b̄] x for z.
-  | Unpack Mode VVal [TVar] Name VExpr
+  | Unpack Mode VVal [TVar] Path VExpr
 
   --   Γ₁ ⊢ v :^ V    lᵢ : V    Γ₂ ⊢ eᵢ : W    Γ₂ ⊢ e : W
   --  ────────────────────────────────────────────────────── [case-lit]
@@ -520,7 +543,7 @@ data VExpr
   --   Γ₁, Γ₂ ⊢ case^ v of { Cᵢ xᵢ -> eᵢ; _ -> e } : W
   --
   -- Matching on the tag of an open datatype, with a mandatory default. Always borrowed.
-  | CaseOpen Mode Name [(Name,Name,VExpr)] VExpr
+  | CaseOpen Mode Path [(Name,Path,VExpr)] VExpr
 
   --   Γ | ∅ ⊢ e : A*    ā ∉ ftv(Γ)
   --  ──────────────────────────────── [gen]
@@ -540,24 +563,26 @@ data VExpr
   -- placeholder in the hole. The paper's `[dropru]` is derived
   -- from `[if-unique]` and `[unbox-ru]` (`Reuse.dropReuse`):
   --
-  --   let r = drop-reuse x in e  ≜  let r = (if-unique x then (let box y @ r' = x in discard y; ret r')
+  --   let r = drop-reuse x in e  ≜  let^ box x.contents = x in
+  --                                 let r = (if-unique x then (let @ r' = x in discard x.contents; ret r')
   --                                          else (drop x; ret no-reuse n)) in e
-  | Drop Name VExpr
+  | Drop Path VExpr
 
   --       Γ ⊢ e : W
   --  ─────────────────────────── [free]
   --   Γ, r : ◇n ⊢ free r; e : W
   --
   -- Free the block of a reuse credit, or do nothing if the credit is empty.
-  | Free Name VExpr
+  | Free Path VExpr
 
-  --   Γ, x :^ Aπ, y : Aπ ⊢ e : W    A contains no reuse credits
-  --  ──────────────────────────────────────────── [dup-a]
-  --   Γ, x :^ Aπ ⊢ let y = dup x in e : W
+  --   Γ, x : t ⊢ e : W    t contains no reuse credits
+  --  ─────────────────────────── [dup]
+  --   Γ, x :^ t ⊢ dup x; e : W
   --
-  -- Duplicate a boxed operand into another operand, preserving its enclosing sum's tag.
-  -- It produces no AVal that could be injected into a different sum.
-  | Dup Name Name VExpr
+  -- Duplicate a variable in place: `x` gains an owned reference and keeps its name, so the
+  -- copy is still a part of the variables on its path (see "Structural rules"). With
+  -- `[contract]` before it, `x` stays available borrowed as well.
+  | Dup Path VExpr
 
   --   Γ, x :! t ⊢ e₁ : W    Γ, x : t ⊢ e₂ : W    t = Box V with |V| defined, or t = T⟨B̄⟩* with T lazy
   --  ───────────────────────────────────────────────────────────────────────────────────── [if-unique]
@@ -566,30 +591,33 @@ data VExpr
   -- Branches on whether a box (`DropSpec`) or a lazy value (`Lazy`) is unique. A lazy value
   -- may be immediate, and then it is not unique. `Lazy` frees a unique lazy value under
   -- evaluation with `typed-lazy-free : ∀a. (!a) -> 1`, which does not drop its (taken) fields.
-  | IsUnique Name VExpr VExpr
+  | IsUnique Path VExpr VExpr
 
-  --   Γ, x : V, r : ◇n[⌊π⌋+1; x : V] ⊢ e : W    |V| = n
-  --  ─────────────────────────────────────────────────── [unbox-ru]
-  --   Γ, z :! (Box V)π ⊢ let box x @ r = z in e : W
+  --   Γ, z.contents : V, r : ◇n[⌊z⌋+1; z.contents : V] ⊢ e : W    |V| = n
+  --  ──────────────────────────────────────────────────────────── [unbox-ru]
+  --   Γ, z :! Box V, z.contents :^ V ⊢ let @ r = z in e : W
   --
-  -- A unique `Box V` splits into its contents and its block, the inverse of `[box-at]`. With
-  -- `[if-unique]` it makes `drop-reuse` of a box derivable. The block of a box at offset k of
-  -- a sum has tag k+1 (a whole box has tag 1).
-  | UnboxRu Name Name Name VExpr
+  -- A unique `Box V` whose contents were read (`[bunbox]`) splits into its contents and its
+  -- block, the inverse of `[box-at]`: the contents are taken out of the block without
+  -- reference counting, and the block becomes the credit `r` (named `z.credit`). With
+  -- `[if-unique]` it makes `drop-reuse` of a box derivable. The block of `z` has tag ⌊z⌋+1.
+  | UnboxRu Path Path VExpr
 
   --   Γ_c, x̄ :q̄ V̄ | J ⊢ e₁ : W    Γ, Γ_c | J, j : Γ_c; (q̄ V̄) -> W ⊢ e₂ : W
   --  ──────────────────────────────────────────────────────────────────── [join]
   --   Γ, Γ_c | J ⊢ join j(x̄ :q̄ V̄) = e₁ in e₂ : W
   --
-  -- A join point captures the owned variables Γ_c that are free in its body, and is not
+  -- A join point captures the owned variables Γ_c that are free in its body (those that are
+  -- not parts of other free variables, see "Structural rules"), and is not
   -- recursive (`j` is not in scope in its body). Its body may jump to outer joins.
   -- Since J is reset outside of tail positions, a jump cannot escape
   -- and is always a tail call. Join points only have owned parameters, except for contexts
   -- that are plugged in place (unique, see `[plug]`). Perceus only produces closed join
   -- points (Γ_c = ∅); only `JoinArgs`, the last pass, introduces captures, and only for
   -- owned parameters. A captured variable must not be bound again in e₂, so every jump sees
-  -- the same variable.
-  | Join Name [(Name,Mode,VType)] VExpr VExpr
+  -- the same variable. The descriptions in V̄ do not name the parameters x̄, as every jump
+  -- binds them to different values (a jump can only pass an empty credit for them).
+  | Join Name [(Path,Mode,VType)] VExpr VExpr
 
   --   j : Γ_c; (q̄ V̄) -> W ∈ J    Γᵢ ⊢ vᵢ :qᵢ Vᵢ
   --  ──────────────────────────────────────────────── [jump]
@@ -604,7 +632,7 @@ data Def
   --   x̄ :q̄ V̄ | ∅ ⊢ e : W
   --  ──────────────────────────────── [deffun]
   --   ⊢ fun f⟨ā⟩(x̄ :q̄ V̄) : W = e
-  = DefFun{ defName :: Name, defParams :: [TVar], defArgs :: [(Name,Mode,VType)], defRes :: VType, defBody :: VExpr }
+  = DefFun{ defName :: Name, defParams :: [TVar], defArgs :: [(Path,Mode,VType)], defRes :: VType, defBody :: VExpr }
 
   --   ∅ | ∅ ⊢ e : V
   --  ───────────────────────── [defval]

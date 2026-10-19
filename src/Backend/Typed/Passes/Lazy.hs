@@ -34,10 +34,10 @@ type Z a = M () Int a
 -- free the block of a lazy value without dropping its (taken) fields
 
 -- lazy values under evaluation with their Koka size
-type Targets = M.Map Name Int
+type Targets = M.Map Path Int
 
-fresh :: String -> Z Name
-fresh s = state (\n -> (newHiddenName ("lz" ++ s ++ show n), n+1))
+fresh :: String -> Z Path
+fresh s = state (\n -> (root (newHiddenName ("lz" ++ s ++ show n)), n+1))
 
 lazyProgram :: Program -> (Program,[String])
 lazyProgram prog
@@ -94,14 +94,14 @@ inPlace linfo shapes mbSize i
     ourSize _        = 0
 
 -- free the lazy value if it is unique, and otherwise overwrite it with an indirection to the value
-indirect :: AType -> [AType] -> Int -> Name -> VVal -> Z VExpr
+indirect :: AType -> [AType] -> Int -> Path -> VVal -> Z VExpr
 indirect t shapes ind x v
   = do r <- fresh "r"
        d <- fresh "d"
        z <- fresh "z"
        a <- fresh "a"
-       let ref = Ptr t (Roll t (injA shapes ind (BoxIn x (DupV (Var r)))))
-           shared = Let d (VPtr t) (Ret ref) (Deref Owned (Var d) a (Drop a (Ret (Var r))))
+       let ref = Ptr t (Roll t (injA shapes ind (BoxIn x (Var r))))
+           shared = Dup r (Let d (VPtr t) (Ret ref) (Deref Owned (Var d) a (Drop a (Ret (Var r)))))
            unique = Let z VUnit (Call nameLazyFree [t] [Var x]) (Ret (Var r))
        return (Let r (VPtr t) (Ret v) (IsUnique x unique shared))
 

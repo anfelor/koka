@@ -26,17 +26,19 @@ import Backend.Typed.Passes.DropSpec( dropSpecProgram )
 import Backend.Typed.Passes.Match( matchProgram )
 import Backend.Typed.Passes.SinkJoins( sinkJoinsProgram )
 import Backend.Typed.Passes.JoinArgs( joinArgsProgram )
+import Backend.Typed.Passes.Paths( pathsProgram )
 import Backend.Typed.Linear( checkLinear )
 
 -- returns the program after Perceus (and reuse) and messages labeled by the phase that produced them
 typedFromCore :: Platform -> Bool -> Newtypes -> [C.Core] -> Int -> C.Core -> (Program,[(String,String)])
 typedFromCore platform enableReuse nt imports uniq core
-  = let (acore,_)             = runUnique uniq (matchCore nt core)
-        (prog,elabErrs,notes) = elabProgram platform nt imports acore
-        passes                = [("anf",False,pure' anfProgram), ("contify",False,contifyProgram), ("simplify",False,pure' simplifyProgram), ("perceus",True,perceusProgram), ("lazy",True,lazyProgram)
-                                  ,("dropspec",True,dropSpecProgram)] ++ [("reuse",True,reuseProgram) | enableReuse]
-                                  ++ [("match",True,matchProgram), ("sinkjoins",True,pure' sinkJoinsProgram), ("joinargs",True,pure' joinArgsProgram)]
-        (dsprog,msgs)         = runPasses prog (label "check" (checkProgram prog)) passes
+  = let (acore,_)              = runUnique uniq (matchCore nt core)
+        (eprog,elabErrs,notes) = elabProgram platform nt imports acore
+        prog                   = pathsProgram eprog
+        passes                 = [("anf",False,pure' anfProgram), ("contify",False,contifyProgram), ("simplify",False,pure' simplifyProgram), ("perceus",True,perceusProgram), ("lazy",True,lazyProgram)
+                                   ,("dropspec",True,dropSpecProgram)] ++ [("reuse",True,reuseProgram) | enableReuse]
+                                   ++ [("match",True,matchProgram), ("sinkjoins",True,pure' sinkJoinsProgram), ("joinargs",True,pure' joinArgsProgram)]
+        (dsprog,msgs)          = runPasses prog (label "check" (checkProgram prog)) passes
     in (dsprog, label "elab" elabErrs ++ msgs ++ label "note" notes)
   where
     pure' f prog = (f prog,[])
@@ -44,12 +46,14 @@ typedFromCore platform enableReuse nt imports uniq core
 -- a pass on the typed IR: its name, whether its result must be linear, and the pass
 type Pass = (String, Bool, Program -> (Program,[String]))
 
--- after each pass the program is type checked and, if the pass produces linear code, checked
--- for linearity; the checks stop at the first error so that it names the pass that caused it
+-- after each pass the variables are named by their paths again (`Paths`) and the program is
+-- type checked and, if the pass produces linear code, checked for linearity; the checks stop
+-- at the first error so that it names the pass that caused it
 runPasses :: Program -> [(String,String)] -> [Pass] -> (Program,[(String,String)])
 runPasses prog msgs [] = (prog,msgs)
 runPasses prog msgs ((name,linear,pass):passes)
-  = let (prog',errs) = pass prog
+  = let (passed,errs) = pass prog
+        prog'        = pathsProgram passed
         checkErrs    = label ("check after " ++ name) (checkProgram prog')
         linErrs      = if linear && null checkErrs then label ("linear after " ++ name) (checkLinear prog') else []
         msgs'        = msgs ++ label name errs

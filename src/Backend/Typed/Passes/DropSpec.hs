@@ -8,35 +8,33 @@
 
 {- Drop specialization (after Perceus, before reuse).
 
-  Perceus destructures a box that is still needed by borrowing its contents,
-  duplicating them and then dropping the box:
+  Perceus takes the contents of a box `z` that it gives up by duplicating them and
+  dropping the box:
 
-    let^ box p = z in let y = dup p in drop z; e
+    dup z.contents; drop z; e
 
-  If the box is unique, the dup and the drop cancel out: its contents are taken
-  without reference counting and its block becomes a reuse credit, which still contains them:
+  If the box is unique, the dup and the drop cancel out: its contents are taken without
+  reference counting, and its block becomes a reuse credit, which still contains them:
 
-    let (y, r : ◇n[k; y : V]) = if-unique z then let box y @ r' = z in ret (y, r')
-                                            else let^ box y = z in let y' = dup y in drop z; ret (y', no-reuse n [k; y : V])
+    let r : ◇n[k; z.contents : V] = if-unique z then (let @ r' = z in ret r')
+                                    else (dup z.contents; drop z; ret no-reuse n [k; z.contents : V])
     in free r; e
 
-  The description of `r` names the `y` of the branches, of which the `y` it binds is an alias
-  (see `Linear`), and the tag k of the block, which follows from the position of `z` (see
-  `[unbox-ru]`). The empty credit of the shared branch has the same description, so that the
-  branches agree on it.
-
-  As in Koka's Parc, the parts of `y` that `e` drops right away are not duplicated at all: the
-  destructuring of `y` at the start of `e` (renames, owned unpairs, and drops of its pointer
-  parts) moves into both branches. The unique branch drops the dead parts, the shared branch
-  duplicates only the live ones, and both return the live parts:
-
-    let ((a, b), r : ◇n[k; (d, (a, b)) : V]) = if-unique z then let box y @ r' = z in let (d, (a, b)) = y in drop d; ret ((a, b), r')
-                                  else let^ box y = z in let^ (d, (a, b)) = y in
-                                       let a' = dup a in let b' = dup b in drop z; ret ((a', b'), no-reuse n [k; (d, (a, b)) : V])
-    in free r; e'
-
-  The shared branch is the original code. Freeing the credit releases the block, unless
+  Both branches leave `z.contents` owned (see `[unbox-ru]`). The description of `r` names
+  the contents and the tag k of the block, which follows from the path of `z`. The
+  empty credit of the shared branch has the same description, so that the branches agree on
+  it. The shared branch is the original code. Freeing the credit releases the block, unless
   `Reuse` uses it for an allocation in `e`.
+
+  As in Koka's Parc, the parts of the contents that `e` drops right away are not duplicated
+  at all. The destructurings of the contents at the start of `e` move before the test (they
+  only read), and the drops of parts among them move into the unique branch, while the
+  shared branch duplicates only the other parts:
+
+    let^ (z.contents.fst, z.contents.snd) = z.contents in
+    let r = if-unique z then (let @ r' = z in drop z.contents.fst; ret r')
+            else (dup z.contents.snd; drop z; ret no-reuse n [k; z.contents : V])
+    in free r; e'
 -}
 module Backend.Typed.Passes.DropSpec( dropSpecProgram ) where
 
@@ -45,14 +43,14 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuBinds, reuseSize )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferAVar, inferV, altTypes, unboxRuBinds, boxContents, reuseSize )
 
 type D a = M (Env,Gamma) Int a
 
-fresh :: String -> D Name
-fresh s = state (\n -> (newHiddenName ("ds" ++ s ++ show n), n+1))
+fresh :: String -> D Path
+fresh s = state (\n -> (root (newHiddenName ("ds" ++ s ++ show n)), n+1))
 
-bind :: [(Name,Ty)] -> D a -> D a
+bind :: [(Path,Ty)] -> D a -> D a
 bind bs = local (\(env,g) -> (env,bindAll bs g))
 
 dropSpecProgram :: Program -> (Program,[String])
@@ -67,32 +65,30 @@ dropSpecProgram prog
     params DefVal{} = M.empty
 
 dsE :: VExpr -> D VExpr
-dsE (Unbox Borrowed z p (Let y s (Ret (DupV (Var p'))) (Drop z' e)))
-  | p == p', z == z', Right n <- reuseSize s
+dsE (Dup p (Drop z e))
+  | p == child z SContents
   = do (_,g) <- ask
-       tz <- liftE (inferVar g z)
-       let (parts,rest) = case taken (Leaf y s) e of
-                            (t,e') | hasDead t -> (t,e')
-                            _ -> (Leaf y s, e)
-           x = nameOf parts
-           live = leaves parts
-       q  <- fresh "q"
-       r  <- fresh "r"
-       r' <- fresh "r"
-       copies <- mapM copy live
-       (l,unpack) <- bindTuple (map fst live)
-       kept <- dropDead parts (Ret (Pair (tuple (map (Var . fst) live)) (Var r')))
-       let payload = Just (Contents (offset (position tz) + 1) (described parts) s)
-           shared = Unbox Borrowed z x (destructure Borrowed parts (compose (map snd copies)
-                      (Drop z (Ret (Pair (tuple (map fst copies)) (NoReuse n payload))))))
-       rest' <- bind ((r,V (VReuse n payload)) : [(x',V t) | (x',t) <- live]) (dsE rest)
-       return (Let q (VProd (tupleType (map snd live)) (VReuse n payload))
-                 (IsUnique z (UnboxRu z x r' (destructure Owned parts kept)) shared)
-                 (Unpair Owned (Var q) l r (unpack (Free r rest'))))
+       s <- liftE (inferAVar g z >>= boxContents)
+       case reuseSize s of
+         Right n -> let (frames,dead,others,rest) = taken p e
+                        bound = concat [xs | f <- frames, Just ds <- [destructOf f], (xs,_) <- dsAlts ds]
+                    in case cover bound (map canonical dead) p of
+                         Just live | not (null dead) -> transfer n frames live dead (others rest)
+                         _ -> transfer n [] [p] [] e
+         Left _ -> Dup p . Drop z <$> dsE e
   where
-    copy (x,t) | isTrivial (V t) = return (Var x, id)
-               | otherwise = do x' <- fresh "y"
-                                return (Var x', Let x' t (Ret (DupV (Var x))))
+    transfer n frames live dead cont
+      = under frames $
+        do (_,g) <- ask
+           s <- liftE (inferAVar g z >>= boxContents)
+           r  <- fresh "r"
+           r' <- fresh "r"
+           let payload = Just (Contents (tagOffset z + 1) (Var p) s)
+               t = VReuse n payload
+               unique = UnboxRu z r' (foldr Drop (Ret (Var r')) dead)
+               shared = foldr Dup (Drop z (Ret (NoReuse n payload))) live
+           cont' <- bind [(r,V t)] (dsE cont)
+           return (Let r t (IsUnique z unique shared) (Free r cont'))
 dsE expr
   | Just ds <- destructAOf expr
   = do (env,g) <- ask
@@ -111,90 +107,57 @@ dsE expr
   = case expr of
       Let x t e1 e2 -> Let x t <$> dsE e1 <*> bind [(x,V t)] (dsE e2)
       Join j ps e1 e2 -> Join j ps <$> bind [(x,V t) | (x,_,t) <- ps] (dsE e1) <*> dsE e2
-      Dup x y e -> do (_,g) <- ask
-                      t <- liftE (inferVar g x)
-                      Dup x y <$> bind [(y,t)] (dsE e)
-      UnboxRu v x r e -> do (_,g) <- ask
-                            bs <- liftE (unboxRuBinds g v x r)
-                            UnboxRu v x r <$> bind bs (dsE e)
+      UnboxRu v r e -> do (_,g) <- ask
+                          bs <- liftE (unboxRuBinds g v r)
+                          UnboxRu v r <$> bind bs (dsE e)
       _ -> descendE pure dsV (\_ e -> dsE e) expr
 
--- The parts of a payload: a part that is still needed, a pointer that is dropped, or a pair
--- that is destructured.
-data Parts = Leaf Name VType | Dead Name VType | Node Name Parts Parts
-
-nameOf :: Parts -> Name
-nameOf (Leaf x _) = x
-nameOf (Dead x _) = x
-nameOf (Node x _ _) = x
-
--- the payload in terms of its parts, which the credit of its block describes
-described :: Parts -> VVal
-described (Node _ a b) = Pair (described a) (described b)
-described parts = Var (nameOf parts)
-
-leaves :: Parts -> [(Name,VType)]
-leaves (Leaf x t) = [(x,t)]
-leaves (Dead _ _) = []
-leaves (Node _ a b) = leaves a ++ leaves b
-
-hasDead :: Parts -> Bool
-hasDead (Leaf _ _) = False
-hasDead (Dead _ _) = True
-hasDead (Node _ a b) = hasDead a || hasDead b
-
--- Replace the leaf `x`.
-at :: Name -> (VType -> Maybe Parts) -> Parts -> Maybe Parts
-at x f parts
-  = case parts of
-      Leaf y t | x == y -> f t
-      Node y a b -> case at x f a of
-                      Just a' -> Just (Node y a' b)
-                      Nothing -> Node y a <$> at x f b
-      _ -> Nothing
-
--- Take the destructuring of a payload from the start of its continuation: renames, owned
--- unpairs and drops of pointers among its parts, also behind drops of other variables.
-taken :: Parts -> VExpr -> (Parts,VExpr)
-taken parts expr
+-- The destructurings of parts of `p` at the start of an expression, the parts of `p` that it
+-- drops among them, and its drops of other variables.
+taken :: Path -> VExpr -> ([VExpr],[Path],K,VExpr)
+taken p expr
   = case expr of
-      Let x _ (Ret (Var w)) e
-        | Just parts' <- at w (Just . Leaf x) parts -> taken parts' e
-      Unpair Owned (Var w) a b e
-        | Just parts' <- at w (split w a b) parts -> taken parts' e
-      Deref Owned (Var w) d (Drop d' e)
-        | d == d', Just parts' <- at w (Just . Dead w) parts -> taken parts' e
-      Drop x e -> Drop x <$> taken parts e
-      _ -> (parts,expr)
+      Drop w e | w `within` p -> let (fs,ds,k,r) = taken p e in (fs,w:ds,k,r)
+               | otherwise -> let (fs,ds,k,r) = taken p e in (fs,ds,Drop w . k,r)
+      _ | Just ds <- destructOf expr, Var x <- dsScrut ds, x `within` p, dsMode ds /= Unique
+        , [(_,e)] <- dsAlts ds, not (isLazy expr)
+        -> let (fs,dd,k,r) = taken p e in (expr:fs,dd,k,r)
+      _ -> ([],[],id,expr)
   where
-    split w a b (VProd s t) = Just (Node w (Leaf a s) (Leaf b t))
-    split _ _ _ _ = Nothing
+    isLazy UnboxLazy{} = True
+    isLazy _ = False
 
-destructure :: Mode -> Parts -> K
-destructure m (Node x a b) = Unpair m (Var x) (nameOf a) (nameOf b) . destructure m a . destructure m b
-destructure _ _ = id
+-- a destructuring form, with a variable as its scrutinee
+destructOf :: VExpr -> Maybe (Destruct VVal)
+destructOf expr
+  = case destructAOf expr of
+      Just ds -> Just ds{ dsScrut = Var (dsScrut ds), dsBuild = \m v es -> dsBuild ds m (varOf v) es }
+      Nothing -> destructVOf expr
 
-dropDead :: Parts -> VExpr -> D VExpr
-dropDead (Dead x t) e = dropValue (fresh "d") x (V t) e
-dropDead (Node _ a b) e = dropDead b e >>= dropDead a
-dropDead (Leaf _ _) e = return e
+-- The parts of `v` that are not dead, where `bound` are the parts in scope: a variable with
+-- a dead part is split into its parts.
+cover :: [Path] -> [Path] -> Path -> Maybe [Path]
+cover bound dead v
+  | any (v `within`) dead = Just []
+  | any (`within` v) dead = case [x | x <- bound, x `within` v, length (stepsFrom v x) == 1] of
+                              [] -> Nothing
+                              xs -> concat <$> mapM (cover bound dead) xs
+  | otherwise = Just [v]
 
-tuple :: [VVal] -> VVal
-tuple [] = UnitV
-tuple vs = foldr1 Pair vs
-
-tupleType :: [VType] -> VType
-tupleType [] = VUnit
-tupleType ts = foldr1 VProd ts
-
--- Bind the names from a tuple: the name of the tuple and its destructuring.
-bindTuple :: [Name] -> D (Name,K)
-bindTuple [] = do u <- fresh "u"
-                  return (u, id)
-bindTuple [x] = return (x, id)
-bindTuple (x:xs) = do l <- fresh "l"
-                      (l',k) <- bindTuple xs
-                      return (l, Unpair Owned (Var l) x l' . k)
+-- the destructurings `fs` (with one alternative each) around an expression in the scope of their binders
+under :: [VExpr] -> D VExpr -> D VExpr
+under [] k = k
+under (f:fs) k
+  | Just ds <- destructOf f
+  = do (env,g) <- ask
+       t <- case destructAOf f of
+              Just da -> liftE (inferVar g (dsScrut da))
+              Nothing -> V <$> liftE (inferV env g (dsScrut ds))
+       [ts] <- liftE (altTypes env t f)
+       let [(xs,_)] = dsAlts ds
+       e <- bind (zip xs ts) (under fs k)
+       return (dsBuild ds (dsMode ds) (dsScrut ds) [e])
+under _ _ = fail "DropSpec.under: not a destructuring"
 
 dsV :: VVal -> D VVal
 dsV = descendV dsA dsV

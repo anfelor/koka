@@ -64,7 +64,7 @@ elabFunDef def pars body
   = do (tvs,args,res) <- funSig (typeOf (C.defExpr def))
        body' <- withTVars tvs (withLocals (map getName pars) (elabExprAt res body))
        let params = withParamModes (defModes def) args
-           args' = [(getName p,m,t) | (p,(m,t)) <- zip pars params]
+           args' = [(root (getName p),m,t) | (p,(m,t)) <- zip pars params]
        return (DefFun (C.defName def) tvs args' res body', SigFun tvs params res)
 
 elabValDef :: C.Def -> E (Def,Sig)
@@ -143,7 +143,7 @@ elabExpr expr
       C.Let [] body -> elabExpr body
       C.Let (C.DefNonRec (C.Def{ C.defName = j, C.defExpr = C.Lam pars _ e1 }) : dgs) body | isJoinName j
         -> do let linear = linearContexts e1
-              ps  <- mapM (\p -> (\t -> (getName p,paramMode Own (S.member (getName p) linear),t)) <$> vt (tnameType p)) pars
+              ps  <- mapM (\p -> (\t -> (root (getName p),paramMode Own (S.member (getName p) linear),t)) <$> vt (tnameType p)) pars
               e1' <- withLocals (map getName pars) (elabExpr e1)
               Join j ps e1' <$> elabExpr (C.Let dgs body)
       C.App (C.Var (TName j tp) _) args | isJoinName j, Just (pars,_,_) <- splitFunType tp
@@ -175,7 +175,7 @@ elabLet def body
          else do t  <- vt (C.defType def)
                  e1 <- elabExprAt t (C.defExpr def)
                  e2 <- withLocals [x] (elabExpr body)
-                 return (Let x t e1 e2)
+                 return (Let (root x) t e1 e2)
 
 elabGen :: [TVar] -> C.Expr -> Type -> E VExpr
 elabGen tvs e tp
@@ -404,7 +404,7 @@ unreachable tp
 
 etaCon :: C.Expr -> [(Name,Type)] -> Type -> E (K,VVal)
 etaCon con pars eff
-  = do xs <- mapM (\(_,tp) -> (\x -> TName x tp) <$> fresh "c") pars
+  = do xs <- mapM (\(_,tp) -> (\x -> TName x tp) <$> freshName "c") pars
        elabVal (C.Lam xs eff (C.App con [C.Var x C.InfoNone | x <- xs]))
 
 elabLam :: VType -> [TName] -> C.Expr -> E AVal
@@ -414,13 +414,13 @@ elabLam (VPtr (AFun qs res)) pars body
        return (Lam ps res (compose ks body'))
 elabLam t _ _ = failE ("expecting a function type for a lambda: " ++ ppr t)
 
-lamParam :: (TName,(Mode,VType)) -> E ((Name,Mode,VType),K)
+lamParam :: (TName,(Mode,VType)) -> E ((Path,Mode,VType),K)
 lamParam (p,(m,q))
   = do t <- vt (tnameType p)
-       if alphaEq q t then return ((getName p,m,q),id)
+       if alphaEq q t then return ((root (getName p),m,q),id)
          else do y <- fresh "a"
                  (k,v) <- coerce q t (Var y)
-                 return ((y,m,q), k . Let (getName p) t (Ret v))
+                 return ((y,m,q), k . Let (root (getName p)) t (Ret v))
 
 stripForallV :: VType -> VType
 stripForallV (VPtr (AForall _ a)) = VPtr a
@@ -466,10 +466,10 @@ etaOwned x tysD params res
        return (Lam [(y,Owned,p) | (y,p) <- zip ys params] res (Call x tysD (map Var ys)))
 
 instLocal :: Name -> Type -> [AType] -> VType -> E (K,VVal)
-instLocal x _ [] _ = return (id, Var x)
+instLocal x _ [] _ = return (id, Var (root x))
 instLocal x tp tys' expect
   = do a <- ptrType tp
-       coerce (VPtr (instA a tys')) expect (TyApp (Var x) tys')
+       coerce (VPtr (instA a tys')) expect (TyApp (Var (root x)) tys')
 
 ptrType :: Type -> E AType
 ptrType tp = do t <- vt tp
@@ -721,7 +721,7 @@ elabBoxedCase info vargs v brs
                          return (CaseA Owned z alts def)
        return (Deref Owned v p (Unroll Owned p z body))
 
-boxedAlt :: [AType] -> [C.Branch] -> (Int,ConInfo) -> E (Int,Name,VExpr)
+boxedAlt :: [AType] -> [C.Branch] -> (Int,ConInfo) -> E (Int,Path,VExpr)
 boxedAlt vargs brs (i,con)
   = do y <- fresh "y"
        e <- conBranch vargs con (Left y) (findBranch con brs)
@@ -733,7 +733,7 @@ elabValueCase info vargs v brs
       [con] -> conBranch vargs con (Right v) (findBranch con brs)
       cons  -> CaseV Owned v <$> mapM (valueAlt vargs brs) cons
 
-valueAlt :: [AType] -> [C.Branch] -> ConInfo -> E (Name,VExpr)
+valueAlt :: [AType] -> [C.Branch] -> ConInfo -> E (Path,VExpr)
 valueAlt vargs brs con
   = do y <- fresh "y"
        b <- conBranch vargs con (Right (Var y)) (findBranch con brs)
@@ -748,7 +748,7 @@ elabOpenCase info vargs v brs
                  []    -> failE "open match without default"
        return (Deref Owned v p (CaseOpen Owned p alts def))
 
-openAlt :: DataInfo -> [AType] -> (ConInfo,C.Branch) -> E (Name,Name,VExpr)
+openAlt :: DataInfo -> [AType] -> (ConInfo,C.Branch) -> E (Name,Path,VExpr)
 openAlt info vargs (con,br@(C.Branch [pat] _))
   = do recordOpenSig info (conInfoName con) (conInfoType con)
        x <- fresh "o"
@@ -767,7 +767,7 @@ findBranch con brs
                  [] | conInfoIsLazy con -> Just (C.Branch [C.PatWild] [C.Guard C.exprTrue (C.Var (TName nameUnreachable (typeOf (head brs))) C.InfoNone)])
                     | otherwise -> Nothing
 
-conBranch :: [AType] -> ConInfo -> Either Name VVal -> Maybe C.Branch -> E VExpr
+conBranch :: [AType] -> ConInfo -> Either Path VVal -> Maybe C.Branch -> E VExpr
 conBranch _ con _ Nothing = failE ("missing branch for " ++ show (conInfoName con))
 conBranch vargs con y (Just br@(C.Branch [pat] _))
   = do body <- withTVars (patExistIds pat) (withLocals (patBinders pat) (branchBody br))
@@ -782,13 +782,13 @@ conBranch vargs con y (Just br@(C.Branch [pat] _))
          _ -> return body
 conBranch _ _ _ (Just _) = failE "unexpected branch after matching"
 
-openCon :: Either Name VVal -> [TVar] -> [TVar] -> E (K,VVal)
+openCon :: Either Path VVal -> [TVar] -> [TVar] -> E (K,VVal)
 openCon y exs exIds
   = do (k1,p) <- either unboxK (return . (,) id) y
        (k2,u) <- if null exs then return (id,p) else unpackK p exIds
        return (k1 . k2, u)
 
-unboxK :: Name -> E (K,VVal)
+unboxK :: Path -> E (K,VVal)
 unboxK y = do p <- fresh "p"
               return (Unbox Owned y p, Var p)
 
@@ -823,4 +823,4 @@ bindField Nothing _ _ = return id
 bindField (Just (TName x tp)) s v
   = do t <- vt tp
        (k,w) <- coerce s t v
-       return (k . Let x t (Ret w))
+       return (k . Let (root x) t (Ret w))

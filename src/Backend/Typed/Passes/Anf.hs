@@ -21,8 +21,8 @@ anfProgram prog = prog{ progDefs = map run (progDefs prog) }
   where
     run def = def{ defBody = evalState (anfE (defBody def)) 0 }
 
-fresh :: State Int Name
-fresh = state (\n -> (newHiddenName ("anf" ++ show n),n+1))
+fresh :: State Int Path
+fresh = state (\n -> (root (newHiddenName ("anf" ++ show n)),n+1))
 
 anfE :: VExpr -> State Int VExpr
 anfE expr
@@ -32,7 +32,7 @@ anfE expr
                           bind x t e1' e2'
       _ -> descendE pure anfV (\_ -> anfE) expr
 
-bind :: Name -> VType -> VExpr -> VExpr -> State Int VExpr
+bind :: Path -> VType -> VExpr -> VExpr -> State Int VExpr
 bind x t (Let y s e1 e2) body
   = do z <- fresh
        rest <- bind x t (renameE (M.singleton y z) e2) body

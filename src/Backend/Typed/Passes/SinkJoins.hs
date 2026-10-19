@@ -44,7 +44,7 @@ sjE expr
       _ -> runIdentity (descendE Identity (Identity . sjV) (\_ e -> Identity (sjE e)) expr)
 
 -- define `join j(ps) = e1` in the innermost subexpression of `e` that contains every jump to it
-sink :: Name -> [(Name,Mode,VType)] -> VExpr -> VExpr -> VExpr
+sink :: Name -> [(Path,Mode,VType)] -> VExpr -> VExpr -> VExpr
 sink j ps e1 e
   = case getConst (descendE (const (Const [])) (const (Const [])) (\xs sub -> Const [xs | jumpsIn sub]) e) of
       [xs] | movable, all (`S.notMember` free) xs

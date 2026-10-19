@@ -7,7 +7,7 @@
 -----------------------------------------------------------------------------
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents
+module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, collapse
                           , rep, boxrep, boxA, isPtr, varV, forallA, prodV, sumTypes, sumAlts, sumWidth
                           , vtInt, vtString, vtChar, vtFloat, atAny
                           ) where
@@ -41,7 +41,7 @@ instance Types AType where
   matchWith = matchAWith
 
 instance Types Ty where
-  subst sub (AAt p a) = AAt p (substA sub a)
+  subst sub (A a) = A (substA sub a)
   subst sub (V t) = V (substV sub t)
   ftv (A a) = ftvA a
   ftv (V t) = ftvV t
@@ -271,13 +271,34 @@ eqContentsMaybe Nothing Nothing = True
 eqContentsMaybe (Just (Contents k p s)) (Just (Contents l q t)) = k == l && eqV s t && eqContents p q
 eqContentsMaybe _ _ = False
 
+-- descriptions are equal up to their normal form (`collapse`)
 eqContents :: VVal -> VVal -> Bool
-eqContents p q = case (p,q) of
-  (Inj i t x, Inj j u y) -> i == j && eqV t u && eqContents x y
-  (Pair a b, Pair c d) -> eqContents a c && eqContents b d
-  (Pack t ts x, Pack u us y) -> eqV t u && eqAs ts us && eqContents x y
-  (TyApp x ts, TyApp y us) -> eqContents x y && eqAs ts us
-  _ -> p == q
+eqContents p0 q0 = go (collapse p0) (collapse q0)
+  where
+    go p q = case (p,q) of
+      (Inj i t x, Inj j u y) -> i == j && eqV t u && go x y
+      (Pair a b, Pair c d) -> go a c && go b d
+      (Pack t ts x, Pack u us y) -> eqV t u && eqAs ts us && go x y
+      (TyApp x ts, TyApp y us) -> go x y && eqAs ts us
+      _ -> p == q
+
+-- The normal form of a description: a value built from the parts of a variable is that
+-- variable, as in `(z.fst, z.snd) = z` and `injᵢ z.injᵢ = z`.
+collapse :: VVal -> VVal
+collapse v
+  = case v of
+      Pair a b -> let a' = collapse a
+                      b' = collapse b
+                  in case (parentAt SFst a', parentAt SSnd b') of
+                       (Just x, Just y) | x == y -> Var x
+                       _ -> Pair a' b'
+      Inj i t w -> let w' = collapse w in maybe (Inj i t w') Var (parentAt (SInjV i) w')
+      Pack t ts w -> let w' = collapse w in maybe (Pack t ts w') Var (parentAt SPack w')
+      TyApp w ts -> TyApp (collapse w) ts
+      _ -> v
+  where
+    parentAt s (Var (Path x ss@(_:_))) | last ss == s = Just (Path x (init ss))
+    parentAt _ _ = Nothing
 
 eqVs :: [VType] -> [VType] -> Bool
 eqVs ss ts = length ss == length ts && and (zipWith eqV ss ts)
