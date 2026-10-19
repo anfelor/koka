@@ -19,7 +19,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Layout( CT(..), layout, leaves, leafSlots, isEnum, orderFields, shapeIsHeap
                            , ctName, scanOf, rawOf, needsRC
-                           , structDefs, blockName, blockDef, blockSize, isBlock
+                           , structDefs, blockName, blockDef, blockSize, isBlock, isScalar
                            , dupExpr, dropStmt, rawCType, primBox, fnv
                            ) where
 
@@ -27,6 +27,7 @@ import Data.Char( ord )
 import Data.Bits( xor )
 import Data.Word( Word64 )
 import Data.List( intercalate, foldl', sortOn )
+import Data.Maybe( isJust )
 import Data.Ord( Down(..) )
 import qualified Numeric
 import Common.Name
@@ -261,17 +262,27 @@ leafSlots ct
       CUnit -> []
       _ -> [(0,ct)]
 
--- a box of this payload is always a heap block (raw values may be boxed in place)
+-- a box of this payload is a heap block (a box of unit is its tag)
 isBlock :: CT -> Bool
 isBlock ct
   = case ct of
       CProd _ _ -> True
       CSum _ _  -> True
       CBox      -> True
-      CPrim _   -> False
+      CPrim _   -> True
+      CEnum _   -> True
       CUnit     -> False
-      CEnum _   -> False
       CReuse    -> False
+
+-- Koka boxes a raw value, or a struct of one, by itself (`Scalar V`). An enumeration is a
+-- sum and boxed by its tag.
+isScalar :: VType -> Bool
+isScalar t
+  = case (t,layout t) of
+      (VSum _, _)  -> False
+      (_, CPrim p) -> isJust (primBox p)
+      (_, CEnum _) -> True
+      _            -> False
 
 sizeAlign :: CT -> (Int,Int)
 sizeAlign ct

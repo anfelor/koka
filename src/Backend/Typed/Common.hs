@@ -91,6 +91,7 @@ isTrivialWith unroll t
                    ASum ts   -> all (trivialA . snd) ts
                    ACon n _  -> n == nameTpReuse || maybe False trivialA (unroll a)
                    ABox _    -> False
+                   AScalar _ -> False
                    AFun _ _  -> False
                    AForall _ _ -> False
                    AVar _    -> False
@@ -119,6 +120,7 @@ containsReuse (V v) = case v of
   VCtx _ _ -> False
 containsReuse (A a) = case a of
   ABox v -> containsReuse (V v)
+  AScalar v -> containsReuse (V v)
   ASum ts -> any (containsReuse . A . snd) ts
   AForall _ b -> containsReuse (A b)
   ALam _ b -> containsReuse (A b)
@@ -199,6 +201,7 @@ descendA fn fa fv val
       InjA i a v     -> InjA i a <$> fa v
       Roll a v       -> Roll a <$> fa v
       Box v          -> Box <$> fv v
+      Scalar v       -> Scalar <$> fv v
       OpenCon c ts v -> OpenCon c ts <$> fv v
       BoxAt r v      -> BoxAt <$> fn r <*> fv v
       BoxIn x v      -> BoxIn <$> fn x <*> fv v

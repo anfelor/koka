@@ -8,7 +8,7 @@
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, collapse
-                          , rep, boxrep, boxA, isPtr, varV, forallA, prodV, sumTypes, sumAlts, sumWidth
+                          , rep, boxrep, boxA, shapeA, isPtr, varV, forallA, prodV, sumTypes, sumAlts, sumWidth
                           , vtInt, vtString, vtChar, vtFloat, atAny
                           ) where
 
@@ -16,6 +16,7 @@ import qualified Data.Map as M
 import Control.Monad( foldM )
 import Common.NamePrim( nameTpInt, nameTpString, nameTpChar, nameTpFloat, nameTpAny )
 import Backend.Typed.Syntax
+import Backend.Typed.Layout( isScalar )
 
 type Sub = M.Map TVar AType
 
@@ -71,6 +72,7 @@ mapReuseContents f = goV
       VRaw _ -> t
     goA a = case a of
       ABox t -> ABox (goV t)
+      AScalar t -> AScalar (goV t)
       ASum ts -> ASum [(i,goA t) | (i,t) <- ts]
       AFun ps r -> AFun [(m,goV t) | (m,t) <- ps] (goV r)
       AForall vs b -> AForall vs (goA b)
@@ -137,6 +139,7 @@ substA sub a
       AApp v ts     -> applyA (M.findWithDefault (AVar v) v sub) (map (substA sub) ts)
       ACon n ts     -> ACon n (map (substA sub) ts)
       ABox t        -> ABox (substV sub t)
+      AScalar t     -> AScalar (substV sub t)
       ASum ts       -> ASum [(i,substA sub t) | (i,t) <- ts]
       AFun ps r     -> AFun [(m,substV sub p) | (m,p) <- ps] (substV sub r)
       AForall tvs b -> AForall tvs (substA (foldr M.delete sub tvs) b)
@@ -174,6 +177,7 @@ ftvA a
       AApp v ts     -> v : concatMap ftvA ts
       ACon _ ts     -> concatMap ftvA ts
       ABox t        -> ftvV t
+      AScalar t     -> ftvV t
       ASum ts       -> concatMap (ftvA . snd) ts
       AFun ps r     -> concatMap (ftvV . snd) ps ++ ftvV r
       AForall vs b  -> filter (`notElem` vs) (ftvA b)
@@ -212,6 +216,7 @@ boxFunA a
       AFun ps r     -> AFun [(m,boxrep p) | (m,p) <- ps] (boxrep r)
       AForall tvs b -> AForall tvs (boxFunA b)
       ABox _        -> a
+      AScalar _     -> a
       AUnit         -> a
       ASum _        -> a
       AVar _        -> a
@@ -219,12 +224,21 @@ boxFunA a
       ACon _ _      -> a
       ALam _ _      -> a
 
+-- Koka's `box`: a scalar is boxed by itself, any other value as a shape
 boxA :: VType -> AType
 boxA t
   = case t of
+      VSum [s] -> boxA s
+      _ | isScalar t -> AScalar t
+        | otherwise  -> shapeA t
+
+-- the shape of a boxed value, whose alternatives have tags
+shapeA :: VType -> AType
+shapeA t
+  = case t of
       VUnit   -> AUnit
-      VSum [s]    -> boxA s
-      VSum ts | not (null ts) -> ASum (sumAlts (map boxA ts))
+      VSum [s]    -> shapeA s
+      VSum ts | not (null ts) -> ASum (sumAlts (map shapeA ts))
       VSum _      -> ABox t
       VPtr _      -> ABox t
       VProd _ _   -> ABox t
@@ -312,6 +326,7 @@ eqA s t
       (ACon n ss, ACon m ts)  -> n == m && eqAs ss ts
       (AApp v ss, AApp w ts)  -> v == w && eqAs ss ts
       (ABox a, ABox b)        -> eqV a b
+      (AScalar a, AScalar b)  -> eqV a b
       (ASum ss, ASum ts)      -> map fst ss == map fst ts && eqAs (map snd ss) (map snd ts)
       (AFun ps r, AFun qs s') -> eqVs (map snd ps) (map snd qs) && eqV r s'
       (AForall as a, AForall bs b) | length as == length bs
@@ -355,6 +370,9 @@ matchAWith tvs sub pat t
                      _ -> Nothing
       ABox p    -> case t of
                      ABox s -> matchVWith tvs sub p s
+                     _ -> Nothing
+      AScalar p -> case t of
+                     AScalar s -> matchVWith tvs sub p s
                      _ -> Nothing
       ASum ps   -> case t of
                      ASum ts | map fst ps == map fst ts -> matchAs sub (map snd ps) (map snd ts)
