@@ -48,7 +48,7 @@ contifyE env g expr
         -> do ts <- mapM (liftE . inferVar g) captures
               case sequence [case t' of V v -> Just v; A _ -> Nothing | t' <- ts] of
                 Just vs -> do j <- fresh "join"
-                              qs <- mapM (const (fresh "capture")) captures
+                              qs <- mapM (const (root <$> fresh "capture")) captures
                               let sub = M.fromList (zip captures qs)
                                   params = ps ++ zipWith (\q v -> (q,Owned,v)) qs vs
                                   closed = renameE sub body
@@ -81,13 +81,13 @@ contifyA env g (Lam ps r e) = Lam ps r <$> contifyE env (bindAll [(x,V t) | (x,_
 contifyA env g a = descendA pure (contifyA env g) (contifyV env g) a
 
 -- Elaboration applies a closure by dereferencing it into a boxed operand.
-callOf :: Name -> VExpr -> Maybe [VVal]
+callOf :: Path -> VExpr -> Maybe [VVal]
 callOf f (Deref _ (Var x) g (App h vs)) | x == f, g == h = Just vs
 callOf f (Call o _ (Var x : vs)) | x == f, o == nameOpenNone (length vs) = Just vs
 callOf _ _ = Nothing
 
 -- Ordinary uses, including captures and non-tail calls, prevent contification.
-tailOnly :: Name -> VExpr -> Bool
+tailOnly :: Path -> VExpr -> Bool
 tailOnly f e = occurs e && tails e
   where
     occurs b = f `S.member` fvE b
@@ -100,7 +100,7 @@ tailOnly f e = occurs e && tails e
           _ -> getAll (getConst (descendE (Const . All . (/= f)) (Const . All . S.notMember f . fvV)
                              (\xs body -> Const (All (f `elem` xs || tails body))) b))
 
-redirect :: Name -> Name -> [VVal] -> VExpr -> VExpr
+redirect :: Path -> Name -> [VVal] -> VExpr -> VExpr
 redirect f j captures expr
   | Just vs <- callOf f expr = Jump j (vs ++ captures)
   | otherwise = runIdentity (descendE Identity Identity
