@@ -11,7 +11,7 @@
 -- Keep inference in sync with the typing rules in Syntax.
 module Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, checkE, inferE, inferA, inferV
                           , inferVar, inferAVar, altTypes, unboxRuBinds, boxContents, reuseSize, unrollT, openFields
-                          , funSig, paramModes, contentsOfAlt, contentsValueOfAlt, altPattern ) where
+                          , funSig, paramModes, altPattern ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -24,7 +24,7 @@ import Backend.Typed.Types
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Layout( layout, blockSize, isBlock )
 
-type Gamma = M.Map Name Ty
+type Gamma = M.Map Path Ty
 
 -- the join points that can be jumped to: their parameter types and result type
 type Joins = M.Map Name ([VType],VType)
@@ -36,7 +36,7 @@ type Q a = Either String a
 envOf :: Program -> Env
 envOf prog = Env (progTypes prog) (progSigs prog)
 
-bindAll :: [(Name,Ty)] -> Gamma -> Gamma
+bindAll :: [(Path,Ty)] -> Gamma -> Gamma
 bindAll bs g = foldr (uncurry M.insert) g bs
 
 expect :: (Types t, Pretty t) => t -> t -> Q ()
@@ -76,6 +76,15 @@ mapCredits f t = case t of
   VExists vs b -> VExists vs (mapCredits f b)
   _ -> t
 
+-- the descriptions of the credits carried by a value
+descriptions :: VType -> [Contents]
+descriptions t = case t of
+  VReuse _ p -> maybe [] pure p
+  VProd a b -> descriptions a ++ descriptions b
+  VSum ts -> concatMap descriptions ts
+  VExists _ b -> descriptions b
+  _ -> []
+
 inferExpr :: Env -> Gamma -> Joins -> VExpr -> Q VType
 inferExpr env g js expr
   | Just ds <- destructAOf expr
@@ -110,21 +119,22 @@ inferExpr env g js expr
                      case t of
                        VReuse _ _ -> inferE env g js e
                        _ -> Left ("free of a non-credit: " ++ ppr t)
-      Dup x y e -> do a <- inferAVar g x
-                      when (containsReuse (A a)) (Left "cannot duplicate a reuse credit")
-                      t <- inferVar g x
-                      inferE env (M.insert y t g) js e
+      Dup x e -> do t <- inferVar g x
+                    when (containsReuse t) (Left "cannot duplicate a reuse credit")
+                    inferE env g js e
       IsUnique x e1 e2 -> do t <- inferVar g x
                              case t of
                                V (VPtr (ACon n _)) | Just TypeDef{ tdefLazy = Just _ } <- M.lookup n (envTypes env)
                                  -> return ()
                                _ -> () <$ (inferAVar g x >>= boxContents >>= reuseSize)
                              branches [inferE env g js e1, inferE env g js e2]
-      UnboxRu v x r e -> do bs <- unboxRuBinds g v x r
-                            inferE env (bindAll bs g) js e
+      UnboxRu v r e -> do bs <- unboxRuBinds g v r
+                          inferE env (bindAll bs g) js e
       Join j ps e1 e2 -> do let xs = [x | (x,_,_) <- ps]
                             unless (S.disjoint (fvE e1 `S.difference` S.fromList xs) (S.fromList (bindersE e2)))
                               (Left ("join point " ++ show j ++ " captures a variable that is bound again in its scope"))
+                            unless (S.disjoint (S.fromList xs) (S.fromList [root n | (_,_,p) <- ps, Contents _ v _ <- descriptions p, Path n _ <- S.toList (fvV v)]))
+                              (Left ("a description in the parameters of join point " ++ show j ++ " names a parameter"))
                             t <- inferE env (bindAll [(x,V p) | (x,_,p) <- ps] g) js e1
                             checkE env g (M.insert j ([p | (_,_,p) <- ps],t) js) e2 t
                             return t
@@ -139,35 +149,18 @@ inferExpr env g js expr
       _ -> Left "unexpected destructuring form"
 
 -- The two scrutinee categories share branch checking and existential escape checks.
-inferDestruct :: Env -> Gamma -> Joins -> VExpr -> Ty -> [([Name],VExpr)] -> Q VType
+inferDestruct :: Env -> Gamma -> Joins -> VExpr -> Ty -> [([Path],VExpr)] -> Q VType
 inferDestruct env g js expr t alts
   = do tss <- altTypes env t expr
        unless (length alts == length tss) (Left "wrong number of alternatives")
-       r <- branches [inferE env (bindAll (zip xs ts) (contentsOfAlt expr t i xs g)) js e
-                    | (i,((xs,e),ts)) <- zip [0..] (zip alts tss)]
+       r <- branches [inferE env (bindAll (zip xs ts) g) js e | ((xs,e),ts) <- zip alts tss]
        case expr of
          Unpack _ _ tvs x e -> unbound tvs (ftv r ++ ftvCtx (M.delete x g) e)
          _ -> return ()
        return r
 
--- Expose payload structure in the descriptions carried by credits.
-contentsOfAlt :: VExpr -> Ty -> Int -> [Name] -> Gamma -> Gamma
-contentsOfAlt expr t i xs = M.map (rewrite (fmap (\(Contents k p s) -> Contents k (contentsValueOfAlt expr t i xs p) s)))
-  where
-    rewrite f (V s) = V (mapReuseContents f s)
-    rewrite f (AAt p a) = case mapReuseContents f (VPtr a) of
-                            VPtr b -> AAt p b
-                            _ -> AAt p a
-
--- Reconstruct a destructured value using the binders of its selected alternative.
--- Both credit contents and code generation's aggregate descriptions use this.
-contentsValueOfAlt :: VExpr -> Ty -> Int -> [Name] -> VVal -> VVal
-contentsValueOfAlt expr t i xs = case (fmap dsScrut (destructVOf expr), altPattern expr t i xs) of
-  (Just (Var x), Just p) -> replaceV (M.singleton x p)
-  _ -> id
-
 -- The scrutinee of an unboxed destructuring in its selected alternative, in terms of its binders.
-altPattern :: VExpr -> Ty -> Int -> [Name] -> Maybe VVal
+altPattern :: VExpr -> Ty -> Int -> [Path] -> Maybe VVal
 altPattern expr t i xs = case (expr,t,xs) of
   (Unpair{}, _, [a,b]) -> Just (Pair (Var a) (Var b))
   (CaseV{}, V s, [a]) -> Just (Inj i s (Var a))
@@ -191,22 +184,20 @@ altTypes env t expr
   = case (expr,t) of
       (Unpair{}, V (VProd a b)) -> return [[V a, V b]]
       (CaseV _ _ alts, V (VSum ts)) | length ts == length alts -> return [[V s] | s <- ts]
-      (SplitA _ _ k _ _, AAt p a@(ASum ts)) -> do
+      (SplitA _ _ k _ _, A a@(ASum ts)) -> do
         checkShape a
         let (ls,rs) = span ((< k) . fst) ts
-            at = AAt (InSum (offset p))
         unless (not (null ls) && not (null rs)) (Left "invalid boxed sum partition")
-        return [[at (ASum ls)], [at (ASum rs)]]
-      (CaseA _ _ alts def, AAt p a@(ASum ts)) -> do
+        return [[A (ASum ls)], [A (ASum rs)]]
+      (CaseA _ _ alts def, A a@(ASum ts)) -> do
         checkShape a
         let indices = [i | (i,_,_) <- alts]
             rest = [(i,t) | (i,t) <- ts, i `notElem` indices]
-            at i = AAt (InSum (offset p + i))
         unless (all (`elem` map fst ts) indices && S.size (S.fromList indices) == length indices)
           (Left "invalid boxed case indices")
         unless (maybe (null rest) (const (not (null rest))) def)
           (Left "incomplete boxed case")
-        return ([[at i t] | i <- indices, Just t <- [lookup i ts]] ++ maybe [] (const [[at 0 (ASum rest)]]) def)
+        return ([[A t] | i <- indices, Just t <- [lookup i ts]] ++ maybe [] (const [[A (ASum rest)]]) def)
       (Deref{}, V (VPtr a)) -> return [[A a]]
       (Unroll{}, A a) -> do b <- unrollT env a
                             return [[A b]]
@@ -217,14 +208,17 @@ altTypes env t expr
                                        return ([[V f] | f <- fs] ++ [[]])
       _ -> Left ("cannot destructure a value of type " ++ ppr t)
 
--- the binders of `[unbox-ru]`: the contents of a unique box and the credit of its block, whose
--- tag follows from the position of the box
-unboxRuBinds :: Gamma -> Name -> Name -> Name -> Q [(Name,Ty)]
-unboxRuBinds g z x r
-  = do t <- inferVar g z
-       s <- inferAVar g z >>= boxContents
+-- the binder of `[unbox-ru]`: the credit of the block of a unique box, whose tag follows from
+-- the tag offset of the box, and whose contents `z.contents` must have been read
+unboxRuBinds :: Gamma -> Path -> Path -> Q [(Path,Ty)]
+unboxRuBinds g z r
+  = do s <- inferAVar g z >>= boxContents
        n <- reuseSize s
-       return [(x,V s),(r,V (VReuse n (Just (Contents (offset (position t) + 1) (Var x) s))))]
+       let x = child z SContents
+       case M.lookup x g of
+         Just (V s') | alphaEq s s' -> return ()
+         _ -> Left ("taking the block of " ++ show z ++ " whose contents are not read")
+       return [(r,V (VReuse n (Just (Contents (tagOffset z + 1) (Var x) s))))]
 
 branches :: [Q VType] -> Q VType
 branches cs = do ts <- sequence cs
@@ -346,10 +340,10 @@ checkReuseTy ty = case ty of
       _ -> Left "reuse contents must be a structural value"
 
 -- Look up a named operand; boxed eliminations and `drop` require A.
-inferVar :: Gamma -> Name -> Q Ty
+inferVar :: Gamma -> Path -> Q Ty
 inferVar g x = maybe (Left ("unbound variable " ++ show x)) return (M.lookup x g)
 
-inferAVar :: Gamma -> Name -> Q AType
+inferAVar :: Gamma -> Path -> Q AType
 inferAVar g x
   = do t <- inferVar g x
        case t of
@@ -454,9 +448,8 @@ inferV env g val
                       case t of
                         VCtx _ _ -> return t
                         _ -> Left ("unsharing a non-context: " ++ ppr t)
-      DupV v -> do t <- inferV env g v
-                   when (containsReuse (V t)) (Left "cannot duplicate a reuse credit")
-                   return t
+      DupV v -> do unless (isGlob v) (Left ("dup of a value that is not a global: " ++ ppr val))
+                   inferV env g v
       TyApp v tys -> do tv <- inferV env g v
                         case tv of
                           VPtr (AForall tvs a) | length tvs == length tys -> return (VPtr (inst tvs tys a))

@@ -60,7 +60,7 @@ inlineA val
       Lam ps r e -> Lam ps r (inlineE e)
       _          -> mapA id inlineA inlineV val
 
-copyE :: M.Map Name Name -> VExpr -> VExpr
+copyE :: M.Map Path Path -> VExpr -> VExpr
 copyE sub expr
   = case expr of
       Let x _ (Ret (Var y)) e
@@ -88,19 +88,19 @@ inlineApply expr
                 _ -> expr
       _ -> expr
 
-copyV :: M.Map Name Name -> VVal -> VVal
+copyV :: M.Map Path Path -> VVal -> VVal
 copyV sub val
   = case val of
       Var x      -> Var (M.findWithDefault x x sub)
       _          -> mapV (copyA sub) (copyV sub) val
 
-copyA :: M.Map Name Name -> AVal -> AVal
+copyA :: M.Map Path Path -> AVal -> AVal
 copyA sub val
   = case val of
       Lam ps r e -> Lam ps r (copyE (shadow [x | (x,_,_) <- ps] sub) e)
       _ -> mapA (\x -> M.findWithDefault x x sub) (copyA sub) (copyV sub) val
 
-shadow :: [Name] -> M.Map Name Name -> M.Map Name Name
+shadow :: [Path] -> M.Map Path Path -> M.Map Path Path
 shadow xs sub = foldr M.delete sub xs
 
 -- fresh contexts
@@ -114,7 +114,7 @@ freshE expr
       _ -> runIdentity (descendE Identity (Identity . freshV) (\_ e -> Identity (freshE e)) expr)
 
 -- inline the fresh context `x = k` into an append that follows immediately and is its only use
-appendFresh :: Name -> VVal -> VExpr -> Maybe VExpr
+appendFresh :: Path -> VVal -> VExpr -> Maybe VExpr
 appendFresh x k expr
   = case expr of
       Let y t (Ret v) e | Just v' <- append v, S.notMember x (fvE e) -> Just (Let y t (Ret v') e)

@@ -25,7 +25,7 @@ import Backend.Typed.Monad
 import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuBinds )
 import Backend.Typed.Layout( shapeIsHeap )
 
-type Match a = M (Env,Gamma) (Int,Set.Set Name) a
+type Match a = M (Env,Gamma) (Int,Set.Set Path) a
 
 matchProgram :: Program -> (Program,[String])
 matchProgram prog
@@ -39,13 +39,13 @@ matchProgram prog
     params DefFun{ defArgs = ps } = Map.fromList [(x,V t) | (x,_,t) <- ps]
     params DefVal{} = Map.empty
 
-fresh :: Match Name
+fresh :: Match Path
 fresh = do (n,used) <- get
-           let x = newHiddenName ("match" ++ show n)
+           let x = root (newHiddenName ("match" ++ show n))
            put (n+1,Set.insert x used)
            if Set.member x used then fresh else return x
 
-bind :: [(Name,Ty)] -> Match a -> Match a
+bind :: [(Path,Ty)] -> Match a -> Match a
 bind bs = local (\(env,g) -> (env,bindAll bs g))
 
 matchE :: VExpr -> Match VExpr
@@ -72,16 +72,13 @@ matchE expr
       Let x t e1 e2 -> Let x t <$> matchE e1 <*> bind [(x,V t)] (matchE e2)
       Join j ps e1 e2 -> Join j ps <$> local (\(env,_) -> (env,Map.fromList [(x,V t) | (x,_,t) <- ps])) (matchE e1)
                                  <*> matchE e2
-      Dup x y e -> do (_,g) <- ask
-                      t <- liftE (inferVar g x)
-                      Dup x y <$> bind [(y,t)] (matchE e)
-      UnboxRu v x r e
+      UnboxRu v r e
         -> do (_,g) <- ask
-              bs <- liftE (unboxRuBinds g v x r)
-              UnboxRu v x r <$> bind bs (matchE e)
+              bs <- liftE (unboxRuBinds g v r)
+              UnboxRu v r <$> bind bs (matchE e)
       _ -> descendE pure matchV (\_ -> matchE) expr
 
-partition :: Mode -> Name -> [(Int,AType)] -> [(Int,Name,VExpr)] -> Maybe (Name,VExpr) -> Match VExpr
+partition :: Mode -> Path -> [(Int,AType)] -> [(Int,Path,VExpr)] -> Maybe (Path,VExpr) -> Match VExpr
 partition _ v _ [] (Just (d,e)) = return (renameE (Map.singleton d v) e)
 partition m v ts alts def
   = case splitAtIndex ts of

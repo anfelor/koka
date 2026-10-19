@@ -8,7 +8,7 @@
 
 module Backend.Typed.Elab.Monad( Env(..), St(..), E
                               , runE, failE, tr, env, withLocals, withTVars, withHole, inClosure
-                              , fresh, recordSig, note, vt
+                              , fresh, freshName, recordSig, note, vt
                               ) where
 
 import qualified Data.Map as M
@@ -56,8 +56,11 @@ withHole x v = local (\e -> e{ envHoles = M.insert x v (envHoles e) })
 withTVars :: [TVar] -> E a -> E a
 withTVars tvs = local (\e -> e{ envTVars = foldr S.insert (envTVars e) tvs })
 
-fresh :: String -> E Name
-fresh s = state (\st -> (newHiddenName (s ++ show (stUniq st)), st{ stUniq = stUniq st + 1 }))
+freshName :: String -> E Name
+freshName s = state (\st -> (newHiddenName (s ++ show (stUniq st)), st{ stUniq = stUniq st + 1 }))
+
+fresh :: String -> E Path
+fresh s = root <$> freshName s
 
 recordSig :: Name -> Sig -> E ()
 recordSig name sig = modify (\st -> st{ stSigs = M.insertWith (\_ old -> old) name sig (stSigs st) })

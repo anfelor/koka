@@ -29,10 +29,10 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuBinds, boxContents, reuseSize, inferE, contentsOfAlt, unrollT )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuBinds, boxContents, reuseSize, inferE, unrollT )
 
 -- credits with the size of their block
-type Credits = [(Name,Int)]
+type Credits = [(Path,Int)]
 
 -- `reJoins`: the sizes of the credits that each join point in scope asks for
 data REnv = REnv{ reEnv :: Env, reGamma :: Gamma, reJoins :: M.Map Name [Int] }
@@ -43,8 +43,8 @@ data RS = RS{ rsUniq :: Int, rsCredits :: Credits, rsAsked :: Maybe Credits }
 
 type R a = M REnv RS a
 
-fresh :: R Name
-fresh = state (\s -> (newHiddenName ("ru" ++ show (rsUniq s)), s{ rsUniq = rsUniq s + 1 }))
+fresh :: R Path
+fresh = state (\s -> (root (newHiddenName ("ru" ++ show (rsUniq s))), s{ rsUniq = rsUniq s + 1 }))
 
 credits :: R Credits
 credits = gets rsCredits
@@ -56,11 +56,11 @@ asked :: R Credits
 asked = gets (fromMaybe [] . rsAsked)
 
 -- use up a credit
-spend :: Name -> R ()
+spend :: Path -> R ()
 spend r = credits >>= setCredits . filter ((/= r) . fst)
 
 -- a credit for a block of n bytes: an available one, or one asked for by a join point body
-takeCredit :: Int -> R (Maybe Name)
+takeCredit :: Int -> R (Maybe Path)
 takeCredit n
   = do cs <- credits
        case [r | (r,m) <- cs, m == n] of
@@ -95,14 +95,14 @@ reuseProgram prog
                  DefFun{} -> M.fromList [(x,V t) | (x,_,t) <- defArgs d]
                  DefVal{} -> M.empty
 
-bind :: [(Name,Ty)] -> R a -> R a
+bind :: [(Path,Ty)] -> R a -> R a
 bind bs = local (\re -> re{ reGamma = bindAll bs (reGamma re) })
 
 typeOfV :: VVal -> R VType
 typeOfV v = do re <- ask
                liftE (inferV (reEnv re) (reGamma re) v)
 
-typeOfName :: Name -> R Ty
+typeOfName :: Path -> R Ty
 typeOfName x = asks reGamma >>= liftE . (`inferVar` x)
 
 -- expressions
@@ -114,14 +114,14 @@ ruE expr
        env <- asks reEnv
        tss <- liftE (altTypes env (V t) expr)
        v   <- ruV (dsScrut ds)
-       es  <- branchesAt expr (V t) [(zip xs ts,e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
+       es  <- branches [(zip xs ts,e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
        return (dsBuild ds (dsMode ds) v es)
 ruE expr
   | Just ds <- destructAOf expr
   = do t <- typeOfName (dsScrut ds)
        env <- asks reEnv
        tss <- liftE (altTypes env t expr)
-       es <- branchesAt expr t [(zip xs ts,e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
+       es <- branches [(zip xs ts,e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
        return (dsBuild ds (dsMode ds) (dsScrut ds) es)
 ruE expr
   = case expr of
@@ -169,20 +169,18 @@ ruE expr
               case t of
                 V (VReuse n _) -> offer r n return (Free r) e
                 _ -> fail ("free of a non-credit: " ++ show r)
-      Dup x y e
-        -> do t <- typeOfName x
-              Dup x y <$> bind [(y,t)] (ruE e)
       IsUnique x e1 e2
         -> do es <- branches [([],e1),([],e2)]
               return (IsUnique x (es !! 0) (es !! 1))
-      UnboxRu v x r e
+      UnboxRu v r e
         -> do g <- asks reGamma
-              bs <- liftE (unboxRuBinds g v x r)
-              UnboxRu v x r <$> bind bs (ruE e)
+              bs <- liftE (unboxRuBinds g v r)
+              UnboxRu v r <$> bind bs (ruE e)
       Ret _ -> plain
       Call _ _ _ -> plain
       App _ _ -> plain
       Gen _ _ -> plain
+      Dup{} -> plain
       -- destructuring forms are handled above
       Unpair{} -> plain
       CaseV{} -> plain
@@ -198,7 +196,7 @@ ruE expr
     plain = descendE pure ruV (\_ e -> ruE e) expr
 
 -- Make a credit available in the continuation; retain the original operation if unused.
-offer :: Name -> Int -> (VExpr -> R VExpr) -> (VExpr -> VExpr) -> VExpr -> R VExpr
+offer :: Path -> Int -> (VExpr -> R VExpr) -> (VExpr -> VExpr) -> VExpr -> R VExpr
 offer r n use unusedOp e
   = do credits >>= setCredits . ((r,n) :)
        t <- asks (M.findWithDefault (V (VReuse n Nothing)) r . reGamma)
@@ -209,37 +207,33 @@ offer r n use unusedOp e
                  else use e'
 
 -- the paper's `[dropru]`, derived from `[if-unique]` and `[unbox-ru]`
-dropReuse :: Name -> Name -> Int -> VExpr -> R VExpr
+dropReuse :: Path -> Path -> Int -> VExpr -> R VExpr
 dropReuse x r n e
-  = do y  <- fresh
-       r' <- fresh
+  = do r' <- fresh
        g <- asks reGamma
        s <- liftE (inferAVar g x >>= boxContents)
+       let y = child x SContents
+           -- the contents are read once
+           readY = if M.member y g then id else Unbox Borrowed x y
        body <- dropValue fresh y (V s) (Ret (Var r'))
-       return (Let r (VReuse n Nothing) (IsUnique x (UnboxRu x y r' body)
-                                                (Drop x (Ret (NoReuse n Nothing))))
-                 e)
+       return (readY (Let r (VReuse n Nothing) (IsUnique x (UnboxRu x r' body)
+                                                  (Drop x (Ret (NoReuse n Nothing))))
+                        e))
 
 -- every branch starts with the same credits, plus those that earlier branches asked for;
 -- credits used in some branch are freed in the others
-branches :: [([(Name,Ty)],VExpr)] -> R [VExpr]
-branches = branchesWith (\_ _ -> id)
-
-branchesAt :: VExpr -> Ty -> [([(Name,Ty)],VExpr)] -> R [VExpr]
-branchesAt expr t = branchesWith (\i xs re -> re{ reGamma = contentsOfAlt expr t i xs (reGamma re) })
-
-branchesWith :: (Int -> [Name] -> REnv -> REnv) -> [([(Name,Ty)],VExpr)] -> R [VExpr]
-branchesWith refine alts
+branches :: [([(Path,Ty)],VExpr)] -> R [VExpr]
+branches alts
   = do cs <- credits
        as0 <- asked
        rs <- sequence [do as <- asked
                           let avail = cs ++ (as \\ as0)
                           setCredits avail
-                          e' <- local (refine i (map fst bs)) (bind bs (ruE e))
+                          e' <- bind bs (ruE e)
                           left <- credits
                           as' <- asked
                           return (e', [r | (r,_) <- avail ++ (as' \\ as), r `notElem` map fst left])
-                      | (i,(bs,e)) <- zip [0..] alts]
+                      | (bs,e) <- alts]
        let usedAny = nub (concatMap snd rs)
        setCredits [c | c <- cs, fst c `notElem` usedAny]
        return [foldr Free e [r | r <- usedAny, r `notElem` used] | (e,used) <- rs]

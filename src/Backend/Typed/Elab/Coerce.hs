@@ -69,7 +69,7 @@ boxLeaf t v
       VReuse _ _    -> Box v
       VCtx _ _    -> Box v
 
-boxAlt :: [VType] -> (AVal -> E VExpr) -> (Int,VType) -> E (Name,VExpr)
+boxAlt :: [VType] -> (AVal -> E VExpr) -> (Int,VType) -> E (Path,VExpr)
 boxAlt ts k (i,ti)
   = do y <- fresh "y"
        body <- boxAV ti (Var y) (k . injA (map boxA ts) i)
@@ -85,7 +85,7 @@ unboxV t v
        (k,w) <- unboxAV t a
        return (Deref Owned v a . k, w)
 
-unboxAV :: VType -> Name -> E (K,VVal)
+unboxAV :: VType -> Path -> E (K,VVal)
 unboxAV t a
   = case t of
       VUnit -> return (id, UnitV)
@@ -104,7 +104,7 @@ unboxAV t a
     unbox = do x <- fresh "x"   -- as `boxA`
                return (Unbox Owned a x, Var x)
 
-unboxAlt :: VType -> [VType] -> Int -> Name -> E VExpr
+unboxAlt :: VType -> [VType] -> Int -> Path -> E VExpr
 unboxAlt t ts i y
   = do (k,w) <- unboxAV (ts !! i) y
        return (k (Ret (Inj i t w)))

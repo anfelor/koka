@@ -15,6 +15,8 @@ import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
 import Data.Monoid( Sum(..) )
 import Data.Functor.Identity( Identity(..) )
+import Data.List( isPrefixOf )
+import Data.Maybe( fromMaybe )
 import Common.Name
 import Common.NamePrim( nameTpReuse )
 import Backend.Typed.Syntax
@@ -28,7 +30,7 @@ compose = foldr (.) id
 
 -- Discard an owned value by destructuring it down to boxed operands and credits.
 -- The caller supplies fresh names from its own pass's supply.
-dropValue :: Monad m => m Name -> Name -> Ty -> VExpr -> m VExpr
+dropValue :: Monad m => m Path -> Path -> Ty -> VExpr -> m VExpr
 dropValue _ _ t e
   | isTrivial t = return e
 dropValue fresh x t e
@@ -65,7 +67,12 @@ dropValue fresh x t e
 
 -- values of these types need no reference counting
 isTrivial :: Ty -> Bool
-isTrivial t
+isTrivial = isTrivialWith (const Nothing)
+
+-- `isTrivial`, where `unroll` gives the body of a named type if it is known (a type with a
+-- single constructor without fields, for example)
+isTrivialWith :: (AType -> Maybe AType) -> Ty -> Bool
+isTrivialWith unroll t
   = case t of
       V v -> trivialV v
       A a -> trivialA a
@@ -82,7 +89,7 @@ isTrivial t
     trivialA a = case a of
                    AUnit     -> True
                    ASum ts   -> all (trivialA . snd) ts
-                   ACon n _  -> n == nameTpReuse
+                   ACon n _  -> n == nameTpReuse || maybe False trivialA (unroll a)
                    ABox _    -> False
                    AFun _ _  -> False
                    AForall _ _ -> False
@@ -122,8 +129,8 @@ containsReuse (A a) = case a of
   AUnit -> False
 
 -- the name under which the type of the hole is bound in the one-hole value of a context
-nameHole :: Name
-nameHole = newHiddenName "hole"
+nameHole :: Path
+nameHole = root (newHiddenName "hole")
 
 -- the one-hole values `K` of `[ctx]`: the hole occurs once, in a field of a block that `K`
 -- allocates, or `K` is the hole itself (the empty context)
@@ -172,7 +179,7 @@ injA ss i v = InjA (fst (sumAlts ss !! i)) (sumOf ss) v
 
 -- a case on each alternative of a boxed sum `a`; the branch gets the alternative, a variable at a
 -- boxed type that it may only destructure
-caseSum :: MonadFail m => (String -> m Name) -> [AType] -> Name -> (Int -> Name -> m VExpr) -> m VExpr
+caseSum :: MonadFail m => (String -> m Path) -> [AType] -> Path -> (Int -> Path -> m VExpr) -> m VExpr
 caseSum fresh shapes a branch
   = case shapes of
       [] -> fail "empty case"
@@ -186,7 +193,7 @@ caseSum fresh shapes a branch
 
 -- Names are operands, not values: a traversal must preserve their variable form.
 -- Lambda bodies are handled separately from the values directly inside a value.
-descendA :: Applicative f => (Name -> f Name) -> (AVal -> f AVal) -> (VVal -> f VVal) -> AVal -> f AVal
+descendA :: Applicative f => (Path -> f Path) -> (AVal -> f AVal) -> (VVal -> f VVal) -> AVal -> f AVal
 descendA fn fa fv val
   = case val of
       InjA i a v     -> InjA i a <$> fa v
@@ -219,39 +226,147 @@ descendV fa fv val
       Lit _          -> pure val
       NoReuse _ _    -> pure val   -- a description is not an operand
 
-mapA :: (Name -> Name) -> (AVal -> AVal) -> (VVal -> VVal) -> AVal -> AVal
+mapA :: (Path -> Path) -> (AVal -> AVal) -> (VVal -> VVal) -> AVal -> AVal
 mapA fn fa fv = runIdentity . descendA (Identity . fn) (Identity . fa) (Identity . fv)
 
 mapV :: (AVal -> AVal) -> (VVal -> VVal) -> VVal -> VVal
 mapV fa fv = runIdentity . descendV (Identity . fa) (Identity . fv)
 
 -- the operands and subexpressions of an expression, with the variables bound in each subexpression
-descendE :: Applicative f => (Name -> f Name) -> (VVal -> f VVal) -> ([Name] -> VExpr -> f VExpr) -> VExpr -> f VExpr
-descendE fn fv fe expr
+descendE :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([Path] -> VExpr -> f VExpr) -> VExpr -> f VExpr
+descendE fn fv fe = descendB fn fv (\bs e -> let xs = map fst bs in (,) xs <$> fe xs e)
+
+-- Like `descendE`, but each binder comes with its step from the scrutinee, and `fb` gives new
+-- binders for a subexpression. The binders of a `let` and a join point have no step,
+-- and neither has that of `[unbox-lazy]`, which takes the contents out of the box.
+descendB :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([(Path,Maybe Step)] -> VExpr -> f ([Path],VExpr)) -> VExpr -> f VExpr
+descendB fn fv fb expr
   = case expr of
       Ret v                 -> Ret <$> fv v
-      Let x t e1 e2         -> Let x t <$> fe [] e1 <*> fe [x] e2
+      Let x t e1 e2         -> (\e1' (x',e2') -> Let x' t e1' e2') <$> plain e1 <*> one x Nothing e2
       Call f ts vs          -> Call f ts <$> traverse fv vs
       App f vs              -> App <$> fn f <*> traverse fv vs
-      Unpair m v x y e      -> (\v' -> Unpair m v' x y) <$> fv v <*> fe [x,y] e
-      CaseV m v alts        -> CaseV m <$> fv v <*> traverse (\(x,e) -> (,) x <$> fe [x] e) alts
-      CaseA m v alts def   -> CaseA m <$> fn v <*> traverse (\(i,x,e) -> (,,) i x <$> fe [x] e) alts <*> traverse (\(x,e) -> (,) x <$> fe [x] e) def
-      SplitA m v k (x,e1) (y,e2) -> SplitA m <$> fn v <*> pure k <*> ((,) x <$> fe [x] e1) <*> ((,) y <$> fe [y] e2)
-      Deref m v x e         -> (\v' -> Deref m v' x) <$> fv v <*> fe [x] e
-      Unroll m v x e        -> (\v' -> Unroll m v' x) <$> fn v <*> fe [x] e
-      Unbox m v x e         -> (\v' -> Unbox m v' x) <$> fn v <*> fe [x] e
-      UnboxLazy v x e       -> (\v' -> UnboxLazy v' x) <$> fn v <*> fe [x] e
-      Unpack m v tvs x e    -> (\v' -> Unpack m v' tvs x) <$> fv v <*> fe [x] e
-      CaseLit v alts def    -> CaseLit <$> fv v <*> traverse (\(l,e) -> (,) l <$> fe [] e) alts <*> fe [] def
-      CaseOpen m v alts def -> CaseOpen m <$> fn v <*> traverse (\(c,x,e) -> (,,) c x <$> fe [x] e) alts <*> fe [] def
-      Gen tvs e             -> Gen tvs <$> fe [] e
-      Drop x e              -> Drop <$> fn x <*> fe [] e
-      Free r e              -> Free <$> fn r <*> fe [] e
-      Dup x y e             -> (\x' -> Dup x' y) <$> fn x <*> fe [y] e
-      IsUnique x e1 e2      -> IsUnique <$> fn x <*> fe [] e1 <*> fe [] e2
-      UnboxRu v x r e       -> (\v' -> UnboxRu v' x r) <$> fn v <*> fe [x,r] e
-      Join j ps e1 e2       -> Join j ps <$> fe [x | (x,_,_) <- ps] e1 <*> fe [] e2
+      Unpair m v x y e      -> (\v' ((x',y'),e') -> Unpair m v' x' y' e') <$> fv v <*> two (x,SFst) (y,SSnd) e
+      CaseV m v alts        -> CaseV m <$> fv v <*> traverse (\(i,(x,e)) -> one x (Just (SInjV i)) e) (zip [0..] alts)
+      CaseA m v alts def    -> CaseA m <$> fn v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x (Just (SInjA i)) e) alts
+                                       <*> traverse (\(x,e) -> one x (Just SRest) e) def
+      SplitA m v k (x,e1) (y,e2) -> SplitA m <$> fn v <*> pure k <*> one x (Just SLo) e1 <*> one y (Just SHi) e2
+      Deref m v x e         -> (\v' (x',e') -> Deref m v' x' e') <$> fv v <*> one x (Just SDeref) e
+      Unroll m v x e        -> (\v' (x',e') -> Unroll m v' x' e') <$> fn v <*> one x (Just SRoll) e
+      Unbox m v x e         -> (\v' (x',e') -> Unbox m v' x' e') <$> fn v <*> one x (Just SContents) e
+      UnboxLazy v x e       -> (\v' (x',e') -> UnboxLazy v' x' e') <$> fn v <*> one x Nothing e
+      Unpack m v tvs x e    -> (\v' (x',e') -> Unpack m v' tvs x' e') <$> fv v <*> one x (Just SPack) e
+      CaseLit v alts def    -> CaseLit <$> fv v <*> traverse (\(l,e) -> (,) l <$> plain e) alts <*> plain def
+      CaseOpen m v alts def -> CaseOpen m <$> fn v <*> traverse (\(c,x,e) -> (\(x',e') -> (c,x',e')) <$> one x (Just (SOpen c)) e) alts
+                                          <*> plain def
+      Gen tvs e             -> Gen tvs <$> plain e
+      Drop x e              -> Drop <$> fn x <*> plain e
+      Free r e              -> Free <$> fn r <*> plain e
+      Dup x e               -> Dup <$> fn x <*> plain e
+      IsUnique x e1 e2      -> IsUnique <$> fn x <*> plain e1 <*> plain e2
+      UnboxRu v r e         -> (\v' (r',e') -> UnboxRu v' r' e') <$> fn v <*> one r (Just SCredit) e
+      Join j ps e1 e2       -> (\(xs,e1') e2' -> Join j [(x',m,t) | (x',(_,m,t)) <- zip xs ps] e1' e2')
+                                 <$> fb [(x,Nothing) | (x,_,_) <- ps] e1 <*> plain e2
       Jump j vs             -> Jump j <$> traverse fv vs
+  where
+    plain e = snd <$> fb [] e
+    one x s e = (\(xs,e') -> (single xs,e')) <$> fb [(x,s)] e
+    two (x,s) (y,t) e = (\(xs,e') -> (pair xs,e')) <$> fb [(x,Just s),(y,Just t)] e
+    single xs = case xs of
+                  [x] -> x
+                  _   -> error "Backend.Typed.Common.descendB: expecting one binder"
+    pair xs = case xs of
+                [x,y] -> (x,y)
+                _     -> error "Backend.Typed.Common.descendB: expecting two binders"
+
+-- the binder at a step from a variable
+child :: Path -> Step -> Path
+child (Path x ss) s = Path x (ss ++ [s])
+
+-- ⌊x⌋: the tag offset of a boxed operand in the sum it was reached through, if it was (the
+-- trailing `[case-a]` and `[split-a]` steps of its path)
+sumOffset :: Path -> Maybe Int
+sumOffset (Path _ ss)
+  = case takeWhile inSum (reverse ss) of
+      [] -> Nothing
+      ts -> Just (sum [i | SInjA i <- ts])
+  where
+    inSum s = case s of
+                SInjA _ -> True
+                SRest   -> True
+                SLo     -> True
+                SHi     -> True
+                _       -> False
+
+tagOffset :: Path -> Int
+tagOffset = fromMaybe 0 . sumOffset
+
+-- the other part of the parent of a part of a pair or a box
+sibling :: Step -> Maybe Step
+sibling s
+  = case s of
+      SFst      -> Just SSnd
+      SSnd      -> Just SFst
+      SContents -> Just SCredit
+      SCredit   -> Just SContents
+      _         -> Nothing
+
+-- A part without a sibling is all of its parent (in its alternative), so a use of it is a use
+-- of the parent.
+canonical :: Path -> Path
+canonical (Path x ss) = Path x (reverse (dropWhile ((== Nothing) . sibling) (reverse ss)))
+
+-- the variables on the path to a variable, from its root
+prefixes :: Path -> [Path]
+prefixes (Path x ss) = [Path x (take k ss) | k <- [0 .. length ss - 1]]
+
+-- `x` is `y` or one of its parts
+within :: Path -> Path -> Bool
+within (Path x ss) (Path y ts) = x == y && ts `isPrefixOf` ss
+
+-- the steps from a variable to one of its parts
+stepsFrom :: Path -> Path -> [Step]
+stepsFrom (Path _ ts) (Path _ ss) = drop (length ts) ss
+
+-- the variable that a destructuring form destructures
+scrutVar :: VExpr -> Maybe Path
+scrutVar expr
+  = case expr of
+      UnboxRu z _ _ -> Just z
+      _ | Just ds <- destructAOf expr -> Just (dsScrut ds)
+        | Just ds <- destructVOf expr, Var z <- dsScrut ds -> Just z
+        | otherwise -> Nothing
+
+-- the part of a value at steps from it, if the value shows it
+project :: VVal -> [Step] -> Maybe VVal
+project v [] = Just v
+project v (s:ss)
+  = case (v,s) of
+      (Var x, _) -> Just (Var (foldl child x (s:ss)))
+      (Pair a _, SFst) -> project a ss
+      (Pair _ b, SSnd) -> project b ss
+      (Inj i _ w, SInjV j) | i == j -> project w ss
+      (Pack _ _ w, SPack) -> project w ss
+      _ -> Nothing
+
+-- the known value of a variable: the part of the known value of the longest prefix of its path
+valueAt :: M.Map Path VVal -> Path -> Maybe VVal
+valueAt vals (Path x ss)
+  = case [w | k <- [length ss, length ss - 1 .. 0], Just v <- [M.lookup (Path x (take k ss)) vals], Just w <- [project v (drop k ss)]] of
+      (w:_) -> Just w
+      [] -> Nothing
+
+-- substitute the known values (`valueAt`) in a value, but not in its boxed values
+substValues :: M.Map Path VVal -> VVal -> VVal
+substValues vals val
+  = case val of
+      Var x -> maybe val id (valueAt vals x)
+      _ -> mapV id (substValues vals) val
+
+-- The path of a binder with a step (`descendB`) from the scrutinee `scrutVar`; the other
+-- binders are roots.
+pathOf :: Maybe Path -> Maybe Step -> Maybe Path
+pathOf z s = child <$> z <*> s
 
 -- the arguments of each jump to a join point; jumps are never inside values, and an inner
 -- join of the same name shadows it
@@ -270,30 +385,38 @@ substJump j f expr
       Join k ps e1 e2 | k == j -> Join k ps (substJump j f e1) e2
       _ -> runIdentity (descendE Identity Identity (\_ e -> Identity (substJump j f e)) expr)
 
-varOf :: VVal -> Name
+varOf :: VVal -> Path
 varOf (Var y) = y
 varOf v       = error ("Backend.Typed.Common.varOf: not a variable: " ++ show v)
 
+-- a top-level value, possibly instantiated (`[dup-glob]`)
+isGlob :: VVal -> Bool
+isGlob v
+  = case v of
+      Glob _ _ -> True
+      TyApp w _ -> isGlob w
+      _ -> False
+
 -- free variables
 
-fvA :: AVal -> S.Set Name
+fvA :: AVal -> S.Set Path
 fvA val
   = case val of
       Lam ps _ e -> fvE e `S.difference` S.fromList [x | (x,_,_) <- ps]
       _ -> getConst (descendA (Const . S.singleton) (Const . fvA) (Const . fvV) val)
 
-fvV :: VVal -> S.Set Name
+fvV :: VVal -> S.Set Path
 fvV val
   = case val of
       Var x -> S.singleton x
       _ -> getConst (descendV (Const . fvA) (Const . fvV) val)
 
-fvE :: VExpr -> S.Set Name
+fvE :: VExpr -> S.Set Path
 fvE = getConst . descendE (Const . S.singleton) (Const . fvV) (\xs e -> Const (fvE e `S.difference` S.fromList xs))
 
 -- substitution of unboxed values (their free variables must not be bound in the scope).
 -- A substitution at a named operand must itself be a variable; use a let for other values.
-replaceA :: M.Map Name VVal -> AVal -> AVal
+replaceA :: M.Map Path VVal -> AVal -> AVal
 replaceA sub val
   = case val of
       Lam ps r e -> let sub' = foldr M.delete sub [x | (x,_,_) <- ps]
@@ -304,7 +427,7 @@ replaceA sub val
       OpenCon c ts v -> OpenCon c (map (replaceAType sub) ts) (replaceV sub v)
       _ -> mapA (replaceName sub) (replaceA sub) (replaceV sub) val
 
-replaceV :: M.Map Name VVal -> VVal -> VVal
+replaceV :: M.Map Path VVal -> VVal -> VVal
 replaceV sub val
   = case val of
       Var x -> M.findWithDefault val x sub
@@ -317,21 +440,21 @@ replaceV sub val
       NoReuse n p -> NoReuse n (fmap (replaceContents sub) p)
       _ -> mapV (replaceA sub) (replaceV sub) val
 
-replaceVType :: M.Map Name VVal -> VType -> VType
+replaceVType :: M.Map Path VVal -> VType -> VType
 replaceVType sub = mapReuseContents (fmap (replaceContents sub))
 
-replaceContents :: M.Map Name VVal -> Contents -> Contents
+replaceContents :: M.Map Path VVal -> Contents -> Contents
 replaceContents sub (Contents k p t) = Contents k (replaceV sub p) (replaceVType sub t)
 
-replaceAType :: M.Map Name VVal -> AType -> AType
+replaceAType :: M.Map Path VVal -> AType -> AType
 replaceAType sub a = case replaceVType sub (VPtr a) of
                       VPtr b -> b
                       _ -> a
 
-replaceName :: M.Map Name VVal -> Name -> Name
+replaceName :: M.Map Path VVal -> Path -> Path
 replaceName sub x = maybe x varOf (M.lookup x sub)
 
-replaceE :: M.Map Name VVal -> VExpr -> VExpr
+replaceE :: M.Map Path VVal -> VExpr -> VExpr
 replaceE sub expr
   | M.null sub = expr
   | otherwise = runIdentity (descendE (Identity . replaceName sub) (Identity . replaceV sub)
@@ -345,33 +468,47 @@ replaceE sub expr
       _ -> expr
 
 -- renaming includes boxed operands as well as unboxed variables
-renameA :: M.Map Name Name -> AVal -> AVal
+renameA :: M.Map Path Path -> AVal -> AVal
 renameA = replaceA . M.map Var
 
-renameV :: M.Map Name Name -> VVal -> VVal
+renameV :: M.Map Path Path -> VVal -> VVal
 renameV = replaceV . M.map Var
 
-renameE :: M.Map Name Name -> VExpr -> VExpr
+renameE :: M.Map Path Path -> VExpr -> VExpr
 renameE = replaceE . M.map Var
 
+-- rename a variable and its parts, also where they are bound
+renamePath :: Path -> Path -> VExpr -> VExpr
+renamePath x (Path r ss) = goE
+  where
+    rn p | p `within` x = Path r (ss ++ stepsFrom x p)
+         | otherwise = p
+    goE = runIdentity . descendB (Identity . rn) (Identity . goV) (\bs e -> Identity (map (rn . fst) bs, goE e))
+    goV v = case v of
+              Var p -> Var (rn p)
+              _ -> mapV goA goV v
+    goA a = case a of
+              Lam ps t e -> Lam [(rn p,m,s) | (p,m,s) <- ps] t (goE e)
+              _ -> mapA rn goA goV a
+
 -- all bound variables (with repetitions)
-bindersE :: VExpr -> [Name]
+bindersE :: VExpr -> [Path]
 bindersE = getConst . descendE (const (Const [])) (Const . bindersV) (\xs e -> Const (xs ++ bindersE e))
 
-bindersA :: AVal -> [Name]
+bindersA :: AVal -> [Path]
 bindersA val
   = case val of
       Lam ps _ e -> [x | (x,_,_) <- ps] ++ bindersE e
       _ -> getConst (descendA (const (Const [])) (Const . bindersA) (Const . bindersV) val)
 
-bindersV :: VVal -> [Name]
+bindersV :: VVal -> [Path]
 bindersV = getConst . descendV (Const . bindersA) (Const . bindersV)
 
 -- destructuring forms: the mode, the scrutinee, the alternatives with their binders, and a rebuild function.
 -- Boxed scrutinees are names; unboxed scrutinees are values.
-data Destruct v = Destruct{ dsMode :: Mode, dsScrut :: v, dsAlts :: [([Name],VExpr)], dsBuild :: Mode -> v -> [VExpr] -> VExpr }
+data Destruct v = Destruct{ dsMode :: Mode, dsScrut :: v, dsAlts :: [([Path],VExpr)], dsBuild :: Mode -> v -> [VExpr] -> VExpr }
 
-destructAOf :: VExpr -> Maybe (Destruct Name)
+destructAOf :: VExpr -> Maybe (Destruct Path)
 destructAOf expr
   = case expr of
       SplitA m v k (x,e1) (y,e2) -> Just (Destruct m v [([x],e1),([y],e2)]
