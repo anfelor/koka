@@ -17,7 +17,7 @@
   Structs are named by a hash of their layout so modules agree on them.
 -}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Layout( CT(..), layout, leaves, leafSlots, isEnum, orderFields, shapeIsHeap
+module Backend.Typed.Layout( CT(..), PrimType(..), EnumSize(..), layout, leaves, leafSlots, isEnum, orderFields, shapeIsHeap
                            , ctName, scanOf, rawOf, needsRC
                            , structDefs, blockName, blockDef, blockSize, isBlock, isScalar
                            , dupExpr, dropStmt, rawCType, primBox, fnv
@@ -35,13 +35,28 @@ import Common.NamePrim
 import Backend.Typed.Syntax
 
 data CT = CBox
-        | CPrim String
+        | CPrim PrimType
         | CUnit
-        | CEnum Int                   -- the size in bytes of the tag (1, 2 or 4)
+        | CEnum EnumSize              -- the width of the tag
         | CProd String [(Int,CT)]     -- leaves in memory order, with their position in the product
         | CSum String [Maybe CT]      -- the payload of each alternative (if not unit)
         | CReuse                      -- a reuse credit
         deriving (Eq,Show)
+
+data PrimType = PrimChar | PrimSSize | PrimIntPtr | PrimDouble | PrimInt64
+              | PrimUInt8 | PrimInt8 | PrimInt16 | PrimInt32 | PrimFloat
+              | PrimFieldAddr | PrimBox
+              deriving (Eq,Show)
+
+data EnumSize = Enum8 | Enum16 | Enum32
+              deriving (Eq,Show)
+
+enumBytes :: EnumSize -> Int
+enumBytes size
+  = case size of
+      Enum8  -> 1
+      Enum16 -> 2
+      Enum32 -> 4
 
 -- A uniform boxed shape can be distinguished by the pointer bit. Nothing means
 -- either a mixture of heap blocks and immediates or an opaque representation.
@@ -90,11 +105,11 @@ leaves t
       VReuse _ _ -> [t]
       VCtx a b -> [VPtr a, VPtr b]
 
-enumSize :: Int -> Int
+enumSize :: Int -> EnumSize
 enumSize n
-  | n <= 256   = 1
-  | n <= 65536 = 2
-  | otherwise  = 4
+  | n <= 256   = Enum8
+  | n <= 65536 = Enum16
+  | otherwise  = Enum32
 
 isEnum :: VType -> Bool
 isEnum t
@@ -121,11 +136,11 @@ ctName :: CT -> String
 ctName ct
   = case ct of
       CBox -> "kk_box_t"
-      CPrim p -> p
+      CPrim p -> primName p
       CUnit -> "kk_unit_t"
-      CEnum 1 -> "uint8_t"
-      CEnum 2 -> "uint16_t"
-      CEnum _ -> "uint32_t"
+      CEnum Enum8  -> "uint8_t"
+      CEnum Enum16 -> "uint16_t"
+      CEnum Enum32 -> "uint32_t"
       CProd n _ -> n
       CSum n _ -> n
       CReuse -> "kk_reuse_t"
@@ -135,7 +150,7 @@ canonCT ct
   = case ct of
       CBox -> "B"
       CUnit -> "U"
-      CEnum n -> "E" ++ show n
+      CEnum size -> "E" ++ show (enumBytes size)
       CPrim _ -> ctName ct
       CProd _ _ -> ctName ct
       CSum _ _ -> ctName ct
@@ -290,7 +305,7 @@ sizeAlign ct
       CBox -> (8,8)
       CReuse -> (8,8)
       CUnit -> (4,4)
-      CEnum n -> (n,n)
+      CEnum size -> let n = enumBytes size in (n,n)
       CPrim p -> let n = primSize p in (n,n)
       CProd _ fs -> structSize (map (sizeAlign . snd) fs)
       CSum _ alts -> let scan = scanOf ct - 1
@@ -313,45 +328,69 @@ fieldOffsets = go 0
 alignUp :: Int -> Int -> Int
 alignUp n a = ((n + a - 1) `div` a) * a
 
-primSize :: String -> Int
+primName :: PrimType -> String
+primName p
+  = case p of
+      PrimChar      -> "kk_char_t"
+      PrimSSize     -> "kk_ssize_t"
+      PrimIntPtr    -> "intptr_t"
+      PrimDouble    -> "double"
+      PrimInt64     -> "int64_t"
+      PrimUInt8     -> "uint8_t"
+      PrimInt8      -> "int8_t"
+      PrimInt16     -> "int16_t"
+      PrimInt32     -> "int32_t"
+      PrimFloat     -> "float"
+      PrimFieldAddr -> "kk_field_addr_t"
+      PrimBox       -> "kk_box_t"
+
+primSize :: PrimType -> Int
 primSize p
   = case p of
-      "uint8_t" -> 1
-      "int8_t"  -> 1
-      "int16_t" -> 2
-      "uint16_t" -> 2
-      "uint32_t" -> 4
-      "int32_t" -> 4
-      "kk_char_t" -> 4
-      "float"   -> 4
-      _         -> 8
+      PrimUInt8     -> 1
+      PrimInt8      -> 1
+      PrimInt16     -> 2
+      PrimInt32     -> 4
+      PrimChar      -> 4
+      PrimFloat     -> 4
+      PrimSSize     -> 8
+      PrimIntPtr    -> 8
+      PrimDouble    -> 8
+      PrimInt64     -> 8
+      PrimFieldAddr -> 8
+      PrimBox       -> 8
 
-rawCType :: Name -> String
+rawCType :: Name -> PrimType
 rawCType n
-  | n == nameTpChar    = "kk_char_t"
-  | n == nameTpSSizeT  = "kk_ssize_t"
-  | n == nameTpIntPtrT = "intptr_t"
-  | n == nameTpFloat   = "double"
-  | n == nameTpInt64   = "int64_t"
-  | n == nameTpByte    = "uint8_t"
-  | n == nameTpInt8    = "int8_t"
-  | n == nameTpInt16   = "int16_t"
-  | n == nameTpInt32 || n == nameTpMarker = "int32_t"
-  | n == nameTpFloat32 = "float"
-  | n == nameTpFloat16 = "float"
-  | n == nameTpFieldAddr = "kk_field_addr_t"
-  | n == nameTpAny     = "kk_box_t"
-  | otherwise          = "intptr_t"
+  | n == nameTpChar    = PrimChar
+  | n == nameTpSSizeT  = PrimSSize
+  | n == nameTpIntPtrT = PrimIntPtr
+  | n == nameTpFloat   = PrimDouble
+  | n == nameTpInt64   = PrimInt64
+  | n == nameTpByte    = PrimUInt8
+  | n == nameTpInt8    = PrimInt8
+  | n == nameTpInt16   = PrimInt16
+  | n == nameTpInt32 || n == nameTpMarker = PrimInt32
+  | n == nameTpFloat32 = PrimFloat
+  | n == nameTpFloat16 = PrimFloat
+  | n == nameTpFieldAddr = PrimFieldAddr
+  | n == nameTpAny     = PrimBox
+  | otherwise          = PrimIntPtr
 
 -- immediate boxing of raw values (as in Koka)
-primBox :: String -> Maybe (String,String)
+primBox :: PrimType -> Maybe (String,String)
 primBox p
-  | p `elem` ["kk_char_t","int64_t","int32_t","int16_t","int8_t","uint8_t","double","float","intptr_t","kk_ssize_t"]
-  = let base = case p of
-                 "kk_char_t"  -> "kk_char"
-                 "double"     -> "kk_double"
-                 "float"      -> "kk_float"
-                 "kk_ssize_t" -> "kk_ssize"
-                 _            -> "kk_" ++ takeWhile (/= '_') p
-    in Just (base ++ "_box", base ++ "_unbox")
-  | otherwise = Nothing
+  = fmap (\base -> (base ++ "_box", base ++ "_unbox")) $
+    case p of
+      PrimChar      -> Just "kk_char"
+      PrimSSize     -> Just "kk_ssize"
+      PrimIntPtr    -> Just "kk_intptr"
+      PrimDouble    -> Just "kk_double"
+      PrimInt64     -> Just "kk_int64"
+      PrimUInt8     -> Just "kk_uint8"
+      PrimInt8      -> Just "kk_int8"
+      PrimInt16     -> Just "kk_int16"
+      PrimInt32     -> Just "kk_int32"
+      PrimFloat     -> Just "kk_float"
+      PrimFieldAddr -> Nothing
+      PrimBox       -> Nothing
