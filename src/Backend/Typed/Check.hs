@@ -23,7 +23,7 @@ checkProgram :: Program -> [String]
 checkProgram prog
   = [show (defName d) ++ ": " ++ err | d <- progDefs prog, Left err <- [checkPaths d >> checkDef (envOf prog) d]]
 
--- The variables are named by their paths (see `Passes.Paths`): the binder of a destructuring
+-- The variables are named by their paths (see `Syntax.Path`): the binder of a destructuring
 -- of a variable is the variable followed by the step of the form, every other binder is a
 -- root, and a root is bound once in a definition.
 checkPaths :: Def -> Either String ()

@@ -7,13 +7,13 @@
 -----------------------------------------------------------------------------
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
-{- Name every variable by its path (after elaboration and after each pass).
+{- Establish path names once, at the Core-to-typed-IR boundary.
 
   The binder of a destructuring of a variable `z` becomes `z` followed by the step of the
   destructuring form (`descendB`), so that its name says where it comes from. Every other
   binder is a root, and a root name is bound only once in a definition: a root that is bound
-  again gets a fresh name. Since the pipeline runs this pass after every other pass, passes
-  may bind any names.
+  again gets a fresh name. Every subsequent pass preserves these invariants; its
+  output is checked directly, without repairing its binders.
 
   A path denotes one value, so it is bound at most once in a scope (`Check`): a destructuring
   of a variable whose binders in one of its alternatives are already in scope is that

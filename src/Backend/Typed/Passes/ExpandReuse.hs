@@ -59,18 +59,18 @@ import Backend.Typed.Common
 type Full = S.Set Path
 
 -- a counter for fresh names, and the credits whose descriptions forget their tags
-type X a = State (Int,S.Set Path) a
+type X a = State (NameSupply,S.Set Path) a
 
 expandReuseProgram :: Program -> Program
 expandReuseProgram prog
-  = prog{ progDefs = [d{ defBody = evalState (exE (params d) (defBody d)) (0,S.empty) } | d <- progDefs prog] }
+  = prog{ progDefs = [d{ defBody = evalState (exE (params d) (defBody d)) (freshFor d,S.empty) } | d <- progDefs prog] }
   where
     params d = case d of
                  DefFun{} -> fullOf [(x,t) | (x,_,t) <- defArgs d]
                  DefVal{} -> S.empty
 
 fresh :: String -> X Name
-fresh s = state (\(n,u) -> (newHiddenName (s ++ show n), (n+1,u)))
+fresh s = state (\(n,u) -> let (x,n') = freshNameFrom s n in (x,(n',u)))
 
 fullOf :: [(Path,VType)] -> Full
 fullOf bs = S.fromList [x | (x,VReuse Full _ _) <- bs]
@@ -145,13 +145,15 @@ allocate full stmt
       Just (u,_,_) | Let x t (Ret v) e <- stmt, v == u
         -> do j <- fresh "reusejp"
               (u',bs) <- hoist u
-              return (lets bs (Join j [(x,modeOf u,t)] e (test full (Jump j [u']))))
+              body <- test full (Jump j [u'])
+              return (lets bs (Join j [(x,modeOf u,t)] e body))
       Just (u,m,t)
         -> do j <- fresh "reusejp"
               x <- root <$> fresh "alloc"
               e <- allocate full (replace u (Var x) stmt)
               (u',bs) <- hoist u
-              return (lets bs (Join j [(x,m,t)] e (test full (Jump j [u']))))
+              body <- test full (Jump j [u'])
+              return (lets bs (Join j [(x,m,t)] e body))
   where
     modeOf u = case u of
                  Context{} -> Unique
@@ -167,7 +169,8 @@ merge full expr (r,m,t,stmt,us)
        hs <- mapM hoist us
        let jumps f = withArms expr [lets bs (f (Jump j [u'])) | (u',bs) <- hs]
        when (length (nub (map tagOf us)) > 1) (modify (\(n,u) -> (n,S.insert r u)))
-       return (Join j [(x,m,t)] e (IfFull r (jumps id) (jumps (allocFresh r))))
+       slow <- cloneE (root <$> fresh "reusecopy") (jumps (allocFresh r))
+       return (Join j [(x,m,t)] e (IfFull r (jumps id) slow))
   where
     tagOf v = case v of
                 Context _ k -> tagOf k
@@ -276,11 +279,15 @@ tested :: Full -> [VVal] -> [Path]
 tested full vs = filter (`S.notMember` full) (nub (concatMap credits vs))
 
 -- Test each credit that may be empty and that a statement allocates in.
-test :: Full -> VExpr -> VExpr
+test :: Full -> VExpr -> X VExpr
 test full stmt
   = case tested full (values stmt) of
-      (r:_) -> IfFull r (test (S.insert r full) stmt) (test full (allocFresh r stmt))
-      [] -> stmt
+      (r:_) -> do
+        -- A statement may contain a closure. Freshen its bound roots in the
+        -- copied branch; copying just the outer statement is not enough.
+        slow <- cloneE (root <$> fresh "reusecopy") (allocFresh r stmt)
+        IfFull r <$> test (S.insert r full) stmt <*> test full slow
+      [] -> return stmt
 
 -- the credits that a value allocates in
 credits :: VVal -> [Path]

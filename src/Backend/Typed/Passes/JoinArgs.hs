@@ -26,14 +26,14 @@ import Backend.Typed.Syntax
 import Backend.Typed.Common
 
 joinArgsProgram :: Program -> Program
-joinArgsProgram prog = prog{ progDefs = [d{ defBody = jaE (defBody d) } | d <- progDefs prog] }
+joinArgsProgram prog = prog{ progDefs = [d{ defBody = jaE (defScope d) (defBody d) } | d <- progDefs prog] }
 
-jaE :: VExpr -> VExpr
-jaE expr
+jaE :: Scope -> VExpr -> VExpr
+jaE scope expr
   = case expr of
       Join j ps e1 e2
-        -> let e1' = jaE e1
-               e2' = jaE e2
+        -> let e1' = jaE (M.union (scopeOf [x | (x,_,_) <- ps]) scope) e1
+               e2' = jaE scope e2
                bound = S.fromList (bindersE e1' ++ bindersE e2')
                -- for each parameter, the variable that every jump passes to it
                invariant (_,Owned,_) vs@(Var y : _) | all (== Var y) vs, S.notMember y bound = Just y
@@ -42,14 +42,14 @@ jaE expr
                sub = M.fromList [(x,Var y) | ((x,_,_),Just y) <- zip ps ys]
                kept :: [a] -> [a]
                kept vs = [v | (v,Nothing) <- zip vs ys]
-           in Join j (kept ps) (replaceE sub e1') (substJump j (Jump j . kept) e2')
-      _ -> runIdentity (descendE Identity (Identity . jaV) (\_ e -> Identity (jaE e)) expr)
+           in Join j (kept ps) (substEIn (M.union (scopeOf [x | (x,_,_) <- kept ps]) scope) (valueAt sub) e1') (substJump j (Jump j . kept) e2')
+      _ -> runIdentity (descendE Identity (Identity . jaV scope) (\xs e -> Identity (jaE (bindScope expr xs scope) e)) expr)
 
-jaV :: VVal -> VVal
-jaV = mapV jaA jaV
+jaV :: Scope -> VVal -> VVal
+jaV scope = mapV (jaA scope) (jaV scope)
 
-jaA :: AVal -> AVal
-jaA val
+jaA :: Scope -> AVal -> AVal
+jaA scope val
   = case val of
-      Lam ps r e -> Lam ps r (jaE e)
-      _          -> mapA id jaA jaV val
+      Lam ps r e -> Lam ps r (jaE (M.union (scopeOf [x | (x,_,_) <- ps]) scope) e)
+      _          -> mapA id (jaA scope) (jaV scope) val

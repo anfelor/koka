@@ -20,7 +20,6 @@
 module Backend.Typed.Passes.Lazy( lazyProgram ) where
 
 import qualified Data.Map as M
-import Common.Name
 import Common.NamePrim( nameLazyMemoize, nameLazyMemoizeTarget )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
@@ -29,7 +28,7 @@ import Backend.Typed.Layout( layout, blockSize )
 import Backend.Typed.Names( nameLazyFree )
 import Backend.Typed.Monad
 
-type Z a = M () Int a
+type Z a = M () NameSupply a
 
 -- free the block of a lazy value without dropping its (taken) fields
 
@@ -37,12 +36,12 @@ type Z a = M () Int a
 type Targets = M.Map Path Int
 
 fresh :: String -> Z Path
-fresh s = state (\n -> (root (newHiddenName ("lz" ++ s ++ show n)), n+1))
+fresh s = state (freshPathFrom ("lz" ++ s))
 
 lazyProgram :: Program -> (Program,[String])
 lazyProgram prog
   = let tdefs = progTypes prog
-        run d = case evalM (lazyE tdefs M.empty (defBody d)) () 0 of
+        run d = case evalM (lazyE tdefs M.empty (defBody d)) () (freshFor d) of
                   Right body -> (d{ defBody = body }, [])
                   Left err   -> (d, [show (defName d) ++ ": " ++ err])
         (defs,errs) = unzip (map run (progDefs prog))
@@ -99,8 +98,8 @@ indirect t shapes ind x v
   = do r <- fresh "r"
        d <- fresh "d"
        z <- fresh "z"
-       a <- fresh "a"
-       let ref = Ptr t (Roll t (injA shapes ind (BoxIn x (Var r))))
+       let a = child d SDeref
+           ref = Ptr t (Roll t (injA shapes ind (BoxIn x (Var r))))
            shared = Dup r (Let d (VPtr t) (Ret ref) (Deref Owned (Var d) a (Drop a (Ret (Var r)))))
            unique = Let z VUnit (Call nameLazyFree [t] [Var x]) (Ret (Var r))
        return (Let r (VPtr t) (Ret v) (IsUnique x unique shared))

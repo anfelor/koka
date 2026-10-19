@@ -11,7 +11,7 @@
 
   Variables of a trivial type (without pointers, also through named types: `trivialTy`) are
   unrestricted. Every other variable is a path (see
-  `Passes.Paths`) and has the mode of its owner, the longest variable on its path that is a
+  `Syntax.Path`) and has the mode of its owner, the longest variable on its path that is a
   root (or, in the body of a join point, a variable it captures). An owned root holds one
   reference, which must be consumed exactly once on every path; a borrowed root (a borrowed
   parameter, or a binder of a borrowed destructuring of a value that is not a variable) holds
@@ -85,7 +85,7 @@ import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, infe
 type Owners = M.Map Path Mode
 
 -- the parts of a trivial type, recorded where they are bound (a path denotes the same part in
--- the whole definition, see `Paths`)
+-- the whole definition, see `Syntax.Path`)
 type Trivial = S.Set Path
 
 -- numbers of references to variables (`key`), without zeros; a reference to a variable is one

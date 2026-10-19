@@ -6,42 +6,29 @@
 -- found in the LICENSE file at the root of this distribution.
 -----------------------------------------------------------------------------
 
--- The IR already separates computations from values. Normalize sequencing by
--- reassociating nested let bindings; freshen lifted binders to avoid capture.
+-- Reassociate nested lets. Roots are unique throughout a definition, so moving a
+-- let out of its bound computation cannot capture a variable in its continuation.
 module Backend.Typed.Passes.Anf( anfProgram ) where
 
-import qualified Data.Map as M
-import Control.Monad.State
-import Common.Name
+import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 
 anfProgram :: Program -> Program
-anfProgram prog = prog{ progDefs = map run (progDefs prog) }
-  where
-    run def = def{ defBody = evalState (anfE (defBody def)) 0 }
+anfProgram prog = prog{ progDefs = [d{ defBody = anfE (defBody d) } | d <- progDefs prog] }
 
-fresh :: State Int Path
-fresh = state (\n -> (root (newHiddenName ("anf" ++ show n)),n+1))
+anfE :: VExpr -> VExpr
+anfE expr = case expr of
+  Let x t e1 e2 -> bind x t (anfE e1) (anfE e2)
+  _ -> runIdentity (descendE Identity (Identity . anfV) (\_ -> Identity . anfE) expr)
 
-anfE :: VExpr -> State Int VExpr
-anfE expr
-  = case expr of
-      Let x t e1 e2 -> do e1' <- anfE e1
-                          e2' <- anfE e2
-                          bind x t e1' e2'
-      _ -> descendE pure anfV (\_ -> anfE) expr
+bind :: Path -> VType -> VExpr -> VExpr -> VExpr
+bind x t (Let y s e1 e2) body = Let y s e1 (bind x t e2 body)
+bind x t e body = Let x t e body
 
-bind :: Path -> VType -> VExpr -> VExpr -> State Int VExpr
-bind x t (Let y s e1 e2) body
-  = do z <- fresh
-       rest <- bind x t (renameE (M.singleton y z) e2) body
-       return (Let z s e1 rest)
-bind x t e body = return (Let x t e body)
+anfV :: VVal -> VVal
+anfV = mapV anfA anfV
 
-anfV :: VVal -> State Int VVal
-anfV = descendV anfA anfV
-
-anfA :: AVal -> State Int AVal
-anfA (Lam ps r e) = Lam ps r <$> anfE e
-anfA a = descendA pure anfA anfV a
+anfA :: AVal -> AVal
+anfA (Lam ps r e) = Lam ps r (anfE e)
+anfA a = mapA id anfA anfV a

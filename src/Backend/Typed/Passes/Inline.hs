@@ -23,11 +23,14 @@
   equal constructor constant. Only fields still in scope are used; enum values carry no
   ownership. Descriptions and the checking rules stay unchanged.
 
-  Existentials are not inlined: unpacking a known `pack` would substitute its types.
+  Bindings that keep a literal dereference named are retained, preserving its operand
+  path without introducing a fresh root. Existentials are not inlined: unpacking a known
+  `pack` would substitute its types.
 -}
 module Backend.Typed.Passes.Inline( inlineProgram ) where
 
 import qualified Data.Map as M
+import qualified Data.Set as S
 import Data.Maybe( fromMaybe )
 import Data.Functor.Const( Const(..) )
 import Data.Functor.Identity( Identity(..) )
@@ -57,9 +60,16 @@ inlineDef def
       DefFun{ defArgs = ps } -> def{ defArgs = [(x,m,substVType sub t) | (x,m,t) <- ps], defRes = substVType sub (defRes def), defBody = body }
       DefVal{} -> def{ defType = substVType sub (defType def), defBody = body }
   where
-    vals = valuesE (defBody def)
+    (allVals,scruts) = valuesE (defBody def)
+    -- Keep a binding if substituting it would turn a variable dereference into
+    -- a literal dereference: its operand must remain a path, rather than become
+    -- a fresh root. The C compiler can still propagate the literal.
+    kept = S.fromList [root n | x@(Path n _) <- S.toList scruts, Just v <- [known allVals x], not (variable v)]
+    vals = M.withoutKeys allVals kept
     sub = known vals
-    body = substE sub (inlineE vals (defBody def))
+    body = substEIn (defScope def) sub (inlineE vals (defBody def))
+    variable (Var _) = True
+    variable _ = False
 
 -- the value of a variable, in terms of variables that are not inlined
 known :: Values -> Path -> Maybe VVal
@@ -86,21 +96,22 @@ occurrences v
       Var x -> [x]
       _ -> getConst (descendV (const (Const [])) (Const . occurrences) v)
 
-valuesE :: VExpr -> Values
-valuesE expr = here <> getConst (descendE (const (Const M.empty)) (Const . valuesV) (\_ e -> Const (valuesE e)) expr)
+valuesE :: VExpr -> (Values,S.Set Path)
+valuesE expr = here <> getConst (descendE (const (Const mempty)) (Const . valuesV) (\_ e -> Const (valuesE e)) expr)
   where
     here = case expr of
-             Let x _ (Ret v) _ | structural v -> M.singleton x v
-             _ -> M.empty
+             Let x _ (Ret v) _ | structural v -> (M.singleton x v,S.empty)
+             Deref _ (Var x) _ _ -> (M.empty,S.singleton x)
+             _ -> mempty
 
-valuesV :: VVal -> Values
+valuesV :: VVal -> (Values,S.Set Path)
 valuesV = getConst . descendV (Const . valuesA) (Const . valuesV)
 
-valuesA :: AVal -> Values
+valuesA :: AVal -> (Values,S.Set Path)
 valuesA val
   = case val of
       Lam _ _ e -> valuesE e
-      _ -> getConst (descendA (const (Const M.empty)) (Const . valuesA) (Const . valuesV) val)
+      _ -> getConst (descendA (const (Const mempty)) (Const . valuesA) (Const . valuesV) val)
 
 -- remove the lets of the inlined values, and the forms that use them as a whole
 inlineE :: Values -> VExpr -> VExpr
