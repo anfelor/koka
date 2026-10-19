@@ -47,18 +47,27 @@ coerce from to v
 boxV :: VType -> VVal -> E (K,VVal)
 boxV t v
   | isMultiSum t = do r <- fresh "b"
-                      body <- boxAV t v (return . Ret . Ptr (boxA t))
+                      body <- leafAV t v (\i a -> return (Ret (Ptr (boxA t) (injA (shapeLeaves t) i a))))
                       return (Let r (VPtr (boxA t)) body, Var r)
   | isScalar t   = return (id, Ptr (AScalar t) (Scalar v))
   | otherwise    = return (id, Ptr (boxA t) (boxLeaf t v))
 
--- the shape `a : shapeA(t)` of `v : t`, given to the continuation in every alternative
-boxAV :: VType -> VVal -> (AVal -> E VExpr) -> E VExpr
-boxAV t v k
-  | VSum ts <- t, isMultiSum t = CaseV Owned v <$> mapM (boxAlt ts k) (zip [0..] ts)
-  | otherwise                  = k (boxLeaf t v)
+-- the boxed leaf of `v : t` and its position in `shapeLeaves(t)`, given to the continuation in
+-- every alternative
+leafAV :: VType -> VVal -> (Int -> AVal -> E VExpr) -> E VExpr
+leafAV t v k
+  | VSum ts <- t, isMultiSum t = CaseV Owned v <$> mapM alt (zip (leafStarts ts) ts)
+  | otherwise                  = k 0 (boxLeaf t v)
+  where
+    alt (start,ti) = do y <- fresh "y"
+                        body <- leafAV ti (Var y) (k . (+ start))
+                        return (y, body)
 
--- as `shapeA` on a type that is not a sum of several alternatives
+-- the position of the first leaf of each alternative
+leafStarts :: [VType] -> [Int]
+leafStarts ts = scanl (+) 0 (map (length . shapeLeaves) ts)
+
+-- the shape of a type that is not a sum of several alternatives
 boxLeaf :: VType -> VVal -> AVal
 boxLeaf t v
   = case t of
@@ -70,12 +79,6 @@ boxLeaf t v
       VExists _ _ -> Box v
       VReuse _ _    -> Box v
       VCtx _ _    -> Box v
-
-boxAlt :: [VType] -> (AVal -> E VExpr) -> (Int,VType) -> E (Path,VExpr)
-boxAlt ts k (i,ti)
-  = do y <- fresh "y"
-       body <- boxAV ti (Var y) (k . injA (map shapeA ts) i)
-       return (y, body)
 
 isMultiSum :: VType -> Bool
 isMultiSum (VSum ts) = length ts > 1
@@ -91,9 +94,9 @@ unboxAV :: VType -> Path -> E (K,VVal)
 unboxAV t a
   = case t of
       VUnit -> return (id, UnitV)
-      VSum ts | length ts > 1 ->
+      VSum _ | isMultiSum t ->
         do r <- fresh "s"
-           body <- caseSum fresh (map shapeA ts) a (unboxAlt t ts)
+           body <- caseSum fresh (shapeLeaves t) a (\j y -> (\(k,w) -> k (Ret w)) <$> unboxLeaf t j y)
            return (Let r t body, Var r)
       VSum _      -> unbox
       VPtr _      -> unbox
@@ -106,10 +109,14 @@ unboxAV t a
     unbox = do x <- fresh "x"   -- a box or a scalar
                return (Unbox Owned a x, Var x)
 
-unboxAlt :: VType -> [VType] -> Int -> Path -> E VExpr
-unboxAlt t ts i y
-  = do (k,w) <- unboxAV (ts !! i) y
-       return (k (Ret (Inj i t w)))
+-- the value of type `t` whose leaf at position `j` is `y`
+unboxLeaf :: VType -> Int -> Path -> E (K,VVal)
+unboxLeaf t j y
+  | VSum ts <- t, isMultiSum t
+  = do let (i,start) = last [(i,s) | (i,s) <- zip [0..] (leafStarts ts), s <= j]
+       (k,w) <- unboxLeaf (ts !! i) (j - start) y
+       return (k, Inj i t w)
+  | otherwise = unboxAV t y
 
 ptrA :: VType -> AType
 ptrA (VPtr a) = a

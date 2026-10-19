@@ -708,7 +708,7 @@ elabBoxedCase info vargs v brs
            wild = [b | b@(C.Branch [C.PatWild] _) <- brs]
            matches c (C.Branch [C.PatCon pc _ _ _ _ _ _ _] _) = getName pc == conInfoName c
            matches _ _ = False
-           selected = [(i,c) | (i,c) <- zip [0..] cons, null wild || any (matches c) brs]
+           selected = [(i,c) | (i,c) <- zip [1..] cons, null wild || any (matches c) brs]   -- by tag
        body <- case cons of
                  [con] -> conBranch vargs con (Left z) (findBranch con brs)
                  _ -> do alts <- mapM (boxedAlt vargs brs) selected
