@@ -32,8 +32,8 @@
 
     A boxed operand x reached through a sum (bound by `[case-a]` or `[split-a]`) lies at the
     tag offset ⌊x⌋ of that sum, which its path determines (`Common.sumOffset`): the sum of the
-    indices of the `[case-a]` steps at its end. A box at offset k is a heap block with tag k+1,
-    while any other box may be Koka's `box`; ⌊x⌋ = 0 for an operand not reached through a sum.
+    indices of the `[case-a]` steps at its end, and ⌊x⌋ = 0 for an operand not reached through a
+    sum. The block of a box at offset k has tag k+1.
 
   Structural rules
 
@@ -106,9 +106,13 @@ owning m
 -- boxed types A, B: what a pointer points to.
 --
 -- - Shapes `Box V`, `1` and `⊕ᵢ Aᵢ` have known tags and can be destructured by `[case]` and
---   `[unbox]`. The alternatives of a sum must be shapes: `a + 1` or `T⟨B̄⟩ + 1` has no known tags.
+--   `[unbox]`. A `Box V` is a heap block with a header (unless V has no contents, `𝟙`). The alternatives of a sum must be shapes: `a + 1` or `T⟨B̄⟩ + 1` has no known tags.
 --   Sum indices are sorted, nonnegative starts of nonoverlapping tag intervals.
 --   A nested sum occupies its tag width; gaps retain excluded alternatives' tag positions.
+-- - `Scalar V` is Koka's `box` of a scalar V (`Layout.isScalar`: a raw type or an enumeration
+--   that Koka boxes by itself): an immediate value, or a block that the runtime allocates (such
+--   as a large `float64`). It has no tag, so it is not a shape, and it is not reused. `boxA`
+--   chooses it for a scalar outside a sum.
 -- - `a`, `a⟨B̄⟩` and `T⟨B̄⟩` without a definition are opaque: a value of such a type can only be
 --   passed around.
 -- - `λā.A` only occurs as the argument of a higher-kinded variable, and applying it is
@@ -116,6 +120,7 @@ owning m
 -- - `unroll(T⟨B̄⟩) = A[B̄/ā]` for a definition `T⟨ā⟩ := A` (`TypeDef`); in the paper `T⟨B̄⟩` is
 --   `μt.A[B̄/ā]` with the recursive occurrences replaced by `t`.
 data AType = ABox VType                 -- Box V
+           | AScalar VType              -- Scalar V
            | AUnit                      -- 1
            | ASum [(Int,AType)]         -- ⊕ᵢ Aᵢ, indexed by stable zero-based tag positions
            | AFun [(Mode,VType)] VType  -- (q̄ V̄) -> W, for top-level functions and closures alike
@@ -137,7 +142,7 @@ data AType = ABox VType                 -- Box V
 -- - `ctx⟨A,B⟩` is an abstract pair of a pointer and a field address (see "Constructor
 --   contexts" above). It is not trivial and has the layout of `A* ⊗ B*`.
 -- - `|V|` is the size of the heap block of a `Box V` (`Layout.blockSize`); it is only defined when
---   the payload is always a heap block (`Layout.isBlock`).
+--   V has contents (`Layout.isBlock`).
 data VType = VPtr AType                 -- A*
            | VUnit                      -- 𝟙
            | VSum [VType]               -- ⊕ᵢ Vᵢ, n-ary (a Koka value type with several constructors)
@@ -259,6 +264,13 @@ data AVal
   --
   -- A fresh allocation: the paper's `alloc_n; box v`.
   | Box VVal
+
+  --   Γ ⊢ v : V    V scalar
+  --  ────────────────────────── [scalar]
+  --   Γ ⊢ scalar v : Scalar V
+  --
+  -- Koka's `box` of a scalar, which allocates only if the value is not immediate.
+  | Scalar VVal
 
   --   C : ∀ā. V -> T⟨ā⟩ ∈ Σ    Γ ⊢ v : V[B̄/ā]
   --  ─────────────────────────────────────────── [open-con]
@@ -513,8 +525,13 @@ data VExpr
   --  ──────────────────────────────────────── [bunbox]
   --   Γ₁, Γ₂ ⊢ let^ box x = v in e : W
   --
+  --   Γ₁ ⊢ v :^ Scalar V    Γ₂, x : V ⊢ e : W
+  --  ─────────────────────────────────────────── [bunbox-scalar]
+  --   Γ₁, Γ₂ ⊢ let^ box x = v in e : W
+  --
   -- Reading the contents of a box is always borrowed. The paper's owned `[unbox]`, which keeps
-  -- the block as a credit, is `[unbox-ru]` and requires the box to be unique.
+  -- the block as a credit, is `[unbox-ru]` and requires the box to be unique. The contents of a
+  -- scalar are trivial.
   | Unbox Mode Path Path VExpr
 
   --   Γ₁ ⊢ v :^ Box V    Γ₂, x : V ⊢ e : W

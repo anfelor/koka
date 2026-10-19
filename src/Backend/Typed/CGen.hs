@@ -18,7 +18,7 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Char( isAlphaNum, ord, isDigit )
 import Data.List( isInfixOf )
-import Data.Maybe( fromMaybe, isJust )
+import Data.Maybe( fromMaybe )
 import qualified Numeric
 import Control.Monad( forM, when )
 import Common.Name
@@ -287,19 +287,20 @@ holeMember cx ct v
 -- Injections only contain construction forms, so their tag can be passed down to
 -- the allocation. Existing boxed operands are duplicated in place (`Dup`).
 genA :: Ctx -> AVal -> G String
-genA cx = genAIn cx False 0
+genA cx = genAIn cx 0
 
-genAIn :: Ctx -> Bool -> Int -> AVal -> G String
-genAIn cx inSum pos val
+genAIn :: Ctx -> Int -> AVal -> G String
+genAIn cx pos val
   = case val of
       Fun f -> staticFun f
       UnitA -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" ++ show (pos+1) ++ "))")
-      Roll _ v -> genAIn cx inSum pos v
-      InjA i (ASum _) v -> genAIn cx True (pos + i) v
+      Roll _ v -> genAIn cx pos v
+      InjA i (ASum _) v -> genAIn cx (pos + i) v
       InjA _ _ _ -> failG "injection into a non-sum"
-      Box v -> genBox cx inSum (pos+1) Fresh v
-      BoxAt r v -> genBox cx inSum (pos+1) (At r) v
-      BoxIn x v -> genBox cx inSum (pos+1) (In x) v
+      Box v -> genBox cx (pos+1) Fresh v
+      BoxAt r v -> genBox cx (pos+1) (At r) v
+      BoxIn x v -> genBox cx (pos+1) (In x) v
+      Scalar v -> genScalar cx v
       OpenCon c tys v -> genOpenCon cx c tys v
       Lam ps r e -> genLam cx ps r e
 
@@ -360,14 +361,12 @@ data Alloc = Fresh | At Path | In Path
 -- a box: freshly allocated, in the block of a reuse credit, or over the block of a lazy value
 -- (whose old fields were taken, see `Lazy`, and whose reference count is kept). A box on the
 -- path of a one-hole value records the context path with its header (see `genHolePath`).
-genBox :: Ctx -> Bool -> Int -> Alloc -> VVal -> G String
-genBox cx inSum tag at v
+genBox :: Ctx -> Int -> Alloc -> VVal -> G String
+genBox cx tag at v
   = do t <- tyOf cx v
        ct <- ctype t
        e <- genV cx v
        case ct of
-         CPrim p | not inSum, Just (box,_) <- primBox p -> return (box ++ "(" ++ e ++ ",_ctx)")
-         CEnum _ | not inSum -> return ("kk_int32_box((int32_t)" ++ e ++ ",_ctx)")
          CUnit -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" ++ show tag ++ "))")
          _ -> do bt <- blockType ct
                  x <- fresh "b"
@@ -461,32 +460,48 @@ genAlias cx dest ve x t named e
 
 genUnbox :: Ctx -> Dest -> Path -> Path -> VExpr -> G [String]
 genUnbox cx dest v x e
-  = do A (ABox t) <- tyOfName cx v
+  = do A a <- tyOfName cx v
        let ve = localName v
-           inSum = isJust (sumOffset v)
+       (t,ue,body) <- case a of
+         -- Scalar unbox helpers can consume the box themselves. For immediate
+         -- scalars this removes the generic drop; heap-backed scalars still
+         -- release their storage through the runtime's owned unbox path.
+         AScalar t -> do let (mode,body) = case e of
+                                             Drop z rest | z == v -> (Owned,rest)
+                                             _ -> (Borrowed,e)
+                         ue <- unboxScalar mode t ve
+                         return (t,ue,body)
+         ABox t -> do ue <- unboxBlock (S.member v (cxNamed cx)) t ve
+                      return (t,ue,e)
+         _ -> failG ("unboxing a value of type " ++ show a)
        ct <- ctype t
-       let -- Scalar unbox helpers can consume the box themselves. For immediate
-           -- scalars this removes the generic drop; heap-backed scalars still
-           -- release their storage through the runtime's owned unbox path.
-           scalar = case ct of
-                      CPrim p -> case primBox p of { Just _ -> True; _ -> False }
-                      CEnum _ -> True
-                      _       -> False
-           (mode,body) = case e of
-                           Drop z rest | z == v, scalar, not inSum -> (Owned,rest)
-                           _ -> (Borrowed,e)
-       ue <- unboxV cx mode inSum (S.member v (cxNamed cx)) t ve
        s <- genE (bindVar cx x (V t)) dest body
        return ([declare (ctName ct) x ue] ++ s)
 
--- the payload of a box; only a box at a type variable can be Koka's `box-any`
-unboxV :: Ctx -> Mode -> Bool -> Bool -> VType -> String -> G String
-unboxV cx mode inSum named t e
+-- Koka's `box` of a scalar
+genScalar :: Ctx -> VVal -> G String
+genScalar cx v
+  = do ct <- tyOf cx v >>= ctype
+       e <- genV cx v
+       case ct of
+         CPrim p | Just (box,_) <- primBox p -> return (box ++ "(" ++ e ++ ",_ctx)")
+         CEnum _ -> return ("kk_int32_box((int32_t)" ++ e ++ ",_ctx)")
+         _ -> failG ("not a scalar: " ++ show ct)
+
+unboxScalar :: Mode -> VType -> String -> G String
+unboxScalar mode t e
   = do ct <- ctype t
        let borrow = if owning mode then "KK_OWNED" else "KK_BORROWED"
        case ct of
-         CPrim p | not inSum, Just (_,unbox) <- primBox p -> return (unbox ++ "(" ++ e ++ "," ++ borrow ++ ",_ctx)")
-         CEnum _ | not inSum -> return ("(" ++ ctName ct ++ ")kk_int32_unbox(" ++ e ++ "," ++ borrow ++ ",_ctx)")
+         CPrim p | Just (_,unbox) <- primBox p -> return (unbox ++ "(" ++ e ++ "," ++ borrow ++ ",_ctx)")
+         CEnum _ -> return ("(" ++ ctName ct ++ ")kk_int32_unbox(" ++ e ++ "," ++ borrow ++ ",_ctx)")
+         _ -> failG ("not a scalar: " ++ show ct)
+
+-- the payload of a box; only a box at a type variable can be Koka's `box-any`
+unboxBlock :: Bool -> VType -> String -> G String
+unboxBlock named t e
+  = do ct <- ctype t
+       case ct of
          CUnit -> return "kk_Unit"
          _ -> do bt <- blockType ct
                  x <- fresh "ub"
