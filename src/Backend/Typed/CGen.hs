@@ -661,7 +661,7 @@ fromKoka kt ct e
   | otherwise
   = case ct of
       CEnum _ -> "((" ++ ctName ct ++ ")(" ++ e ++ "))"
-      CPrim p -> "((" ++ p ++ ")(" ++ e ++ "))"
+      CPrim _ -> "((" ++ ctName ct ++ ")(" ++ e ++ "))"
       _ -> "kt_pun(" ++ ctName ct ++ "," ++ e ++ ")"
 
 -- expressions
