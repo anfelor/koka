@@ -52,8 +52,12 @@
   once in its scope (a borrowed one not at all), it must never be needed twice, and only a
   unique one may be consumed as unique (`leave`).
 
-  The body of a join point is checked like the body of a function whose owned parameters
-  include the variables it captures; a jump is checked like a call that also consumes the
+  The body of a join point is checked like the body of a function whose parameters include
+  the variables it captures: unique if the body uses them as unique, borrowed if their owner
+  is borrowed and the body does not consume them (a join point is not recursive and runs in
+  the scope of its definition), and owned otherwise, with as many references as the body
+  consumes (Γ_c is a multiset). The jumps use them in the same way, so a `let` before the
+  join point is unique if the body uses its variable as unique. A jump is checked like a call that also passes the
   captured variables.
 
   Descriptions need no check here: a root is bound only once in a definition (`Check`) and
@@ -96,7 +100,8 @@ data Use = Use{ uNet :: Counts, uPeak :: Counts, uBorrowed :: S.Set Path, uUniqu
 type L a = M Owners Trivial a
 
 -- the modes of the parameters of the join points in scope, and the variables they capture
-type Joins = M.Map Name ([Mode],[Path])
+-- with their modes
+type Joins = M.Map Name ([Mode],[(Path,Mode)])
 
 checkLinear :: Program -> [String]
 checkLinear prog
@@ -238,7 +243,7 @@ roots env m bs check
   = do let xs = [(x,m) | (x,t) <- bs, not (trivialTy env t)]
        withOwners xs check >>= leave xs
 
--- a body (of a function, closure or join point) whose only variables are its parameters
+-- a body (of a function or closure) whose only variables are its parameters
 closed :: [(Path,Mode)] -> L Use -> L ()
 closed ps check
   = do u <- local (const (M.fromList ps)) check
@@ -404,9 +409,11 @@ checkE env g js expr
                      Nothing -> fail ("jump to unknown join point " ++ show j)
       -- the captured variables that are not parts of other captured variables
       Join j ps e1 e2 -> do let fvs = S.toList (fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps])
-                                caps = [x | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
-                            closed (params env ps ++ [(x,Owned) | x <- caps])
-                                   (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) js e1)
+                            let xs = [x | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
+                            u <- local (const (M.fromList (params env ps ++ [(x,Unique) | x <- xs])))
+                                       (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) js e1)
+                            caps <- concat <$> mapM (captured u) xs
+                            _ <- leave (params env ps ++ caps) u
                             checkE env g (M.insert j ([m | (_,m,_) <- ps],caps) js) e2
       App f vs -> do ft <- liftE (inferVar g f)
                      case ft of
@@ -426,6 +433,10 @@ checkE env g js expr
                              u1 <- checkE env g js e1
                              u2 <- checkE env g js e2
                              before (readVar env g x) (branches [u1{ uUnique = S.delete z (uUnique u1) }, u2])
+      -- the test reads the credit, which is empty in the second branch: the test consumes it there
+      IfFull r e1 e2 -> do u1 <- checkE env g js e1
+                           u2 <- before (consume env g r) (checkE env g js e2)
+                           before (readVar env g r) (branches [u1, u2])
       -- a unique use of `z`, whose block becomes the credit, a part of `z`
       UnboxRu z r e
         -> do bs <- liftE (unboxRuBinds g z r)
@@ -437,9 +448,22 @@ checkE env g js expr
     -- owned and unique arguments (and captured variables) first: a borrowed argument must not
     -- be derived from one of them
     args caps ms vs = uses ([ownedV env g v | (Owned,v) <- zip ms vs] ++
-                            map (consume env g) caps ++
+                            [consume env g x | (x,Owned) <- caps] ++
                             [uniqueV env g v | (Unique,v) <- zip ms vs] ++
-                            [borrowedV env g v | (Borrowed,v) <- zip ms vs])
+                            [uniqueName env g x | (x,Unique) <- caps] ++
+                            [borrowedV env g v | (Borrowed,v) <- zip ms vs] ++
+                            [inspect env g x | (x,Borrowed) <- caps])
+    -- A variable is captured unique if the body uses it as unique (the jump then uses it as
+    -- unique), borrowed if its owner is borrowed and the body does not consume it, and owned
+    -- otherwise, once for each reference that the body consumes.
+    captured :: Use -> Path -> L [(Path,Mode)]
+    captured u x
+      = do o <- ownerMode x
+           k <- keyOf x
+           let consumed = [n | (p,n) <- M.toList (uNet u), n > 0, p `within` k || k `within` p]
+           return (if S.member k (uUnique u) then [(x,Unique)]
+                   else if o == Borrowed && null consumed then [(x,Borrowed)]
+                   else replicate (maximum (1 : consumed)) (x,Owned))
 
 -- The binders of a destructuring of a variable are its parts, and an owned or unique
 -- destructuring consumes those of a trivial type. A unique destructuring consumes its

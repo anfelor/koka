@@ -59,8 +59,8 @@ dropValue fresh x t e
                     s' = inst tvs (map AVar bs) s
                 body <- dropValue fresh y (V s') (Ret UnitV)
                 return (Let u VUnit (Unpack Owned (Var x) bs y body) e)
-        VReuse _ _ -> return (Free x e)
-        VCtx _ _ -> return (Drop x e)
+        VReuse _ _ _ -> return (Free x e)
+        VCtx _ _ _ -> return (Drop x e)
         VUnit -> return e
         VRaw _ -> return e
 
@@ -83,8 +83,8 @@ isTrivialWith unroll t
                    VSum ts      -> all trivialV ts
                    VExists _ b  -> trivialV b
                    VPtr a       -> trivialA a
-                   VReuse _ _     -> False
-                   VCtx _ _     -> False
+                   VReuse _ _ _   -> False
+                   VCtx _ _ _   -> False
     trivialA a = case a of
                    AUnit     -> True
                    ASum ts   -> all (trivialA . snd) ts
@@ -119,8 +119,8 @@ containsReuse (V v) = case v of
   VExists _ b -> containsReuse (V b)
   VUnit -> False
   VRaw _ -> False
-  VReuse _ _ -> True
-  VCtx _ _ -> False
+  VReuse _ _ _ -> True
+  VCtx _ _ _ -> False
 containsReuse (A a) = case a of
   ABox v -> containsReuse (V v)
   AScalar v -> containsReuse (V v)
@@ -266,6 +266,7 @@ descendB fn fv fb expr
       Free r e              -> Free <$> fn r <*> plain e
       Dup x e               -> Dup <$> fn x <*> plain e
       IsUnique x e1 e2      -> IsUnique <$> fn x <*> plain e1 <*> plain e2
+      IfFull r e1 e2        -> IfFull <$> fn r <*> plain e1 <*> plain e2
       UnboxRu v r e         -> (\v' (r',e') -> UnboxRu v' r' e') <$> fn v <*> one r (Just SCredit) e
       Join j ps e1 e2       -> (\(xs,e1') e2' -> Join j [(x',m,t) | (x',(_,m,t)) <- zip xs ps] e1' e2')
                                  <$> fb [(x,Nothing) | (x,_,_) <- ps] e1 <*> plain e2
@@ -546,6 +547,7 @@ destructAOf expr
       Drop{} -> Nothing
       Free{} -> Nothing
       IsUnique{} -> Nothing
+      IfFull{} -> Nothing
       UnboxRu{} -> Nothing
       Join{} -> Nothing
       Jump{} -> Nothing
@@ -573,6 +575,7 @@ destructVOf expr
       Drop{} -> Nothing
       Free{} -> Nothing
       IsUnique{} -> Nothing
+      IfFull{} -> Nothing
       UnboxRu{} -> Nothing
       Join{} -> Nothing
       Jump{} -> Nothing
@@ -601,6 +604,7 @@ isRead expr
       Drop{}      -> False
       Free{}      -> False
       IsUnique{}  -> False
+      IfFull{}    -> False
       UnboxRu{}   -> False
       Join{}      -> False
       Jump{}      -> False
@@ -629,6 +633,7 @@ keepsPointer expr
       Drop{}      -> False
       Free{}      -> False
       IsUnique{}  -> False
+      IfFull{}    -> False
       UnboxRu{}   -> False
       Join{}      -> False
       Jump{}      -> False

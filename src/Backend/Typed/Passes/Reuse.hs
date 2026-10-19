@@ -130,14 +130,14 @@ ruE expr
               -- Keep descriptions that are still in scope through credit aliases.
               re <- ask
               t' <- case t of
-                      VReuse _ Nothing -> liftE (inferE (reEnv re) (reGamma re) M.empty e1')
+                      VReuse _ _ Nothing -> liftE (inferE (reEnv re) (reGamma re) M.empty e1')
                       _ -> return t
               Let x t' e1' <$> bind [(x,V t')] (ruE e2)
       Join j ps e1 e2
         -> do (e1',as) <- scope (Just []) (bind [(x,V t) | (x,_,t) <- ps] (ruE e1))
               let rs = fromMaybe [] as
               e2' <- local (\re -> re{ reJoins = M.insert j (map snd rs) (reJoins re) }) (ruE e2)
-              return (Join j (ps ++ [(r,Owned,VReuse n Nothing) | (r,n) <- rs]) e1' e2')
+              return (Join j (ps ++ [(r,Owned,VReuse MaybeEmpty n Nothing) | (r,n) <- rs]) e1' e2')
       Jump j vs
         -> do vs' <- mapM ruV vs
               ns  <- asks (M.findWithDefault [] j . reJoins)
@@ -167,11 +167,14 @@ ruE expr
       Free r e
         -> do t <- typeOfName r
               case t of
-                V (VReuse n _) -> offer r n return (Free r) e
+                V (VReuse _ n _) -> offer r n return (Free r) e
                 _ -> fail ("free of a non-credit: " ++ show r)
       IsUnique x e1 e2
         -> do es <- branches [([],e1),([],e2)]
               return (IsUnique x (es !! 0) (es !! 1))
+      IfFull r e1 e2
+        -> do es <- branches [([],e1),([],e2)]
+              return (IfFull r (es !! 0) (es !! 1))
       UnboxRu v r e
         -> do g <- asks reGamma
               bs <- liftE (unboxRuBinds g v r)
@@ -199,7 +202,7 @@ ruE expr
 offer :: Path -> Int -> (VExpr -> R VExpr) -> (VExpr -> VExpr) -> VExpr -> R VExpr
 offer r n use unusedOp e
   = do credits >>= setCredits . ((r,n) :)
-       t <- asks (M.findWithDefault (V (VReuse n Nothing)) r . reGamma)
+       t <- asks (M.findWithDefault (V (VReuse MaybeEmpty n Nothing)) r . reGamma)
        e' <- bind [(r,t)] (ruE e)
        unused <- any ((== r) . fst) <$> credits
        if unused then do spend r
@@ -216,7 +219,7 @@ dropReuse x r n e
            -- the contents are read once
            readY = if M.member y g then id else Unbox Borrowed x y
        body <- dropValue fresh y (V s) (Ret (Var r'))
-       return (readY (Let r (VReuse n Nothing) (IsUnique x (UnboxRu x r' body)
+       return (readY (Let r (VReuse MaybeEmpty n Nothing) (IsUnique x (UnboxRu x r' body)
                                                   (Drop x (Ret (NoReuse n Nothing))))
                         e))
 

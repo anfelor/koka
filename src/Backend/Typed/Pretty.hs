@@ -61,13 +61,13 @@ prettyV t
       VPtr a@(AVar _)   -> prettyA a <.> text "*"
       VPtr a@(ACon _ _) -> prettyA a <.> text "*"
       VPtr a     -> parens (prettyA a) <.> text "*"
-      VReuse n contents -> text ("reuse" ++ show n) <.> prettyContents contents
+      VReuse f n contents -> text ("reuse" ++ (if f == Full then "!" else "") ++ show n) <.> prettyContents contents
       VUnit      -> text "I"
       VSum ts    -> parens (hsep (punctuate (text " (+)") (map prettyV ts)))
       VProd x y  -> parens (prettyV x <+> text "(x)" <+> prettyV y)
       VRaw n     -> nm n
       VExists vs t -> parens (text "exists" <+> hsep (map tv vs) <.> text "." <+> prettyV t)
-      VCtx a b   -> text "ctx" <.> angles (commaSep [prettyA a, prettyA b])
+      VCtx f a b -> text ("ctx" ++ (if f == Full then "+" else "")) <.> angles (commaSep [prettyA a, prettyA b])
 
 prettyT :: Ty -> Doc
 prettyT (A a) = prettyA a
@@ -92,7 +92,7 @@ prettyAVal val
       BoxIn x v   -> text "box-in@" <.> pv x <+> atomVal v
 
 prettyContents :: Maybe Contents -> Doc
-prettyContents = maybe empty (\(Contents k p t) -> brackets (text (show k) <.> semi <+> prettyVal p <+> text ":" <+> prettyV t))
+prettyContents = maybe empty (\(Contents k p t) -> brackets (text (maybe "_" show k) <.> semi <+> prettyVal p <+> text ":" <+> prettyV t))
 
 prettyVal :: VVal -> Doc
 prettyVal val
@@ -164,6 +164,7 @@ prettyExpr expr
       Drop x e -> text "drop" <+> pv x <.> semi <-> prettyExpr e
       Free r e -> text "free" <+> pv r <.> semi <-> prettyExpr e
       IsUnique x e1 e2 -> text "if-unique" <+> pv x <-> indent 2 (vcat [text "then" <+> align (prettyExpr e1), text "else" <+> align (prettyExpr e2)])
+      IfFull r e1 e2 -> text "if-full" <+> pv r <-> indent 2 (vcat [text "then" <+> align (prettyExpr e1), text "else" <+> align (prettyExpr e2)])
       UnboxRu v r e -> text "let @" <+> pv r <+> text "=" <+> pv v <+> text "in" <-> prettyExpr e
       Join j ps e1 e2 -> text "join" <+> nm j <.> parens (commaSep [mode m <.> pv x <+> colon <+> prettyV t | (x,m,t) <- ps]) <+> text "="
                          <-> indent 2 (prettyExpr e1) <-> text "in" <+> align (prettyExpr e2)

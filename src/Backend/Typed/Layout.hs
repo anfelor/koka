@@ -74,7 +74,7 @@ layout t
   = case t of
       VRaw n      -> CPrim (rawCType n)
       VExists _ b -> layout b
-      VReuse _ _    -> CReuse
+      VReuse _ _ _  -> CReuse
       VSum ts | isEnum t -> CEnum (enumSize (length ts))
       VSum ts     -> let alts = map altLayout ts
                      in CSum (structName ("S[" ++ intercalate "|" (map (maybe "U" canonCT) alts) ++ "]")) alts
@@ -86,7 +86,7 @@ layout t
       VPtr _      -> CBox
       -- Koka's `cctx`: `res` and the address of the hole, which is boxed as a value
       -- (`kk_field_addr_t`), so duplicating and dropping it does nothing
-      VCtx a b    -> layout (VProd (VPtr a) (VPtr b))
+      VCtx _ a b  -> layout (VProd (VPtr a) (VPtr b))
   where
     altLayout s = case layout s of
                     CUnit -> Nothing
@@ -102,8 +102,8 @@ leaves t
       VPtr _ -> [t]
       VSum _ -> [t]
       VRaw _ -> [t]
-      VReuse _ _ -> [t]
-      VCtx a b -> [VPtr a, VPtr b]
+      VReuse _ _ _ -> [t]
+      VCtx _ a b -> [VPtr a, VPtr b]
 
 enumSize :: Int -> EnumSize
 enumSize n

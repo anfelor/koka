@@ -216,7 +216,7 @@ elabApp f args resTp
   | isPrim nameCCtxApply f, [acc,_] <- args
   = do t <- vt (typeOf acc)
        (a,b) <- case t of
-                  VCtx a b -> return (a,b)
+                  VCtx _ a b -> return (a,b)
                   _ -> failE ("plugging a non-context: " ++ ppr t)
        let shared = not (isLinearContextPrim f)
        callWith (\[c,v] -> return (Ret (Plug (ctxCopy shared c) v))) [t, VPtr b] (VPtr a) args resTp
@@ -637,7 +637,7 @@ ctxCopy False v = v
 holeType :: VType -> E AType
 holeType t
   = case t of
-      VCtx _ b -> return b
+      VCtx _ _ b -> return b
       _ -> failE ("expecting a context: " ++ ppr t)
 
 -- the address of the hole of a context under construction: `@field-addr-of` or a variable

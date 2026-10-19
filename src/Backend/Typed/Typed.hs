@@ -22,6 +22,7 @@ import Backend.Typed.Passes.Simplify( simplifyProgram )
 import Backend.Typed.Passes.Perceus( perceusProgram )
 import Backend.Typed.Passes.Lazy( lazyProgram )
 import Backend.Typed.Passes.Reuse( reuseProgram )
+import Backend.Typed.Passes.ExpandReuse( expandReuseProgram )
 import Backend.Typed.Passes.DropSpec( dropSpecProgram )
 import Backend.Typed.Passes.Match( matchProgram )
 import Backend.Typed.Passes.SinkJoins( sinkJoinsProgram )
@@ -38,7 +39,8 @@ typedFromCore platform enableReuse nt imports uniq core
         prog                   = pathsProgram eprog
         passes                 = [("anf",False,pure' anfProgram), ("contify",False,contifyProgram), ("simplify",False,pure' simplifyProgram), ("perceus",True,perceusProgram), ("lazy",True,lazyProgram)
                                    ,("dropspec",True,dropSpecProgram)] ++ [("reuse",True,reuseProgram) | enableReuse]
-                                   ++ [("match",True,matchProgram), ("sinkjoins",True,pure' sinkJoinsProgram), ("joinargs",True,pure' joinArgsProgram), ("inline",True,pure' inlineProgram)]
+                                   ++ [("match",True,matchProgram), ("sinkjoins",True,pure' sinkJoinsProgram), ("joinargs",True,pure' joinArgsProgram)]
+                                   ++ [("expandreuse",True,pure' expandReuseProgram) | enableReuse] ++ [("inline",True,pure' inlineProgram)]
         (dsprog,msgs)          = runPasses prog (label "check" (checkProgram prog)) passes
     in (dsprog, label "elab" elabErrs ++ msgs ++ label "note" notes)
   where
