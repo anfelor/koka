@@ -7,11 +7,12 @@
 -----------------------------------------------------------------------------
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, collapse
+module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents, collapse
                           , rep, boxrep, boxA, shapeA, shapeLeaves, isPtr, varV, forallA, prodV, sumTypes, sumAlts, sumOf
                           , vtInt, vtString, vtChar, vtFloat, atAny
                           ) where
 
+import Data.Functor.Identity( Identity(..) )
 import qualified Data.Map as M
 import Control.Monad( foldM )
 import Common.NamePrim( nameTpInt, nameTpString, nameTpChar, nameTpFloat, nameTpAny )
@@ -59,28 +60,31 @@ inst tvs tys = subst (M.fromList (zip tvs tys))
 
 -- Transform descriptions without changing the runtime type of a credit.
 mapReuseContents :: (Maybe Contents -> Maybe Contents) -> VType -> VType
-mapReuseContents f = goV
+mapReuseContents f = runIdentity . traverseReuseContents (Identity . f)
+
+traverseReuseContents :: Applicative f => (Maybe Contents -> f (Maybe Contents)) -> VType -> f VType
+traverseReuseContents f = goV
   where
     goV t = case t of
-      VPtr a -> VPtr (goA a)
-      VSum ts -> VSum (map goV ts)
-      VProd a b -> VProd (goV a) (goV b)
-      VExists vs b -> VExists vs (goV b)
-      VReuse fl n p -> VReuse fl n (f p)
-      VCtx fl a b -> VCtx fl (goA a) (goA b)
-      VUnit -> t
-      VRaw _ -> t
+      VPtr a -> VPtr <$> goA a
+      VSum ts -> VSum <$> traverse goV ts
+      VProd a b -> VProd <$> goV a <*> goV b
+      VExists vs b -> VExists vs <$> goV b
+      VReuse fl n p -> VReuse fl n <$> f p
+      VCtx fl a b -> VCtx fl <$> goA a <*> goA b
+      VUnit -> pure t
+      VRaw _ -> pure t
     goA a = case a of
-      ABox t -> ABox (goV t)
-      AScalar t -> AScalar (goV t)
-      ASum ts -> ASum [(i,goA t) | (i,t) <- ts]
-      AFun ps r -> AFun [(m,goV t) | (m,t) <- ps] (goV r)
-      AForall vs b -> AForall vs (goA b)
-      AApp v ts -> AApp v (map goA ts)
-      ACon n ts -> ACon n (map goA ts)
-      ALam vs b -> ALam vs (goA b)
-      AUnit -> a
-      AVar _ -> a
+      ABox t -> ABox <$> goV t
+      AScalar t -> AScalar <$> goV t
+      ASum ts -> ASum <$> traverse (\(i,t) -> (,) i <$> goA t) ts
+      AFun ps r -> AFun <$> traverse (\(m,t) -> (,) m <$> goV t) ps <*> goV r
+      AForall vs b -> AForall vs <$> goA b
+      AApp v ts -> AApp v <$> traverse goA ts
+      ACon n ts -> ACon n <$> traverse goA ts
+      ALam vs b -> ALam vs <$> goA b
+      AUnit -> pure a
+      AVar _ -> pure a
 
 -- a value at a type variable: `a*`
 varV :: TVar -> VType

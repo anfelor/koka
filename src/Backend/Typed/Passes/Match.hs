@@ -16,21 +16,19 @@
 module Backend.Typed.Passes.Match( matchProgram ) where
 
 import qualified Data.Map as Map
-import qualified Data.Set as Set
 import Data.List( sortOn )
-import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
 import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuBinds )
 import Backend.Typed.Layout( shapeIsHeap )
 
-type Match a = M (Env,Gamma) (Int,Set.Set Path) a
+type Match a = M (Env,Gamma) () a
 
 matchProgram :: Program -> (Program,[String])
 matchProgram prog
   = let run d = case evalM (matchE (defBody d)) (envOf prog,params d)
-                          (0,Set.fromList (bindersE (defBody d)) `Set.union` fvE (defBody d)) of
+                          () of
                   Right e -> (d{ defBody = e },[])
                   Left err -> (d,[show (defName d) ++ ": " ++ err])
         (defs,errs) = unzip (map run (progDefs prog))
@@ -38,12 +36,6 @@ matchProgram prog
   where
     params DefFun{ defArgs = ps } = Map.fromList [(x,V t) | (x,_,t) <- ps]
     params DefVal{} = Map.empty
-
-fresh :: Match Path
-fresh = do (n,used) <- get
-           let x = root (newHiddenName ("match" ++ show n))
-           put (n+1,Set.insert x used)
-           if Set.member x used then fresh else return x
 
 bind :: [(Path,Ty)] -> Match a -> Match a
 bind bs = local (\(env,g) -> (env,bindAll bs g))
@@ -86,12 +78,12 @@ partition m v ts alts def
         let (ls,rs) = span ((< k) . fst) ts
             (left,right) = span (\(i,_,_) -> i < k) alts
             defaultFor ss = if any (\(i,_) -> i `notElem` selected) ss then def else Nothing
-        x <- fresh
-        y <- fresh
+        let x = child v SLo
+            y = child v SHi
         e1 <- partition m x ls left (defaultFor ls)
         e2 <- partition m y rs right (defaultFor rs)
         return (SplitA m v k (x,e1) (y,e2))
-      _ -> return (CaseA m v alts def)
+      _ -> return (nameParts (CaseA m v alts def))
   where
     selected = [i | (i,_,_) <- alts]
     -- A sparse default must fit wholly on the immediate side. This avoids

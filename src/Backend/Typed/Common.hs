@@ -16,10 +16,11 @@ import Data.Functor.Const( Const(..) )
 import Data.Monoid( Sum(..) )
 import Data.Functor.Identity( Identity(..) )
 import Data.List( isPrefixOf )
+import Data.Maybe( listToMaybe, fromMaybe )
 import Common.Name
 import Common.NamePrim( nameTpReuse )
 import Backend.Typed.Syntax
-import Backend.Typed.Types( Types(..), inst, sumAlts, sumOf, mapReuseContents )
+import Backend.Typed.Types( Types(..), inst, sumAlts, sumOf, mapReuseContents, traverseReuseContents )
 
 -- A continuation that wraps an expression.
 type K = VExpr -> VExpr
@@ -27,38 +28,99 @@ type K = VExpr -> VExpr
 compose :: [K] -> K
 compose = foldr (.) id
 
+-- A fresh-name supply belongs to one definition, shared by all of a pass's
+-- nested scopes. Reserve description names too: they can outlive their binders.
+data NameSupply = NameSupply Int (S.Set Name)
+
+freshFor :: Def -> NameSupply
+freshFor d = NameSupply 0 (S.fromList [n | Path n _ <- args ++ mentionedE body ++ types])
+  where
+    body = defBody d
+    args = case d of DefFun{ defArgs = ps } -> [x | (x,_,_) <- ps]; DefVal{} -> []
+    types = case d of
+      DefFun{ defArgs = ps, defRes = r } -> concatMap (mentionedT . (\(_,_,t) -> t)) ps ++ mentionedT r
+      DefVal{ defType = t } -> mentionedT t
+
+freshNameFrom :: String -> NameSupply -> (Name,NameSupply)
+freshNameFrom prefix (NameSupply i used)
+  | S.member n used = freshNameFrom prefix (NameSupply (i+1) used)
+  | otherwise = (n,NameSupply (i+1) (S.insert n used))
+  where n = newHiddenName (prefix ++ show i)
+
+freshPathFrom :: String -> NameSupply -> (Path,NameSupply)
+freshPathFrom prefix supply = let (n,supply') = freshNameFrom prefix supply in (root n,supply')
+
+mentionedT :: VType -> [Path]
+mentionedT t = getConst (traverseReuseContents (\p -> Const (case p of Nothing -> []; Just (Contents _ v s) -> mentionedV v ++ mentionedT s)) t)
+
+mentionedE :: VExpr -> [Path]
+mentionedE e = annotations ++ getConst (descendE (Const . (:[])) (Const . mentionedV) (\xs body -> Const (xs ++ mentionedE body)) e)
+  where annotations = case e of
+          Let _ t _ _ -> mentionedT t
+          Call _ ts _ -> concatMap (mentionedT . VPtr) ts
+          Join _ ps _ _ -> concatMap (mentionedT . (\(_,_,t) -> t)) ps
+          _ -> []
+
+mentionedV :: VVal -> [Path]
+mentionedV v = annotations ++ getConst (descendV (Const . mentionedA) (Const . mentionedV) v)
+  where annotations = case v of
+          Var x -> [x]
+          Glob _ ts -> concatMap (mentionedT . VPtr) ts
+          Inj _ t _ -> mentionedT t
+          Ptr a _ -> mentionedT (VPtr a)
+          Pack t ts _ -> mentionedT t ++ concatMap (mentionedT . VPtr) ts
+          TyApp _ ts -> concatMap (mentionedT . VPtr) ts
+          Context a _ -> mentionedT (VPtr a)
+          NoReuse _ p -> case p of Nothing -> []; Just (Contents _ w t) -> mentionedV w ++ mentionedT t
+          _ -> []
+
+mentionedA :: AVal -> [Path]
+mentionedA a = case a of
+  Lam ps t e -> [x | (x,_,_) <- ps] ++ concatMap (mentionedT . (\(_,_,s) -> s)) ps ++ mentionedT t ++ mentionedE e
+  _ -> annotations ++ getConst (descendA (Const . (:[])) (Const . mentionedA) (Const . mentionedV) a)
+  where annotations = case a of
+          InjA _ t _ -> mentionedT (VPtr t)
+          Roll t _ -> mentionedT (VPtr t)
+          OpenCon _ ts _ -> concatMap (mentionedT . VPtr) ts
+          _ -> []
+
 -- Discard an owned value by destructuring it down to boxed operands and credits.
--- The caller supplies fresh names from its own pass's supply.
-dropValue :: Monad m => m Path -> Path -> Ty -> VExpr -> m VExpr
-dropValue _ _ t e
+-- Parts use their canonical paths, reusing those already in scope. Sequencing
+-- a sum or existential drop needs a fresh root from the caller.
+dropValue :: Monad m => m Path -> Scope -> Path -> Ty -> VExpr -> m VExpr
+dropValue _ _ _ t e
   | isTrivial t = return e
-dropValue fresh x t e
+dropValue fresh scope x t e
   = case t of
       A _ -> return (Drop x e)
       V v -> case v of
-        VPtr a -> do y <- fresh
-                     return (Deref Owned (Var x) y (Drop y e))
-        VProd a b -> do y <- fresh
-                        z <- fresh
-                        rest <- dropValue fresh z (V b) e
-                        body <- dropValue fresh y (V a) rest
-                        return (Unpair Owned (Var x) y z body)
-        VSum ts -> do alts <- mapM dropAlt ts
-                      return (CaseV Owned (Var x) alts)
+        VPtr a -> do let y = child x SDeref
+                     return (reuseParts scope (Deref Owned (Var x) y (Drop y e)))
+        VProd a b -> do let y = child x SFst
+                            z = child x SSnd
+                            parts = M.union (scopeOf [y,z]) scope
+                        rest <- dropValue fresh parts z (V b) e
+                        body <- dropValue fresh parts y (V a) rest
+                        return (reuseParts scope (Unpair Owned (Var x) y z body))
+        VSum ts -> do u <- fresh
+                      alts <- mapM dropAlt (zip [0..] ts)
+                      -- A continuation can bind roots. Keep it outside the case,
+                      -- rather than copying its binders into every alternative.
+                      return (Let u VUnit (reuseParts scope (CaseV Owned (Var x) alts)) e)
           where
-            dropAlt s = do y <- fresh
-                           body <- dropValue fresh y (V s) e
-                           return (y,body)
+            dropAlt (i,s) = do let y = child x (SInjV i)
+                               body <- dropValue fresh (M.insert y Nothing scope) y (V s) (Ret UnitV)
+                               return (y,body)
         VExists tvs s
-          -> do y <- fresh
+          -> do let y = child x SPack
                 u <- fresh
                 -- Keep the continuation outside the existential's scope.
                 -- Fresh types only need to avoid the payload's free variables.
                 let start = minimum (0 : tvs ++ ftv s) - 1
                     bs = take (length tvs) [start,start-1 ..]
                     s' = inst tvs (map AVar bs) s
-                body <- dropValue fresh y (V s') (Ret UnitV)
-                return (Let u VUnit (Unpack Owned (Var x) bs y body) e)
+                body <- dropValue fresh (M.insert y Nothing scope) y (V s') (Ret UnitV)
+                return (Let u VUnit (reuseParts scope (Unpack Owned (Var x) bs y body)) e)
         VReuse _ _ _ -> return (Free x e)
         VCtx _ _ _ -> return (Drop x e)
         VUnit -> return e
@@ -403,55 +465,73 @@ fvE = getConst . descendE (Const . S.singleton) (Const . fvV) (\xs e -> Const (f
 -- substitution of unboxed values (their free variables must not be bound in the scope).
 -- A substitution at a named operand must itself be a variable; use a let for other values.
 replaceA :: M.Map Path VVal -> AVal -> AVal
-replaceA = substA . flip M.lookup
+replaceA = substA . valueAt
 
 replaceV :: M.Map Path VVal -> VVal -> VVal
-replaceV = substV . flip M.lookup
+replaceV = substV . valueAt
 
 replaceVType :: M.Map Path VVal -> VType -> VType
-replaceVType = substVType . flip M.lookup
+replaceVType = substVType . valueAt
 
 replaceContents :: M.Map Path VVal -> Contents -> Contents
-replaceContents = substContents . flip M.lookup
+replaceContents = substContents . valueAt
 
 replaceAType :: M.Map Path VVal -> AType -> AType
-replaceAType = substAType . flip M.lookup
+replaceAType = substAType . valueAt
 
 replaceE :: M.Map Path VVal -> VExpr -> VExpr
 replaceE sub expr
   | M.null sub = expr
-  | otherwise = substE (`M.lookup` sub) expr
+  | otherwise = substE (valueAt sub) expr
 
 -- substitution by a function from variables to their values (binders shadow it)
 type Subst = Path -> Maybe VVal
 
 -- the substitution without the binders of a scope
 hide :: [Path] -> Subst -> Subst
-hide xs sub x = if x `elem` xs then Nothing else sub x
+hide xs sub x = if any (x `within`) xs then Nothing else sub x
+
+-- Substitution's expression callback allows a pass to fuse its own rewrites
+-- with the traversal, rather than traversing a continuation again per alias.
+type SubstExpr = Scope -> Subst -> VExpr -> VExpr
 
 substA :: Subst -> AVal -> AVal
-substA sub val
+substA sub val = substAWith id substEIn (scopeFor sub (fvA val)) sub val
+
+substAWith :: (Path -> Path) -> SubstExpr -> Scope -> Subst -> AVal -> AVal
+substAWith renameRoot recur scope sub val
   = case val of
-      Lam ps r e -> let sub' = hide [x | (x,_,_) <- ps] sub
-                    in Lam [(x,m,substVType sub' t) | (x,m,t) <- ps]
-                         (substVType sub' r) (substE sub' e)
-      InjA i a v -> InjA i (substAType sub a) (substA sub v)
-      Roll a v -> Roll (substAType sub a) (substA sub v)
-      OpenCon c ts v -> OpenCon c (map (substAType sub) ts) (substV sub v)
-      _ -> mapA (substName sub) (substA sub) (substV sub) val
+      Lam ps r e -> let xs = [x | (x,_,_) <- ps]
+                        ys = map renameRoot xs
+                        sub' = bindSub (zip xs ys) sub
+                    in Lam [(y,m,substVType sub' t) | (y,(_,m,t)) <- zip ys ps]
+                         (substVType sub' r) (recur (M.union (scopeOf ys) scope) sub' e)
+      InjA i a v -> InjA i (substAType sub a) (goA v)
+      Roll a v -> Roll (substAType sub a) (goA v)
+      OpenCon c ts v -> OpenCon c (map (substAType sub) ts) (goV v)
+      _ -> mapA (substName sub) goA goV val
+  where
+    goA = substAWith renameRoot recur scope sub
+    goV = substVWith renameRoot recur scope sub
 
 substV :: Subst -> VVal -> VVal
-substV sub val
+substV sub val = substVWith id substEIn (scopeFor sub (fvV val)) sub val
+
+substVWith :: (Path -> Path) -> SubstExpr -> Scope -> Subst -> VVal -> VVal
+substVWith renameRoot recur scope sub val
   = case val of
       Var x -> maybe val id (sub x)
       Glob x ts -> Glob x (map (substAType sub) ts)
-      Inj i t v -> Inj i (substVType sub t) (substV sub v)
-      Ptr a v -> Ptr (substAType sub a) (substA sub v)
-      Pack t ts v -> Pack (substVType sub t) (map (substAType sub) ts) (substV sub v)
-      TyApp v ts -> TyApp (substV sub v) (map (substAType sub) ts)
-      Context b v -> Context (substAType sub b) (substV sub v)
+      Inj i t v -> Inj i (substVType sub t) (goV v)
+      Ptr a v -> Ptr (substAType sub a) (goA v)
+      Pack t ts v -> Pack (substVType sub t) (map (substAType sub) ts) (goV v)
+      TyApp v ts -> TyApp (goV v) (map (substAType sub) ts)
+      Context b v -> Context (substAType sub b) (goV v)
       NoReuse n p -> NoReuse n (fmap (substContents sub) p)
-      _ -> mapV (substA sub) (substV sub) val
+      _ -> mapV goA goV val
+  where
+    goA = substAWith renameRoot recur scope sub
+    goV = substVWith renameRoot recur scope sub
 
 substVType :: Subst -> VType -> VType
 substVType sub = mapReuseContents (fmap (substContents sub))
@@ -467,10 +547,77 @@ substAType sub a = case substVType sub (VPtr a) of
 substName :: Subst -> Path -> Path
 substName sub x = maybe x varOf (sub x)
 
+-- The parts in scope, and (for a residual boxed sum) its excluded tags.
+-- Keep this information lexical: the same path can be bound in separate branches.
+type Scope = M.Map Path (Maybe [Int])
+
+scopeOf :: [Path] -> Scope
+scopeOf xs = M.fromList [(x,Nothing) | x <- xs]
+
+defScope :: Def -> Scope
+defScope d = case d of
+  DefFun{ defArgs = ps } -> scopeOf [x | (x,_,_) <- ps]
+  DefVal{} -> M.empty
+
+bindScope :: VExpr -> [Path] -> Scope -> Scope
+bindScope expr xs scope = M.union (M.fromList [(x,rest x) | x <- xs]) scope
+  where
+    rest x = case expr of
+      CaseA _ z as _ | x == child z SRest -> Just [i | (i,_,_) <- as]
+      _ -> Nothing
+
+-- Reuse an already established alternative, except when destructuring has the
+-- effect of consuming a unique scrutinee. A residual sum also needs the same tags.
+knownAlt :: Scope -> VExpr -> Maybe Int
+knownAlt scope expr = do
+  z <- scrutVar expr
+  m <- case destructAOf expr of
+         Just ds -> Just (dsMode ds)
+         Nothing -> dsMode <$> destructVOf expr
+  let alts = getConst (descendB (const (Const [])) (const (Const [])) (\bs e -> Const [(bs,e)]) expr)
+      indices = case expr of CaseA _ _ as _ -> [i | (i,_,_) <- as]; _ -> []
+  listToMaybe [i | m /= Unique, (i,(bs@(_:_),_)) <- zip [0..] alts, Just ss <- [mapM snd bs]
+                , all (\s -> M.member (child z s) scope) ss
+                , SRest `notElem` ss || M.lookup (child z SRest) scope == Just (Just indices)]
+
+-- Reuse parts while constructing a destructuring form.
+reuseParts :: Scope -> VExpr -> VExpr
+reuseParts scope expr = case knownAlt scope expr of
+  Just i -> snd (getConst (descendB (const (Const [])) (const (Const [])) (\bs e -> Const [(bs,e)]) expr) !! i)
+  Nothing -> expr
+
+-- Retarget a newly constructed destructuring and its continuation. Existing root
+-- binders (including those of non-variable scrutinees) keep their identity.
+nameParts :: VExpr -> VExpr
+nameParts expr = runIdentity (descendB Identity Identity branch expr)
+  where
+    branch bs e = let xs = [fromMaybe x (pathOf (scrutVar expr) step) | (x,step) <- bs]
+                      ren = M.fromList [(x,y) | ((x,_),y) <- zip bs xs, x /= y]
+                  in Identity (xs,renameE ren e)
+
 substE :: Subst -> VExpr -> VExpr
-substE sub expr
-  = runIdentity (descendE (Identity . substName sub) (Identity . substV sub)
-                  (\xs e -> Identity (substE (hide xs sub) e)) annotated)
+substE sub expr = substEIn (scopeFor sub (fvE expr)) sub expr
+
+scopeFor :: Subst -> S.Set Path -> Scope
+scopeFor sub = scopeOf . S.toList . S.unions . map (\x -> maybe (S.singleton x) fvV (sub x)) . S.toList
+
+-- Substitution rebuilds destructuring binders along with their scrutinee. This
+-- preserves path names while doing the substitution's existing traversal; it is
+-- not a subsequent normalization pass. Descriptions use the same substitution.
+substEIn :: Scope -> Subst -> VExpr -> VExpr
+substEIn = substStep substEIn
+
+-- One expression layer, including value annotations and the scopes of lambdas.
+substStep :: SubstExpr -> SubstExpr
+substStep = substStepWith id
+
+-- A copy also gives each root binder a new name. Canonical parts and all
+-- description annotations follow the same substitution as ordinary operands.
+substStepWith :: (Path -> Path) -> SubstExpr -> SubstExpr
+substStepWith renameRoot recur scope sub expr
+  = case chosen of
+      Just (bs,e) -> recur scope (under bs) e
+      Nothing -> runIdentity (descendB Identity Identity branch operands)
   where
     annotated = case expr of
       Let x t e1 e2 -> Let x (substVType sub t) e1 e2
@@ -478,6 +625,37 @@ substE sub expr
       Join j ps e1 e2 -> let sub' = hide [x | (x,_,_) <- ps] sub
                         in Join j [(x,m,substVType sub' t) | (x,m,t) <- ps] e1 e2
       _ -> expr
+    operands = runIdentity (descendB (Identity . substName sub) (Identity . substVWith renameRoot recur scope sub)
+                             (\bs e -> Identity (map fst bs,e)) annotated)
+    named bs = [(x,fromMaybe (renameRoot x) (pathOf (scrutVar operands) step)) | (x,step) <- bs]
+    under bs = bindSub bs sub
+    alts = getConst (descendB (const (Const [])) (const (Const [])) (\bs e -> Const [(bs,e)]) operands)
+    namedOperands = runIdentity (descendB Identity Identity (\bs e -> Identity (map snd (named bs),e)) operands)
+    chosen = do i <- knownAlt scope namedOperands
+                let (bs,e) = alts !! i
+                return (named bs,e)
+    branch bs e =
+      let pairs = named bs
+          xs = map snd pairs
+      in Identity (xs,recur (bindScope operands xs scope) (under pairs) e)
+
+-- Extend a substitution with the (possibly renamed) binders of a scope.
+bindSub :: [(Path,Path)] -> Subst -> Subst
+bindSub bs sub p = case [(x,y) | (x,y) <- bs, p `within` x] of
+  ((x,y):_) -> project (Var y) (stepsFrom x p)
+  [] -> sub p
+
+-- Copy an expression without duplicating its root binders. Free variables keep
+-- their identities; descriptions of bound variables are renamed even out of scope.
+cloneE :: Monad m => m Path -> VExpr -> m VExpr
+cloneE fresh expr = do
+  let xs = S.toList (S.fromList [x | x@(Path _ []) <- bindersE expr])
+  ys <- mapM (const fresh) xs
+  let ren = M.fromList (zip xs ys)
+      renameRoot x = M.findWithDefault x x ren
+      sub = valueAt (M.map Var ren)
+      go = substStepWith renameRoot go
+  return (if null xs then expr else go (scopeFor sub (fvE expr)) sub expr)
 
 -- renaming includes boxed operands as well as unboxed variables
 renameA :: M.Map Path Path -> AVal -> AVal
@@ -491,17 +669,7 @@ renameE = replaceE . M.map Var
 
 -- rename a variable and its parts, also where they are bound
 renamePath :: Path -> Path -> VExpr -> VExpr
-renamePath x (Path r ss) = goE
-  where
-    rn p | p `within` x = Path r (ss ++ stepsFrom x p)
-         | otherwise = p
-    goE = runIdentity . descendB (Identity . rn) (Identity . goV) (\bs e -> Identity (map (rn . fst) bs, goE e))
-    goV v = case v of
-              Var p -> Var (rn p)
-              _ -> mapV goA goV v
-    goA a = case a of
-              Lam ps t e -> Lam [(rn p,m,s) | (p,m,s) <- ps] t (goE e)
-              _ -> mapA rn goA goV a
+renamePath x y = renameE (M.singleton x y)
 
 -- all bound variables (with repetitions)
 bindersE :: VExpr -> [Path]

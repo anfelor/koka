@@ -39,12 +39,12 @@ data REnv = REnv{ reEnv :: Env, reGamma :: Gamma, reJoins :: M.Map Name [Int] }
 
 -- `rsCredits`: the available credits, newest first;
 -- `rsAsked`: in the body of a join point, the credits that it asks for
-data RS = RS{ rsUniq :: Int, rsCredits :: Credits, rsAsked :: Maybe Credits }
+data RS = RS{ rsUniq :: NameSupply, rsCredits :: Credits, rsAsked :: Maybe Credits }
 
 type R a = M REnv RS a
 
 fresh :: R Path
-fresh = state (\s -> (root (newHiddenName ("ru" ++ show (rsUniq s))), s{ rsUniq = rsUniq s + 1 }))
+fresh = state (\s -> let (x,u) = freshPathFrom "ru" (rsUniq s) in (x,s{ rsUniq = u }))
 
 credits :: R Credits
 credits = gets rsCredits
@@ -85,7 +85,7 @@ scope ask action
 reuseProgram :: Program -> (Program,[String])
 reuseProgram prog
   = let env = envOf prog
-        run d = case evalM (ruE (defBody d)) (REnv env (params d) M.empty) (RS 0 [] Nothing) of
+        run d = case evalM (ruE (defBody d)) (REnv env (params d) M.empty) (RS (freshFor d) [] Nothing) of
                   Right body -> (d{ defBody = body }, [])
                   Left err   -> (d, [show (defName d) ++ ": " ++ err])
         (defs,errs) = unzip (map run (progDefs prog))
@@ -161,8 +161,9 @@ ruE expr
                   -- A single-constructor datatype (such as FIP padding) can hide
                   -- a reusable box. Unrolling transfers ownership without copying.
                   Left _ | Right b@(ABox s) <- unrollT env a, Right _ <- reuseSize s
-                    -> do y <- fresh
-                          Unroll Owned x y <$> bind [(y,A b)] (ruE (Drop y e))
+                    -> do let y = child x SRoll
+                          g <- asks reGamma
+                          reuseParts (scopeOf (M.keys g)) . Unroll Owned x y <$> bind [(y,A b)] (ruE (Drop y e))
                   Left _ -> Drop x <$> ruE e
       Free r e
         -> do t <- typeOfName r
@@ -212,13 +213,13 @@ offer r n use unusedOp e
 -- the paper's `[dropru]`, derived from `[if-unique]` and `[unbox-ru]`
 dropReuse :: Path -> Path -> Int -> VExpr -> R VExpr
 dropReuse x r n e
-  = do r' <- fresh
+  = do let r' = child x SCredit
        g <- asks reGamma
        s <- liftE (inferAVar g x >>= boxContents)
        let y = child x SContents
            -- the contents are read once
            readY = if M.member y g then id else Unbox Borrowed x y
-       body <- dropValue fresh y (V s) (Ret (Var r'))
+       body <- dropValue fresh (scopeOf (M.keys g)) y (V s) (Ret (Var r'))
        return (readY (Let r (VReuse MaybeEmpty n Nothing) (IsUnique x (UnboxRu x r' body)
                                                   (Drop x (Ret (NoReuse n Nothing))))
                         e))

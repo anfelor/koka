@@ -22,14 +22,14 @@ import Backend.Typed.Common
 import Backend.Typed.Monad
 import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes )
 
-type P a = M () Int a
+type P a = M () NameSupply a
 
 fresh :: String -> P Name
-fresh s = state (\n -> (newHiddenName ("cont" ++ s ++ show n),n+1))
+fresh s = state (freshNameFrom ("cont" ++ s))
 
 contifyProgram :: Program -> (Program,[String])
 contifyProgram prog
-  = let run d = case evalM (contifyE (envOf prog) (gamma d) (defBody d)) () 0 of
+  = let run d = case evalM (contifyE (envOf prog) (gamma d) (defBody d)) () (freshFor d) of
                   Right body -> (d{ defBody = body },[])
                   Left err -> (d,[show (defName d) ++ ": " ++ err])
         (defs,errs) = unzip (map run (progDefs prog))
