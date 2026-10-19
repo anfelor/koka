@@ -9,8 +9,8 @@
 {- C code generation from the typed IR (after Perceus).
 
   Unboxed types are represented as described in `Layout`. A boxed sum is a `kk_box_t`:
-  alternative `i` of a datatype has tag `i+1`; unit alternatives are singletons and boxes
-  are heap blocks. Externals are called with their Koka C types and their arguments are converted.
+  the alternative with index `i` of a sum has tag `i`; unit alternatives are singletons and
+  boxes are heap blocks. Externals are called with their Koka C types and their arguments are converted.
 -}
 module Backend.Typed.CGen( CEnv(..), External(..), cgenModule, runtimeHeader, cName, ktInitName, ktFileName ) where
 
@@ -29,7 +29,7 @@ import Kind.Newtypes
 import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Types( inst, prodV, sumWidth, collapse, Types(..) )
+import Backend.Typed.Types( inst, prodV, collapse, Types(..) )
 import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuBinds, unrollT, openFields, boxContents, reuseSize )
 import Backend.Typed.Names( nameLazyFree )
 import Backend.Typed.Layout
@@ -146,10 +146,6 @@ pointerTest ve left right
   = case (shapeIsHeap left,shapeIsHeap right) of
       (Just l,Just r) | l /= r -> Just ((if l then "" else "!") ++ "kk_datatype_is_ptr(kk_datatype_unbox(" ++ ve ++ "))")
       _ -> Nothing
-
--- size of a boxed sum
-sumSize :: AType -> Int
-sumSize = sumWidth
 
 -- values
 
@@ -285,21 +281,22 @@ holeMember cx ct v
                  _ -> return (i,Just v)
 
 -- Injections only contain construction forms, so their tag can be passed down to
--- the allocation. Existing boxed operands are duplicated in place (`Dup`).
+-- the allocation; a box or unit outside a sum has tag 1. Existing boxed operands are
+-- duplicated in place (`Dup`).
 genA :: Ctx -> AVal -> G String
-genA cx = genAIn cx 0
+genA cx = genAIn cx 1
 
 genAIn :: Ctx -> Int -> AVal -> G String
-genAIn cx pos val
+genAIn cx tag val
   = case val of
       Fun f -> staticFun f
-      UnitA -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" ++ show (pos+1) ++ "))")
-      Roll _ v -> genAIn cx pos v
-      InjA i (ASum _) v -> genAIn cx (pos + i) v
+      UnitA -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" ++ show tag ++ "))")
+      Roll _ v -> genAIn cx tag v
+      InjA i (ASum _) v -> genAIn cx i v
       InjA _ _ _ -> failG "injection into a non-sum"
-      Box v -> genBox cx (pos+1) Fresh v
-      BoxAt r v -> genBox cx (pos+1) (At r) v
-      BoxIn x v -> genBox cx (pos+1) (In x) v
+      Box v -> genBox cx tag Fresh v
+      BoxAt r v -> genBox cx tag (At r) v
+      BoxIn x v -> genBox cx tag (In x) v
       Scalar v -> genScalar cx v
       OpenCon c tys v -> genOpenCon cx c tys v
       Lam ps r e -> genLam cx ps r e
@@ -842,28 +839,27 @@ genE cx dest expr
         -> do t <- tyOfName cx v
               [[tl@(A ls)],[tr@(A rs)]] <- liftC (altTypes (cxEnv cx) t expr)
               let ve = localName v
-                  boundary = tagOffset v + k
               left <- genSumBranch cx dest v x tl e1
               right <- genSumBranch cx dest v y tr e2
               tg <- fresh "t"
               let (header,test) = case pointerTest ve ls rs of
                                    Just c -> ([],c)
-                                   Nothing -> ([tagDecl t tg ve],tg ++ " <= " ++ show boundary)
+                                   Nothing -> ([tagDecl t tg ve],tg ++ " < " ++ show k)
               return (["{"] ++ map ("  " ++) (header ++ ifChain [(test,left),("true",right)]) ++ ["}"])
       CaseA _ v alts def
         -> do t <- tyOfName cx v
               tss <- liftC (altTypes (cxEnv cx) t expr)
               let ve = localName v
               brs <- forM (zip alts tss) $ \((i,x,e),ts) -> do
-                [ti@(A a)] <- return ts
+                [ti] <- return ts
                 body <- genSumBranch cx dest v x ti e
-                return ([tagOffset v + i + 1 .. tagOffset v + i + sumSize a],body)
+                return ([i],body)
               fallback <- case (def, drop (length alts) tss) of
                             (Just (x,e), [[td]]) -> Just <$> genSumBranch cx dest v x td e
                             _ -> return Nothing
               tg <- fresh "t"
-              -- Match owns partitioning. Only a single runtime tag with a
-              -- default needs an equality branch; nested sums cover multiple tags.
+              -- Match owns partitioning. Only a single alternative with a
+              -- default needs an equality branch.
               let dispatch = case (brs,fallback) of
                     ([([tag],body)],Just other) -> ifChain [(tg ++ " == " ++ show tag,body),("true",other)]
                     _ -> switchCases tg brs fallback
