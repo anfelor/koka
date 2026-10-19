@@ -26,6 +26,7 @@ import Backend.Typed.Passes.DropSpec( dropSpecProgram )
 import Backend.Typed.Passes.Match( matchProgram )
 import Backend.Typed.Passes.SinkJoins( sinkJoinsProgram )
 import Backend.Typed.Passes.JoinArgs( joinArgsProgram )
+import Backend.Typed.Passes.Inline( inlineProgram )
 import Backend.Typed.Passes.Paths( pathsProgram )
 import Backend.Typed.Linear( checkLinear )
 
@@ -37,7 +38,7 @@ typedFromCore platform enableReuse nt imports uniq core
         prog                   = pathsProgram eprog
         passes                 = [("anf",False,pure' anfProgram), ("contify",False,contifyProgram), ("simplify",False,pure' simplifyProgram), ("perceus",True,perceusProgram), ("lazy",True,lazyProgram)
                                    ,("dropspec",True,dropSpecProgram)] ++ [("reuse",True,reuseProgram) | enableReuse]
-                                   ++ [("match",True,matchProgram), ("sinkjoins",True,pure' sinkJoinsProgram), ("joinargs",True,pure' joinArgsProgram)]
+                                   ++ [("match",True,matchProgram), ("sinkjoins",True,pure' sinkJoinsProgram), ("joinargs",True,pure' joinArgsProgram), ("inline",True,pure' inlineProgram)]
         (dsprog,msgs)          = runPasses prog (label "check" (checkProgram prog)) passes
     in (dsprog, label "elab" elabErrs ++ msgs ++ label "note" notes)
   where

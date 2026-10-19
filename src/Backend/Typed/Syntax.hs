@@ -226,10 +226,11 @@ instance Show Step where
 root :: Name -> Path
 root x = Path x []
 
--- Values `Γ ⊢ v :q t`. A borrowed value is an atom: a variable, a global, a literal, `()`, a
--- function, or a type application of one of these. A unique value is a variable, a context
--- `ctx K`, `c₁ ++ c₂` or `ctx-copy c`. All other values are owned. (The paper also allows borrowed pairs
--- and injections.)
+-- Values `Γ ⊢ v :q t`. A borrowed value is structural: a variable, a global, a literal, `()`,
+-- a function, a type application of one of these, or a pair, injection or pack of borrowed
+-- values (as in the paper). A unique value is a variable, a context `ctx K`, `c₁ ++ c₂`,
+-- `ctx-copy c`, `()`, a literal of a trivial type, or a pair, injection or pack of unique
+-- values. All other values are owned.
 --
 -- Boxed values `Γ ⊢ a :q A`; boxed variables occur only as named operands.
 data AVal
@@ -322,22 +323,24 @@ data VVal
   -- A top-level value is borrowed: an owned use needs a `[dup-glob]` (unless its type is trivial).
   | Glob Name [AType]
 
-  --  ────────────── [unit]
-  --   ∅ ⊢ () : 𝟙
+  --  ─────────────── [unit]
+  --   ∅ ⊢ () :q 𝟙
   | UnitV
 
   --  ──────────────────── [lit]
   --   ∅ ⊢ l : type(l)
+  --
+  -- A literal of a trivial type is also unique; `int` and `string` literals may be shared.
   | Lit Lit
 
-  --   Γ ⊢ v : Vᵢ
-  --  ─────────────────────── [inj]
-  --   Γ ⊢ injᵢ v : ⊕ⱼ Vⱼ
+  --   Γ ⊢ v :q Vᵢ
+  --  ──────────────────────── [inj]
+  --   Γ ⊢ injᵢ v :q ⊕ⱼ Vⱼ
   | Inj Int VType VVal
 
-  --   Γ₁ ⊢ v₁ : V₁    Γ₂ ⊢ v₂ : V₂
-  --  ────────────────────────────────── [pair]
-  --   Γ₁, Γ₂ ⊢ (v₁, v₂) : V₁ ⊗ V₂
+  --   Γ₁ ⊢ v₁ :q V₁    Γ₂ ⊢ v₂ :q V₂
+  --  ──────────────────────────────────── [pair]
+  --   Γ₁, Γ₂ ⊢ (v₁, v₂) :q V₁ ⊗ V₂
   | Pair VVal VVal
 
   --   Γ ⊢ v : A
@@ -347,9 +350,9 @@ data VVal
   -- A no-op at run time. The annotation records the pointed-to type `A`.
   | Ptr AType AVal
 
-  --   Γ ⊢ v : V[B̄/ā]
-  --  ─────────────────────────── [pack]
-  --   Γ ⊢ pack[B̄] v : ∃ā. V
+  --   Γ ⊢ v :q V[B̄/ā]
+  --  ──────────────────────────── [pack]
+  --   Γ ⊢ pack[B̄] v :q ∃ā. V
   | Pack VType [AType] VVal
 
   --   Γ ⊢ v :q (∀ā. A)*

@@ -348,13 +348,6 @@ valueAt vals (Path x ss)
       (w:_) -> Just w
       [] -> Nothing
 
--- substitute the known values (`valueAt`) in a value, but not in its boxed values
-substValues :: M.Map Path VVal -> VVal -> VVal
-substValues vals val
-  = case val of
-      Var x -> maybe val id (valueAt vals x)
-      _ -> mapV id (substValues vals) val
-
 -- The path of a binder with a step (`descendB`) from the scrutinee `scrutVar`; the other
 -- binders are roots.
 pathOf :: Maybe Path -> Maybe Step -> Maybe Path
@@ -409,54 +402,80 @@ fvE = getConst . descendE (Const . S.singleton) (Const . fvV) (\xs e -> Const (f
 -- substitution of unboxed values (their free variables must not be bound in the scope).
 -- A substitution at a named operand must itself be a variable; use a let for other values.
 replaceA :: M.Map Path VVal -> AVal -> AVal
-replaceA sub val
-  = case val of
-      Lam ps r e -> let sub' = foldr M.delete sub [x | (x,_,_) <- ps]
-                    in Lam [(x,m,replaceVType sub' t) | (x,m,t) <- ps]
-                         (replaceVType sub' r) (replaceE sub' e)
-      InjA i a v -> InjA i (replaceAType sub a) (replaceA sub v)
-      Roll a v -> Roll (replaceAType sub a) (replaceA sub v)
-      OpenCon c ts v -> OpenCon c (map (replaceAType sub) ts) (replaceV sub v)
-      _ -> mapA (replaceName sub) (replaceA sub) (replaceV sub) val
+replaceA = substA . flip M.lookup
 
 replaceV :: M.Map Path VVal -> VVal -> VVal
-replaceV sub val
-  = case val of
-      Var x -> M.findWithDefault val x sub
-      Glob x ts -> Glob x (map (replaceAType sub) ts)
-      Inj i t v -> Inj i (replaceVType sub t) (replaceV sub v)
-      Ptr a v -> Ptr (replaceAType sub a) (replaceA sub v)
-      Pack t ts v -> Pack (replaceVType sub t) (map (replaceAType sub) ts) (replaceV sub v)
-      TyApp v ts -> TyApp (replaceV sub v) (map (replaceAType sub) ts)
-      Context b v -> Context (replaceAType sub b) (replaceV sub v)
-      NoReuse n p -> NoReuse n (fmap (replaceContents sub) p)
-      _ -> mapV (replaceA sub) (replaceV sub) val
+replaceV = substV . flip M.lookup
 
 replaceVType :: M.Map Path VVal -> VType -> VType
-replaceVType sub = mapReuseContents (fmap (replaceContents sub))
+replaceVType = substVType . flip M.lookup
 
 replaceContents :: M.Map Path VVal -> Contents -> Contents
-replaceContents sub (Contents k p t) = Contents k (replaceV sub p) (replaceVType sub t)
+replaceContents = substContents . flip M.lookup
 
 replaceAType :: M.Map Path VVal -> AType -> AType
-replaceAType sub a = case replaceVType sub (VPtr a) of
-                      VPtr b -> b
-                      _ -> a
-
-replaceName :: M.Map Path VVal -> Path -> Path
-replaceName sub x = maybe x varOf (M.lookup x sub)
+replaceAType = substAType . flip M.lookup
 
 replaceE :: M.Map Path VVal -> VExpr -> VExpr
 replaceE sub expr
   | M.null sub = expr
-  | otherwise = runIdentity (descendE (Identity . replaceName sub) (Identity . replaceV sub)
-                  (\xs e -> Identity (replaceE (foldr M.delete sub xs) e)) annotated)
+  | otherwise = substE (`M.lookup` sub) expr
+
+-- substitution by a function from variables to their values (binders shadow it)
+type Subst = Path -> Maybe VVal
+
+-- the substitution without the binders of a scope
+hide :: [Path] -> Subst -> Subst
+hide xs sub x = if x `elem` xs then Nothing else sub x
+
+substA :: Subst -> AVal -> AVal
+substA sub val
+  = case val of
+      Lam ps r e -> let sub' = hide [x | (x,_,_) <- ps] sub
+                    in Lam [(x,m,substVType sub' t) | (x,m,t) <- ps]
+                         (substVType sub' r) (substE sub' e)
+      InjA i a v -> InjA i (substAType sub a) (substA sub v)
+      Roll a v -> Roll (substAType sub a) (substA sub v)
+      OpenCon c ts v -> OpenCon c (map (substAType sub) ts) (substV sub v)
+      _ -> mapA (substName sub) (substA sub) (substV sub) val
+
+substV :: Subst -> VVal -> VVal
+substV sub val
+  = case val of
+      Var x -> maybe val id (sub x)
+      Glob x ts -> Glob x (map (substAType sub) ts)
+      Inj i t v -> Inj i (substVType sub t) (substV sub v)
+      Ptr a v -> Ptr (substAType sub a) (substA sub v)
+      Pack t ts v -> Pack (substVType sub t) (map (substAType sub) ts) (substV sub v)
+      TyApp v ts -> TyApp (substV sub v) (map (substAType sub) ts)
+      Context b v -> Context (substAType sub b) (substV sub v)
+      NoReuse n p -> NoReuse n (fmap (substContents sub) p)
+      _ -> mapV (substA sub) (substV sub) val
+
+substVType :: Subst -> VType -> VType
+substVType sub = mapReuseContents (fmap (substContents sub))
+
+substContents :: Subst -> Contents -> Contents
+substContents sub (Contents k p t) = Contents k (substV sub p) (substVType sub t)
+
+substAType :: Subst -> AType -> AType
+substAType sub a = case substVType sub (VPtr a) of
+                     VPtr b -> b
+                     _ -> a
+
+substName :: Subst -> Path -> Path
+substName sub x = maybe x varOf (sub x)
+
+substE :: Subst -> VExpr -> VExpr
+substE sub expr
+  = runIdentity (descendE (Identity . substName sub) (Identity . substV sub)
+                  (\xs e -> Identity (substE (hide xs sub) e)) annotated)
   where
     annotated = case expr of
-      Let x t e1 e2 -> Let x (replaceVType sub t) e1 e2
-      Call f ts vs -> Call f (map (replaceAType sub) ts) vs
-      Join j ps e1 e2 -> let sub' = foldr M.delete sub [x | (x,_,_) <- ps]
-                        in Join j [(x,m,replaceVType sub' t) | (x,m,t) <- ps] e1 e2
+      Let x t e1 e2 -> Let x (substVType sub t) e1 e2
+      Call f ts vs -> Call f (map (substAType sub) ts) vs
+      Join j ps e1 e2 -> let sub' = hide [x | (x,_,_) <- ps] sub
+                        in Join j [(x,m,substVType sub' t) | (x,m,t) <- ps] e1 e2
       _ -> expr
 
 -- renaming includes boxed operands as well as unboxed variables
