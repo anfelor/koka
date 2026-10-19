@@ -39,23 +39,22 @@
 module Backend.Typed.Passes.DropSpec( dropSpecProgram ) where
 
 import qualified Data.Map as M
-import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
 import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferAVar, inferV, altTypes, unboxRuBinds, boxContents, reuseSize )
 
-type D a = M (Env,Gamma) Int a
+type D a = M (Env,Gamma) NameSupply a
 
 fresh :: String -> D Path
-fresh s = state (\n -> (root (newHiddenName ("ds" ++ s ++ show n)), n+1))
+fresh s = state (freshPathFrom ("ds" ++ s))
 
 bind :: [(Path,Ty)] -> D a -> D a
 bind bs = local (\(env,g) -> (env,bindAll bs g))
 
 dropSpecProgram :: Program -> (Program,[String])
 dropSpecProgram prog
-  = let run d = case evalM (dsE (defBody d)) (envOf prog,params d) 0 of
+  = let run d = case evalM (dsE (defBody d)) (envOf prog,params d) (freshFor d) of
                   Right e -> (d{ defBody = e },[])
                   Left err -> (d,[show (defName d) ++ ": " ++ err])
         (defs,errs) = unzip (map run (progDefs prog))
@@ -82,8 +81,8 @@ dsE (Dup p (Drop z e))
         do (_,g) <- ask
            s <- liftE (inferAVar g z >>= boxContents)
            r  <- fresh "r"
-           r' <- fresh "r"
-           let payload = Just (Contents (Just (boxTag z)) (Var p) s)
+           let r' = child z SCredit
+               payload = Just (Contents (Just (boxTag z)) (Var p) s)
                t = VReuse MaybeEmpty n payload
                unique = UnboxRu z r' (foldr Drop (Ret (Var r')) dead)
                shared = foldr Dup (Drop z (Ret (NoReuse n payload))) live

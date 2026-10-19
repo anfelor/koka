@@ -18,7 +18,7 @@
   Destructuring a dead owned variable moves its ownership to the binders
   (mode owned). Otherwise the binders are borrowed from the scrutinee (mode
   borrowed). A borrowed variable whose path passes through an owned variable `z` (the
-  longest such, its *owner*: see `Paths`) is only duplicated where `z` is given up while
+  longest such, its *owner*: see `Syntax.Path`) is only duplicated where `z` is given up while
   it is still needed:
   - where `z` is consumed (passed on, or moved by a `let` or a destructuring), it is
     duplicated before;
@@ -64,17 +64,17 @@ type VarSet = S.Set Path
 -- `peJoins`: the parameter modes of the join points in scope
 data PEnv = PEnv{ peEnv :: Env, peGamma :: Gamma, peBorrowed :: VarSet, peLazy :: Maybe Path, peJoins :: M.Map Name [Mode] }
 
-type P a = M () Int a
+type P a = M () NameSupply a
 
 fresh :: String -> P Path
-fresh s = state (\n -> (root (newHiddenName ("rc" ++ s ++ show n)), n+1))
+fresh s = state (freshPathFrom ("rc" ++ s))
 
 -- programs
 
 perceusProgram :: Program -> (Program,[String])
 perceusProgram prog
   = let env = envOf prog
-        run d = case evalM (perceusDef env d) () 0 of
+        run d = case evalM (perceusDef env d) () (freshFor d) of
                   Right d' -> (d', [])
                   Left err -> (d, [show (defName d) ++ ": " ++ err])
         (defs,errs) = unzip (map run (progDefs prog))
@@ -110,7 +110,7 @@ dropNames pe xs e = foldM step e (reverse xs)
     step body x = do t <- tyOfVar pe x
                      case partsOf pe x of
                        ps@(_:_) | not (pointer t) -> dropNames pe ps body
-                       _ -> dropValue (fresh "d") x t body
+                       _ -> dropValue (fresh "d") (scopeOf (M.keys (peGamma pe))) x t body
 
 -- the parts of a variable that are bound and not of a trivial type
 partsOf :: PEnv -> Path -> [Path]
@@ -225,10 +225,13 @@ percE' pe owned expr
 percE' pe owned expr
   | Just ds <- destructVOf expr
   = atomic pe owned (dsScrut ds) (restFv ds) $ \pe1 own1 z ->
-    do t   <- typeOfV pe1 z
-       tss <- liftE (altTypes (peEnv pe1) (V t) expr)
-       (m,es) <- destruct pe1 own1 (valName z) expr [zip xs ts | ((xs,_),ts) <- zip (dsAlts ds) tss] (map snd (dsAlts ds))
-       return (dsBuild ds m z es)
+    do t <- typeOfV pe1 z
+       let expr' = nameParts (dsBuild ds (dsMode ds) z (map snd (dsAlts ds)))
+       case destructVOf expr' of
+         Just ds' -> do tss <- liftE (altTypes (peEnv pe1) (V t) expr')
+                        (m,es) <- destruct pe1 own1 (valName z) expr' [zip xs ts | ((xs,_),ts) <- zip (dsAlts ds') tss] (map snd (dsAlts ds'))
+                        return (dsBuild ds' m z es)
+         Nothing -> fail "expected a value destructuring"
 percE' pe owned expr
   = case expr of
       Ret v -> do (k,[v']) <- useVals pe owned [(Owned,v)]
@@ -395,24 +398,24 @@ useA pe lastOcc i val
   where
     moves x j = M.lookup x lastOcc == Just j
     trivial x = maybe False isTrivial (M.lookup x (peGamma pe))
-    stepName :: Path -> StateT (K,Int) (M () Int) Path
+    stepName :: Path -> StateT (K,Int) (M () NameSupply) Path
     stepName x = do (k,j) <- get
                     put (k,j+1)
                     return x
 
-useChildren :: PEnv -> M.Map Path Int -> Int -> StateT (K,Int) (M () Int) a -> P (K,Int,a)
+useChildren :: PEnv -> M.Map Path Int -> Int -> StateT (K,Int) (M () NameSupply) a -> P (K,Int,a)
 useChildren _ _ i action
   = do (v,(k,j)) <- runStateT action (id,i)
        return (k,j,v)
 
-stepV :: PEnv -> M.Map Path Int -> VVal -> StateT (K,Int) (M () Int) VVal
+stepV :: PEnv -> M.Map Path Int -> VVal -> StateT (K,Int) (M () NameSupply) VVal
 stepV pe occ v
   = do (k,i) <- get
        (k',j,w) <- lift (useVal pe occ Owned i v)
        put (k . k',j)
        return w
 
-stepA :: PEnv -> M.Map Path Int -> AVal -> StateT (K,Int) (M () Int) AVal
+stepA :: PEnv -> M.Map Path Int -> AVal -> StateT (K,Int) (M () NameSupply) AVal
 stepA pe occ v
   = do (k,i) <- get
        (k',j,w) <- lift (useA pe occ i v)

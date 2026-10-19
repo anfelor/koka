@@ -67,14 +67,14 @@ groupsOf core
 -- a pass on the typed IR: its name, whether its result must be linear, and the pass
 type Pass = (String, Bool, Program -> (Program,[String]))
 
--- after each pass the variables are named by their paths again (`Paths`) and the program is
--- type checked and, if the pass produces linear code, checked for linearity; the checks stop
--- at the first error so that it names the pass that caused it
+-- Each pass preserves path naming; validate its result directly, and check linearity
+-- if the pass produces linear code. Stop at the first error so that later passes
+-- never run on invalid input and the message identifies the pass responsible.
 runPasses :: Program -> [(String,String)] -> [Pass] -> (Program,[(String,String)])
+runPasses prog msgs _ | not (null msgs) = (prog,msgs)
 runPasses prog msgs [] = (prog,msgs)
 runPasses prog msgs ((name,linear,pass):passes)
-  = let (passed,errs) = pass prog
-        prog'        = pathsProgram passed
+  = let (prog',errs) = pass prog
         checkErrs    = label ("check after " ++ name) (checkProgram prog')
         linErrs      = if linear && null checkErrs then label ("linear after " ++ name) (checkLinear prog') else []
         msgs'        = msgs ++ label name errs

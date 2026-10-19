@@ -197,8 +197,9 @@ data Lit = LitInt Integer
 -- Variables are paths: a root followed by the steps of the destructurings that lead from the
 -- root to the variable, outermost first. For example, `z.snd.deref` is the binder of
 -- `let_q ptr x = z.snd` where `z.snd` is the binder of `let_q (z.fst, z.snd) = z`. The binders
--- of other forms are roots, and a root is bound only once in a definition (`Check`; the pass
--- `Paths` renames the variables after each pass).
+-- of other forms are roots, and a root is bound only once in a definition. `Paths`
+-- establishes these invariants after elaboration; subsequent passes preserve them
+-- and `Check` validates their output directly.
 data Path = Path Name [Step]
           deriving (Eq,Ord)
 
