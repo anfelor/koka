@@ -210,7 +210,7 @@ altTypes env t expr
       _ -> Left ("cannot destructure a value of type " ++ ppr t)
 
 -- the binder of `[unbox-ru]`: the credit of the block of a unique box, whose tag follows from
--- the tag offset of the box, and whose contents `z.contents` must have been read
+-- the path of the box, and whose contents `z.contents` must have been read
 unboxRuBinds :: Gamma -> Path -> Path -> Q [(Path,Ty)]
 unboxRuBinds g z r
   = do s <- inferAVar g z >>= boxContents
@@ -219,7 +219,7 @@ unboxRuBinds g z r
        case M.lookup x g of
          Just (V s') | alphaEq s s' -> return ()
          _ -> Left ("taking the block of " ++ show z ++ " whose contents are not read")
-       return [(r,V (VReuse n (Just (Contents (tagOffset z + 1) (Var x) s))))]
+       return [(r,V (VReuse n (Just (Contents (boxTag z) (Var x) s))))]
 
 branches :: [Q VType] -> Q VType
 branches cs = do ts <- sequence cs

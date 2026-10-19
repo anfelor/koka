@@ -16,11 +16,10 @@ import Data.Functor.Const( Const(..) )
 import Data.Monoid( Sum(..) )
 import Data.Functor.Identity( Identity(..) )
 import Data.List( isPrefixOf )
-import Data.Maybe( fromMaybe )
 import Common.Name
 import Common.NamePrim( nameTpReuse )
 import Backend.Typed.Syntax
-import Backend.Typed.Types( Types(..), inst, sumAlts, sumWidth, mapReuseContents )
+import Backend.Typed.Types( Types(..), inst, sumAlts, sumOf, mapReuseContents )
 
 -- A continuation that wraps an expression.
 type K = VExpr -> VExpr
@@ -98,14 +97,18 @@ isTrivialWith unroll t
                    AApp _ _  -> False
                    ALam _ _  -> False
 
--- Boxed sum alternatives must have a tag determined by their construction.
+-- Boxed sum alternatives must have a tag determined by their construction: sums are flat and
+-- their tags are increasing.
 isShape :: AType -> Bool
 isShape a = case a of
-  AUnit -> True
-  ABox _ -> True
-  ASum ts -> not (null ts) && all (\(i,t) -> i >= 0 && isShape t) ts
-             && and [i + sumWidth t <= j | ((i,t),(j,_)) <- zip ts (drop 1 ts)]
-  _ -> False
+  ASum ts -> not (null ts) && all (\(i,t) -> i >= 1 && isAlt t) ts
+             && and [i < j | ((i,_),(j,_)) <- zip ts (drop 1 ts)]
+  _ -> isAlt a
+  where
+    isAlt t = case t of
+                AUnit -> True
+                ABox _ -> True
+                _ -> False
 
 -- Credits have ownership but no reference count: duplication cannot create another owner.
 containsReuse :: Ty -> Bool
@@ -170,10 +173,6 @@ holes = getSum . holesV
 tapp :: VVal -> [AType] -> VVal
 tapp v []  = v
 tapp v tys = TyApp v tys
-
-sumOf :: [AType] -> AType
-sumOf [a] = a
-sumOf ts = ASum (sumAlts ts)
 
 injA :: [AType] -> Int -> AVal -> AVal
 injA [_] 0 v = v
@@ -286,23 +285,13 @@ descendB fn fv fb expr
 child :: Path -> Step -> Path
 child (Path x ss) s = Path x (ss ++ [s])
 
--- ⌊x⌋: the tag offset of a boxed operand in the sum it was reached through, if it was (the
--- trailing `[case-a]` and `[split-a]` steps of its path)
-sumOffset :: Path -> Maybe Int
-sumOffset (Path _ ss)
-  = case takeWhile inSum (reverse ss) of
-      [] -> Nothing
-      ts -> Just (sum [i | SInjA i <- ts])
-  where
-    inSum s = case s of
-                SInjA _ -> True
-                SRest   -> True
-                SLo     -> True
-                SHi     -> True
-                _       -> False
-
-tagOffset :: Path -> Int
-tagOffset = fromMaybe 0 . sumOffset
+-- tag(z): the tag of the block of a box `z`, the alternative of a sum that it was reached
+-- through (`[case-a]`), or 1 if it is the only one
+boxTag :: Path -> Int
+boxTag (Path _ ss)
+  = case reverse ss of
+      (SInjA i : _) -> i
+      _ -> 1
 
 -- the other part of the parent of a part of a pair or a box
 sibling :: Step -> Maybe Step

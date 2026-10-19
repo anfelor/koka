@@ -110,7 +110,7 @@ conOf :: VVal -> Maybe (Int, VVal, AVal -> VVal)
 conOf (Ptr t (Roll t' s)) = fmap (\(i,w,re) -> (i, w, Ptr t . Roll t' . re)) (go s)
   where
     go (Box w)   = Just (0, w, id)
-    go (InjA i a (Box w)) = Just (i, w, InjA i a)
+    go (InjA i a (Box w)) = Just (i - 1, w, InjA i a)   -- tags start at 1
     go _         = Nothing
 conOf _ = Nothing
 

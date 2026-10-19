@@ -17,7 +17,7 @@ import Core.Core( conReprAllocSize, getConRepr )
 import Kind.Newtypes
 import Type.Type( typevarId, conInfoName, conInfoIsLazy )
 import Backend.Typed.Syntax
-import Backend.Typed.Common( sumOf )
+import Backend.Typed.Types( sumOf )
 import Backend.Typed.TypeInfo
 
 refBody :: Newtypes -> DataInfo -> Tr (Maybe AType)

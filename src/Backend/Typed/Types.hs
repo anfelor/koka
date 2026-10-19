@@ -8,7 +8,7 @@
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, collapse
-                          , rep, boxrep, boxA, shapeA, isPtr, varV, forallA, prodV, sumTypes, sumAlts, sumWidth
+                          , rep, boxrep, boxA, shapeA, shapeLeaves, isPtr, varV, forallA, prodV, sumTypes, sumAlts, sumOf
                           , vtInt, vtString, vtChar, vtFloat, atAny
                           ) where
 
@@ -97,14 +97,14 @@ sumTypes a
       ASum ts -> map snd ts
       _ -> [a]
 
--- The index is the start of an alternative's runtime tag interval, not its
--- position in the list. Filtering alternatives therefore preserves their tags.
+-- The index of an alternative is its runtime tag (Koka's tags start at 1), not its position
+-- in the list. Filtering alternatives therefore preserves their tags.
 sumAlts :: [AType] -> [(Int,AType)]
-sumAlts ts = zip (scanl (+) 0 (map sumWidth ts)) ts
+sumAlts ts = zip [1..] ts
 
-sumWidth :: AType -> Int
-sumWidth (ASum ts) = maximum (0 : [i + sumWidth t | (i,t) <- ts])
-sumWidth _ = 1
+sumOf :: [AType] -> AType
+sumOf [a] = a
+sumOf ts = ASum (sumAlts ts)
 
 prodV :: [VType] -> VType
 prodV []     = VUnit
@@ -232,20 +232,24 @@ boxA t
       _ | isScalar t -> AScalar t
         | otherwise  -> shapeA t
 
--- the shape of a boxed value, whose alternatives have tags
+-- the shape of a boxed value: a flat sum of its leaves, which have tags
 shapeA :: VType -> AType
-shapeA t
+shapeA t = sumOf (shapeLeaves t)
+
+-- the alternatives of a value, where those of nested sums are spliced in, in order
+shapeLeaves :: VType -> [AType]
+shapeLeaves t
   = case t of
-      VUnit   -> AUnit
-      VSum [s]    -> shapeA s
-      VSum ts | not (null ts) -> ASum (sumAlts (map shapeA ts))
-      VSum _      -> ABox t
-      VPtr _      -> ABox t
-      VProd _ _   -> ABox t
-      VRaw _      -> ABox t
-      VExists _ _ -> ABox t
-      VReuse _ _    -> ABox t
-      VCtx _ _    -> ABox t
+      VUnit   -> [AUnit]
+      VSum [s]    -> shapeLeaves s
+      VSum ts | not (null ts) -> concatMap shapeLeaves ts
+      VSum _      -> [ABox t]
+      VPtr _      -> [ABox t]
+      VProd _ _   -> [ABox t]
+      VRaw _      -> [ABox t]
+      VExists _ _ -> [ABox t]
+      VReuse _ _    -> [ABox t]
+      VCtx _ _    -> [ABox t]
 
 eqV :: VType -> VType -> Bool
 eqV s t

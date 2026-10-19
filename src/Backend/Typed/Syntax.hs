@@ -30,10 +30,8 @@
     tail position and omitted from the rules where that is all that happens; it is reset to ∅
     where an expression is not in tail position.
 
-    A boxed operand x reached through a sum (bound by `[case-a]` or `[split-a]`) lies at the
-    tag offset ⌊x⌋ of that sum, which its path determines (`Common.sumOffset`): the sum of the
-    indices of the `[case-a]` steps at its end, and ⌊x⌋ = 0 for an operand not reached through a
-    sum. The block of a box at offset k has tag k+1.
+    The tag of a box z, tag(z), is determined by its path (`Common.boxTag`): it is i if z is
+    the binder of alternative i of a `[case-a]`, and 1 otherwise.
 
   Structural rules
 
@@ -106,9 +104,10 @@ owning m
 -- boxed types A, B: what a pointer points to.
 --
 -- - Shapes `Box V`, `1` and `⊕ᵢ Aᵢ` have known tags and can be destructured by `[case]` and
---   `[unbox]`. A `Box V` is a heap block with a header (unless V has no contents, `𝟙`). The alternatives of a sum must be shapes: `a + 1` or `T⟨B̄⟩ + 1` has no known tags.
---   Sum indices are sorted, nonnegative starts of nonoverlapping tag intervals.
---   A nested sum occupies its tag width; gaps retain excluded alternatives' tag positions.
+--   `[unbox]`. A `Box V` is a heap block with a header (unless V has no contents, `𝟙`).
+--   Sums are flat: their alternatives are `Box V` or `1` (`a + 1` or `T⟨B̄⟩ + 1` has no known
+--   tags), indexed by their runtime tags, which are increasing and start at 1 as in Koka.
+--   A sub-sum keeps the tags of its alternatives, with gaps for those it excludes.
 -- - `Scalar V` is Koka's `box` of a scalar V (`Layout.isScalar`: a raw type or an enumeration
 --   that Koka boxes by itself): an immediate value, or a block that the runtime allocates (such
 --   as a large `float64`). It has no tag, so it is not a shape, and it is not reused. `boxA`
@@ -122,7 +121,7 @@ owning m
 data AType = ABox VType                 -- Box V
            | AScalar VType              -- Scalar V
            | AUnit                      -- 1
-           | ASum [(Int,AType)]         -- ⊕ᵢ Aᵢ, indexed by stable zero-based tag positions
+           | ASum [(Int,AType)]         -- ⊕ᵢ Aᵢ, indexed by tags
            | AFun [(Mode,VType)] VType  -- (q̄ V̄) -> W, for top-level functions and closures alike
            | AForall [TVar] AType       -- ∀ā. A
            | AVar TVar                  -- a
@@ -498,8 +497,8 @@ data VExpr
   --
   -- Indices must belong to the sum and be distinct. Without a default every alternative occurs.
   -- The default excludes the matched indices without renumbering the remainder;
-  -- it must be nonempty. No allocation or retagging occurs, at any mode. The binders lie at
-  -- the absolute tag offsets of their alternatives in the block of v: ⌊xᵢ⌋ = ⌊v⌋+i and ⌊d⌋ = ⌊v⌋.
+  -- it must be nonempty. No allocation or retagging occurs, at any mode: the binders are
+  -- the block of v, with the tags of their alternatives (tag(xᵢ) = i).
   | CaseA Mode Path [(Int,Path,VExpr)] (Maybe (Path,VExpr))
 
   --   Γ₁ ⊢ v :q ⊕ᵢ∈J Aᵢ    Γ₂, x :q ⊕ᵢ∈J,i<k Aᵢ ⊢ e₁ : W    Γ₂, y :q ⊕ᵢ∈J,i≥k Aᵢ ⊢ e₂ : W
@@ -507,7 +506,7 @@ data VExpr
   --   Γ₁, Γ₂ ⊢ split_q v at k of { x -> e₁; y -> e₂ } : W
   --
   -- Both sides must be nonempty. Both binders retain the original indices,
-  -- pointer and runtime tags (⌊x⌋ = ⌊y⌋ = ⌊v⌋). Even singleton partitions keep their sum wrapper.
+  -- pointer and runtime tags. Even singleton partitions keep their sum wrapper.
   -- Like CaseA, this supports owned, borrowed and unique modes without repacking.
   | SplitA Mode Path Int (Path,VExpr) (Path,VExpr)
 
@@ -610,14 +609,14 @@ data VExpr
   -- evaluation with `typed-lazy-free : ∀a. (!a) -> 1`, which does not drop its (taken) fields.
   | IsUnique Path VExpr VExpr
 
-  --   Γ, z.contents : V, r : ◇n[⌊z⌋+1; z.contents : V] ⊢ e : W    |V| = n
+  --   Γ, z.contents : V, r : ◇n[tag(z); z.contents : V] ⊢ e : W    |V| = n
   --  ──────────────────────────────────────────────────────────── [unbox-ru]
   --   Γ, z :! Box V, z.contents :^ V ⊢ let @ r = z in e : W
   --
   -- A unique `Box V` whose contents were read (`[bunbox]`) splits into its contents and its
   -- block, the inverse of `[box-at]`: the contents are taken out of the block without
   -- reference counting, and the block becomes the credit `r` (named `z.credit`). With
-  -- `[if-unique]` it makes `drop-reuse` of a box derivable. The block of `z` has tag ⌊z⌋+1.
+  -- `[if-unique]` it makes `drop-reuse` of a box derivable. The block of `z` has tag tag(z).
   | UnboxRu Path Path VExpr
 
   --   Γ_c, x̄ :q̄ V̄ | J ⊢ e₁ : W    Γ, Γ_c | J, j : Γ_c; (q̄ V̄) -> W ⊢ e₂ : W
