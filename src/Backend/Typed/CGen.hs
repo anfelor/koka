@@ -201,18 +201,19 @@ makeCtx ct (ss,res,hole)
   = do x <- fresh "ctx"
        return ("({ " ++ concat ss ++ ctName ct ++ " " ++ x ++ "; " ++ x ++ ".f0 = " ++ res ++ "; " ++ x ++ ".f1 = " ++ hole ++ "; " ++ x ++ "; })")
 
--- Appending a fresh context that is not empty plugs its `res` into the hole and keeps its hole
+-- Appending a nonempty context plugs its `res` into the hole and keeps its hole
 -- (`kk_cctx_extend_linear`); otherwise the runtime tests whether the second context is empty.
 genAppend :: Ctx -> VVal -> VVal -> G String
 genAppend cx c d
   = do ct <- tyOf cx (Append c d) >>= ctype
-       case d of
-         Context b k | k /= Hole
-           -> do (ss,r,h) <- genHolePath (bindVar cx nameHole (V (VPtr b))) k
-                 res <- plug cx c r
-                 makeCtx ct (ss,res,h)
+       td <- tyOf cx d
+       de <- genV cx d
+       case td of
+         VCtx Full _ _
+           -> do y <- fresh "c"
+                 res <- plug cx c (y ++ ".f0")
+                 makeCtx ct ([ctName ct ++ " " ++ y ++ " = " ++ de ++ "; "],res,y ++ ".f1")
          _ -> do ce <- genV cx c
-                 de <- genV cx d
                  x <- fresh "c"
                  y <- fresh "c"
                  return ("({ " ++ ctName ct ++ " " ++ x ++ " = " ++ ce ++ "; " ++ ctName ct ++ " " ++ y ++ " = " ++ de ++ "; "
@@ -380,32 +381,32 @@ genBox cx tag at v
                  case at of
                    Fresh -> return ("({ " ++ bt ++ "* " ++ x ++ " = " ++ allocFresh ++ "; "
                                     ++ x ++ "->p = " ++ e ++ "; " ++ box)
-                   At r  -> do described <- reuseMatches cx r t v
-                               let matches = maybe [] snd described
-                                   alloc = allocAt (localName r)
-                                   start = "({ _Static_assert(sizeof(" ++ bt ++ ") == " ++ show (blockSize ct) ++ ",\"kt_reuse\"); "
-                                   saved = length (filter id matches)
-                                   setTag | creditTag cx r == Just tag = ""
-                                          | otherwise = x ++ "->_block.header.tag = (kk_tag_t)" ++ show tag ++ "; "
-                                   setScan | fmap fst described == Just (scanOf ct) = ""
-                                           | otherwise = x ++ "->_block.header.scan_fsize = " ++ show (scanOf ct) ++ "; "
-                               if saved < 1 + ((1 + length matches) `div` 4)
-                                 then return (start ++ bt ++ "* " ++ x ++ " = " ++ alloc ++ "; " ++ x ++ "->p = " ++ e ++ "; " ++ box)
-                                 else do y <- fresh "reuse_payload"
+                   At r  -> do rt <- tyOfName cx r
+                               let start = "({ _Static_assert(sizeof(" ++ bt ++ ") == " ++ show (blockSize ct) ++ ",\"kt_reuse\"); "
+                               case rt of
+                                 V (VReuse Full _ _)
+                                   -> do described <- reuseMatches cx r t v
+                                         y <- fresh "reuse_payload"
                                          let field i = case ct of
                                                          CProd _ _ -> ".f" ++ show i
                                                          _ -> ""
-                                             writes = concat [x ++ "->p" ++ field i ++ " = " ++ y ++ field i ++ "; "
-                                                             | (i,same) <- zip [0..] matches, not same]
-                                         -- Evaluate once before testing the credit: dups still run
-                                         -- even when their corresponding stores are omitted.
-                                         -- A described credit is a unique block of its described payload,
-                                         -- so its header only needs the new tag and scan size, where they differ.
-                                         return (start ++ ctName ct ++ " " ++ y ++ " = " ++ e ++ "; " ++ bt ++ "* " ++ x ++ "; "
-                                                 ++ "if kk_likely(" ++ localName r ++ " != kk_reuse_null) { "
-                                                 ++ x ++ " = (" ++ bt ++ "*)" ++ localName r ++ "; " ++ setTag ++ setScan ++ setPath ++ writes
-                                                 ++ "} else { " ++ x ++ " = " ++ allocFresh ++ "; "
-                                                 ++ x ++ "->p = " ++ y ++ "; } " ++ box)
+                                             writes matches = concat [x ++ "->p" ++ field i ++ " = " ++ y ++ field i ++ "; "
+                                                                     | (i,same) <- zip [0..] matches, not same]
+                                             setTag | creditTag cx r == Just tag = ""
+                                                    | otherwise = x ++ "->_block.header.tag = (kk_tag_t)" ++ show tag ++ "; "
+                                             setScan scan | scan == scanOf ct = ""
+                                                          | otherwise = x ++ "->_block.header.scan_fsize = " ++ show (scanOf ct) ++ "; "
+                                             -- A described credit is a unique block of its described payload,
+                                             -- so its header only needs the new tag and scan size, where they differ,
+                                             -- and only the fields that change are stored. Dups still run, in `y`.
+                                             update = case described of
+                                                        Just (scan,matches) -> setTag ++ setScan scan ++ setPath ++ writes matches
+                                                        Nothing -> "kk_block_init(&" ++ x ++ "->_block,sizeof(" ++ bt ++ ")," ++ scan ++ "," ++ fromMaybe "0" cpath ++ ",(kk_tag_t)" ++ show tag ++ "); "
+                                                                   ++ x ++ "->p = " ++ y ++ "; "
+                                         return (start ++ ctName ct ++ " " ++ y ++ " = " ++ e ++ "; " ++ bt ++ "* " ++ x ++ " = (" ++ bt ++ "*)" ++ localName r ++ "; "
+                                                 ++ update ++ box)
+                                 -- a credit that may be empty, which `ExpandReuse` did not test
+                                 _ -> return (start ++ bt ++ "* " ++ x ++ " = " ++ allocAt (localName r) ++ "; " ++ x ++ "->p = " ++ e ++ "; " ++ box)
                    In y  -> do v <- fresh "v"
                                return ("({ " ++ ctName ct ++ " " ++ v ++ " = " ++ e ++ "; "
                                        ++ bt ++ "* " ++ x ++ " = (" ++ bt ++ "*)kt_block_clear(kk_datatype_as_ptr(kk_datatype_unbox(" ++ localName y ++ "),_ctx)," ++ scan ++ ",(kk_tag_t)" ++ show tag ++ ",_ctx); "
@@ -421,7 +422,7 @@ reuseMatches :: Ctx -> Path -> VType -> VVal -> G (Maybe (Int,[Bool]))
 reuseMatches cx r t v
   = do rt <- tyOfName cx r
        case rt of
-         V (VReuse _ (Just (Contents _ old ot)))
+         V (VReuse _ _ (Just (Contents _ old ot)))
            -> do oct <- ctype ot
                  ct <- ctype t
                  let slots s w ctw = zip (leafSlots ctw) (leafValues s w)
@@ -434,7 +435,7 @@ reuseMatches cx r t v
 creditTag :: Ctx -> Path -> Maybe Int
 creditTag cx r
   = case M.lookup r (cxGamma cx) of
-      Just (V (VReuse _ (Just (Contents k _ _)))) -> Just k
+      Just (V (VReuse _ _ (Just (Contents k _ _)))) -> k
       _ -> Nothing
 
 -- The value of each leaf of a value of type `t`, as a value in normal form (`collapse`) and
@@ -721,8 +722,12 @@ genE cx dest expr
               s <- genE cx dest e
               return (filter (not . null) [dropStmt ct (localName x)] ++ s)
       Free r e
-        -> do s <- genE cx dest e
-              return (dropStmt CReuse (localName r) : s)
+        -> do rt <- tyOfName cx r
+              s <- genE cx dest e
+              let free = case rt of
+                           V (VReuse Full _ _) -> "kt_reuse_free(" ++ localName r ++ ",_ctx);"
+                           _ -> dropStmt CReuse (localName r)
+              return (free : s)
       Dup x e
         -> do ct <- tyOfName cx x >>= ctOf
               s <- genE cx dest e
@@ -736,6 +741,15 @@ genE cx dest expr
                     A _ -> ("kk_block_is_unique(kk_datatype_as_ptr(" ++ d ++ ",_ctx))", S.insert x (cxShared cx))
               s2 <- genE cx{ cxShared = shared } dest e2
               return (["if kk_likely(" ++ test ++ ") {"]
+                      ++ map ("  " ++) s1 ++ ["} else {"] ++ map ("  " ++) s2 ++ ["}"])
+      IfFull r e1 e2
+        -> do t <- liftC (inferVar (cxGamma cx) r)
+              full <- case t of
+                        V (VReuse _ n p) -> return (V (VReuse Full n p))
+                        _ -> failG ("test of a non-credit: " ++ show r)
+              s1 <- genE (bindVar cx r full) dest e1
+              s2 <- genE cx dest e2
+              return (["if kk_likely(" ++ localName r ++ " != kk_reuse_null) {"]
                       ++ map ("  " ++) s1 ++ ["} else {"] ++ map ("  " ++) s2 ++ ["}"])
       UnboxRu v r e
         -> do bs <- liftC (unboxRuBinds (cxGamma cx) v r)
@@ -1327,6 +1341,9 @@ runtimeHeader = unlines
   , "// credits come from box blocks, which are always allocated with `kk_malloc_small`"
   , "static inline void kt_reuse_drop(kk_reuse_t r, kk_context_t* _ctx) {"
   , "  if (r != kk_reuse_null) { kk_assert_internal(kk_block_is_unique(r)); kk_free_small(r,_ctx); }"
+  , "}"
+  , "static inline void kt_reuse_free(kk_reuse_t r, kk_context_t* _ctx) {"
+  , "  kk_assert_internal(r != kk_reuse_null && kk_block_is_unique(r)); kk_free_small(r,_ctx);"
   , "}"
   , "static inline bool kt_box_is_any(kk_box_t b, kk_context_t* _ctx) {"
   , "  return (kk_box_is_ptr(b) && kk_block_has_tag(kk_ptr_unbox(b,_ctx), KK_TAG_BOX_ANY));"

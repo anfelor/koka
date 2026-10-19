@@ -77,8 +77,8 @@ boxLeaf t v
       VProd _ _   -> Box v
       VRaw _      -> Box v
       VExists _ _ -> Box v
-      VReuse _ _    -> Box v
-      VCtx _ _    -> Box v
+      VReuse _ _ _  -> Box v
+      VCtx _ _ _  -> Box v
 
 isMultiSum :: VType -> Bool
 isMultiSum (VSum ts) = length ts > 1
@@ -103,8 +103,8 @@ unboxAV t a
       VProd _ _   -> unbox
       VRaw _      -> unbox
       VExists _ _ -> unbox
-      VReuse _ _    -> unbox
-      VCtx _ _    -> unbox
+      VReuse _ _ _  -> unbox
+      VCtx _ _ _  -> unbox
   where
     unbox = do x <- fresh "x"   -- a box or a scalar
                return (Unbox Owned a x, Var x)

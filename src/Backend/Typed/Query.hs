@@ -55,31 +55,38 @@ inferE :: Env -> Gamma -> Joins -> VExpr -> Q VType
 inferE env g js e = do mapM_ checkReuseTy (M.elems g)
                        inferExpr env g js e
 
--- Forgetting a description is allowed; inventing one is not.
+-- Forgetting a description, its tag, or that a credit is full or a context nonempty is allowed;
+-- inventing any is not.
 expectV :: VType -> VType -> Q ()
 expectV expected actual
   = expect expected (forget expected actual)
   where
-    forget (VReuse _ Nothing) (VReuse n _) = VReuse n Nothing
+    forget (VReuse f _ p) (VReuse g n q) = VReuse (if f == MaybeEmpty then f else g) n (forgetDesc p q)
+    forget (VCtx f _ _) (VCtx g a b) = VCtx (if f == MaybeEmpty then f else g) a b
     forget (VProd a b) (VProd c d) = VProd (forget a c) (forget b d)
     forget (VSum ts) (VSum us) | length ts == length us = VSum (zipWith forget ts us)
     forget (VExists as a) (VExists bs b) | length as == length bs
       = VExists as (forget a (inst bs (map AVar as) b))
     forget _ t = t
+    forgetDesc p q = case (p,q) of
+                       (Just (Contents Nothing _ _), Just (Contents _ v s)) -> Just (Contents Nothing v s)
+                       (Just _, _) -> q
+                       (Nothing, _) -> Nothing
 
--- Forget only credits carried by a value, not contracts behind a pointer.
-mapCredits :: (Maybe Contents -> Maybe Contents) -> VType -> VType
-mapCredits f t = case t of
-  VReuse n p -> VReuse n (f p)
-  VProd a b -> VProd (mapCredits f a) (mapCredits f b)
-  VSum ts -> VSum (map (mapCredits f) ts)
-  VExists vs b -> VExists vs (mapCredits f b)
+-- Forget only credits and contexts carried by a value, not contracts behind a pointer.
+mapCredits :: (Fill -> Fill) -> (Maybe Contents -> Maybe Contents) -> VType -> VType
+mapCredits f g t = case t of
+  VReuse fl n p -> VReuse (f fl) n (g p)
+  VCtx fl a b -> VCtx (f fl) a b
+  VProd a b -> VProd (mapCredits f g a) (mapCredits f g b)
+  VSum ts -> VSum (map (mapCredits f g) ts)
+  VExists vs b -> VExists vs (mapCredits f g b)
   _ -> t
 
 -- the descriptions of the credits carried by a value
 descriptions :: VType -> [Contents]
 descriptions t = case t of
-  VReuse _ p -> maybe [] pure p
+  VReuse _ _ p -> maybe [] pure p
   VProd a b -> descriptions a ++ descriptions b
   VSum ts -> concatMap descriptions ts
   VExists _ b -> descriptions b
@@ -111,13 +118,13 @@ inferExpr env g js expr
                                branches (inferE env g js def : [inferE env g js e | (_,e) <- alts])
       Drop x e -> do t <- inferVar g x
                      case t of
-                       V (VCtx _ _) -> return ()
+                       V (VCtx _ _ _) -> return ()
                        V _ -> Left ("drop of an unboxed value: " ++ ppr t)
                        A _ -> return ()
                      inferE env g js e
       Free r e -> do t <- inferV env g (Var r)
                      case t of
-                       VReuse _ _ -> inferE env g js e
+                       VReuse _ _ _ -> inferE env g js e
                        _ -> Left ("free of a non-credit: " ++ ppr t)
       Dup x e -> do t <- inferVar g x
                     when (containsReuse t) (Left "cannot duplicate a reuse credit")
@@ -128,6 +135,11 @@ inferExpr env g js expr
                                  -> return ()
                                _ -> () <$ (inferAVar g x >>= boxContents >>= reuseSize)
                              branches [inferE env g js e1, inferE env g js e2]
+      -- the credit is full in the first branch and empty in the second
+      IfFull r e1 e2 -> do t <- inferV env g (Var r)
+                           case t of
+                             VReuse _ n p -> branches [inferE env (M.insert r (V (VReuse Full n p)) g) js e1, inferE env (M.delete r g) js e2]
+                             _ -> Left ("test of a non-credit: " ++ ppr t)
       UnboxRu v r e -> do bs <- unboxRuBinds g v r
                           inferE env (bindAll bs g) js e
       Join j ps e1 e2 -> do let xs = [x | (x,_,_) <- ps]
@@ -219,7 +231,7 @@ unboxRuBinds g z r
        case M.lookup x g of
          Just (V s') | alphaEq s s' -> return ()
          _ -> Left ("taking the block of " ++ show z ++ " whose contents are not read")
-       return [(r,V (VReuse n (Just (Contents (boxTag z) (Var x) s))))]
+       return [(r,V (VReuse Full n (Just (Contents (Just (boxTag z)) (Var x) s))))]
 
 branches :: [Q VType] -> Q VType
 branches cs = do ts <- sequence cs
@@ -227,9 +239,12 @@ branches cs = do ts <- sequence cs
                    []     -> Left "case without branches"
                    (t:rest)
                      | all (alphaEq t) rest -> return t
-                     | otherwise -> do let erase = mapCredits (const Nothing)
-                                       mapM_ (expect (erase t) . erase) rest
+                     | all (alphaEq (weaken t) . weaken) rest -> return (weaken t)
+                     | otherwise -> do mapM_ (expect (erase t) . erase) rest
                                        return (erase t)
+  where
+    weaken = mapCredits (const MaybeEmpty) id
+    erase = mapCredits (const MaybeEmpty) (const Nothing)
 
 funSig :: Env -> Name -> [AType] -> Q ([VType],VType)
 funSig env f tys
@@ -297,7 +312,7 @@ checkV :: Env -> Gamma -> VVal -> VType -> Q ()
 checkV env g val t = do checkReuseTy (V t)
                         case (val,t) of
                           -- an empty credit satisfies every description
-                          (NoReuse n _, VReuse m _) | n == m -> () <$ inferV env g val
+                          (NoReuse n _, VReuse MaybeEmpty m _) | n == m -> () <$ inferV env g val
                           _ -> inferV env g val >>= expectV t
 
 -- Descriptions are checked for layout, but never used as owned values. Their names need not be in
@@ -305,19 +320,19 @@ checkV env g val t = do checkReuseTy (V t)
 checkReuseTy :: Ty -> Q ()
 checkReuseTy ty = case ty of
   V t -> case t of
-    VReuse n p -> do when (n < 0) (Left "negative reuse size")
-                     case p of
-                       Nothing -> return ()
-                       Just (Contents k v s) -> do when (k < 1) (Left "reuse contents with an invalid tag")
-                                                   structural v
-                                                   noHeapCredit s
-                                                   m <- reuseSize s
-                                                   unless (n == m) (Left "reuse contents do not match the block size")
+    VReuse _ n p -> do when (n < 0) (Left "negative reuse size")
+                       case p of
+                         Nothing -> return ()
+                         Just (Contents k v s) -> do when (maybe False (< 1) k) (Left "reuse contents with an invalid tag")
+                                                     structural v
+                                                     noHeapCredit s
+                                                     m <- reuseSize s
+                                                     unless (n == m) (Left "reuse contents do not match the block size")
     VPtr a -> checkReuseTy (A a)
     VProd a b -> checkReuseTy (V a) >> checkReuseTy (V b)
     VSum ts -> mapM_ (checkReuseTy . V) ts
     VExists _ b -> checkReuseTy (V b)
-    VCtx a b -> checkReuseTy (A a) >> checkReuseTy (A b)
+    VCtx _ a b -> checkReuseTy (A a) >> checkReuseTy (A b)
     VUnit -> return ()
     VRaw _ -> return ()
   A a -> case a of
@@ -402,7 +417,7 @@ inferA env g val
                       tv <- inferV env g v
                       noHeapCredit tv
                       case tr of
-                        VReuse n _
+                        VReuse _ n _
                           -> do m <- reuseSize tv
                                 unless (n == m) (Left ("reuse of a block of " ++ show n ++ " bytes for " ++ show m ++ " bytes"))
                                 return (ABox tv)
@@ -420,7 +435,7 @@ inferV env g val
                       _ -> Left ("unknown global value " ++ show x)
       UnitV -> return VUnit
       Lit l -> return (litType l)
-      NoReuse n p -> do let t = VReuse n p
+      NoReuse n p -> do let t = VReuse MaybeEmpty n p
                         checkReuseTy (V t)
                         return t
       Inj i t v -> case t of
@@ -438,20 +453,20 @@ inferV env g val
       Context b k -> do unless (isCtxValue k) (Left ("ill-formed context: " ++ ppr val))
                         t <- inferV env (M.insert nameHole (V (VPtr b)) g) k
                         case t of
-                          VPtr a -> return (VCtx a b)
+                          VPtr a -> return (VCtx (if k == Hole then MaybeEmpty else Full) a b)
                           _ -> Left ("context of a non-pointer: " ++ ppr t)
       Plug c v -> do t <- inferV env g c
                      case t of
-                       VCtx a b -> checkV env g v (VPtr b) >> return (VPtr a)
+                       VCtx _ a b -> checkV env g v (VPtr b) >> return (VPtr a)
                        _ -> Left ("plugging a non-context: " ++ ppr t)
       Append c d -> do tc <- inferV env g c
                        td <- inferV env g d
                        case (tc,td) of
-                         (VCtx a b, VCtx b' c') | alphaEq b b' -> return (VCtx a c')
+                         (VCtx f a b, VCtx f' b' c') | alphaEq b b' -> return (VCtx (if f == Full then f else f') a c')
                          _ -> Left ("appending " ++ ppr td ++ " to " ++ ppr tc)
       CtxCopy c -> do t <- inferV env g c
                       case t of
-                        VCtx _ _ -> return t
+                        VCtx _ _ _ -> return t
                         _ -> Left ("unsharing a non-context: " ++ ppr t)
       DupV v -> do unless (isGlob v) (Left ("dup of a value that is not a global: " ++ ppr val))
                    inferV env g v

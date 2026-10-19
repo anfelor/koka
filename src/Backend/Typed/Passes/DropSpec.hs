@@ -83,8 +83,8 @@ dsE (Dup p (Drop z e))
            s <- liftE (inferAVar g z >>= boxContents)
            r  <- fresh "r"
            r' <- fresh "r"
-           let payload = Just (Contents (boxTag z) (Var p) s)
-               t = VReuse n payload
+           let payload = Just (Contents (Just (boxTag z)) (Var p) s)
+               t = VReuse MaybeEmpty n payload
                unique = UnboxRu z r' (foldr Drop (Ret (Var r')) dead)
                shared = foldr Dup (Drop z (Ret (NoReuse n payload))) live
            cont' <- bind [(r,V t)] (dsE cont)
