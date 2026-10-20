@@ -110,7 +110,8 @@ owning m
 --   A sub-sum keeps the tags of its alternatives, with gaps for those it excludes.
 -- - `Scalar V` is Koka's `box` of a scalar V (`Layout.isScalar`: a raw type or an enumeration
 --   that Koka boxes by itself): an immediate value, or a block that the runtime allocates (such
---   as a large `float64`). It has no tag, so it is not a shape, and it is not reused. `boxA`
+--   as a large `float64`). It has no tag, so it is not a shape, and it is not reused. Nothing
+--   relies on its uniqueness: `[if-unique]` and `[unbox-ru]` do not apply to it. `boxA`
 --   chooses it for a scalar outside a sum.
 -- - `a`, `a⟨B̄⟩` and `T⟨B̄⟩` without a definition are opaque: a value of such a type can only be
 --   passed around.
@@ -324,7 +325,7 @@ data VVal
   --
   -- As in the paper, a variable is only a value at an unboxed type. A variable `x :q A` at a boxed
   -- type (bound by `[case]` on `⊕ᵢ Aᵢ`, `[deref]` or `[unroll]`) is only an *operand*: the
-  -- scrutinee of a destructuring form, the variable of `[drop]` or `[if-unique]`, the value of
+  -- scrutinee of a destructuring form or `[unscalar]`, the variable of `[drop]` or `[if-unique]`, the value of
   -- `[dup]` or the function of `[app]`. It cannot be stored again as a boxed value.
   = Var Path
 
@@ -540,14 +541,18 @@ data VExpr
   --  ──────────────────────────────────────── [bunbox]
   --   Γ₁, Γ₂ ⊢ let^ box x = v in e : W
   --
-  --   Γ₁ ⊢ v :^ Scalar V    Γ₂, x : V ⊢ e : W
-  --  ─────────────────────────────────────────── [bunbox-scalar]
-  --   Γ₁, Γ₂ ⊢ let^ box x = v in e : W
-  --
   -- Reading the contents of a box is always borrowed. The paper's owned `[unbox]`, which keeps
-  -- the block as a credit, is `[unbox-ru]` and requires the box to be unique. The contents of a
-  -- scalar are trivial.
+  -- the block as a credit, is `[unbox-ru]` and requires the box to be unique.
   | Unbox Mode Path Path VExpr
+
+  --   Γ₁ ⊢ v :q Scalar V    Γ₂, x : V ⊢ e : W
+  --  ─────────────────────────────────────────── [unscalar]
+  --   Γ₁, Γ₂ ⊢ let_q scalar x = v in e : W
+  --
+  -- Reading a scalar copies its contents, which are trivial: `x` is a root, not a part of `v`.
+  -- An owned read consumes the scalar (Koka's owned unbox, which frees a heap-backed one), and so
+  -- does a unique one.
+  | Unscalar Mode Path Path VExpr
 
   --   Γ₁ ⊢ v :^ Box V    Γ₂, x : V ⊢ e : W
   --  ─────────────────────────────────────────── [unbox-lazy]

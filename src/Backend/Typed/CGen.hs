@@ -130,6 +130,14 @@ stmtExpr ss e = "({" <+> align (vcat (ss ++ [e <.> ";"])) <+> "})"
 dupExpr :: CT -> Doc -> Doc
 dupExpr ct e = maybe e (\f -> text f <.> "(" <.> e <.> ",_ctx)") (dupFun ct)
 
+-- Like aggregate dup helpers, keep field dups inline: a call can spill another
+-- live field and enlarge even the unique path's stack frame. Root dups may be
+-- tail calls, so leave their inlining to the C compiler.
+dupAt :: Path -> CT -> Doc
+dupAt x CBox | Path _ (_:_) <- canonical x
+  = "kt_box_dup_inline(" <.> localName x <.> ",_ctx)"
+dupAt x ct = dupExpr ct (localName x)
+
 dropStmt :: CT -> Doc -> Doc
 dropStmt ct e = maybe empty (\f -> text f <.> "(" <.> e <.> ",_ctx);") (dropFun ct)
 
@@ -484,21 +492,22 @@ genAlias cx dest ve x t named e
 genUnbox :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
 genUnbox cx dest v x e
   = do A a <- tyOfName cx v
-       let ve = localName v
-       (t,ue,body) <- case a of
-         -- Scalar unbox helpers can consume the box themselves. For immediate
-         -- scalars this removes the generic drop; heap-backed scalars still
-         -- release their storage through the runtime's owned unbox path.
-         AScalar t -> do let (mode,body) = case e of
-                                             Drop z rest | z == v -> (Owned,rest)
-                                             _ -> (Borrowed,e)
-                         ue <- unboxScalar mode t ve
-                         return (t,ue,body)
-         ABox t -> do ue <- unboxBlock (S.member v (cxNamed cx)) t ve
-                      return (t,ue,e)
-         _ -> failG ("unboxing a value of type " ++ show a)
-       ct <- ctype t
-       s <- genE (bindVar cx x (V t)) dest body
+       t <- liftC (boxContents a)
+       ue <- unboxBlock (S.member v (cxNamed cx)) t (localName v)
+       genRead cx dest x t ue e
+
+-- An owned read lets the runtime release a heap-backed scalar.
+genUnscalar :: Ctx -> Dest -> Mode -> Path -> Path -> VExpr -> G [Doc]
+genUnscalar cx dest m v x e
+  = do A (AScalar t) <- tyOfName cx v
+       ue <- unboxScalar m t (localName v)
+       genRead cx dest x t ue e
+
+-- bind the contents `ue : t` that were read from a box or scalar
+genRead :: Ctx -> Dest -> Path -> VType -> Doc -> VExpr -> G [Doc]
+genRead cx dest x t ue e
+  = do ct <- ctype t
+       s <- genE (bindVar cx x (V t)) dest e
        return ([declare (cty ct) x ue] ++ s)
 
 -- Koka's `box` of a scalar
@@ -519,6 +528,18 @@ unboxScalar mode t e
          CPrim p | Just (_,unbox) <- primBox p -> return (text unbox <.> "(" <.> e <.> "," <.> borrow <.> ",_ctx)")
          CEnum _ -> return ("(" <.> cty ct <.> ")kk_int32_unbox(" <.> e <.> "," <.> borrow <.> ",_ctx)")
          _ -> failG ("not a scalar: " ++ show ct)
+
+-- Koka's box of a scalar is a heap block only on targets where the scalar is not immediate
+-- (`scalarHeapSize`), and needs no drop elsewhere. Like kklib's unbox, which ignores
+-- ownership there, this does not release a polymorphic `kk_box_any` either.
+dropScalar :: VType -> Doc -> G Doc
+dropScalar t e
+  = do ct <- ctype t
+       let drop = dropStmt CBox e
+       return (case scalarHeapSize ct of
+                 Nothing -> drop
+                 Just 0  -> empty
+                 Just n  -> "if (KK_INTF_SIZE <=" <+> int n <.> ")" <+> block [drop])
 
 -- the payload of a box; only a box at a type variable can be Koka's `box-any`
 unboxBlock :: Bool -> VType -> Doc -> G Doc
@@ -746,9 +767,11 @@ genE cx dest expr
               return (("kk_block_decref(kk_datatype_as_ptr(kk_datatype_unbox(" <.> localName x <.> "),_ctx),_ctx);") : s)
         | otherwise
         -> do t <- tyOfName cx x
-              ct <- ctOf t
+              d <- case t of
+                     A (AScalar st) -> dropScalar st (localName x)
+                     _ -> (`dropStmt` localName x) <$> ctOf t
               s <- genE cx dest e
-              return (dropStmt ct (localName x) : s)
+              return (d : s)
       Free r e
         -> do rt <- tyOfName cx r
               s <- genE cx dest e
@@ -759,7 +782,7 @@ genE cx dest expr
       Dup x e
         -> do ct <- tyOfName cx x >>= ctOf
               s <- genE cx dest e
-              return (["(void)" <.> dupExpr ct (localName x) <.> ";" | needsRC ct] ++ s)
+              return (["(void)" <.> dupAt x ct <.> ";" | needsRC ct] ++ s)
       IsUnique x e1 e2
         -> do t <- liftC (inferVar (cxGamma cx) x)
               s1 <- genE cx dest e1
@@ -841,6 +864,7 @@ genE cx dest expr
               genAlias cx dest (localName v) x (A a) (S.insert x (cxNamed cx)) e
       Unbox _ v x e -> genUnbox cx dest v x e
       UnboxLazy v x e -> genUnbox cx dest v x e
+      Unscalar m v x e -> genUnscalar cx dest m v x e
       SplitA _ v k (x,e1) (y,e2)
         -> do t <- tyOfName cx v
               [[tl@(A ls)],[tr@(A rs)]] <- liftC (altTypes (cxEnv cx) t expr)
@@ -1329,6 +1353,9 @@ runtimeHeader = vcat
   , "#define kt_unbox_datatype(b) kk_datatype_unbox(b)"
   , "#define kt_unreachable() kk_fatal_error(EFAULT,\"typed backend: unreachable\")"
   , "#define kt_unreachable_value(ctx) (kt_unreachable(), kk_box_null())"
+  , "static inline __attribute__((always_inline)) kk_box_t kt_box_dup_inline(kk_box_t b, kk_context_t* ctx) {"
+  , "  return kk_box_dup(b,ctx);"
+  , "}"
   , "// plug the hole of a unique context (`kk_cctx_apply_linear`); an empty context has no hole"
   , "static inline kk_box_t kt_ctx_plug(kk_box_t res, kk_box_t hole, kk_box_t child, kk_context_t* _ctx) {"
   , "  if kk_likely(!kk_box_eq(hole,kk_box_null())) {"

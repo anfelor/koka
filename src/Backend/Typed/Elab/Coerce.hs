@@ -106,8 +106,8 @@ unboxAV t a
       VReuse _ _ _  -> unbox
       VCtx _ _ _  -> unbox
   where
-    unbox = do x <- fresh "x"   -- a box or a scalar
-               return (Unbox Owned a x, Var x)
+    unbox = do x <- fresh "x"
+               return ((if isScalar t then Unscalar else Unbox) Owned a x, Var x)
 
 -- the value of type `t` whose leaf at position `j` is `y`
 unboxLeaf :: VType -> Int -> Path -> E (K,VVal)

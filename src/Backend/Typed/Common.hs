@@ -299,7 +299,8 @@ descendE fn fv fe = descendB fn fv (\bs e -> let xs = map fst bs in (,) xs <$> f
 
 -- Like `descendE`, but each binder comes with its step from the scrutinee, and `fb` gives new
 -- binders for a subexpression. The binders of a `let` and a join point have no step,
--- and neither has that of `[unbox-lazy]`, which takes the contents out of the box.
+-- and neither has that of `[unbox-lazy]`, which takes the contents out of the box, or that of
+-- `[unscalar]`, which copies them.
 descendB :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([(Path,Maybe Step)] -> VExpr -> f ([Path],VExpr)) -> VExpr -> f VExpr
 descendB fn fv fb expr
   = case expr of
@@ -315,6 +316,7 @@ descendB fn fv fb expr
       Deref m v x e         -> (\v' (x',e') -> Deref m v' x' e') <$> fv v <*> one x (Just SDeref) e
       Unroll m v x e        -> (\v' (x',e') -> Unroll m v' x' e') <$> fn v <*> one x (Just SRoll) e
       Unbox m v x e         -> (\v' (x',e') -> Unbox m v' x' e') <$> fn v <*> one x (Just SContents) e
+      Unscalar m v x e      -> (\v' (x',e') -> Unscalar m v' x' e') <$> fn v <*> one x Nothing e
       UnboxLazy v x e       -> (\v' (x',e') -> UnboxLazy v' x' e') <$> fn v <*> one x Nothing e
       Unpack m v tvs x e    -> (\v' (x',e') -> Unpack m v' tvs x' e') <$> fv v <*> one x (Just SPack) e
       CaseLit v alts def    -> CaseLit <$> fv v <*> traverse (\(l,e) -> (,) l <$> plain e) alts <*> plain def
@@ -696,6 +698,7 @@ destructAOf expr
       Unroll m v x e        -> Just (Destruct m v [([x],e)] (\m' v' es -> Unroll m' v' x (head es)))
       Unbox m v x e         -> Just (Destruct m v [([x],e)] (\m' v' es -> Unbox m' v' x (head es)))
       UnboxLazy v x e       -> Just (Destruct Borrowed v [([x],e)] (\_ v' es -> UnboxLazy v' x (head es)))
+      Unscalar m v x e      -> Just (Destruct m v [([x],e)] (\m' v' es -> Unscalar m' v' x (head es)))
       CaseOpen m v alts def -> Just (Destruct m v ([([x],e) | (_,x,e) <- alts] ++ [([],def)])
                                        (\m' v' es -> CaseOpen m' v' [(c,x,e) | ((c,x,_),e) <- zip alts es] (last es)))
       Unpair{} -> Nothing
@@ -729,6 +732,7 @@ destructVOf expr
       Unroll{} -> Nothing
       Unbox{} -> Nothing
       UnboxLazy{} -> Nothing
+      Unscalar{} -> Nothing
       CaseOpen{} -> Nothing
       Ret{} -> Nothing
       Let{} -> Nothing
@@ -752,6 +756,7 @@ isRead expr
       SplitA{}    -> False
       Unbox{}     -> True
       UnboxLazy{} -> True
+      Unscalar{}  -> False
       CaseOpen{}  -> True
       Unpair{}    -> False
       CaseV{}     -> False
@@ -787,6 +792,7 @@ keepsPointer expr
       CaseV{}     -> False
       Unbox{}     -> False
       UnboxLazy{} -> False
+      Unscalar{}  -> False
       CaseOpen{}  -> False
       Ret{}       -> False
       Let{}       -> False

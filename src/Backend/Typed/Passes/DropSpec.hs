@@ -28,7 +28,7 @@
 
   As in Koka's Parc, the parts of the contents that `e` drops right away are not duplicated
   at all. The destructurings of the contents at the start of `e` move before the test (they
-  only read), and the drops of parts among them move into the unique branch, while the
+  only read; an owned read of a scalar becomes a borrowed one and a drop), and the drops of parts among them move into the unique branch, while the
   shared branch duplicates only the other parts:
 
     let^ (z.contents.fst, z.contents.snd) = z.contents in
@@ -118,6 +118,9 @@ taken p expr
   = case expr of
       Drop w e | w `within` p -> let (fs,ds,k,r) = taken p e in (fs,w:ds,k,r)
                | otherwise -> let (fs,ds,k,r) = taken p e in (fs,ds,Drop w . k,r)
+      -- an owned read of a scalar consumes it: it moves as a read and a drop
+      Unscalar m w x e | owning m, w `within` p
+        -> let (fs,ds,k,r) = taken p e in (Unscalar Borrowed w x e:fs,w:ds,k,r)
       _ | Just ds <- destructOf expr, Var x <- dsScrut ds, x `within` p, dsMode ds /= Unique
         , [(_,e)] <- dsAlts ds, not (isLazy expr)
         -> let (fs,dd,k,r) = taken p e in (expr:fs,dd,k,r)
