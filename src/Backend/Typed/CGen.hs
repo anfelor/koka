@@ -5,12 +5,15 @@
 -- terms of the Apache License, Version 2.0. A copy of the License can be
 -- found in the LICENSE file at the root of this distribution.
 -----------------------------------------------------------------------------
+{-# LANGUAGE OverloadedStrings #-}
 
 {- C code generation from the typed IR (after Perceus).
 
   Unboxed types are represented as described in `Layout`. A boxed sum is a `kk_box_t`:
   the alternative with index `i` of a sum has tag `i`; unit alternatives are singletons and
   boxes are heap blocks. Externals are called with their Koka C types and their arguments are converted.
+
+  The C code is a `Doc`: string literals are documents, and a list of documents is a list of statements.
 -}
 module Backend.Typed.CGen( CEnv(..), External(..), cgenModule, runtimeHeader, cName, ktInitName, ktFileName ) where
 
@@ -21,6 +24,7 @@ import Data.List( isInfixOf )
 import Data.Maybe( fromMaybe )
 import qualified Numeric
 import Control.Monad( forM, when )
+import Lib.PPrint( Doc, text, string, int, integer, empty, isEmptyDoc, line, nest, align, vcat, hcat, hsep, (<.>), (<+>), (<->) )
 import Common.Name
 import Common.NamePrim
 import Type.Type
@@ -32,7 +36,7 @@ import Backend.Typed.Common
 import Backend.Typed.Types( inst, prodV, collapse, Types(..) )
 import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuBinds, unrollT, openFields, boxContents, reuseSize )
 import Backend.Typed.Names( nameLazyFree )
-import Backend.Typed.Layout
+import Backend.Typed.Layout hiding( dupExpr, dropStmt )
 import Backend.Typed.Monad
 
 data External = External{ extFormat :: String, extType :: Type }
@@ -49,12 +53,12 @@ data CEnv = CEnv{ ceModName   :: Name
 -- generation monad
 
 -- `stLocal`: whether the current definition uses declarations of the C file (static functions)
-data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [String], stDecls :: [String], stWrappers :: S.Set Name
+data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [String], stDecls :: [Doc], stWrappers :: S.Set Name
             , stLocal :: Bool }
 
 -- `cxJoins`: the label and the parameters of each join point in scope
 data Ctx = Ctx{ cxEnv :: Env, cxCEnv :: CEnv, cxGamma :: Gamma, cxNamed :: S.Set Path, cxSelf :: Maybe (Name,[Path])
-              , cxJoins :: M.Map Name (String,[Path])
+              , cxJoins :: M.Map Name (Doc,[Path])
               , cxShared :: S.Set Path }   -- boxes known to be shared (the else branch of `IsUnique`)
 
 type G a = M () St a
@@ -65,10 +69,13 @@ failG = fail
 liftC :: Either String a -> G a
 liftC = liftE
 
-fresh :: String -> G String
-fresh s = state (\st -> ("_" ++ s ++ show (stUniq st), st{ stUniq = stUniq st + 1 }))
+freshName :: String -> G String
+freshName s = state (\st -> ("_" ++ s ++ show (stUniq st), st{ stUniq = stUniq st + 1 }))
 
-emitDecl :: String -> G ()
+fresh :: String -> G Doc
+fresh s = text <$> freshName s
+
+emitDecl :: Doc -> G ()
 emitDecl d = modify (\st -> st{ stDecls = stDecls st ++ [d], stLocal = True })
 
 -- names
@@ -76,8 +83,8 @@ emitDecl d = modify (\st -> st{ stDecls = stDecls st ++ [d], stLocal = True })
 cName :: Name -> String
 cName name = "kt_" ++ encode (show name)
 
-localName :: Path -> String
-localName (Path x ss) = "x_" ++ encode (show x) ++ concat ["_p_" ++ encode (show s) | s <- ss]
+localName :: Path -> Doc
+localName (Path x ss) = text ("x_" ++ encode (show x) ++ concat ["_p_" ++ encode (show s) | s <- ss])
 
 encode :: String -> String
 encode = concatMap enc
@@ -107,6 +114,25 @@ kokaName name
 kokaTypeName :: Name -> String
 kokaTypeName name = kokaName (prependRaw "@" name)
 
+-- C syntax
+
+cty :: CT -> Doc
+cty ct = text (ctName ct)
+
+-- a block with each statement on its own line
+block :: [Doc] -> Doc
+block ss = "{" <.> nest 2 (hcat [line <.> s | s <- ss, not (isEmptyDoc s)]) <-> "}"
+
+-- a statement expression `({ s1; s2; e; })` with each statement on its own line
+stmtExpr :: [Doc] -> Doc -> Doc
+stmtExpr ss e = "({" <+> align (vcat (ss ++ [e <.> ";"])) <+> "})"
+
+dupExpr :: CT -> Doc -> Doc
+dupExpr ct e = maybe e (\f -> text f <.> "(" <.> e <.> ",_ctx)") (dupFun ct)
+
+dropStmt :: CT -> Doc -> Doc
+dropStmt ct e = maybe empty (\f -> text f <.> "(" <.> e <.> ",_ctx);") (dropFun ct)
+
 -- C types
 
 ctype :: VType -> G CT
@@ -121,10 +147,10 @@ defineStruct name def
                    else st{ stStructs = M.insert name def (stStructs st), stOrder = stOrder st ++ [name] })
 
 -- block types for boxes
-blockType :: CT -> G String
+blockType :: CT -> G Doc
 blockType ct
   = do uncurry defineStruct (blockDef ct)
-       return ("struct " ++ blockName ct)
+       return ("struct" <+> text (blockName ct))
 
 -- types of values
 
@@ -140,19 +166,19 @@ ctOf (A _) = return CBox
 
 -- Translate a binary shape decision using the pointer bit when it identifies
 -- the two sides; otherwise the decision uses their tag intervals.
-pointerTest :: String -> AType -> AType -> Maybe String
+pointerTest :: Doc -> AType -> AType -> Maybe Doc
 pointerTest ve left right
   = case (shapeIsHeap left,shapeIsHeap right) of
-      (Just l,Just r) | l /= r -> Just ((if l then "" else "!") ++ "kk_datatype_is_ptr(kk_datatype_unbox(" ++ ve ++ "))")
+      (Just l,Just r) | l /= r -> Just ((if l then empty else "!") <.> "kk_datatype_is_ptr(kk_datatype_unbox(" <.> ve <.> "))")
       _ -> Nothing
 
 -- values
 
-genV :: Ctx -> VVal -> G String
+genV :: Ctx -> VVal -> G Doc
 genV cx val
   = case val of
       Var x -> return (localName x)
-      Glob x _ -> return (cName x)
+      Glob x _ -> return (text (cName x))
       DupV v -> do t <- tyOf cx v
                    ct <- ctype t
                    e <- genV cx v
@@ -165,18 +191,18 @@ genV cx val
       Pack _ _ v -> genV cx v
       Inj i t v
         | isEnum t -> do ct <- ctype t
-                         return ("((" ++ ctName ct ++ ")" ++ show i ++ ")")
+                         return ("((" <.> cty ct <.> ")" <.> int i <.> ")")
         | otherwise
         -> do ct@(CSum name alts) <- ctype t
               let scan = scanOf ct
               x <- fresh "v"
               e <- genV cx v
               let setAlt = case alts !! i of
-                             Just _ -> x ++ "._cons.c" ++ show i ++ " = " ++ e ++ "; "
-                             Nothing -> ""
-              return ("({ " ++ name ++ " " ++ x ++ "; " ++ x ++ "._tag = kk_value_tag(" ++ show (i+1) ++ "); "
-                      ++ concat [x ++ "._cons._fields[" ++ show j ++ "] = kk_box_null(); " | j <- [0..scan-2]]
-                      ++ setAlt ++ x ++ "; })")
+                             Just _ -> x <.> "._cons.c" <.> int i <+> "=" <+> e <.> ";"
+                             Nothing -> empty
+              return (stmtExpr ([text name <+> x <.> ";", x <.> "._tag = kk_value_tag(" <.> int (i+1) <.> ");"]
+                                ++ [x <.> "._cons._fields[" <.> int j <.> "] = kk_box_null();" | j <- [0..scan-2]]
+                                ++ [setAlt]) x)
       Pair _ _ -> do t <- tyOf cx val
                      genProd cx t (prodLeafVals val)
       Hole -> return "kk_box_null()"   -- the placeholder (`kk_cctx_hole`)
@@ -186,24 +212,24 @@ genV cx val
       CtxCopy c -> do ct <- tyOf cx c >>= ctype
                       ce <- genV cx c
                       x <- fresh "c"
-                      return ("({ " ++ ctName ct ++ " " ++ x ++ " = " ++ ce ++ "; kt_ctx_copy(&" ++ x ++ ".f0,&" ++ x ++ ".f1,_ctx); " ++ x ++ "; })")
+                      return (stmtExpr [cty ct <+> x <+> "=" <+> ce <.> ";", "kt_ctx_copy(&" <.> x <.> ".f0,&" <.> x <.> ".f1,_ctx);"] x)
 
 -- a context is `res` and the address of its hole; the empty context has neither
-genCtx :: Ctx -> AType -> VVal -> G String
+genCtx :: Ctx -> AType -> VVal -> G Doc
 genCtx cx b k
   = do ct <- tyOf cx (Context b k) >>= ctype
        case k of
          Hole -> makeCtx ct ([],"kk_box_null()","kk_box_null()")
          _ -> genHolePath (bindVar cx nameHole (V (VPtr b))) k >>= makeCtx ct
 
-makeCtx :: CT -> ([String],String,String) -> G String
+makeCtx :: CT -> ([Doc],Doc,Doc) -> G Doc
 makeCtx ct (ss,res,hole)
   = do x <- fresh "ctx"
-       return ("({ " ++ concat ss ++ ctName ct ++ " " ++ x ++ "; " ++ x ++ ".f0 = " ++ res ++ "; " ++ x ++ ".f1 = " ++ hole ++ "; " ++ x ++ "; })")
+       return (stmtExpr (ss ++ [cty ct <+> x <.> ";", x <.> ".f0 =" <+> res <.> ";", x <.> ".f1 =" <+> hole <.> ";"]) x)
 
 -- Appending a nonempty context plugs its `res` into the hole and keeps its hole
 -- (`kk_cctx_extend_linear`); otherwise the runtime tests whether the second context is empty.
-genAppend :: Ctx -> VVal -> VVal -> G String
+genAppend :: Ctx -> VVal -> VVal -> G Doc
 genAppend cx c d
   = do ct <- tyOf cx (Append c d) >>= ctype
        td <- tyOf cx d
@@ -211,17 +237,18 @@ genAppend cx c d
        case td of
          VCtx Full _ _
            -> do y <- fresh "c"
-                 res <- plug cx c (y ++ ".f0")
-                 makeCtx ct ([ctName ct ++ " " ++ y ++ " = " ++ de ++ "; "],res,y ++ ".f1")
+                 res <- plug cx c (y <.> ".f0")
+                 makeCtx ct ([cty ct <+> y <+> "=" <+> de <.> ";"],res,y <.> ".f1")
          _ -> do ce <- genV cx c
                  x <- fresh "c"
                  y <- fresh "c"
-                 return ("({ " ++ ctName ct ++ " " ++ x ++ " = " ++ ce ++ "; " ++ ctName ct ++ " " ++ y ++ " = " ++ de ++ "; "
-                         ++ "kt_ctx_append(&" ++ x ++ ".f0,&" ++ x ++ ".f1," ++ y ++ ".f0," ++ y ++ ".f1,_ctx); " ++ x ++ "; })")
+                 return (stmtExpr [cty ct <+> x <+> "=" <+> ce <.> ";",
+                                   cty ct <+> y <+> "=" <+> de <.> ";",
+                                   "kt_ctx_append(&" <.> x <.> ".f0,&" <.> x <.> ".f1," <.> y <.> ".f0," <.> y <.> ".f1,_ctx);"] x)
 
 -- fill the hole of a unique context in place (`kk_cctx_apply_linear`); a copy of a context
 -- is filled in place if it is unique and copied with the child otherwise (`kk_cctx_apply`)
-plug :: Ctx -> VVal -> String -> G String
+plug :: Ctx -> VVal -> Doc -> G Doc
 plug cx c ve
   = do let (fill,c') = case c of
                          CtxCopy c0 -> ("kt_ctx_copy_plug",c0)
@@ -229,35 +256,35 @@ plug cx c ve
        ct <- tyOf cx c' >>= ctype
        ce <- genV cx c'
        x <- fresh "c"
-       return ("({ " ++ ctName ct ++ " " ++ x ++ " = " ++ ce ++ "; " ++ fill ++ "(" ++ x ++ ".f0," ++ x ++ ".f1," ++ ve ++ ",_ctx); })")
+       return (stmtExpr [cty ct <+> x <+> "=" <+> ce <.> ";"] (fill <.> "(" <.> x <.> ".f0," <.> x <.> ".f1," <.> ve <.> ",_ctx)"))
 
 -- Allocate a one-hole value (`genBox` records the context path in the header of each block on
 -- the path to the hole): the statements, `res` and the address of the hole (`kk_field_addr_t`).
 -- The address is bound before the context is used, as in `kk_cctx_extend_linear`.
-genHolePath :: Ctx -> VVal -> G ([String],String,String)
+genHolePath :: Ctx -> VVal -> G ([Doc],Doc,Doc)
 genHolePath cx k
   = do r <- fresh "r"
        h <- fresh "h"
        ke <- genV cx k
        fields <- pathFields k
        bs <- mapM (const (fresh "b")) fields
-       let parents = ("kk_datatype_unbox(" ++ r ++ ")") :
-                     ["kk_datatype_unbox(((" ++ bt ++ "*)" ++ x ++ ")->" ++ f ++ ")" | (x,(bt,f)) <- zip bs fields]
-           steps = ["kk_block_t* " ++ x ++ " = kk_datatype_as_ptr(" ++ parent ++ ",_ctx); " | (x,parent) <- zip bs parents]
+       let parents = ("kk_datatype_unbox(" <.> r <.> ")") :
+                     ["kk_datatype_unbox(((" <.> bt <.> "*)" <.> x <.> ")->" <.> f <.> ")" | (x,(bt,f)) <- zip bs fields]
+           steps = ["kk_block_t*" <+> x <+> "= kk_datatype_as_ptr(" <.> parent <.> ",_ctx);" | (x,parent) <- zip bs parents]
            (bt,f) = last fields
-           hole = "kk_box_t " ++ h ++ " = kk_internal_ptr_box(&((" ++ bt ++ "*)" ++ last bs ++ ")->" ++ f ++ ",_ctx); "
-       return (("kk_box_t " ++ r ++ " = " ++ ke ++ "; ") : steps ++ [hole], r, h)
+           hole = "kk_box_t" <+> h <+> "= kk_internal_ptr_box(&((" <.> bt <.> "*)" <.> last bs <.> ")->" <.> f <.> ",_ctx);"
+       return (("kk_box_t" <+> r <+> "=" <+> ke <.> ";") : steps ++ [hole], r, h)
   where
     -- the type of each block on the path, and the member that leads to the hole
     pathFields v = case v of
-                     Ptr _ a -> block a
+                     Ptr _ a -> blockOf a
                      _ -> failG ("not a one-hole value: " ++ show v)
-    block a = case a of
-                Roll _ w -> block w
-                InjA _ _ w -> block w
-                Box v -> payload v
-                BoxAt _ v -> payload v
-                _ -> failG ("not a one-hole value: " ++ show a)
+    blockOf a = case a of
+                  Roll _ w -> blockOf w
+                  InjA _ _ w -> blockOf w
+                  Box v -> payload v
+                  BoxAt _ v -> payload v
+                  _ -> failG ("not a one-hole value: " ++ show a)
     payload v = do ct <- tyOf cx v >>= ctype
                    bt <- blockType ct
                    (member,inner) <- holeMember cx ct v
@@ -265,11 +292,11 @@ genHolePath cx k
                    return ((bt,member) : rest)
 
 -- the member of a payload that leads to the hole, and the nested one-hole value there
-holeMember :: Ctx -> CT -> VVal -> G (String,Maybe VVal)
+holeMember :: Ctx -> CT -> VVal -> G (Doc,Maybe VVal)
 holeMember cx ct v
   = do (j,inner) <- leaf v 0
        let member = case ct of
-                      CProd _ _ -> "p.f" ++ show j
+                      CProd _ _ -> "p.f" <.> int j
                       _ -> "p"
        return (member,inner)
   where
@@ -283,14 +310,14 @@ holeMember cx ct v
 -- Injections only contain construction forms, so their tag can be passed down to
 -- the allocation; a box or unit outside a sum has tag 1. Existing boxed operands are
 -- duplicated in place (`Dup`).
-genA :: Ctx -> AVal -> G String
+genA :: Ctx -> AVal -> G Doc
 genA cx = genAIn cx 1
 
-genAIn :: Ctx -> Int -> AVal -> G String
+genAIn :: Ctx -> Int -> AVal -> G Doc
 genAIn cx tag val
   = case val of
       Fun f -> staticFun f
-      UnitA -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" ++ show tag ++ "))")
+      UnitA -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" <.> int tag <.> "))")
       Roll _ v -> genAIn cx tag v
       InjA i (ASum _) v -> genAIn cx i v
       InjA _ _ _ -> failG "injection into a non-sum"
@@ -306,7 +333,7 @@ prodLeafVals (Pair v w) = prodLeafVals v ++ prodLeafVals w
 prodLeafVals v = [v]
 
 -- construct an unboxed product from values for its components
-genProd :: Ctx -> VType -> [VVal] -> G String
+genProd :: Ctx -> VType -> [VVal] -> G Doc
 genProd cx t vs
   = do ct <- ctype t
        case ct of
@@ -317,7 +344,7 @@ genProd cx t vs
                                              return (e, length (leaves tv), tv)
                  x <- fresh "p"
                  assigns <- assignLeaves x (zip [0..] fs) parts 0
-                 return ("({ " ++ name ++ " " ++ x ++ "; " ++ concat assigns ++ x ++ "; })")
+                 return (stmtExpr ((text name <+> x <.> ";") : assigns) x)
          _ -> case vs of
                 [v] -> genV cx v
                 _ -> do es <- mapM (genV cx) vs
@@ -329,27 +356,25 @@ genProd cx t vs
            rs <- assignLeaves x fs rest (i+n)
            return (as ++ rs)
     leafAssign x i n s e
-      | n == 0 = return ["(void)(" ++ e ++ "); "]
-      | n == 1 = return [x ++ ".f" ++ show i ++ " = " ++ e ++ "; "]
+      | n == 0 = return ["(void)(" <.> e <.> ");"]
+      | n == 1 = return [x <.> ".f" <.> int i <+> "=" <+> e <.> ";"]
       | otherwise = do sct <- ctype s
                        y <- fresh "q"
-                       let sname = ctName sct
-                       return ([sname ++ " " ++ y ++ " = " ++ e ++ "; "] ++
-                               [x ++ ".f" ++ show (i+j) ++ " = " ++ y ++ ".f" ++ show j ++ "; " | j <- [0..n-1]])
+                       return ((cty sct <+> y <+> "=" <+> e <.> ";") :
+                               [x <.> ".f" <.> int (i+j) <+> "=" <+> y <.> ".f" <.> int j <.> ";" | j <- [0..n-1]])
 
 -- project a component (a range of leaves) from a product
-projLeaves :: VType -> String -> Int -> VType -> G String
+projLeaves :: VType -> Doc -> Int -> VType -> G Doc
 projLeaves whole e start part
   = do let n = length (leaves part)
        ct <- ctype part
        wct <- ctype whole
        case (n, wct) of
          (0,_) -> return "kk_Unit"
-         (_,CProd _ _) | n == 1 -> return ("(" ++ e ++ ").f" ++ show start)
+         (_,CProd _ _) | n == 1 -> return ("(" <.> e <.> ").f" <.> int start)
          (_,CProd _ _)
-           -> do let pname = ctName ct
-                 y <- fresh "q"
-                 return ("({ " ++ pname ++ " " ++ y ++ "; " ++ concat [y ++ ".f" ++ show j ++ " = (" ++ e ++ ").f" ++ show (start+j) ++ "; " | j <- [0..n-1]] ++ y ++ "; })")
+           -> do y <- fresh "q"
+                 return (stmtExpr ((cty ct <+> y <.> ";") : [y <.> ".f" <.> int j <+> "= (" <.> e <.> ").f" <.> int (start+j) <.> ";" | j <- [0..n-1]]) y)
          _ -> return e
 
 -- where the block of a box comes from
@@ -358,59 +383,59 @@ data Alloc = Fresh | At Path | In Path
 -- a box: freshly allocated, in the block of a reuse credit, or over the block of a lazy value
 -- (whose old fields were taken, see `Lazy`, and whose reference count is kept). A box on the
 -- path of a one-hole value records the context path with its header (see `genHolePath`).
-genBox :: Ctx -> Int -> Alloc -> VVal -> G String
+genBox :: Ctx -> Int -> Alloc -> VVal -> G Doc
 genBox cx tag at v
   = do t <- tyOf cx v
        ct <- ctype t
        e <- genV cx v
        case ct of
-         CUnit -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" ++ show tag ++ "))")
+         CUnit -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" <.> int tag <.> "))")
          _ -> do bt <- blockType ct
                  x <- fresh "b"
                  cpath <- if holes v == 1
                             then do (member,_) <- holeMember cx ct v
-                                    return (Just ("(uint8_t)kk_field_index_of(" ++ bt ++ "," ++ member ++ ")"))
+                                    return (Just ("(uint8_t)kk_field_index_of(" <.> bt <.> "," <.> member <.> ")"))
                             else return Nothing
-                 let scan = show (scanOf ct)
-                     box  = "kk_datatype_box(kk_datatype_from_base(" ++ x ++ ",_ctx)); })"
-                     allocAt r = "kk_block_alloc_at_as(" ++ bt ++ "," ++ r ++ "," ++ scan ++ "," ++ fromMaybe "0" cpath ++ ",(kk_tag_t)" ++ show tag ++ ",_ctx)"
+                 let scan = int (scanOf ct)
+                     path = fromMaybe "0" cpath
+                     box  = "kk_datatype_box(kk_datatype_from_base(" <.> x <.> ",_ctx))"
+                     allocAt r = "kk_block_alloc_at_as(" <.> bt <.> "," <.> r <.> "," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
                      allocFresh = case cpath of
-                                    Nothing -> "kk_block_alloc_as(" ++ bt ++ "," ++ scan ++ ",(kk_tag_t)" ++ show tag ++ ",_ctx)"
+                                    Nothing -> "kk_block_alloc_as(" <.> bt <.> "," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
                                     Just _ -> allocAt "kk_reuse_null"
-                     setPath = maybe "" (\i -> x ++ "->_block.header._field_idx = " ++ i ++ "; ") cpath
+                     setPath = maybe empty (\i -> x <.> "->_block.header._field_idx =" <+> i <.> ";") cpath
                  case at of
-                   Fresh -> return ("({ " ++ bt ++ "* " ++ x ++ " = " ++ allocFresh ++ "; "
-                                    ++ x ++ "->p = " ++ e ++ "; " ++ box)
+                   Fresh -> return (stmtExpr [bt <.> "*" <+> x <+> "=" <+> allocFresh <.> ";", x <.> "->p =" <+> e <.> ";"] box)
                    At r  -> do rt <- tyOfName cx r
-                               let start = "({ _Static_assert(sizeof(" ++ bt ++ ") == " ++ show (blockSize ct) ++ ",\"kt_reuse\"); "
+                               let check = "_Static_assert(sizeof(" <.> bt <.> ") ==" <+> int (blockSize ct) <.> ",\"kt_reuse\");"
                                case rt of
                                  V (VReuse Full _ _)
                                    -> do described <- reuseMatches cx r t v
                                          y <- fresh "reuse_payload"
                                          let field i = case ct of
-                                                         CProd _ _ -> ".f" ++ show i
-                                                         _ -> ""
-                                             writes matches = concat [x ++ "->p" ++ field i ++ " = " ++ y ++ field i ++ "; "
-                                                                     | (i,same) <- zip [0..] matches, not same]
-                                             setTag | creditTag cx r == Just tag = ""
-                                                    | otherwise = x ++ "->_block.header.tag = (kk_tag_t)" ++ show tag ++ "; "
-                                             setScan scan | scan == scanOf ct = ""
-                                                          | otherwise = x ++ "->_block.header.scan_fsize = " ++ show (scanOf ct) ++ "; "
+                                                         CProd _ _ -> ".f" <.> int i
+                                                         _ -> empty
+                                             writes matches = [x <.> "->p" <.> field i <+> "=" <+> y <.> field i <.> ";"
+                                                              | (i,same) <- zip [0..] matches, not same]
+                                             setTag | creditTag cx r == Just tag = empty
+                                                    | otherwise = x <.> "->_block.header.tag = (kk_tag_t)" <.> int tag <.> ";"
+                                             setScan scan | scan == scanOf ct = empty
+                                                          | otherwise = x <.> "->_block.header.scan_fsize =" <+> int (scanOf ct) <.> ";"
                                              -- A described credit is a unique block of its described payload,
                                              -- so its header only needs the new tag and scan size, where they differ,
                                              -- and only the fields that change are stored. Dups still run, in `y`.
                                              update = case described of
-                                                        Just (scan,matches) -> setTag ++ setScan scan ++ setPath ++ writes matches
-                                                        Nothing -> "kk_block_init(&" ++ x ++ "->_block,sizeof(" ++ bt ++ ")," ++ scan ++ "," ++ fromMaybe "0" cpath ++ ",(kk_tag_t)" ++ show tag ++ "); "
-                                                                   ++ x ++ "->p = " ++ y ++ "; "
-                                         return (start ++ ctName ct ++ " " ++ y ++ " = " ++ e ++ "; " ++ bt ++ "* " ++ x ++ " = (" ++ bt ++ "*)" ++ localName r ++ "; "
-                                                 ++ update ++ box)
+                                                        Just (scan,matches) -> [setTag, setScan scan, setPath] ++ writes matches
+                                                        Nothing -> ["kk_block_init(&" <.> x <.> "->_block,sizeof(" <.> bt <.> ")," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ");",
+                                                                    x <.> "->p =" <+> y <.> ";"]
+                                         return (stmtExpr ([check, cty ct <+> y <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> localName r <.> ";"]
+                                                           ++ update) box)
                                  -- a credit that may be empty, which `ExpandReuse` did not test
-                                 _ -> return (start ++ bt ++ "* " ++ x ++ " = " ++ allocAt (localName r) ++ "; " ++ x ++ "->p = " ++ e ++ "; " ++ box)
+                                 _ -> return (stmtExpr [check, bt <.> "*" <+> x <+> "=" <+> allocAt (localName r) <.> ";", x <.> "->p =" <+> e <.> ";"] box)
                    In y  -> do v <- fresh "v"
-                               return ("({ " ++ ctName ct ++ " " ++ v ++ " = " ++ e ++ "; "
-                                       ++ bt ++ "* " ++ x ++ " = (" ++ bt ++ "*)kt_block_clear(kk_datatype_as_ptr(kk_datatype_unbox(" ++ localName y ++ "),_ctx)," ++ scan ++ ",(kk_tag_t)" ++ show tag ++ ",_ctx); "
-                                       ++ setPath ++ x ++ "->p = " ++ v ++ "; " ++ box)
+                               let clear = "kt_block_clear(kk_datatype_as_ptr(kk_datatype_unbox(" <.> localName y <.> "),_ctx)," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
+                               return (stmtExpr [cty ct <+> v <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> clear <.> ";",
+                                                 setPath, x <.> "->p =" <+> v <.> ";"] box)
 
 -- The credit's old payload layout (by its scan size) and, for each leaf of the new payload,
 -- whether its C slot already holds its bits: the old payload has a leaf at the same offset,
@@ -451,12 +476,12 @@ leafValues t v
       _ -> [(collapse v,i) | i <- [0 .. length (leaves t) - 1]]
 
 -- `[deref]` and `[unroll]` keep the pointer
-genAlias :: Ctx -> Dest -> String -> Path -> Ty -> S.Set Path -> VExpr -> G [String]
+genAlias :: Ctx -> Dest -> Doc -> Path -> Ty -> S.Set Path -> VExpr -> G [Doc]
 genAlias cx dest ve x t named e
   = do s <- genE (bindVar cx{ cxNamed = named } x t) dest e
        return ([declare "kk_box_t" x ve] ++ s)
 
-genUnbox :: Ctx -> Dest -> Path -> Path -> VExpr -> G [String]
+genUnbox :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
 genUnbox cx dest v x e
   = do A a <- tyOfName cx v
        let ve = localName v
@@ -474,29 +499,29 @@ genUnbox cx dest v x e
          _ -> failG ("unboxing a value of type " ++ show a)
        ct <- ctype t
        s <- genE (bindVar cx x (V t)) dest body
-       return ([declare (ctName ct) x ue] ++ s)
+       return ([declare (cty ct) x ue] ++ s)
 
 -- Koka's `box` of a scalar
-genScalar :: Ctx -> VVal -> G String
+genScalar :: Ctx -> VVal -> G Doc
 genScalar cx v
   = do ct <- tyOf cx v >>= ctype
        e <- genV cx v
        case ct of
-         CPrim p | Just (box,_) <- primBox p -> return (box ++ "(" ++ e ++ ",_ctx)")
-         CEnum _ -> return ("kk_int32_box((int32_t)" ++ e ++ ",_ctx)")
+         CPrim p | Just (box,_) <- primBox p -> return (text box <.> "(" <.> e <.> ",_ctx)")
+         CEnum _ -> return ("kk_int32_box((int32_t)" <.> e <.> ",_ctx)")
          _ -> failG ("not a scalar: " ++ show ct)
 
-unboxScalar :: Mode -> VType -> String -> G String
+unboxScalar :: Mode -> VType -> Doc -> G Doc
 unboxScalar mode t e
   = do ct <- ctype t
        let borrow = if owning mode then "KK_OWNED" else "KK_BORROWED"
        case ct of
-         CPrim p | Just (_,unbox) <- primBox p -> return (unbox ++ "(" ++ e ++ "," ++ borrow ++ ",_ctx)")
-         CEnum _ -> return ("(" ++ ctName ct ++ ")kk_int32_unbox(" ++ e ++ "," ++ borrow ++ ",_ctx)")
+         CPrim p | Just (_,unbox) <- primBox p -> return (text unbox <.> "(" <.> e <.> "," <.> borrow <.> ",_ctx)")
+         CEnum _ -> return ("(" <.> cty ct <.> ")kk_int32_unbox(" <.> e <.> "," <.> borrow <.> ",_ctx)")
          _ -> failG ("not a scalar: " ++ show ct)
 
 -- the payload of a box; only a box at a type variable can be Koka's `box-any`
-unboxBlock :: Bool -> VType -> String -> G String
+unboxBlock :: Bool -> VType -> Doc -> G Doc
 unboxBlock named t e
   = do ct <- ctype t
        case ct of
@@ -504,24 +529,29 @@ unboxBlock named t e
          _ -> do bt <- blockType ct
                  x <- fresh "ub"
                  y <- fresh "ux"
-                 let read = "((" ++ bt ++ "*)kk_datatype_as_ptr(kk_datatype_unbox(" ++ e ++ "),_ctx))->p"
-                 if named then return read else
-                  return ("({ kk_box_t " ++ y ++ " = " ++ e ++ "; " ++ ctName ct ++ " " ++ x ++ "; if kk_unlikely(kt_box_is_any(" ++ y ++ ",_ctx)) { kk_valuetype_unbox_from_any((kk_box_t*)&" ++ x ++ ",sizeof(" ++ ctName ct ++ ")," ++ y ++ ",KK_BORROWED,_ctx); } else { " ++ x ++ " = ((" ++ bt ++ "*)kk_datatype_as_ptr(kk_datatype_unbox(" ++ y ++ "),_ctx))->p; } " ++ x ++ "; })")
+                 let payload b = "((" <.> bt <.> "*)kk_datatype_as_ptr(kk_datatype_unbox(" <.> b <.> "),_ctx))->p"
+                 if named then return (payload e) else
+                  return (stmtExpr ["kk_box_t" <+> y <+> "=" <+> e <.> ";",
+                                    cty ct <+> x <.> ";",
+                                    "if kk_unlikely(kt_box_is_any(" <.> y <.> ",_ctx))"
+                                      <+> block ["kk_valuetype_unbox_from_any((kk_box_t*)&" <.> x <.> ",sizeof(" <.> cty ct <.> ")," <.> y <.> ",KK_BORROWED,_ctx);"]
+                                      <+> "else" <+> block [x <+> "=" <+> payload y <.> ";"]] x)
 
 -- literals
 
-genLit :: Lit -> G String
+genLit :: Lit -> G Doc
 genLit lit
   = case lit of
-      LitInt i | i >= -8191 && i <= 8191 -> return ("kt_box_integer(kk_integer_from_small(" ++ show i ++ "))")
-               | i >= -2147483647 && i <= 2147483647 -> return ("kt_box_integer(kk_integer_from_int(" ++ show i ++ ",_ctx))")
-               | otherwise -> return ("kt_box_integer(kk_integer_from_str(\"" ++ show i ++ "\",_ctx))")
-      LitFloat d -> return (showHFloat d "")
-      LitChar c -> return ("((kk_char_t)" ++ show (fromEnum c) ++ ")")
+      LitInt i | i >= -8191 && i <= 8191 -> return ("kt_box_integer(kk_integer_from_small(" <.> integer i <.> "))")
+               | i >= -2147483647 && i <= 2147483647 -> return ("kt_box_integer(kk_integer_from_int(" <.> integer i <.> ",_ctx))")
+               | otherwise -> return ("kt_box_integer(kk_integer_from_str(\"" <.> integer i <.> "\",_ctx))")
+      LitFloat d -> return (text (showHFloat d ""))
+      LitChar c -> return ("((kk_char_t)" <.> int (fromEnum c) <.> ")")
       LitString "" -> return "kt_box_string(kk_string_empty())"
       LitString s -> do x <- fresh "s"
                         let (cstr,clen) = cstring s
-                        return ("({ kk_define_string_literal(static," ++ x ++ "," ++ show clen ++ "," ++ cstr ++ ",_ctx); kt_box_string(kk_string_dup(" ++ x ++ ",_ctx)); })")
+                        return (stmtExpr ["kk_define_string_literal(static," <.> x <.> "," <.> int clen <.> "," <.> text cstr <.> ",_ctx);"]
+                                         ("kt_box_string(kk_string_dup(" <.> x <.> ",_ctx))"))
 
 cstring :: String -> (String,Int)
 cstring s
@@ -539,14 +569,14 @@ cstring s
                        else (bytes [0xF0 + x `div` 262144, 0x80 + (x `div` 4096) `mod` 64, 0x80 + (x `div` 64) `mod` 64, 0x80 + x `mod` 64], 4)
 
 -- top-level functions as values
-staticFun :: Name -> G String
+staticFun :: Name -> G Doc
 staticFun f
   = do modify (\st -> st{ stWrappers = S.insert f (stWrappers st), stLocal = True })
        x <- fresh "f"
-       return ("({ kk_define_static_function(" ++ x ++ "," ++ cName f ++ "_fun,_ctx); kk_datatype_box(" ++ x ++ "); })")
+       return (stmtExpr ["kk_define_static_function(" <.> x <.> "," <.> text (cName f) <.> "_fun,_ctx);"] ("kk_datatype_box(" <.> x <.> ")"))
 
 -- closures
-genLam :: Ctx -> [(Path,Mode,VType)] -> VType -> VExpr -> G String
+genLam :: Ctx -> [(Path,Mode,VType)] -> VType -> VExpr -> G Doc
 genLam cx ps r e
   = do let caps = S.toList (lamFree ps e)
        capTys <- mapM (\x -> case M.lookup x (cxGamma cx) of
@@ -555,39 +585,38 @@ genLam cx ps r e
        capCts <- mapM (ctOf . snd) capTys
        let fields = orderFields (zip [0..] capCts)
            scan   = 1 + sum (map (scanOf . snd) fields)
-       n <- fresh "lam"
-       let sname = "struct kt_clo" ++ n
-           fname = "kt_fun" ++ n
+       n <- freshName "lam"
+       let sname = "struct kt_clo" <.> text n
+           fname = "kt_fun" <.> text n
        pcts <- mapM (\(_,_,t) -> ctype t) ps
        rct  <- ctype r
-       let structDef = sname ++ " { struct kk_function_s _base; " ++ concat [ctName ct ++ " c" ++ show i ++ "; " | (i,ct) <- fields] ++ "};\n"
+       let structDef = sname <+> block ("struct kk_function_s _base;" : [cty ct <+> "c" <.> int i <.> ";" | (i,ct) <- fields]) <.> ";"
            g'  = M.union (M.fromList ([(x,V t) | (x,_,t) <- ps])) (cxGamma cx)
            cx' = cx{ cxGamma = g', cxSelf = Nothing, cxJoins = M.empty }
        body <- genE cx' DReturn e
        -- Transfer captures from unique closures; shared closures retain their own references.
-       let loads = [ctName ct ++ " " ++ localName (caps !! i) ++ " = _self->c" ++ show i ++ ";" | (i,ct) <- fields]
-           dups = [x ++ " = " ++ dupExpr ct x ++ ";" | (i,ct) <- fields, needsRC ct, let x = localName (caps !! i)]
-           fun = "static " ++ ctName rct ++ " " ++ fname ++ "(kk_function_t _fself" ++ concat [", " ++ ctName ct ++ " " ++ localName x | ((x,_,_),ct) <- zip ps pcts] ++ ", kk_context_t* _ctx) {\n"
-                 ++ (if null caps then "  kk_function_static_drop(_fself,_ctx);\n"
-                     else "  " ++ sname ++ "* _self = kk_function_as(" ++ sname ++ "*,_fself,_ctx);\n" ++ concatMap (\l -> "  " ++ l ++ "\n") loads
-                          ++ "  kk_drop_match(_self,{ " ++ unwords dups ++ " },{},_ctx);\n")
-                 ++ indent body ++ "}\n"
-       emitDecl ((if null caps then "" else structDef) ++ fun)
+       let loads = [cty ct <+> localName (caps !! i) <+> "= _self->c" <.> int i <.> ";" | (i,ct) <- fields]
+           dups = [x <+> "=" <+> dupExpr ct x <.> ";" | (i,ct) <- fields, needsRC ct, let x = localName (caps !! i)]
+           sig = "static" <+> cty rct <+> fname <.> "(kk_function_t _fself" <.> hcat [", " <.> cty ct <+> localName x | ((x,_,_),ct) <- zip ps pcts] <.> ", kk_context_t* _ctx)"
+           prologue | null caps = ["kk_function_static_drop(_fself,_ctx);"]
+                    | otherwise = (sname <.> "* _self = kk_function_as(" <.> sname <.> "*,_fself,_ctx);") : loads
+                                  ++ ["kk_drop_match(_self,{" <+> hsep dups <+> "},{},_ctx);"]
+       emitDecl (vcat ([structDef | not (null caps)] ++ [sig <+> block (prologue ++ body)]))
        x <- fresh "c"
        -- A capture-free closure can share a static function block.
        if null caps
-         then return ("({ kk_define_static_function(" ++ x ++ "," ++ fname ++ ",_ctx); "
-                      ++ "kk_datatype_box(kk_function_static_dup(" ++ x ++ ",_ctx)); })")
-         else return ("({ " ++ sname ++ "* " ++ x ++ " = kk_function_alloc_as(" ++ sname ++ "," ++ show scan ++ ",_ctx); "
-                      ++ x ++ "->_base.fun = kk_kkfun_ptr_box(&" ++ fname ++ ",_ctx); "
-                      ++ concat [x ++ "->c" ++ show i ++ " = " ++ localName (caps !! i) ++ "; " | (i,_) <- fields]
-                      ++ "kk_datatype_box(kk_datatype_from_base(&" ++ x ++ "->_base,_ctx)); })")
+         then return (stmtExpr ["kk_define_static_function(" <.> x <.> "," <.> fname <.> ",_ctx);"]
+                               ("kk_datatype_box(kk_function_static_dup(" <.> x <.> ",_ctx))"))
+         else return (stmtExpr ([sname <.> "*" <+> x <+> "= kk_function_alloc_as(" <.> sname <.> "," <.> int scan <.> ",_ctx);",
+                                 x <.> "->_base.fun = kk_kkfun_ptr_box(&" <.> fname <.> ",_ctx);"]
+                                ++ [x <.> "->c" <.> int i <+> "=" <+> localName (caps !! i) <.> ";" | (i,_) <- fields])
+                               ("kk_datatype_box(kk_datatype_from_base(&" <.> x <.> "->_base,_ctx))"))
 
 lamFree :: [(Path,Mode,VType)] -> VExpr -> S.Set Path
 lamFree ps e = fvA (Lam ps VUnit e)
 
 -- open datatypes use the constructors of Koka's headers
-genOpenCon :: Ctx -> Name -> [AType] -> VVal -> G String
+genOpenCon :: Ctx -> Name -> [AType] -> VVal -> G Doc
 genOpenCon cx c tys v
   = do (fields,kfields) <- openConFields cx c tys
        e <- genV cx v
@@ -598,7 +627,9 @@ genOpenCon cx c tys v
                     fct <- ctype f
                     return (toKoka fct (kokaCType kt) p)
        fct <- ctype ft
-       return ("({ " ++ ctName fct ++ " " ++ x ++ " = " ++ e ++ "; kt_box_datatype(" ++ kokaName (makeHiddenName "new" c) ++ "(" ++ (if null args then "" else "kk_reuse_null,0,") ++ concatMap (++ ",") args ++ "_ctx)); })")
+       let new = text (kokaName (makeHiddenName "new" c))
+       return (stmtExpr [cty fct <+> x <+> "=" <+> e <.> ";"]
+                        ("kt_box_datatype(" <.> new <.> "(" <.> (if null args then empty else "kk_reuse_null,0,") <.> hcat [a <.> "," | a <- args] <.> "_ctx))"))
 
 openConFields :: Ctx -> Name -> [AType] -> G ([VType],[Type])
 openConFields cx c tys
@@ -647,55 +678,52 @@ kokaPrimTypes
     ,(nameTpFloat32,"float"),(nameTpFloat16,"float"),(nameTpRef,"kk_ref_t"),(nameTpLocalVar,"kk_ref_t")
     ,(nameTpBox,"kk_box_t"),(nameTpAny,"kk_box_t"),(nameTpReuse,"kk_reuse_t"),(nameTpFieldAddr,"kk_field_addr_t")]
 
-toKoka :: CT -> String -> String -> String
+toKoka :: CT -> String -> Doc -> Doc
 toKoka ct kt e
   | ctName ct == kt = e
   | otherwise
   = case ct of
-      CEnum _ -> "((" ++ kt ++ ")(" ++ e ++ "))"
-      CPrim _ -> "((" ++ kt ++ ")(" ++ e ++ "))"
-      _ -> "kt_pun(" ++ kt ++ "," ++ e ++ ")"
+      CEnum _ -> "((" <.> text kt <.> ")(" <.> e <.> "))"
+      CPrim _ -> "((" <.> text kt <.> ")(" <.> e <.> "))"
+      _ -> "kt_pun(" <.> text kt <.> "," <.> e <.> ")"
 
-fromKoka :: String -> CT -> String -> String
+fromKoka :: String -> CT -> Doc -> Doc
 fromKoka kt ct e
   | ctName ct == kt = e
   | otherwise
   = case ct of
-      CEnum _ -> "((" ++ ctName ct ++ ")(" ++ e ++ "))"
-      CPrim _ -> "((" ++ ctName ct ++ ")(" ++ e ++ "))"
-      _ -> "kt_pun(" ++ ctName ct ++ "," ++ e ++ ")"
+      CEnum _ -> "((" <.> cty ct <.> ")(" <.> e <.> "))"
+      CPrim _ -> "((" <.> cty ct <.> ")(" <.> e <.> "))"
+      _ -> "kt_pun(" <.> cty ct <.> "," <.> e <.> ")"
 
 -- expressions
 
-data Dest = DReturn | DAssign String | DDiscard
+data Dest = DReturn | DAssign Doc | DDiscard
 
-assignTo :: Dest -> CT -> String -> [String]
+assignTo :: Dest -> CT -> Doc -> [Doc]
 assignTo dest ct e
   = case dest of
-      DReturn   -> ["return " ++ e ++ ";"]
-      DAssign x -> [x ++ " = " ++ e ++ ";"]
-      DDiscard  -> ["(void)(" ++ e ++ ");"]
-
-indent :: [String] -> String
-indent = concatMap (\l -> "  " ++ l ++ "\n")
+      DReturn   -> ["return" <+> e <.> ";"]
+      DAssign x -> [x <+> "=" <+> e <.> ";"]
+      DDiscard  -> ["(void)(" <.> e <.> ");"]
 
 bindVar :: Ctx -> Path -> Ty -> Ctx
 bindVar cx x t = cx{ cxGamma = M.insert x t (cxGamma cx) }
 
 -- Declare the C variable of a binder. A path is bound at most once in a scope (`Check`).
-declare :: String -> Path -> String -> String
-declare ctype x e = ctype ++ " " ++ localName x ++ " = " ++ e ++ ";"
+declare :: Doc -> Path -> Doc -> Doc
+declare ctype x e = ctype <+> localName x <+> "=" <+> e <.> ";"
 
-genE :: Ctx -> Dest -> VExpr -> G [String]
+genE :: Ctx -> Dest -> VExpr -> G [Doc]
 genE cx dest expr
   | Just (v,mk) <- hoistDeep expr
-  = do x <- root . newHiddenName <$> fresh "hoist"
+  = do x <- root . newHiddenName <$> freshName "hoist"
        let expr' = mk (Var x)
        t <- tyOf cx v
        ct <- ctype t
        s <- genE cx (DAssign (localName x)) (Ret v)
        rest <- genE (bindVar cx x (V t)) dest expr'
-       return ([ctName ct ++ " " ++ localName x ++ ";"] ++ s ++ rest)
+       return ([cty ct <+> localName x <.> ";"] ++ s ++ rest)
 genE cx dest expr
   = case expr of
       Ret v -> do t <- tyOf cx v
@@ -708,40 +736,39 @@ genE cx dest expr
               let cx' = (bindVar cx x (V t)){ cxNamed = namedOf cx e1 x }
               s2 <- genE cx' dest e2
               -- the binders of `e1` are out of scope in `e2`, and a path may be bound in both
-              let block = case e1 of
-                            Ret _ -> s1
-                            _ -> ["{"] ++ map ("  " ++) s1 ++ ["}"]
-              return ([ctName ct ++ " " ++ localName x ++ ";"] ++ block ++ s2)
+              let assign = case e1 of
+                             Ret _ -> s1
+                             _ -> [block s1]
+              return ([cty ct <+> localName x <.> ";"] ++ assign ++ s2)
       Drop x e
         | S.member x (cxShared cx)   -- like Koka's C backend: a shared block only needs a decrement
         -> do s <- genE cx dest e
-              return (("kk_block_decref(kk_datatype_as_ptr(kk_datatype_unbox(" ++ localName x ++ "),_ctx),_ctx);") : s)
+              return (("kk_block_decref(kk_datatype_as_ptr(kk_datatype_unbox(" <.> localName x <.> "),_ctx),_ctx);") : s)
         | otherwise
         -> do t <- tyOfName cx x
               ct <- ctOf t
               s <- genE cx dest e
-              return (filter (not . null) [dropStmt ct (localName x)] ++ s)
+              return (dropStmt ct (localName x) : s)
       Free r e
         -> do rt <- tyOfName cx r
               s <- genE cx dest e
               let free = case rt of
-                           V (VReuse Full _ _) -> "kt_reuse_free(" ++ localName r ++ ",_ctx);"
+                           V (VReuse Full _ _) -> "kt_reuse_free(" <.> localName r <.> ",_ctx);"
                            _ -> dropStmt CReuse (localName r)
               return (free : s)
       Dup x e
         -> do ct <- tyOfName cx x >>= ctOf
               s <- genE cx dest e
-              return (["(void)" ++ dupExpr ct (localName x) ++ ";" | needsRC ct] ++ s)
+              return (["(void)" <.> dupExpr ct (localName x) <.> ";" | needsRC ct] ++ s)
       IsUnique x e1 e2
         -> do t <- liftC (inferVar (cxGamma cx) x)
               s1 <- genE cx dest e1
-              let d = "kk_datatype_unbox(" ++ localName x ++ ")"
+              let d = "kk_datatype_unbox(" <.> localName x <.> ")"
                   (test,shared) = case t of
-                    V _ -> ("kk_datatype_is_unique(" ++ d ++ ",_ctx)", cxShared cx)   -- a lazy value may be immediate
-                    A _ -> ("kk_block_is_unique(kk_datatype_as_ptr(" ++ d ++ ",_ctx))", S.insert x (cxShared cx))
+                    V _ -> ("kk_datatype_is_unique(" <.> d <.> ",_ctx)", cxShared cx)   -- a lazy value may be immediate
+                    A _ -> ("kk_block_is_unique(kk_datatype_as_ptr(" <.> d <.> ",_ctx))", S.insert x (cxShared cx))
               s2 <- genE cx{ cxShared = shared } dest e2
-              return (["if kk_likely(" ++ test ++ ") {"]
-                      ++ map ("  " ++) s1 ++ ["} else {"] ++ map ("  " ++) s2 ++ ["}"])
+              return ["if kk_likely(" <.> test <.> ")" <+> block s1 <+> "else" <+> block s2]
       IfFull r e1 e2
         -> do t <- liftC (inferVar (cxGamma cx) r)
               full <- case t of
@@ -749,27 +776,26 @@ genE cx dest expr
                         _ -> failG ("test of a non-credit: " ++ show r)
               s1 <- genE (bindVar cx r full) dest e1
               s2 <- genE cx dest e2
-              return (["if kk_likely(" ++ localName r ++ " != kk_reuse_null) {"]
-                      ++ map ("  " ++) s1 ++ ["} else {"] ++ map ("  " ++) s2 ++ ["}"])
+              return ["if kk_likely(" <.> localName r <+> "!= kk_reuse_null)" <+> block s1 <+> "else" <+> block s2]
       UnboxRu v r e
         -> do bs <- liftC (unboxRuBinds (cxGamma cx) v r)
               s <- genE (foldl (\c (y,ty) -> bindVar c y ty) cx bs) dest e
-              return (declare "kk_reuse_t" r ("kk_datatype_as_ptr(kk_datatype_unbox(" ++ localName v ++ "),_ctx)") : s)
+              return (declare "kk_reuse_t" r ("kk_datatype_as_ptr(kk_datatype_unbox(" <.> localName v <.> "),_ctx)") : s)
       Gen _ e -> genE cx dest e
       Join j ps e1 e2
         -> do lbl <- fresh "join"
               decls <- mapM (\(x,_,t) -> do ct <- ctype t
-                                            return (ctName ct ++ " " ++ localName x ++ ";")) ps
+                                            return (cty ct <+> localName x <.> ";")) ps
               s2 <- genE cx{ cxJoins = M.insert j (lbl,[x | (x,_,_) <- ps]) (cxJoins cx) } dest e2
               s1 <- genE (foldl (\c (x,_,t) -> bindVar c x (V t)) cx ps) dest e1
               let (skip,end) = case dest of
                                  DReturn -> ([],[])
-                                 _ -> (["goto " ++ lbl ++ "_end;"], [lbl ++ "_end: ;"])
-              return (["{"] ++ map ("  " ++) (decls ++ s2 ++ skip) ++ [lbl ++ ": {"] ++ map ("  " ++) s1 ++ ["}"] ++ end ++ ["}"])
+                                 _ -> (["goto" <+> lbl <.> "_end;"], [lbl <.> "_end: ;"])
+              return [block (decls ++ s2 ++ skip ++ [lbl <.> ":" <+> block s1] ++ end)]
       Jump j vs
         -> do (lbl,xs) <- maybe (failG ("jump to unknown join point " ++ show j)) return (M.lookup j (cxJoins cx))
               args <- mapM (genV cx) vs
-              return ([localName x ++ " = " ++ a ++ ";" | (x,a) <- zip xs args] ++ ["goto " ++ lbl ++ ";"])
+              return ([localName x <+> "=" <+> a <.> ";" | (x,a) <- zip xs args] ++ ["goto" <+> lbl <.> ";"])
       Call f tys vs -> genCall cx dest f tys vs
       App f vs
         -> do ft <- tyOfName cx f
@@ -778,11 +804,11 @@ genE cx dest expr
                           _ -> failG ("application of " ++ show ft)
               pcts <- mapM ctype ps
               rct  <- ctype r
-              let fe = localName f
               args <- mapM (genV cx) vs
               fx <- fresh "fn"
-              let call = "kk_function_call(" ++ ctName rct ++ ",(kk_function_t" ++ concatMap ((", " ++) . ctName) pcts ++ ", kk_context_t*)," ++ fx ++ ",(" ++ fx ++ concatMap (", " ++) args ++ ", _ctx),_ctx)"
-              return (["{ kk_function_t " ++ fx ++ " = kk_datatype_unbox(" ++ fe ++ ");"] ++ map ("  " ++) (assignTo dest rct call) ++ ["}"])
+              let call = "kk_function_call(" <.> cty rct <.> ",(kk_function_t" <.> hcat [", " <.> cty ct | ct <- pcts] <.> ", kk_context_t*),"
+                         <.> fx <.> ",(" <.> fx <.> hcat [", " <.> a | a <- args] <.> ", _ctx),_ctx)"
+              return [block (("kk_function_t" <+> fx <+> "= kk_datatype_unbox(" <.> localName f <.> ");") : assignTo dest rct call)]
       Unpair _ v x y e
         -> do VProd a b <- tyOf cx v
               ve <- genV cx v
@@ -793,16 +819,16 @@ genE cx dest expr
               cta <- ctype a
               ctb <- ctype b
               s <- genE (bindVar (bindVar cx x (V a)) y (V b)) dest e
-              return ([ctName wct ++ " " ++ z ++ " = " ++ ve ++ ";",
-                       declare (ctName cta) x px,
-                       declare (ctName ctb) y py] ++ s)
+              return ([cty wct <+> z <+> "=" <+> ve <.> ";",
+                       declare (cty cta) x px,
+                       declare (cty ctb) y py] ++ s)
       Unpack _ v tvs x e
         -> do whole@(VExists bs body) <- tyOf cx v
               let t = inst bs (map AVar tvs) body
               ve <- genV cx v
               ct <- ctype t
               s <- genE (bindVar cx x (V t)) dest e
-              return ([declare (ctName ct) x ve] ++ s)
+              return ([declare (cty ct) x ve] ++ s)
       Deref _ v x e
         -> do VPtr a <- tyOf cx v
               ve <- genV cx v
@@ -824,8 +850,8 @@ genE cx dest expr
               tg <- fresh "t"
               let (header,test) = case pointerTest ve ls rs of
                                    Just c -> ([],c)
-                                   Nothing -> ([tagDecl t tg ve],tg ++ " < " ++ show k)
-              return (["{"] ++ map ("  " ++) (header ++ ifChain [(test,left),("true",right)]) ++ ["}"])
+                                   Nothing -> ([tagDecl t tg ve],tg <+> "<" <+> int k)
+              return [block (header ++ [ifChain [(test,left)] right])]
       CaseA _ v alts def
         -> do t <- tyOfName cx v
               tss <- liftC (altTypes (cxEnv cx) t expr)
@@ -841,9 +867,9 @@ genE cx dest expr
               -- Match owns partitioning. Only a single alternative with a
               -- default needs an equality branch.
               let dispatch = case (brs,fallback) of
-                    ([([tag],body)],Just other) -> ifChain [(tg ++ " == " ++ show tag,body),("true",other)]
+                    ([([tag],body)],Just other) -> ifChain [(tg <+> "==" <+> int tag,body)] other
                     _ -> switchCases tg brs fallback
-              return (["{"] ++ map ("  " ++) (tagDecl t tg ve : dispatch) ++ ["}"])
+              return [block [tagDecl t tg ve, dispatch]]
       CaseV _ v alts
         -> do t@(VSum ts) <- tyOf cx v
               ve <- genV cx v
@@ -853,19 +879,19 @@ genE cx dest expr
                        do cti <- ctype ti
                           s <- genE (bindVar cx x (V ti)) dest e
                           let bind = case ct of
-                                       CEnum _ -> declare (ctName cti) x "kk_Unit"
+                                       CEnum _ -> declare (cty cti) x "kk_Unit"
                                        CSum _ alts' ->
                                          case alts' !! i of
-                                           Just _ -> declare (ctName cti) x (z ++ "._cons.c" ++ show i)
-                                           Nothing -> declare (ctName cti) x "kk_Unit"
-                                       _ -> ""
+                                           Just _ -> declare (cty cti) x (z <.> "._cons.c" <.> int i)
+                                           Nothing -> declare (cty cti) x "kk_Unit"
+                                       _ -> empty
                           return ([i], bind : s)
-              let tag = case ct of { CEnum _ -> z; _ -> "kk_smallint_from_integer(" ++ z ++ "._tag) - 1" }
+              let tag = case ct of { CEnum _ -> z; _ -> "kk_smallint_from_integer(" <.> z <.> "._tag) - 1" }
                   dispatch = case brs of
                     [(_,body)] -> body
-                    [(_,left),(_,right)] -> ifChain [("(" ++ tag ++ ") == 0",left),("true",right)]
-                    _ -> switchCases tag brs (Just ["kt_unreachable();"])
-              return ([ "{ " ++ ctName ct ++ " " ++ z ++ " = " ++ ve ++ ";" ] ++ dispatch ++ ["}"])
+                    [(_,left),(_,right)] -> [ifChain [("(" <.> tag <.> ") == 0",left)] right]
+                    _ -> [switchCases tag brs (Just ["kt_unreachable();"])]
+              return [block ((cty ct <+> z <+> "=" <+> ve <.> ";") : dispatch)]
       CaseLit v alts def
         -> do tv <- tyOf cx v
               ve <- genV cx v
@@ -873,7 +899,7 @@ genE cx dest expr
                        do s <- genE cx dest e
                           return (litTest ve l, s)
               sd <- genE cx dest def
-              return (ifChain (brs ++ [("true", sd)]))
+              return [ifChain brs sd]
       CaseOpen _ v alts def
         -> do let ve = localName v
               A tv <- tyOfName cx v
@@ -885,9 +911,10 @@ genE cx dest expr
                           names <- conFieldNames cx c
                           fe <- openFieldExpr c fields kfields names ve
                           s <- genE (bindVar cx x (V f)) dest e
-                          return ("kt_open_is(" ++ ve ++ "," ++ kokaName (makeHiddenName "tag" c) ++ ",_ctx)", declare (ctName fct) x fe : s)
+                          let tag = text (kokaName (makeHiddenName "tag" c))
+                          return ("kt_open_is(" <.> ve <.> "," <.> tag <.> ",_ctx)", declare (cty fct) x fe : s)
               sd <- genE cx dest def
-              return (ifChain (brs ++ [("true",sd)]))
+              return [ifChain brs sd]
 
 -- bind deeply nested values first (C compilers limit the nesting of brackets)
 hoistDeep :: VExpr -> Maybe (VVal, VVal -> VExpr)
@@ -940,7 +967,7 @@ childrenA v = case v of
   _ -> []
 
 -- A partition binder is an alias with a different static sum and tag origin.
-genSumBranch :: Ctx -> Dest -> Path -> Path -> Ty -> VExpr -> G [String]
+genSumBranch :: Ctx -> Dest -> Path -> Path -> Ty -> VExpr -> G [Doc]
 genSumBranch cx dest v x t e
   = do let named = if S.member v (cxNamed cx) then S.insert x (cxNamed cx) else cxNamed cx
            cx' = (bindVar cx x t){ cxNamed = named }
@@ -949,45 +976,40 @@ genSumBranch cx dest v x t e
 
 -- Read the tag of a boxed sum; when every alternative is a heap block, the
 -- tag is in the block header and needs no pointer test.
-tagDecl :: Ty -> String -> String -> String
-tagDecl t tg ve = "kk_tag_t " ++ tg ++ " = " ++ tagRead ++ ";"
+tagDecl :: Ty -> Doc -> Doc -> Doc
+tagDecl t tg ve = "kk_tag_t" <+> tg <+> "=" <+> tagRead <.> ";"
   where
-    d = "kk_datatype_unbox(" ++ ve ++ ")"
+    d = "kk_datatype_unbox(" <.> ve <.> ")"
     tagRead = case t of
-                A a | shapeIsHeap a == Just True -> "kk_block_tag(kk_datatype_as_ptr(" ++ d ++ ",_ctx))"
-                _ -> "kk_datatype_tag(" ++ d ++ ",_ctx)"
+                A a | shapeIsHeap a == Just True -> "kk_block_tag(kk_datatype_as_ptr(" <.> d <.> ",_ctx))"
+                _ -> "kk_datatype_tag(" <.> d <.> ",_ctx)"
 
 -- Exhaustive boxed cases also accept the dummy result of an effect yield:
 -- the final arm is the default, without emitting its body twice.
-switchCases :: String -> [([Int],[String])] -> Maybe [String] -> [String]
+switchCases :: Doc -> [([Int],[Doc])] -> Maybe [Doc] -> Doc
 switchCases tag brs def
-  = ["switch (" ++ tag ++ ") {"]
-    ++ concat [branch (map (\t -> "case " ++ show t ++ ":") tags
-                      ++ ["default:" | Nothing <- [def], i == length brs - 1]) body
-              | (i,(tags,body)) <- zip [0..] brs]
-    ++ maybe [] (branch ["default:"]) def ++ ["}"]
+  = "switch (" <.> tag <.> ")" <+> block ([branch (["case" <+> int t <.> ":" | t <- tags]
+                                                    ++ ["default:" | Nothing <- [def], i == length brs - 1]) body
+                                           | (i,(tags,body)) <- zip [0..] brs]
+                                          ++ [branch ["default:"] body | Just body <- [def]])
   where
-    branch labels body = labels ++ ["{"] ++ map ("  " ++) body ++ ["  break;","}"]
+    branch labels body = hsep labels <+> block (body ++ ["break;"])
 
-ifChain :: [(String,[String])] -> [String]
-ifChain [] = []
-ifChain [("true",s)] = ["{"] ++ map ("  " ++) s ++ ["}"]
-ifChain ((t,s):rest)
-  = ["if (" ++ t ++ ") {"] ++ map ("  " ++) s ++ ["} else"] ++ ifChain' rest
-  where
-    ifChain' [] = ["{ kt_unreachable(); }"]
-    ifChain' brs = ifChain brs
+-- the tests in order, each with its branch, and the final `else` branch
+ifChain :: [(Doc,[Doc])] -> [Doc] -> Doc
+ifChain [] other = block other
+ifChain ((test,s):rest) other = "if (" <.> test <.> ")" <+> block s <+> "else" <+> ifChain rest other
 
-litTest :: String -> Lit -> String
+litTest :: Doc -> Lit -> Doc
 litTest ve lit
   = case lit of
-      LitInt i -> "kk_integer_eq_borrow(kt_unbox_integer(" ++ ve ++ ")," ++ intLit i ++ ",_ctx)"
-      LitString s -> "(kk_string_cmp_cstr_borrow(kt_unbox_string(" ++ ve ++ ")," ++ fst (cstring s) ++ ",_ctx) == 0)"
-      LitChar c -> "(" ++ ve ++ " == " ++ show (fromEnum c) ++ ")"
-      LitFloat d -> "(" ++ ve ++ " == " ++ showHFloat d "" ++ ")"
+      LitInt i -> "kk_integer_eq_borrow(kt_unbox_integer(" <.> ve <.> ")," <.> intLit i <.> ",_ctx)"
+      LitString s -> "(kk_string_cmp_cstr_borrow(kt_unbox_string(" <.> ve <.> ")," <.> text (fst (cstring s)) <.> ",_ctx) == 0)"
+      LitChar c -> "(" <.> ve <+> "==" <+> int (fromEnum c) <.> ")"
+      LitFloat d -> "(" <.> ve <+> "==" <+> text (showHFloat d "") <.> ")"
   where
-    intLit i | i >= -8191 && i <= 8191 = "kk_integer_from_small(" ++ show i ++ ")"
-             | otherwise = "kk_integer_from_str(\"" ++ show i ++ "\",_ctx)"
+    intLit i | i >= -8191 && i <= 8191 = "kk_integer_from_small(" <.> integer i <.> ")"
+             | otherwise = "kk_integer_from_str(\"" <.> integer i <.> "\",_ctx)"
 
 openTypeArgs :: Ctx -> Path -> G [AType]
 openTypeArgs cx v
@@ -1009,9 +1031,9 @@ kokaLocal n
 cReserved :: [String]
 cReserved = ["bool","toString","arguments","eval","char","int","intptr_t","long","short","signed","size_t","ssize_t","intptr_t","uintptr_t","unsigned","uint8_t","double","auto","extern","float","goto","inline","restrict","sizeof","static","volatile","async","await","break","case","catch","class","continue","const","debugger","default","delete","do","else","finally","for","function","if","in","instanceof","new","return","register","switch","struct","this","throw","try","typeof","typedef","union","var","void","while","with","yield","class","enum","export","extends","import","super","errno","exception_info","or","timezone"]
 
-openFieldExpr :: Name -> [VType] -> [Type] -> [String] -> String -> G String
+openFieldExpr :: Name -> [VType] -> [Type] -> [String] -> Doc -> G Doc
 openFieldExpr c fields kfields names ve
-  = do let acc n = kokaName (makeHiddenName "as" c) ++ "(kt_unbox_datatype(" ++ ve ++ "),_ctx)->" ++ n
+  = do let acc n = text (kokaName (makeHiddenName "as" c)) <.> "(kt_unbox_datatype(" <.> ve <.> "),_ctx)->" <.> text n
        vals <- forM (zip3 fields kfields names) $ \(f,kt,n) ->
                  do fct <- ctype f
                     return (fromKoka (kokaCType kt) fct (acc n))
@@ -1019,21 +1041,19 @@ openFieldExpr c fields kfields names ve
          [] -> return "kk_Unit"
          [_] -> return (head vals)
          _ -> do ct <- ctype (prodV fields)
-                 let sname = ctName ct
-                     parts = zip fields vals
                  y <- fresh "of"
                  let go i [] = []
                      go i ((f,v):rest) = let n = length (leaves f)
-                                         in (if n == 1 then [y ++ ".f" ++ show i ++ " = " ++ v ++ "; "] else []) ++ go (i+n) rest
-                 return ("({ " ++ sname ++ " " ++ y ++ "; " ++ concat (go 0 parts) ++ y ++ "; })")
+                                         in [y <.> ".f" <.> int i <+> "=" <+> v <.> ";" | n == 1] ++ go (i+n) rest
+                 return (stmtExpr ((cty ct <+> y <.> ";") : go 0 (zip fields vals)) y)
 
 -- calls
 
-genCall :: Ctx -> Dest -> Name -> [AType] -> [VVal] -> G [String]
+genCall :: Ctx -> Dest -> Name -> [AType] -> [VVal] -> G [Doc]
 genCall cx dest f tys vs
   | f == nameLazyFree, [v] <- vs
   = do e <- genV cx v
-       return (["kk_block_free(kk_datatype_as_ptr(kk_datatype_unbox(" ++ e ++ "),_ctx),_ctx);"] ++ assignTo dest CUnit "kk_Unit")
+       return (("kk_block_free(kk_datatype_as_ptr(kk_datatype_unbox(" <.> e <.> "),_ctx),_ctx);") : assignTo dest CUnit "kk_Unit")
   | [Lit (LitInt i)] <- vs, Just (kt,lit) <- fixedWidthLit f i
   = do (_,r) <- callSig cx f tys
        rct <- ctype r
@@ -1042,18 +1062,18 @@ genCall cx dest f tys vs
   = do (_,r) <- callSig cx f tys
        rct <- ctype r
        e <- genV cx v
-       let arg = "kt_unbox_integer(" ++ e ++ ")"
+       let arg = "kt_unbox_integer(" <.> e <.> ")"
            test = case i of
-                    0  -> "kk_integer_is_zero_borrow(" ++ arg ++ ")"
-                    1  -> "kk_integer_is_one_borrow(" ++ arg ++ ")"
-                    -1 -> "kk_integer_is_minus_one_borrow(" ++ arg ++ ")"
-                    _  -> "kk_integer_eq_borrow(kk_integer_from_small(" ++ show i ++ ")," ++ arg ++ ",_ctx)"
-       return (assignTo dest rct (fromKoka "bool" rct (if neq then "!(" ++ test ++ ")" else test)))
+                    0  -> "kk_integer_is_zero_borrow(" <.> arg <.> ")"
+                    1  -> "kk_integer_is_one_borrow(" <.> arg <.> ")"
+                    -1 -> "kk_integer_is_minus_one_borrow(" <.> arg <.> ")"
+                    _  -> "kk_integer_eq_borrow(kk_integer_from_small(" <.> integer i <.> ")," <.> arg <.> ",_ctx)"
+       return (assignTo dest rct (fromKoka "bool" rct (if neq then "!(" <.> test <.> ")" else test)))
   | Just (v,i) <- smallIntArithmetic f vs
   = do (_,r) <- callSig cx f tys
        rct <- ctype r
        e <- genV cx v
-       let call = "kk_integer_add_small_const(kt_unbox_integer(" ++ e ++ ")," ++ show i ++ ",_ctx)"
+       let call = "kk_integer_add_small_const(kt_unbox_integer(" <.> e <.> ")," <.> integer i <.> ",_ctx)"
        return (assignTo dest rct (fromKoka "kk_integer_t" rct call))
   | Just ext <- M.lookup f (ceExterns (cxCEnv cx)) = genExtern cx dest f tys vs ext
   | otherwise
@@ -1064,10 +1084,10 @@ genCall cx dest f tys vs
          (DReturn, Just (self,params)) | self == f && length params == length args
            -> do tmps <- mapM (const (fresh "a")) args
                  pcts <- mapM ctype ps
-                 return (["{"] ++ ["  " ++ ctName ct ++ " " ++ t ++ " = " ++ a ++ ";" | (t,a,ct) <- zip3 tmps args pcts]
-                         ++ ["  " ++ localName p ++ " = " ++ t ++ ";" | (p,t) <- zip params tmps]
-                         ++ ["  goto kt_tailcall;", "}"])
-         _ -> return (assignTo dest rct (callName f ++ "(" ++ concatMap (++ ", ") args ++ "_ctx)"))
+                 return [block ([cty ct <+> t <+> "=" <+> a <.> ";" | (t,a,ct) <- zip3 tmps args pcts]
+                                ++ [localName p <+> "=" <+> t <.> ";" | (p,t) <- zip params tmps]
+                                ++ ["goto kt_tailcall;"])]
+         _ -> return (assignTo dest rct (callName f <.> "(" <.> hcat [a <.> ", " | a <- args] <.> "_ctx)"))
 
 -- A small constant cannot equal a bigint. Put it first for the general equality
 -- helper, whose fast rejection tests its first operand; common values have predicates.
@@ -1101,21 +1121,21 @@ smallIntArithmetic f vs
 -- Conversions of small integer literals to fixed-width integers become C literals
 -- (as in `Backend.C.FromCore.genAppSpecial`); `ssize_t` and `intptr_t` stay within 32 bits
 -- so that they fit on every platform.
-fixedWidthLit :: Name -> Integer -> Maybe (String,String)
+fixedWidthLit :: Name -> Integer -> Maybe (String,Doc)
 fixedWidthLit f i
-  | f `elem` [nameInt32,nameInternalInt32] && within 31 = Just ("int32_t", "KK_I32(" ++ show i ++ ")")
-  | f == nameInt64 && within 63                         = Just ("int64_t", "KK_I64(" ++ show i ++ ")")
-  | f `elem` [nameSSizeT,nameInternalSSizeT] && within 31 = Just ("kk_ssize_t", "KK_IZ(" ++ show i ++ ")")
-  | f == nameIntPtrT && within 31                       = Just ("intptr_t", "KK_IP(" ++ show i ++ ")")
-  | f == nameByte && i >= 0 && i <= 255                 = Just ("uint8_t", "((uint8_t)" ++ show i ++ ")")
+  | f `elem` [nameInt32,nameInternalInt32] && within 31 = Just ("int32_t", "KK_I32(" <.> integer i <.> ")")
+  | f == nameInt64 && within 63                         = Just ("int64_t", "KK_I64(" <.> integer i <.> ")")
+  | f `elem` [nameSSizeT,nameInternalSSizeT] && within 31 = Just ("kk_ssize_t", "KK_IZ(" <.> integer i <.> ")")
+  | f == nameIntPtrT && within 31                       = Just ("intptr_t", "KK_IP(" <.> integer i <.> ")")
+  | f == nameByte && i >= 0 && i <= 255                 = Just ("uint8_t", "((uint8_t)" <.> integer i <.> ")")
   | otherwise = Nothing
   where
     within bits = abs i < 2^bits   -- excludes the minimum, which is not a valid C literal
 
-callName :: Name -> String
+callName :: Name -> Doc
 callName f
   | f == newHiddenName "typed-unreachable" = "kt_unreachable_value"
-  | otherwise = cName f
+  | otherwise = text (cName f)
 
 callSig :: Ctx -> Name -> [AType] -> G ([VType],VType)
 callSig cx f tys
@@ -1123,7 +1143,7 @@ callSig cx f tys
       Just (SigFun tvs ps r) -> return (map (inst tvs tys . snd) ps, inst tvs tys r)
       _ -> failG ("unknown function " ++ show f)
 
-genExtern :: Ctx -> Dest -> Name -> [AType] -> [VVal] -> External -> G [String]
+genExtern :: Ctx -> Dest -> Name -> [AType] -> [VVal] -> External -> G [Doc]
 genExtern cx dest f tys vs ext
   = do (ps,r) <- callSig cx f tys
        let (kpars,kres) = kokaFunType (extType ext)
@@ -1134,13 +1154,13 @@ genExtern cx dest f tys vs ext
                     return (toKoka ct (externCType kp p) e, externCType kp p)
        let fmt   = extFormat ext
            named = [(n,a) | (n,a) <- zip (kokaParamNames (extType ext)) args, n `elem` cIdents fmt]
-           call | isComment fmt = ""
+           call | isComment fmt = empty
                 | null named    = substFormat fmt (map fst args)
-                | otherwise     = "({ " ++ concat [kt ++ " " ++ n ++ " = " ++ a ++ "; " | (n,(a,kt)) <- named]  -- parameters used by name
-                                  ++ substFormat fmt (map fst args) ++ "; })"
+                | otherwise     = stmtExpr [text kt <+> text n <+> "=" <+> a <.> ";" | (n,(a,kt)) <- named]  -- parameters used by name
+                                           (substFormat fmt (map fst args))
        case r of
-         VUnit | null call -> return (assignTo dest CUnit "kk_Unit")
-         VUnit -> return (["(void)(" ++ call ++ ");"] ++ assignTo dest CUnit "kk_Unit")
+         VUnit | isEmptyDoc call -> return (assignTo dest CUnit "kk_Unit")
+         VUnit -> return (("(void)(" <.> call <.> ");") : assignTo dest CUnit "kk_Unit")
          _ -> return (assignTo dest rct (fromKoka (externCType kres r) rct call))
   where
     -- Koka passes type variables of its lazy internals at their instance (see `Backend.C.Box`)
@@ -1183,14 +1203,15 @@ isComment fmt = case dropWhile (== ' ') fmt of
                   ""          -> True
                   _           -> False
 
-substFormat :: String -> [String] -> String
+substFormat :: String -> [Doc] -> Doc
 substFormat fmt args = go fmt
   where
-    go [] = []
-    go ('\\':'#':xs) = '#' : go xs
+    go [] = empty
+    go ('\\':'#':xs) = "#" <.> go xs
     go ('#':d:xs) | isDigit d && d /= '0' = let i = fromEnum d - fromEnum '1'
-                                            in (if i < length args then "(" ++ args !! i ++ ")" else "/*missing*/") ++ go xs
-    go (x:xs) = x : go xs
+                                            in (if i < length args then "(" <.> args !! i <.> ")" else "/*missing*/") <.> go xs
+    -- Raw C newlines must not add indentation inside backslash-continued strings.
+    go (x:xs) = text [x] <.> go xs
 
 -- boxed values that are (parts of) values of named types, which are never Koka's `box-any`
 namedOf :: Ctx -> VExpr -> Path -> S.Set Path
@@ -1201,7 +1222,7 @@ namedOf cx e x
 
 -- definitions
 
-genDef :: Env -> CEnv -> Def -> G (String,String,String)
+genDef :: Env -> CEnv -> Def -> G (Doc,Doc,Doc)
 genDef env cenv def
   = case def of
       DefFun f _ args res body
@@ -1210,20 +1231,21 @@ genDef env cenv def
               let g  = M.fromList [(x,V t) | (x,_,t) <- args]
                   cx = Ctx env cenv g S.empty (Just (f,[x | (x,_,_) <- args])) M.empty S.empty
               ss <- genE cx DReturn body
-              let sig = ctName rct ++ " " ++ cName f ++ "(" ++ concat [ctName ct ++ " " ++ localName x ++ ", " | ((x,_,_),ct) <- zip args pcts] ++ "kk_context_t* _ctx)"
-              let label = if any ("goto kt_tailcall;" `isInfixOf`) ss then "  kt_tailcall: ;\n" else ""
-              return (sig ++ ";\n", sig ++ " {\n" ++ label ++ indent ss ++ "}\n", "")
+              let sig = cty rct <+> text (cName f) <.> "(" <.> hcat [cty ct <+> localName x <.> ", " | ((x,_,_),ct) <- zip args pcts] <.> "kk_context_t* _ctx)"
+                  label = ["kt_tailcall: ;" | "goto kt_tailcall;" `isInfixOf` show (vcat ss)]
+              return (sig <.> ";", sig <+> block (label ++ ss), empty)
       DefVal x _ t body
         -> do ct <- ctype t
               let cx = Ctx env cenv M.empty S.empty Nothing M.empty S.empty
               ss <- genE cx DReturn body
-              let initf = cName x ++ "_init"
-              return ("extern " ++ ctName ct ++ " " ++ cName x ++ ";\n",
-                      ctName ct ++ " " ++ cName x ++ ";\nstatic " ++ ctName ct ++ " " ++ initf ++ "(kk_context_t* _ctx) {\n" ++ indent ss ++ "}\n",
-                      "  " ++ cName x ++ " = " ++ initf ++ "(_ctx);\n")
+              let name  = text (cName x)
+                  initf = name <.> "_init"
+              return ("extern" <+> cty ct <+> name <.> ";",
+                      vcat [cty ct <+> name <.> ";", "static" <+> cty ct <+> initf <.> "(kk_context_t* _ctx)" <+> block ss],
+                      name <+> "=" <+> initf <.> "(_ctx);")
 
 -- wrappers for top-level functions used as values
-genWrapper :: Env -> CEnv -> Name -> G (String,String)
+genWrapper :: Env -> CEnv -> Name -> G (Doc,Doc)
 genWrapper env cenv f
   = case M.lookup f (envSigs env) of
       Just (SigFun tvs ps r)
@@ -1232,8 +1254,8 @@ genWrapper env cenv f
               let xs  = [root (newHiddenName ("p" ++ show i)) | i <- [0..length ps - 1]]
                   cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) S.empty Nothing M.empty S.empty
               body <- genCall cx DReturn f (map AVar tvs) (map Var xs)
-              let sig = "static " ++ ctName rct ++ " " ++ cName f ++ "_fun(kk_function_t _fself" ++ concat [", " ++ ctName ct ++ " " ++ localName x | (x,ct) <- zip xs pcts] ++ ", kk_context_t* _ctx)"
-              return (sig ++ ";\n", sig ++ " {\n  kk_function_static_drop(_fself,_ctx);\n" ++ indent body ++ "}\n")
+              let sig = "static" <+> cty rct <+> text (cName f) <.> "_fun(kk_function_t _fself" <.> hcat [", " <.> cty ct <+> localName x | (x,ct) <- zip xs pcts] <.> ", kk_context_t* _ctx)"
+              return (sig <.> ";", sig <+> block ("kk_function_static_drop(_fself,_ctx);" : body))
       _ -> failG ("wrapper for unknown function " ++ show f)
 
 -- modules
@@ -1242,12 +1264,12 @@ cgenModule :: CEnv -> Program -> (String,String,[String])
 cgenModule cenv prog
   = let env = envOf prog
         -- (prototype, definition in the header, definition in the C file, initialization)
-        genDefE :: Def -> G (Either String (String,String,String,String))
+        genDefE :: Def -> G (Either String (Doc,Doc,Doc,Doc))
         genDefE d = do st <- get
                        case runM (genDef env cenv d) () st{ stLocal = False } of
                          Left err -> return (Left (show (defName d) ++ ": " ++ err))
                          Right ((p,c,i),st') -> do put st'
-                                                   return (Right (if inHeader d st' then ("static inline " ++ p,"static inline " ++ c,"",i) else (p,"",c,i)))
+                                                   return (Right (if inHeader d st' then ("static inline" <+> p,"static inline" <+> c,empty,i) else (p,empty,c,i)))
         -- a small function is defined in the header unless it uses declarations of the C file
         inHeader d st = S.member (defName d) (ceInline cenv) && isFun d && not (stLocal st)
         isFun DefFun{} = True
@@ -1261,33 +1283,36 @@ cgenModule cenv prog
          Right ((rs,wdefs),st)
            -> let ok    = [x | Right x <- rs]
                   errs  = [e | Left e <- rs]
-                  modc  = cName (ceModName cenv)
-                  guardN = "KT_" ++ encode (show (ceModName cenv)) ++ "_H"
-                  hdr   = "#ifndef " ++ guardN ++ "\n#define " ++ guardN ++ "\n"
-                          ++ concat ["#include \"" ++ h ++ "\"\n" | h <- take 1 (ceIncludes cenv)]
-                          ++ runtimeHeader
-                          ++ concat ["#include \"" ++ h ++ "\"\n" | h <- drop 1 (ceIncludes cenv)]
-                          ++ concat [stStructs st M.! n | n <- stOrder st]
-                          ++ concat [p | (p,_,_,_) <- ok]
-                          ++ concat [h | (_,h,_,_) <- ok]
-                          ++ "void " ++ ktInitName (ceModName cenv) ++ "(kk_context_t* _ctx);\n#endif\n"
-                  csrc  = concat ["#include \"" ++ take (length h - 2) h ++ ".c\"\n" | h <- take 1 (ceIncludes cenv)]
-                          ++ "#include \"" ++ "kt_" ++ encode (show (ceModName cenv)) ++ ".h\"\n"
-                          ++ concat (map fst wdefs)
-                          ++ concat (stDecls st)
-                          ++ concat [d | (_,_,d,_) <- ok]
-                          ++ concat (map snd wdefs)
-                          ++ "void " ++ ktInitName (ceModName cenv) ++ "(kk_context_t* _ctx) {\n  static bool _initialized = false;\n  if (_initialized) return;\n  _initialized = true;\n"
-                          ++ concat ["  " ++ i ++ "(_ctx);\n" | i <- ceImportInits cenv]
-                          ++ concat [i | (_,_,_,i) <- ok]
-                          ++ "}\n"
-              in (hdr, csrc, errs)
+                  modName = ceModName cenv
+                  guardN = text ("KT_" ++ encode (show modName) ++ "_H")
+                  initf  = "void" <+> text (ktInitName modName) <.> "(kk_context_t* _ctx)"
+                  include h = "#include \"" <.> text h <.> "\""
+                  -- `Layout` writes its definitions as lines that end in a newline
+                  layoutDef s = string (init s)
+                  hdr   = vcat (["#ifndef" <+> guardN, "#define" <+> guardN]
+                                ++ map include (take 1 (ceIncludes cenv))
+                                ++ [runtimeHeader]
+                                ++ map include (drop 1 (ceIncludes cenv))
+                                ++ [layoutDef (stStructs st M.! n) | n <- stOrder st]
+                                ++ [p | (p,_,_,_) <- ok]
+                                ++ [h | (_,h,_,_) <- ok]
+                                ++ [initf <.> ";", "#endif"])
+                  csrc  = vcat ([include (take (length h - 2) h ++ ".c") | h <- take 1 (ceIncludes cenv)]
+                                ++ [include (ktFileName modName ++ ".h")]
+                                ++ map fst wdefs
+                                ++ stDecls st
+                                ++ [d | (_,_,d,_) <- ok]
+                                ++ map snd wdefs
+                                ++ [initf <+> block (["static bool _initialized = false;", "if (_initialized) return;", "_initialized = true;"]
+                                                     ++ [text i <.> "(_ctx);" | i <- ceImportInits cenv]
+                                                     ++ [i | (_,_,_,i) <- ok])])
+              in (show hdr ++ "\n", show csrc ++ "\n", errs)
 
 
 -- runtime support
 
-runtimeHeader :: String
-runtimeHeader = unlines
+runtimeHeader :: Doc
+runtimeHeader = vcat
   [ "#ifndef KT_RUNTIME_H"
   , "#define KT_RUNTIME_H"
   , "#include <string.h>"
