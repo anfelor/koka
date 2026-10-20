@@ -32,8 +32,8 @@
     and `z` is dropped.
   So a test such as `is-red(r)` does not duplicate `r`, and a nested pattern reuses the
   inner block where the outer value is dead. Reading the contents of a box is always
-  borrowed. Duplicates keep their names (`[dup]`), so the paths always show where a
-  variable comes from.
+  borrowed, while reading a dead owned scalar consumes it (`[unscalar]`). Duplicates keep
+  their names (`[dup]`), so the paths always show where a variable comes from.
 
   Exception (as Koka's Parc): `lazy-eval-locked` *takes* the fields of the lazy value
   `@lazy` in every branch that passes `@lazy` on. The parts of `@lazy` are borrowed
@@ -215,6 +215,13 @@ percE' pe owned (Unbox m z x e)
        -- the taken contents are a root (see `[unbox-lazy]`)
        y <- fresh "l"
        UnboxLazy z y <$> percE (bind pe [(y,tx)]) (owned `S.union` ownedOf pe [(y,tx)]) (renamePath x y e)
+-- the binder is a copy of trivial contents, so a dead owned scalar is consumed by the read
+percE' pe owned expr@(Unscalar _ z x e)
+  = do t <- tyOfVar pe z
+       [[tx]] <- liftE (altTypes (peEnv pe) t expr)
+       let move = S.member z owned && S.notMember z (fvE e)
+           owned' = if move then S.delete z owned else owned
+       Unscalar (if move then Owned else Borrowed) z x <$> percE (bind pe [(x,tx)]) owned' e
 percE' pe owned expr
   | Just ds <- destructAOf expr
   = do let z = dsScrut ds

@@ -214,8 +214,8 @@ altTypes env t expr
       (Unroll{}, A a) -> do b <- unrollT env a
                             return [[A b]]
       (Unbox{}, A (ABox s)) -> return [[V s]]
-      (Unbox{}, A (AScalar s)) -> return [[V s]]
       (UnboxLazy{}, A (ABox s)) -> return [[V s]]
+      (Unscalar{}, A (AScalar s)) -> return [[V s]]
       (Unpack _ _ tvs _ _, V (VExists bs s)) | length bs == length tvs -> return [[V (inst bs (map AVar tvs) s)]]
       (CaseOpen _ _ alts _, A a) -> do fs <- mapM (\(c,_,_) -> openFields env c a) alts
                                        return ([[V f] | f <- fs] ++ [[]])

@@ -30,7 +30,8 @@
   its alternatives must consume it, and it is then a unique use of the scrutinee. `UnboxLazy`
   takes the contents of a box of the lazy value in `lazy-eval-locked`: the binder is a new
   owned root and the box is left as it is (its block is then written over without dropping
-  its old fields, see `Lazy`).
+  its old fields, see `Lazy`). `Unscalar` copies the trivial contents of a scalar into a root,
+  so its mode matters: an owned read consumes the scalar.
 
   `dup x` gives `x` one more reference under the same name, so a variable may hold several:
   the references are counted (`Counts`), where a reference to a variable stands for one to
@@ -377,6 +378,11 @@ checkE env g js (UnboxLazy v x e)
        [[tx]] <- liftE (altTypes env t (UnboxLazy v x e))
        let bs = [(x,tx)]
        before (inspect env g v) (roots env Owned bs (checkE env (bindAll bs g) js e))
+-- the binder is a copy of trivial contents, and an owned read consumes the scalar
+checkE env g js expr@(Unscalar m z x e)
+  = do t <- liftE (inferVar g z)
+       [[tx]] <- liftE (altTypes env t expr)
+       before ((if owning m then consume else readVar) env g z) (checkE env (bindAll [(x,tx)] g) js e)
 checkE _ _ _ expr
   | isRead expr, Just ds <- destructAOf expr, owning (dsMode ds)
   = fail ("owned read of the contents of a box: " ++ show (dsScrut ds))

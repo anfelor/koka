@@ -20,7 +20,7 @@
 module Backend.Typed.Layout( CT(..), PrimType(..), EnumSize(..), layout, leaves, leafSlots, isEnum, orderFields, shapeIsHeap
                            , ctName, scanOf, rawOf, needsRC
                            , structDefs, blockName, blockDef, blockSize, isBlock, isScalar
-                           , dupExpr, dropStmt, dupFun, dropFun, rawCType, primBox, fnv
+                           , dupExpr, dropStmt, dupFun, dropFun, rawCType, primBox, scalarHeapSize, fnv
                            ) where
 
 import Data.Char( ord )
@@ -376,6 +376,27 @@ rawCType n
   | otherwise          = PrimIntPtr
 
 -- immediate boxing of raw values (as in Koka)
+-- the largest `KK_INTF_SIZE` at which Koka's box of a scalar may be a heap block (kklib's
+-- `box.h`), or `Nothing` if it may be one on every target
+scalarHeapSize :: CT -> Maybe Int
+scalarHeapSize ct
+  = case ct of
+      CEnum _ -> Just 4   -- boxed as an `int32`
+      CPrim p -> case p of
+                   PrimInt8      -> Just 0
+                   PrimUInt8     -> Just 0
+                   PrimInt16     -> Just 2
+                   PrimInt32     -> Just 4
+                   PrimFloat     -> Just 4
+                   PrimChar      -> Just 4
+                   PrimInt64     -> Just 8
+                   PrimDouble    -> Just 8
+                   PrimSSize     -> Nothing
+                   PrimIntPtr    -> Nothing
+                   PrimFieldAddr -> Nothing
+                   PrimBox       -> Nothing
+      _ -> Nothing
+
 primBox :: PrimType -> Maybe (String,String)
 primBox p
   = fmap (\base -> (base ++ "_box", base ++ "_unbox")) $
