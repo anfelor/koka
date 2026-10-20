@@ -1,0 +1,2 @@
+typed fip: lazy/queue/bankers/@trmc-list: fbip fun: calling a non-fip function: lazy/queue/bankers/#stream/lazy-whnf
+typed fip: lazy/queue/bankers/uncons: fbip(2) fun: calling a non-fip function: lazy/queue/bankers/#stream/lazy-whnf

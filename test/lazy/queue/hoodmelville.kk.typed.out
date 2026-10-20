@@ -1,0 +1,3 @@
+typed fip: lazy/queue/hoodmelville/tick: fbip fun: calling a non-fip function: lazy/queue/hoodmelville/#thunk/lazy-eval
+typed fip: lazy/queue/hoodmelville/whnf: fbip fun: calling a non-fip function: lazy/queue/hoodmelville/#thunk/lazy-whnf
+typed fip: lazy/queue/hoodmelville/exec: fbip fun: calling a non-fip function: lazy/queue/hoodmelville/#thunk/lazy-eval

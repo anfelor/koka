@@ -39,6 +39,7 @@ library
       Backend.Typed.Elab.Match
       Backend.Typed.Elab.Monad
       Backend.Typed.Elab.Types
+      Backend.Typed.Fip
       Backend.Typed.Layout
       Backend.Typed.Linear
       Backend.Typed.Monad

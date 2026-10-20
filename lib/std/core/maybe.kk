@@ -80,7 +80,8 @@ pub fun cmp( mb1 : maybe<a>, mb2 : maybe<a>, ?cmp : (a,a) -> e order ) : e order
 
 
 // Order two `:maybe` values in ascending order
-pub fip fun order2( mb1 : maybe<a>, mb2 : maybe<a>, ^?order2 : (a,a) -> e order2<a> ) : e order2<maybe<a>>
+// (not `fip`: the typed backend allocates a box for a boxed `Just`)
+pub fun order2( mb1 : maybe<a>, mb2 : maybe<a>, ^?order2 : (a,a) -> e order2<a> ) : e order2<maybe<a>>
   match mb1
     Just(x)  -> match mb2
                   Just(y) -> match order2(x,y)
