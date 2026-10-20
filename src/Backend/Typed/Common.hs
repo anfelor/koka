@@ -86,11 +86,12 @@ mentionedA a = case a of
 
 -- Discard an owned value by destructuring it down to boxed operands and credits.
 -- Parts use their canonical paths, reusing those already in scope. Sequencing
--- a sum or existential drop needs a fresh root from the caller.
-dropValue :: Monad m => m Path -> Scope -> Path -> Ty -> VExpr -> m VExpr
-dropValue _ _ _ t e
-  | isTrivial t = return e
-dropValue fresh scope x t e
+-- a sum or existential drop needs a fresh root from the caller. Parts of a trivial
+-- type (`Query.trivialTy`) are not discarded.
+dropValue :: Monad m => (Ty -> Bool) -> m Path -> Scope -> Path -> Ty -> VExpr -> m VExpr
+dropValue trivial _ _ _ t e
+  | trivial t = return e
+dropValue trivial fresh scope x t e
   = case t of
       A _ -> return (Drop x e)
       V v -> case v of
@@ -99,8 +100,8 @@ dropValue fresh scope x t e
         VProd a b -> do let y = child x SFst
                             z = child x SSnd
                             parts = M.union (scopeOf [y,z]) scope
-                        rest <- dropValue fresh parts z (V b) e
-                        body <- dropValue fresh parts y (V a) rest
+                        rest <- dropValue trivial fresh parts z (V b) e
+                        body <- dropValue trivial fresh parts y (V a) rest
                         return (reuseParts scope (Unpair Owned (Var x) y z body))
         VSum ts -> do u <- fresh
                       alts <- mapM dropAlt (zip [0..] ts)
@@ -109,7 +110,7 @@ dropValue fresh scope x t e
                       return (Let u VUnit (reuseParts scope (CaseV Owned (Var x) alts)) e)
           where
             dropAlt (i,s) = do let y = child x (SInjV i)
-                               body <- dropValue fresh (M.insert y Nothing scope) y (V s) (Ret UnitV)
+                               body <- dropValue trivial fresh (M.insert y Nothing scope) y (V s) (Ret UnitV)
                                return (y,body)
         VExists tvs s
           -> do let y = child x SPack
@@ -119,19 +120,15 @@ dropValue fresh scope x t e
                 let start = minimum (0 : tvs ++ ftv s) - 1
                     bs = take (length tvs) [start,start-1 ..]
                     s' = inst tvs (map AVar bs) s
-                body <- dropValue fresh (M.insert y Nothing scope) y (V s') (Ret UnitV)
+                body <- dropValue trivial fresh (M.insert y Nothing scope) y (V s') (Ret UnitV)
                 return (Let u VUnit (reuseParts scope (Unpack Owned (Var x) bs y body)) e)
         VReuse _ _ _ -> return (Free x e)
         VCtx _ _ _ -> return (Drop x e)
         VUnit -> return e
         VRaw _ -> return e
 
--- values of these types need no reference counting
-isTrivial :: Ty -> Bool
-isTrivial = isTrivialWith (const Nothing)
-
--- `isTrivial`, where `unroll` gives the body of a named type if it is known (a type with a
--- single constructor without fields, for example)
+-- values of these types need no reference counting, where `unroll` gives the body of a
+-- named type if it is known (a type with a single constructor without fields, for example)
 isTrivialWith :: (AType -> Maybe AType) -> Ty -> Bool
 isTrivialWith unroll t
   = case t of

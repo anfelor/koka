@@ -29,7 +29,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuBinds, boxContents, reuseSize, inferE, unrollT )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuBinds, boxContents, reuseSize, inferE, unrollT, trivialTy )
 
 -- credits with the size of their block
 type Credits = [(Path,Int)]
@@ -215,11 +215,12 @@ dropReuse :: Path -> Path -> Int -> VExpr -> R VExpr
 dropReuse x r n e
   = do let r' = child x SCredit
        g <- asks reGamma
+       env <- asks reEnv
        s <- liftE (inferAVar g x >>= boxContents)
        let y = child x SContents
            -- the contents are read once
            readY = if M.member y g then id else Unbox Borrowed x y
-       body <- dropValue fresh (scopeOf (M.keys g)) y (V s) (Ret (Var r'))
+       body <- dropValue (trivialTy env) fresh (scopeOf (M.keys g)) y (V s) (Ret (Var r'))
        return (readY (Let r (VReuse MaybeEmpty n Nothing) (IsUnique x (UnboxRu x r' body)
                                                   (Drop x (Ret (NoReuse n Nothing))))
                         e))
