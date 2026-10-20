@@ -58,6 +58,7 @@ library
       Backend.Typed.Passes.Reuse
       Backend.Typed.Passes.Simplify
       Backend.Typed.Passes.SinkJoins
+      Backend.Typed.Passes.Yields
       Backend.Typed.Pretty
       Backend.Typed.Query
       Backend.Typed.Syntax

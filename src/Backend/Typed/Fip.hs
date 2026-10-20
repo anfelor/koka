@@ -33,7 +33,7 @@
 
   As in the frontend, `int` is assumed small (it is neither shared nor freed), and literals,
   scalars and globals are not counted. The frontend checks a function before its monadic
-  translation, so the paths on which an effect yields (`yielding()`) are not taken either,
+  translation, so the paths on which an effect yields (`[let-yield]`) are not taken either,
   and the evidence operations (`evv-*`) that open effects are free. Neither are paths that
   end in a pattern match failure. The frontend does not report on
   `std/core/debug`, and neither does this check.
@@ -85,8 +85,8 @@ data Info = Info{ iFip :: Fip, iGroup :: S.Set Name, iFips :: M.Map Name Fip, iB
 data JoinPt = JoinPt Int [(Path,Mode,VType)] VExpr FEnv
 
 -- `fFull`: the credits that are full besides those of a full type;
--- `fYielding`: the results of `yielding()`; `fFailing`: the join points whose bodies fail
-data FEnv = FEnv{ fInfo :: Info, fEnv :: Env, fGamma :: Gamma, fFull :: S.Set Path, fYielding :: S.Set Path
+-- `fFailing`: the join points whose bodies fail
+data FEnv = FEnv{ fInfo :: Info, fEnv :: Env, fGamma :: Gamma, fFull :: S.Set Path
                 , fJoins :: M.Map Name JoinPt, fFailing :: S.Set Name, fTail :: Bool }
 
 -- `fsRuns`: the results of the join point bodies, for each instance and the fullness of its arguments
@@ -103,7 +103,7 @@ checkFip fips groups prog
   where
     checkDef d fip
       = let info = Info fip (M.findWithDefault S.empty (defName d) groups) fips [x | (x,Borrowed,_) <- defArgs d]
-            fenv = FEnv info (envOf prog) (M.fromList [(x,V t) | (x,_,t) <- defArgs d]) S.empty S.empty M.empty S.empty True
+            fenv = FEnv info (envOf prog) (M.fromList [(x,V t) | (x,_,t) <- defArgs d]) S.empty M.empty S.empty True
             label msg = show (defName d) ++ ": " ++ show fip ++ " fun: " ++ msg
         in case runM (fipE (defBody d)) fenv (FS 0 M.empty []) of
              Right ((cost,_),st) -> map label (nub (fsMsgs st) ++ allocMsg fip cost)
@@ -224,28 +224,24 @@ fipE :: VExpr -> F (Cost,Bool)
 fipE expr
   | Just ds <- destructAOf expr
   = do t <- typeOfVar (dsScrut ds)
-       destruct t ds id
+       destruct t ds
   | Just ds <- destructVOf expr
   = do fe <- ask
        t <- liftE (inferV (fEnv fe) (fGamma fe) (dsScrut ds))
        c <- fipV (dsScrut ds)
-       -- the first alternative of a test of `yielding()` is `false`
-       let taken = case dsScrut ds of
-                     Var x | S.member x (fYielding fe) -> take 1
-                     _ -> id
-       (c',full) <- destruct (V t) ds taken
+       (c',full) <- destruct (V t) ds
        return (c <> c',full)
   where
-    destruct t ds taken
+    destruct t ds
       = do env <- asks fEnv
            tss <- liftE (altTypes env t expr)
            alive <- alivePaths
-           branches (taken [bind (zip xs ts) (fipE e) | ((xs,e),ts) <- zip (dsAlts ds) tss, alive e])
+           branches [bind (zip xs ts) (fipE e) | ((xs,e),ts) <- zip (dsAlts ds) tss, alive e]
 fipE expr
   = case expr of
       Ret v -> (,) <$> fipV v <*> fullV v
-      Let x t (Call f _ []) e2 | f == nameYielding
-        -> local (\fe -> fe{ fYielding = S.insert x (fYielding fe) }) (bind [(x,V t)] (fipE e2))
+      -- the yielding branch is not taken
+      LetYield x t e1 e2 _ -> fipE (Let x t e1 e2)
       Let x t e1 e2
         -> do tl <- asks fTail
               let tailModProduct = tl && modProduct S.empty e2
@@ -326,6 +322,7 @@ fails failing expr
       Call f _ _ -> f == namePatternMatchError || f == nameUnreachable
       Jump j _ -> S.member j failing
       Let _ _ e1 e2 -> fails failing e1 || fails failing e2
+      LetYield _ _ e1 e2 e3 -> fails failing e1 || (fails failing e2 && fails failing e3)
       Join j _ e1 e2 -> fails (if fails failing e1 then S.insert j failing else failing) e2
       _ -> let es = subexprs expr in not (null es) && all (fails failing) es
 
@@ -339,10 +336,7 @@ modProduct joins expr
       App _ _ -> False
       CaseLit{} -> False
       Jump j _ -> S.member j joins
-      Let x _ (Call f _ []) e2 | f == nameYielding
-        -> case e2 of
-             CaseV _ (Var y) ((_,e):_) | y == x -> modProduct joins e
-             _ -> modProduct joins e2
+      LetYield x t e1 e2 _ -> modProduct joins (Let x t e1 e2)
       Let _ _ e1 e2 -> modProduct S.empty e1 && modProduct joins e2
       Join j _ e1 e2 -> modProduct (if modProduct joins e1 then S.insert j joins else joins) e2
       _ | Just ds <- destructAOf expr -> single (dsAlts ds)

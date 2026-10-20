@@ -34,7 +34,7 @@
   is straight-line (`straightReuse`): copying a test that precedes it, such as the key test of a
   tree descent, can cost more than the credit test it saves, while `ExpandReuse` shares such a
   test and splits only the allocation. As in `Fip`, the paths on which an effect yields
-  (`yielding()`) are cold: they need only consume the credit, and may allocate fresh. The limit of `copyLimit`
+  (`[let-yield]`) are cold: they need only consume the credit, and may allocate fresh. The limit of `copyLimit`
   nodes only bounds the code size; Lean had none. As in Lean, the resets nested in `e` are
   copied only in the unique branch, so that the code grows at most linearly in their number.
 -}
@@ -46,7 +46,6 @@ import Data.Functor.Identity( Identity(..) )
 import Data.Monoid( Sum(..), Any(..), All(..) )
 import Control.Monad.State
 import Backend.Typed.Syntax
-import Common.NamePrim( nameYielding )
 import Backend.Typed.Common
 
 type C a = State NameSupply a
@@ -133,7 +132,7 @@ body expr
 consumed :: Bool -> Path -> VExpr -> Bool
 consumed freeing r expr
   = case expr of
-      _ | Just (e,es) <- yieldingAlts expr -> consumed freeing r e && all (consumed True r) es
+      _ | Just (e,ey) <- yieldingAlts expr -> consumed freeing r e && consumed True r ey
       Free r' e -> if r' == r then freeing else consumed freeing r e
       Let _ _ e1 e2 | isStatement e1 -> if mentions e1 then direct e1 else consumed freeing r e2
                     | otherwise -> not (mentions e1) && consumed freeing r e2
@@ -158,14 +157,6 @@ isStatement e
 
 statementValues :: VExpr -> [VVal]
 statementValues = getConst . descendE (const (Const [])) (Const . pure) (\_ _ -> Const [])
-
--- The alternatives of a test of `yielding()`: the first is taken if no effect yields, as in
--- `Fip`, and the others are cold.
-yieldingAlts :: VExpr -> Maybe (VExpr,[VExpr])
-yieldingAlts expr
-  = case expr of
-      Let x _ (Call f _ []) (CaseV _ (Var y) ((_,e):alts)) | f == nameYielding && y == x -> Just (e,map snd alts)
-      _ -> Nothing
 
 -- whether an expression allocates a fresh block or closure somewhere (and not in a credit),
 -- except on the paths on which an effect yields

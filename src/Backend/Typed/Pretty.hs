@@ -154,6 +154,9 @@ prettyExpr expr
   = case expr of
       Ret v -> text "ret" <+> atomVal v
       Let x t e1 e2 -> letIn empty (pv x <+> colon <+> prettyV t) (align (prettyExpr e1)) e2
+      LetYield x t e1 e2 e3 -> text "let" <+> pv x <+> colon <+> prettyV t <+> text "=" <+> align (prettyExpr e1)
+                               <-> indent 2 (text "yielding" <+> align (prettyExpr e3)) <-> text "in" <+> align (prettyExpr e2)
+      Yielded _ -> text "yielded"
       Call f [] vs -> nm f <.> args vs
       Call f ts vs -> nm f <.> tyArgs ts <.> args vs
       App f vs -> pv f <.> args vs

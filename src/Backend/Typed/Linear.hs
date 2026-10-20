@@ -405,6 +405,14 @@ checkE env g js expr
                                       Ret w | S.member x (uUnique u2) -> (,) Unique <$> uniqueV env g w
                                       _ -> (,) Owned <$> checkE env g M.empty e1
                           andThen u1 =<< leave [(x,m) | not (trivialTy env (V t))] u2
+      -- the binder is not in scope where an effect yields
+      LetYield x t e1 e2 e3
+        -> do u2 <- withOwners [(x,Owned)] (checkE env (M.insert x (V t) g) js e2)
+                    >>= leave [(x,Owned) | not (trivialTy env (V t))]
+              u3 <- checkE env g js e3
+              u1 <- checkE env g M.empty e1
+              andThen u1 =<< branches [u2, u3]
+      Yielded _ -> return noUse
       Call f _ vs -> args [] (paramModes env f (length vs)) vs
       Jump j vs -> case M.lookup j js of
                      Just (ms,caps) -> args caps ms vs

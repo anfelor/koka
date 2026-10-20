@@ -17,7 +17,7 @@ import Data.Functor.Const( Const(..) )
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Query( Env, envOf, checkE )
+import Backend.Typed.Query( Env, envOf, checkE, yieldJoins )
 
 checkProgram :: Program -> [String]
 checkProgram prog
@@ -83,5 +83,5 @@ rootBinder x = [Left ("binder " ++ show x ++ " is not a root")]
 checkDef :: Env -> Def -> Either String ()
 checkDef env def
   = case def of
-      DefFun _ _ args res body -> checkE env (M.fromList [(x,V t) | (x,_,t) <- args]) M.empty body res
-      DefVal _ _ t body        -> checkE env M.empty M.empty body t
+      DefFun _ _ args res body -> checkE env (M.fromList [(x,V t) | (x,_,t) <- args]) yieldJoins body res
+      DefVal _ _ t body        -> checkE env M.empty yieldJoins body t
