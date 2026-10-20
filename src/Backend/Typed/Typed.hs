@@ -45,7 +45,7 @@ typedFromCore platform enableReuse nt imports uniq core
         passes                 = [("anf",False,pure' anfProgram), ("contify",False,contifyProgram), ("simplify",False,pure' simplifyProgram), ("perceus",True,perceusProgram), ("lazy",True,lazyProgram)
                                    ,("dropspec",True,dropSpecProgram)] ++ [("reuse",True,reuseProgram) | enableReuse]
                                    ++ [("match",True,matchProgram), ("sinkjoins",True,pure' sinkJoinsProgram), ("joinargs",True,pure' joinArgsProgram)]
-                                   ++ [("expandreuse",True,pure' expandReuseProgram) | enableReuse] ++ [("inline",True,pure' inlineProgram)]
+                                   ++ [("expandreuse",True,pure' expandReuseProgram) | enableReuse] ++ [("inline",True,inlineProgram)]
         (dsprog,msgs)          = runPasses prog (label "check" (checkProgram prog)) passes
         -- without reuse every constructor allocates
         fipMsgs                = if enableReuse && null msgs then label "fip" (checkFip (fipsOf (core:imports)) (groupsOf core) dsprog) else []

@@ -19,6 +19,10 @@
   code generation compares them syntactically to omit the stores of unchanged fields. It runs
   after `JoinArgs`, so that a captured variable is inlined into the join body as well.
 
+  In an enum alternative, a reused payload can name its old enum field instead of the
+  equal constructor constant. Only fields still in scope are used; enum values carry no
+  ownership. Descriptions and the checking rules stay unchanged.
+
   Existentials are not inlined: unpacking a known `pack` would substitute its types.
 -}
 module Backend.Typed.Passes.Inline( inlineProgram ) where
@@ -29,12 +33,23 @@ import Data.Functor.Const( Const(..) )
 import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
+import Backend.Typed.Monad
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, altTypes, unboxRuBinds )
 
 -- the structural values bound by lets
 type Values = M.Map Path VVal
 
-inlineProgram :: Program -> Program
-inlineProgram prog = prog{ progDefs = map inlineDef (progDefs prog) }
+inlineProgram :: Program -> (Program,[String])
+inlineProgram prog
+  = let inlined = prog{ progDefs = map inlineDef (progDefs prog) }
+        run d = case evalM (reuseE (defBody d)) (envOf inlined,params d,M.empty) () of
+                  Right e -> (d{ defBody = e },[])
+                  Left err -> (d,[show (defName d) ++ ": " ++ err])
+        (defs,errs) = unzip (map run (progDefs inlined))
+    in (inlined{ progDefs = defs },concat errs)
+  where
+    params DefFun{ defArgs = ps } = M.fromList [(x,V t) | (x,_,t) <- ps]
+    params DefVal{} = M.empty
 
 inlineDef :: Def -> Def
 inlineDef def
@@ -105,3 +120,66 @@ inlineA vals val
   = case val of
       Lam ps r e -> Lam ps r (inlineE vals e)
       _ -> mapA id (inlineA vals) (inlineV vals) val
+
+-- The enum facts are local to a branch, unlike the structural lets above.
+type Reuse a = M (Env,Gamma,Values) () a
+
+bindReuse :: [(Path,Ty)] -> Reuse a -> Reuse a
+bindReuse bs = local (\(env,g,facts) -> (env,bindAll bs g,facts))
+
+reuseE :: VExpr -> Reuse VExpr
+reuseE expr
+  | Just ds <- destructAOf expr
+  = do (env,g,_) <- ask
+       t <- liftE (inferVar g (dsScrut ds))
+       tss <- liftE (altTypes env t expr)
+       es <- sequence [bindReuse (zip xs ts) (reuseE e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
+       return (dsBuild ds (dsMode ds) (dsScrut ds) es)
+  | Just ds <- destructVOf expr
+  = do (env,g,_) <- ask
+       t <- liftE (inferV env g (dsScrut ds))
+       tss <- liftE (altTypes env (V t) expr)
+       let enumBranch :: Int -> Reuse a -> Reuse a
+           enumBranch i = case expr of
+             CaseV _ (Var z) _ | enumType t -> local (\(env,g,facts) -> (env,g,M.insert z (Inj i t UnitV) facts))
+             _ -> id
+       v <- reuseV (dsScrut ds)
+       es <- sequence [bindReuse (zip xs ts) (enumBranch i (reuseE e)) | (i,((xs,e),ts)) <- zip [0..] (zip (dsAlts ds) tss)]
+       return (dsBuild ds (dsMode ds) v es)
+reuseE expr
+  = case expr of
+      Let x t e1 e2 -> Let x t <$> reuseE e1 <*> bindReuse [(x,V t)] (reuseE e2)
+      Join j ps e1 e2 -> Join j ps <$> bindReuse [(x,V t) | (x,_,t) <- ps] (reuseE e1) <*> reuseE e2
+      UnboxRu z r e -> do (_,g,_) <- ask
+                          bs <- liftE (unboxRuBinds g z r)
+                          UnboxRu z r <$> bindReuse bs (reuseE e)
+      _ -> descendE pure reuseV (\_ -> reuseE) expr
+
+enumType :: VType -> Bool
+enumType (VSum ts) = not (null ts) && all (== VUnit) ts
+enumType _ = False
+
+reuseV :: VVal -> Reuse VVal
+reuseV = descendV reuseA reuseV
+
+reuseA :: AVal -> Reuse AVal
+reuseA val
+  = case val of
+      BoxAt r v -> do (_,g,facts) <- ask
+                      v' <- reuseV v
+                      t <- liftE (inferVar g r)
+                      return (BoxAt r (case t of
+                        V (VReuse _ _ (Just (Contents _ old _))) -> restore g facts old v'
+                        _ -> v'))
+      Lam ps r e -> Lam ps r <$> bindReuse [(x,V t) | (x,_,t) <- ps]
+                                  (local (\(env,g,_) -> (env,g,M.empty)) (reuseE e))
+      _ -> descendA pure reuseA reuseV val
+
+-- Prefer the old field's variable only where the branch proves it equals the new
+-- constant. Description names may be out of scope, and must not become runtime uses.
+restore :: Gamma -> Values -> VVal -> VVal -> VVal
+restore g facts old new
+  | Var x <- old, Just (V t) <- M.lookup x g, enumType t, M.lookup x facts == Just new = Var x
+  | Pair a b <- new, Just x <- project old [SFst], Just y <- project old [SSnd]
+  = Pair (restore g facts x a) (restore g facts y b)
+  | otherwise = new
