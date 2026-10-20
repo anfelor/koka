@@ -46,6 +46,7 @@ library
       Backend.Typed.Names
       Backend.Typed.Passes.Anf
       Backend.Typed.Passes.Contify
+      Backend.Typed.Passes.CopyReset
       Backend.Typed.Passes.JoinArgs
       Backend.Typed.Passes.Inline
       Backend.Typed.Passes.DropSpec
