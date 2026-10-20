@@ -8,8 +8,12 @@
 
 module Backend.Typed.Typed( typedFromCore ) where
 
+import qualified Data.Map as M
+import qualified Data.Set as S
 import Common.Unique
-import Common.Syntax( Platform )
+import Common.Name
+import Common.Syntax( Platform, Fip )
+import qualified Common.Syntax as Syntax
 import Kind.Newtypes
 import qualified Core.Core as C
 import Backend.Typed.Syntax
@@ -30,6 +34,7 @@ import Backend.Typed.Passes.JoinArgs( joinArgsProgram )
 import Backend.Typed.Passes.Inline( inlineProgram )
 import Backend.Typed.Passes.Paths( pathsProgram )
 import Backend.Typed.Linear( checkLinear )
+import Backend.Typed.Fip( checkFip )
 
 -- returns the program after Perceus (and reuse) and messages labeled by the phase that produced them
 typedFromCore :: Platform -> Bool -> Newtypes -> [C.Core] -> Int -> C.Core -> (Program,[(String,String)])
@@ -42,9 +47,22 @@ typedFromCore platform enableReuse nt imports uniq core
                                    ++ [("match",True,matchProgram), ("sinkjoins",True,pure' sinkJoinsProgram), ("joinargs",True,pure' joinArgsProgram)]
                                    ++ [("expandreuse",True,pure' expandReuseProgram) | enableReuse] ++ [("inline",True,pure' inlineProgram)]
         (dsprog,msgs)          = runPasses prog (label "check" (checkProgram prog)) passes
-    in (dsprog, label "elab" elabErrs ++ msgs ++ label "note" notes)
+        -- without reuse every constructor allocates
+        fipMsgs                = if enableReuse && null msgs then label "fip" (checkFip (fipsOf (core:imports)) (groupsOf core) dsprog) else []
+    in (dsprog, label "elab" elabErrs ++ msgs ++ fipMsgs ++ label "note" notes)
   where
     pure' f prog = (f prog,[])
+
+-- the FIP annotations of the functions
+fipsOf :: [C.Core] -> M.Map Name Fip
+fipsOf cores
+  = M.fromList ([(C.defName d, fip) | c <- cores, d <- C.flattenDefGroups (C.coreProgDefs c), Syntax.DefFun _ fip <- [C.defSort d]]
+                ++ [(C.externalName x, C.externalFip x) | c <- cores, x@(C.External{}) <- C.coreProgExternals c])
+
+-- the recursive group of each recursive definition
+groupsOf :: C.Core -> M.Map Name (S.Set Name)
+groupsOf core
+  = M.fromList [(C.defName d, names) | C.DefRec ds <- C.coreProgDefs core, let names = S.fromList (map C.defName ds), d <- ds]
 
 -- a pass on the typed IR: its name, whether its result must be linear, and the pass
 type Pass = (String, Bool, Program -> (Program,[String]))

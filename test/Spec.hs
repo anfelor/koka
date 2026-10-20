@@ -234,11 +234,13 @@ makeTest cfg fp
                kokaDir <- getCurrentDirectory
                out <- runKoka cfg kokaDir fp
                -- the typed backend reports its problems as `typed ...` lines (see also `typedStdTest`)
-               when ("--typedc" `elem` flags cfg) $
-                 filter ("typed " `isPrefixOf`) (lines out) `shouldBe` []
+               let typed = "--typedc" `elem` flags cfg
+               when typed $
+                 do expectedTyped <- typedExpected fp
+                    filter isTypedLine (lines out) `shouldBe` expectedTyped
                unless (mode (options cfg) == Test) $ (withBinaryFile expectedFile WriteMode (\h -> hPutStr h out)) -- writeFile expectedFile out
                expected <- testSanitize kokaDir <$> readFile expectedFile
-               out `shouldBe` expected
+               (if typed then intercalate "\n" (filter (not . isTypedLine) (lines out)) else out) `shouldBe` expected
   | otherwise
       = return ()
 
@@ -353,7 +355,18 @@ backendName BackendTyped = "typed"
 -- when they are compiled (use `--rebuild` to check them again)
 typedStdTest :: String -> Spec
 typedStdTest out
-  = it "std" $ filter ("typed " `isPrefixOf`) (lines out) `shouldBe` []
+  = it "std" $ filter isTypedLine (lines out) `shouldBe` []
+
+isTypedLine :: String -> Bool
+isTypedLine = ("typed " `isPrefixOf`)
+
+-- the problems that the typed backend reports for a test (such as FIP warnings that the
+-- frontend reports as well), in `<test>.typed.out`
+typedExpected :: FilePath -> IO [String]
+typedExpected fp
+  = do let typedFile = fp ++ ".typed.out"
+       exists <- doesFileExist typedFile
+       if exists then lines <$> readFile typedFile else return []
 
 -- compile all standard libraries before testing so we can run in parallel (and return the output)
 precompileBackend :: Options -> Backend -> IO String
@@ -363,7 +376,7 @@ precompileBackend options backend
        outs <- sequence
          [ precompile stdcfg{flags = "-e" : flags stdcfg} "util/link-test.kk"
            -- precompile bench by compiling a dependent file (ensures correct module name resolution)
-         , precompile stdcfg "test/lazy/queue/bankers.kk"
+         , precompile stdcfg "test/lazy/queue/batched.kk"
            -- precompile mpat-lib so test/cgen/mpat.kk loads it from the .kki
          , precompile stdcfg "test/cgen/mpat-lib.kk"
            -- precompile specbox-lib so test/cgen/specbox.kk loads it from the .kki
