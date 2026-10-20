@@ -78,7 +78,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuBinds, paramModes, unrollT )
+import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuBinds, paramModes, trivialTy )
 
 -- the mode of the variables at and below each owner: the roots in scope, and in the body of a
 -- join point the variables it captures
@@ -115,10 +115,6 @@ checkDef env def
       DefVal _ _ _ body -> run M.empty [] body
   where
     run g ps body = evalM (closed ps (checkE env g M.empty body)) M.empty S.empty
-
--- values of these types need no references; unlike `isTrivial`, this looks into named types
-trivialTy :: Env -> Ty -> Bool
-trivialTy env = isTrivialWith (either (const Nothing) Just . unrollT env)
 
 -- the parameters that are not of a trivial type
 params :: Env -> [(Path,Mode,VType)] -> [(Path,Mode)]

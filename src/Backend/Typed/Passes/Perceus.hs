@@ -55,7 +55,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, altTypes, paramModes )
+import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, altTypes, paramModes, trivialTy )
 import Backend.Typed.Types( inst, isPtr )
 
 type VarSet = S.Set Path
@@ -87,7 +87,7 @@ perceusDef env def
         -> do let lz = case args of
                          ((x,m,_):_) | owning m, "lazy-eval-locked" `isSuffixOf` nameLocal f -> Just x
                          _ -> Nothing
-              body' <- percE (paramEnv env args lz M.empty) (ownedParams args) body
+              body' <- percE (paramEnv env args lz M.empty) (ownedParams env args) body
               return (DefFun f tvs args res body')
       DefVal x tvs t body
         -> DefVal x tvs t <$> percE (PEnv env M.empty S.empty Nothing M.empty) S.empty body
@@ -96,8 +96,8 @@ perceusDef env def
 paramEnv :: Env -> [(Path,Mode,VType)] -> Maybe Path -> M.Map Name [Mode] -> PEnv
 paramEnv env ps lz js = PEnv env (M.fromList [(x,V t) | (x,_,t) <- ps]) (S.fromList [x | (x,Borrowed,_) <- ps]) lz js
 
-ownedParams :: [(Path,Mode,VType)] -> VarSet
-ownedParams ps = S.fromList [x | (x,m,t) <- ps, owning m, not (isTrivial (V t))]
+ownedParams :: Env -> [(Path,Mode,VType)] -> VarSet
+ownedParams env ps = S.fromList [x | (x,m,t) <- ps, owning m, not (trivialTy env (V t))]
 
 typeOfV :: PEnv -> VVal -> P VType
 typeOfV pe v = liftE (inferV (peEnv pe) (peGamma pe) v)
@@ -110,19 +110,19 @@ dropNames pe xs e = foldM step e (reverse xs)
     step body x = do t <- tyOfVar pe x
                      case partsOf pe x of
                        ps@(_:_) | not (pointer t) -> dropNames pe ps body
-                       _ -> dropValue (fresh "d") (scopeOf (M.keys (peGamma pe))) x t body
+                       _ -> dropValue (trivialTy (peEnv pe)) (fresh "d") (scopeOf (M.keys (peGamma pe))) x t body
 
 -- the parts of a variable that are bound and not of a trivial type
 partsOf :: PEnv -> Path -> [Path]
 partsOf pe z
   = [x | (x,t) <- takeWhile ((`within` z) . fst) (M.toAscList (M.dropWhileAntitone (<= z) (peGamma pe)))
-       , length (stepsFrom z x) == 1, not (isTrivial t)]
+       , length (stepsFrom z x) == 1, not (trivialTy (peEnv pe) t)]
 
 -- the owner of a borrowed variable (see the top); the parts of the lazy value under
 -- evaluation have none
 ownerOf :: PEnv -> VarSet -> Path -> Maybe Path
 ownerOf pe owned x
-  | S.member x owned || maybe True isTrivial (M.lookup x (peGamma pe)) = Nothing
+  | S.member x owned || maybe True (trivialTy (peEnv pe)) (M.lookup x (peGamma pe)) = Nothing
   | otherwise = case [z | z <- reverse (prefixes x), S.member z owned] of
                   (z:_) | Just z /= peLazy pe -> Just z
                   _ -> Nothing
@@ -214,7 +214,7 @@ percE' pe owned (Unbox m z x e)
        [[tx]] <- liftE (altTypes (peEnv pe) t (Unbox m z x e))
        -- the taken contents are a root (see `[unbox-lazy]`)
        y <- fresh "l"
-       UnboxLazy z y <$> percE (bind pe [(y,tx)]) (owned `S.union` ownedOf [(y,tx)]) (renamePath x y e)
+       UnboxLazy z y <$> percE (bind pe [(y,tx)]) (owned `S.union` ownedOf pe [(y,tx)]) (renamePath x y e)
 percE' pe owned expr
   | Just ds <- destructAOf expr
   = do let z = dsScrut ds
@@ -241,7 +241,7 @@ percE' pe owned expr
                   own2  = owned `S.intersection` live2
                   own1  = owned `S.difference` live2
               e1' <- percE pe{ peBorrowed = peBorrowed pe `S.union` own2 } own1 e1
-              e2' <- percE (bind pe [(x,V t)]) (own2 `S.union` ownedOf [(x,V t)]) e2
+              e2' <- percE (bind pe [(x,V t)]) (own2 `S.union` ownedOf pe [(x,V t)]) e2
               return (hoistdupAll (\e1'' -> Let x t e1'' e2') e1')
       Call f tys vs
         -> do let ms = paramModes (peEnv pe) f (length vs)
@@ -257,7 +257,7 @@ percE' pe owned expr
               (k,vs') <- useVals pe owned (zip ms vs)
               return (k (Jump j vs'))
       Join j ps e1 e2
-        -> do e1' <- percE (paramEnv (peEnv pe) ps Nothing (peJoins pe)) (ownedParams ps) e1
+        -> do e1' <- percE (paramEnv (peEnv pe) ps Nothing (peJoins pe)) (ownedParams (peEnv pe) ps) e1
               e2' <- percE' pe{ peJoins = M.insert j [m | (_,m,_) <- ps] (peJoins pe) } owned e2
               return (Join j ps e1' e2')
       App f vs
@@ -298,7 +298,7 @@ atomic pe owned v liveRest cont
               let ownV     = (owned `S.intersection` fvV v) `S.difference` liveRest
                   rest     = owned `S.difference` ownV
               (k,[v']) <- useVals pe{ peBorrowed = peBorrowed pe `S.union` rest } ownV [(Owned,v)]
-              body <- cont (bind pe [(s,V t)]) (rest `S.union` ownedOf [(s,V t)]) (Var s)
+              body <- cont (bind pe [(s,V t)]) (rest `S.union` ownedOf pe [(s,V t)]) (Var s)
               kv <- letVal s (V t) v'
               return (k (kv body))
 
@@ -314,7 +314,7 @@ destruct pe owned (Just z) _ binderss bodies
   where
     lazyBody lz (bs,e)
       | not (S.member lz (fvE e)) = eagerBody pe owned [lz] (bs,e)
-      | otherwise = percE (bind pe{ peBorrowed = peBorrowed pe `S.union` ownedOf bs } bs) owned e
+      | otherwise = percE (bind pe{ peBorrowed = peBorrowed pe `S.union` ownedOf pe bs } bs) owned e
 destruct pe owned z expr binderss bodies
   = do let zOwned = case z of
                       Just x -> S.member x owned
@@ -326,21 +326,21 @@ destruct pe owned z expr binderss bodies
            moveAll  = zOwned && not (isRead expr) && all deadIn bodies
        if moveAll
          then do let own = owned `S.difference` S.fromList zName
-                 es <- mapM (\(bs,e) -> percE (bind pe bs) (own `S.union` ownedOf bs) e) (zip binderss bodies)
+                 es <- mapM (\(bs,e) -> percE (bind pe bs) (own `S.union` ownedOf pe bs) e) (zip binderss bodies)
                  return (Owned,es)
          else do es <- mapM (borrowedBody pe owned) (zip binderss bodies)
                  return (Borrowed,es)
 
 -- the binders are borrowed from the scrutinee (and from its owner)
 borrowedBody :: PEnv -> VarSet -> ([(Path,Ty)],VExpr) -> P VExpr
-borrowedBody pe owned (bs,e) = percE (bind pe{ peBorrowed = peBorrowed pe `S.union` ownedOf bs } bs) owned e
+borrowedBody pe owned (bs,e) = percE (bind pe{ peBorrowed = peBorrowed pe `S.union` ownedOf pe bs } bs) owned e
 
 -- the live binders of an owned scrutinee of the lazy value are duplicated at the start of the
 -- body, and the scrutinee is dropped after that if it is dead
 eagerBody :: PEnv -> VarSet -> [Path] -> ([(Path,Ty)],VExpr) -> P VExpr
 eagerBody pe owned zName (bs,e)
   = do let live    = fvE e
-           dupped  = [x | (x,t) <- bs, not (isTrivial t), S.member x live]
+           dupped  = [x | (x,t) <- bs, not (trivialTy (peEnv pe) t), S.member x live]
            zDead   = not (any (`S.member` live) zName)
            own     = (if zDead then owned `S.difference` S.fromList zName else owned)
                      `S.union` S.fromList dupped
@@ -376,9 +376,9 @@ useVal _ _ Borrowed i v = return (id,i,v)
 useVal pe lastOcc Unique i v = useVal pe lastOcc Owned i v
 useVal pe lastOcc Owned i val
   = case val of
-      Var x -> return (if M.lookup x lastOcc == Just i || maybe False isTrivial (M.lookup x (peGamma pe)) then id else Dup x, i+1, val)
+      Var x -> return (if M.lookup x lastOcc == Just i || maybe False (trivialTy (peEnv pe)) (M.lookup x (peGamma pe)) then id else Dup x, i+1, val)
       Glob _ _ -> do t <- typeOfV pe val
-                     return (id,i,if isTrivial (V t) then val else DupV val)
+                     return (id,i,if trivialTy (peEnv pe) (V t) then val else DupV val)
       DupV _ -> return (id,i,val)
       _ -> useChildren pe lastOcc i (descendV (stepA pe lastOcc) (stepV pe lastOcc) val)
 
@@ -391,13 +391,13 @@ useA pe lastOcc i val
                   dups = [x | (x,j) <- idxs, not (moves x j), not (trivial x)]
               let g    = M.union (M.fromList [(x,V t) | (x,_,t) <- ps]) (peGamma pe)
                   inner = PEnv (peEnv pe) g S.empty Nothing M.empty
-                  own  = S.fromList ([x | x <- caps, maybe False (not . isTrivial) (M.lookup x g)] ++ [x | (x,_,t) <- ps, not (isTrivial (V t))])
+                  own  = S.fromList ([x | x <- caps, maybe False (not . trivialTy (peEnv pe)) (M.lookup x g)] ++ [x | (x,_,t) <- ps, not (trivialTy (peEnv pe) (V t))])
               e' <- percE inner own e
               return (dupAll dups, i + length caps, Lam ps r e')
       _ -> useChildren pe lastOcc i (descendA stepName (stepA pe lastOcc) (stepV pe lastOcc) val)
   where
     moves x j = M.lookup x lastOcc == Just j
-    trivial x = maybe False isTrivial (M.lookup x (peGamma pe))
+    trivial x = maybe False (trivialTy (peEnv pe)) (M.lookup x (peGamma pe))
     stepName :: Path -> StateT (K,Int) (M () NameSupply) Path
     stepName x = do (k,j) <- get
                     put (k,j+1)
@@ -455,5 +455,5 @@ resultOfCall pe f tys
 bind :: PEnv -> [(Path,Ty)] -> PEnv
 bind pe bs = pe{ peGamma = bindAll bs (peGamma pe) }
 
-ownedOf :: [(Path,Ty)] -> VarSet
-ownedOf bs = S.fromList [x | (x,t) <- bs, not (isTrivial t)]
+ownedOf :: PEnv -> [(Path,Ty)] -> VarSet
+ownedOf pe bs = S.fromList [x | (x,t) <- bs, not (trivialTy (peEnv pe) t)]
