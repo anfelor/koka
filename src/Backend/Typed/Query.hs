@@ -10,7 +10,7 @@
 -- Type inference and environment queries shared by typed IR consumers.
 -- Keep inference in sync with the typing rules in Syntax.
 module Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, checkE, inferE, inferA, inferV
-                          , inferVar, inferAVar, altTypes, unboxRuBinds, boxContents, reuseSize, unrollT, openFields
+                          , inferVar, inferAVar, altTypes, unboxRuBinds, boxContents, reuseSize, unrollT, trivialTy, openFields
                           , funSig, paramModes, altPattern ) where
 
 import qualified Data.Map as M
@@ -275,6 +275,10 @@ unrollT env t
                        Just _  -> Left ("cannot unroll abstract type " ++ show n)
                        Nothing -> Left ("unknown type " ++ show n)
       _ -> Left ("unroll of " ++ ppr (A t))
+
+-- values of these types need no references, also through named types
+trivialTy :: Env -> Ty -> Bool
+trivialTy env = isTrivialWith (either (const Nothing) Just . unrollT env)
 
 -- the fields of an open constructor at an instance `T⟨B̄⟩` of its type
 openFields :: Env -> Name -> AType -> Q VType

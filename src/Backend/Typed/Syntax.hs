@@ -135,9 +135,9 @@ data AType = ABox VType                 -- Box V
 -- - `A*` is the only pointer-sized type (`Types.isPtr`): it holds a pointer to an `A` (or, for a
 --   shape, an immediate value with its tag).
 -- - Types are equal up to renaming of bound variables and β-reduction of type lambdas.
--- - A type is trivial (`Common.isTrivial`) if it contains no pointers: `𝟙`, raw types, sums,
---   products and existentials of trivial types, and `@reuse*` (a named type that is not
---   reference counted).
+-- - A type is trivial (`Query.trivialTy`) if it contains no pointers: `𝟙`, raw types, sums,
+--   products and existentials of trivial types, `@reuse*` (a named type that is not
+--   reference counted), and named types whose body is trivial.
 -- - `ctx⟨A,B⟩` is an abstract pair of a pointer and a field address (see "Constructor
 --   contexts" above). It is not trivial and has the layout of `A* ⊗ B*`. A nonempty context
 --   `ctx⁺⟨A,B⟩` is also a context `ctx⟨A,B⟩`, as a full credit is also a credit.

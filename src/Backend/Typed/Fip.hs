@@ -54,7 +54,7 @@ import Backend.Typed.Monad
 import Backend.Typed.Names( nameUnreachable, nameLazyFree )
 import Backend.Typed.Layout( layout, isBlock )
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuBinds, unrollT )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuBinds, trivialTy )
 
 -- The allocations of the most allocating path; whether there are allocations, calls to the
 -- recursive group, and both in sequence; and the types of the values boxed for polymorphism.
@@ -188,7 +188,7 @@ fullV v
 untracked :: Ty -> F Bool
 untracked t
   = do env <- asks fEnv
-       return (isTrivialWith (either (const Nothing) Just . unrollT env) t || isInt t)
+       return (trivialTy env t || isInt t)
   where
     isInt (A a) = isIntA a
     isInt (V (VPtr a)) = isIntA a
