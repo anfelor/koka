@@ -105,6 +105,7 @@ dsE expr
 dsE expr
   = case expr of
       Let x t e1 e2 -> Let x t <$> dsE e1 <*> bind [(x,V t)] (dsE e2)
+      LetYield x t e1 e2 e3 -> LetYield x t <$> dsE e1 <*> bind [(x,V t)] (dsE e2) <*> dsE e3
       Join j ps e1 e2 -> Join j ps <$> bind [(x,V t) | (x,_,t) <- ps] (dsE e1) <*> dsE e2
       UnboxRu v r e -> do (_,g) <- ask
                           bs <- liftE (unboxRuBinds g v r)

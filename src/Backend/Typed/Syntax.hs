@@ -24,11 +24,17 @@
     Γ ⊢ a :q A       the boxed value a has type A
     Γ ⊢ v :q V       the unboxed value v has type V; an owned value consumes Γ
     Γ | J ⊢ e : W    the expression e has unboxed type W and consumes every owned variable of Γ
+    Γ | J ⊢ʸ e : W   the same, where the result of e may be the dummy value of an effect yield
     ⊢ def            a top-level definition is well-typed
 
     `^Γ` marks every variable of Γ as borrowed. J is passed unchanged to every subexpression in
     tail position and omitted from the rules where that is all that happens; it is reset to ∅
-    where an expression is not in tail position.
+    where an expression is not in tail position. The mark `ʸ` follows J: it is passed unchanged
+    to every subexpression in tail position (and omitted from the rules), and where J is reset
+    to ∅ it is dropped unless the rule writes `⊢ʸ` (the bodies of definitions and closures and
+    the bound expression of `[let-yield]`). Only `[yielded]` requires it. Without the mark, a
+    position only excludes `[yielded]`: since the IR has no effects, a call bound by `[let]`
+    may still return a dummy, which `Yields` ensures is not inspected (see `[let-yield]`).
 
     The tag of a box z, tag(z), is determined by its path (`Common.boxTag`): it is i if z is
     the binder of alternative i of a `[case-a]`, and 1 otherwise.
@@ -291,7 +297,7 @@ data AVal
   -- A constructor of an open datatype (whose constructors are spread over modules).
   | OpenCon Name [AType] VVal
 
-  --   ⌊Γ⌋, x̄ : V̄ | ∅ ⊢ e : W    q̄ = ·
+  --   ⌊Γ⌋, x̄ : V̄ | ∅ ⊢ʸ e : W    q̄ = ·
   --  ───────────────────────────────────────── [lam]
   --   Γ ⊢ fn(x̄ :q̄ V̄) : W -> e : (q̄ V̄) -> W
   --
@@ -473,6 +479,29 @@ data VExpr
   --  ─────────────────────────────────────────── [let-unique]
   --   Γ₁, Γ₂ | J ⊢ let x : V = ret v in e : W
   | Let Path VType VExpr VExpr
+
+  --   Γ₁, ^Γ₂ | ∅ ⊢ʸ e₁ : V    Γ₂, x : V | J ⊢ e₂ : W    Γ₂ | J ⊢ e₃ : W
+  --  ──────────────────────────────────────────────────────────────────────── [let-yield]
+  --   Γ₁, Γ₂ | J ⊢ let x : V = e₁ yielding e₃ in e₂ : W
+  --
+  -- Koka's monadic bind: `e₁` may yield an effect, and then `e₃` runs instead of `e₂` (Koka's
+  -- `if yielding() then e₃ else e₂`). While an effect yields, `e₁` returns a dummy value (see
+  -- `[yielded]`), and `x` is not in scope in `e₃`, so the dummy is never inspected or dropped.
+  -- `e₁` consumes Γ₁ in either case, as a function that yields first releases its owned
+  -- arguments. Without a value to bind, the test is `let x : 𝟙 = ret () yielding e₃ in e₂`.
+  -- Elaboration moves the coercions of the result of `e₁` into `e₂` (`Yields`); a value that
+  -- may be a dummy is only bound by this rule.
+  | LetYield Path VType VExpr VExpr VExpr
+
+  --  ──────────────────────── [yielded]
+  --   ∅ | J ⊢ʸ yielded : W
+  --
+  -- The dummy value of an expression that yields an effect, in the yielding branch of a
+  -- `[let-yield]` (in place of a coercion of the dummy that a call returns). It is only allowed
+  -- where the result may be a dummy (`⊢ʸ`): in the body of a definition or closure, in
+  -- the bound expression of `[let-yield]`, and in their tail positions. Code generation fills
+  -- its pointers with Koka's shared `box-any`, which the runtime may drop.
+  | Yielded VType
 
   --   f : ∀ā. (q̄ V̄) -> W ∈ Σ    Γᵢ ⊢ vᵢ :qᵢ Vᵢ[B̄/ā]
   --  ───────────────────────────────────────────────── [call]
@@ -678,12 +707,12 @@ data VExpr
 
 -- Definitions `⊢ def`, with `f : ∀ā. (q̄ V̄) -> W ∈ Σ` and `x : ∀ā. V ∈ Σ`
 data Def
-  --   x̄ :q̄ V̄ | ∅ ⊢ e : W
+  --   x̄ :q̄ V̄ | ∅ ⊢ʸ e : W
   --  ──────────────────────────────── [deffun]
   --   ⊢ fun f⟨ā⟩(x̄ :q̄ V̄) : W = e
   = DefFun{ defName :: Name, defParams :: [TVar], defArgs :: [(Path,Mode,VType)], defRes :: VType, defBody :: VExpr }
 
-  --   ∅ | ∅ ⊢ e : V
+  --   ∅ | ∅ ⊢ʸ e : V
   --  ───────────────────────── [defval]
   --   ⊢ val x⟨ā⟩ : V = e
   --

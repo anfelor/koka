@@ -10,8 +10,9 @@
    branch bodies. Exhaustive cases become binary partitions: prefer a boundary
    separating immediates from heap blocks (even for two alternatives), otherwise
    balance by alternative count down to two-way cases.
-   Sparse cases can split off an immediate default from heap alternatives. The
-   default's residual sum keeps its original indices; its body is never copied.
+   Sparse cases can split off a default on one side of a pointer test from the
+   alternatives on the other. The default's residual sum keeps its original
+   indices; its body is never copied.
 -}
 module Backend.Typed.Passes.Match( matchProgram ) where
 
@@ -62,6 +63,7 @@ matchE expr
 matchE expr
   = case expr of
       Let x t e1 e2 -> Let x t <$> matchE e1 <*> bind [(x,V t)] (matchE e2)
+      LetYield x t e1 e2 e3 -> LetYield x t <$> matchE e1 <*> bind [(x,V t)] (matchE e2) <*> matchE e3
       Join j ps e1 e2 -> Join j ps <$> local (\(env,_) -> (env,Map.fromList [(x,V t) | (x,_,t) <- ps])) (matchE e1)
                                  <*> matchE e2
       UnboxRu v r e
@@ -86,15 +88,16 @@ partition m v ts alts def
       _ -> return (nameParts (CaseA m v alts def))
   where
     selected = [i | (i,_,_) <- alts]
-    -- A sparse default must fit wholly on the immediate side. This avoids
-    -- copying its body and keeps an effect-yield dummy on the default path.
+    -- A sparse default must fit wholly on one side of a pointer test, so that
+    -- its body is not copied.
     canSplit _ | Nothing <- def = True
     canSplit k = let (ls,rs) = span ((< k) . fst) ts
-                     immediate ss = shapeIsHeap (ASum ss) == Just False
-                                    && all (\(i,_) -> i `notElem` selected) ss
-                     heap ss = shapeIsHeap (ASum ss) == Just True
-                               && all (\(i,_) -> i `elem` selected) ss
-                 in (immediate ls && heap rs) || (heap ls && immediate rs)
+                     pointer = case (shapeIsHeap (ASum ls),shapeIsHeap (ASum rs)) of
+                                 (Just l,Just r) -> l /= r
+                                 _ -> False
+                     defaults ss = all (\(i,_) -> i `notElem` selected) ss
+                     matched ss = all (\(i,_) -> i `elem` selected) ss
+                 in pointer && ((defaults ls && matched rs) || (matched ls && defaults rs))
 
 -- Only contiguous groups preserve the runtime tag order. A pointer split is
 -- useful when there is exactly one change of representation; otherwise use a

@@ -29,7 +29,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuBinds, boxContents, reuseSize, inferE, unrollT, trivialTy )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuBinds, boxContents, reuseSize, inferE, noJoins, unrollT, trivialTy )
 
 -- credits with the size of their block
 type Credits = [(Path,Int)]
@@ -130,9 +130,13 @@ ruE expr
               -- Keep descriptions that are still in scope through credit aliases.
               re <- ask
               t' <- case t of
-                      VReuse _ _ Nothing -> liftE (inferE (reEnv re) (reGamma re) M.empty e1')
+                      VReuse _ _ Nothing -> liftE (inferE (reEnv re) (reGamma re) noJoins e1')
                       _ -> return t
               Let x t' e1' <$> bind [(x,V t')] (ruE e2)
+      LetYield x t e1 e2 e3
+        -> do e1' <- ruE e1
+              es <- branches [([(x,V t)],e2),([],e3)]
+              return (LetYield x t e1' (es !! 0) (es !! 1))
       Join j ps e1 e2
         -> do (e1',as) <- scope (Just []) (bind [(x,V t) | (x,_,t) <- ps] (ruE e1))
               let rs = fromMaybe [] as
@@ -181,6 +185,7 @@ ruE expr
               bs <- liftE (unboxRuBinds g v r)
               UnboxRu v r <$> bind bs (ruE e)
       Ret _ -> plain
+      Yielded _ -> plain
       Call _ _ _ -> plain
       App _ _ -> plain
       Gen _ _ -> plain

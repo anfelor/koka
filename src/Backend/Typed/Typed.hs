@@ -23,6 +23,7 @@ import Backend.Typed.Passes.Anf( anfProgram )
 import Backend.Typed.Elab.FromCore( elabProgram )
 import Backend.Typed.Check( checkProgram )
 import Backend.Typed.Passes.Simplify( simplifyProgram )
+import Backend.Typed.Passes.Yields( yieldsProgram )
 import Backend.Typed.Passes.Perceus( perceusProgram )
 import Backend.Typed.Passes.Lazy( lazyProgram )
 import Backend.Typed.Passes.Reuse( reuseProgram )
@@ -43,7 +44,7 @@ typedFromCore platform enableReuse nt imports uniq core
   = let (acore,_)              = runUnique uniq (matchCore nt core)
         (eprog,elabErrs,notes) = elabProgram platform nt imports acore
         prog                   = pathsProgram eprog
-        passes                 = [("anf",False,pure' anfProgram), ("contify",False,contifyProgram), ("simplify",False,pure' simplifyProgram), ("perceus",True,perceusProgram), ("lazy",True,lazyProgram)
+        passes                 = [("anf",False,pure' anfProgram), ("contify",False,contifyProgram), ("simplify",False,pure' simplifyProgram), ("yields",False,pure' yieldsProgram), ("perceus",True,perceusProgram), ("lazy",True,lazyProgram)
                                    ,("dropspec",True,dropSpecProgram)] ++ [("reuse",True,reuseProgram) | enableReuse]
                                    ++ [("match",True,matchProgram), ("sinkjoins",True,pure' sinkJoinsProgram), ("joinargs",True,pure' joinArgsProgram)]
                                    ++ concat [[("copyreset",True,pure' copyResetProgram),("expandreuse",True,pure' expandReuseProgram)] | enableReuse] ++ [("inline",True,inlineProgram)]
