@@ -20,7 +20,7 @@
 module Backend.Typed.Layout( CT(..), PrimType(..), EnumSize(..), layout, leaves, leafSlots, isEnum, orderFields, shapeIsHeap
                            , ctName, scanOf, rawOf, needsRC
                            , structDefs, blockName, blockDef, blockSize, isBlock, isScalar
-                           , dupExpr, dropStmt, rawCType, primBox, fnv
+                           , dupExpr, dropStmt, dupFun, dropFun, rawCType, primBox, fnv
                            ) where
 
 import Data.Char( ord )
@@ -229,31 +229,29 @@ dupDropDefs name fs
     ++ concat ["  " ++ dropStmt ct f ++ "\n" | (f,ct) <- fs]
     ++ "}\n"
 
-dupExpr :: CT -> String -> String
-dupExpr ct e
+-- the functions that duplicate and drop a value of a C type, where it needs one
+dupFun :: CT -> Maybe String
+dupFun ct
   = case ct of
-      CBox -> "kk_box_dup(" ++ e ++ ",_ctx)"
-      CProd _ _ | needsRC ct -> ctName ct ++ "_dup(" ++ e ++ ",_ctx)"
-      CSum _ _  | needsRC ct -> ctName ct ++ "_dup(" ++ e ++ ",_ctx)"
-      CProd _ _ -> e
-      CSum _ _  -> e
-      CPrim _ -> e
-      CUnit -> e
-      CEnum _ -> e
-      CReuse -> e   -- credits are linear and never duplicated
+      CBox -> Just "kk_box_dup"
+      CProd _ _ | needsRC ct -> Just (ctName ct ++ "_dup")
+      CSum _ _  | needsRC ct -> Just (ctName ct ++ "_dup")
+      _ -> Nothing   -- raw values need none; credits are linear and never duplicated
+
+dropFun :: CT -> Maybe String
+dropFun ct
+  = case ct of
+      CBox -> Just "kk_box_drop"
+      CReuse -> Just "kt_reuse_drop"
+      CProd _ _ | needsRC ct -> Just (ctName ct ++ "_drop")
+      CSum _ _  | needsRC ct -> Just (ctName ct ++ "_drop")
+      _ -> Nothing
+
+dupExpr :: CT -> String -> String
+dupExpr ct e = maybe e (\f -> f ++ "(" ++ e ++ ",_ctx)") (dupFun ct)
 
 dropStmt :: CT -> String -> String
-dropStmt ct e
-  = case ct of
-      CBox -> "kk_box_drop(" ++ e ++ ",_ctx);"
-      CReuse -> "kt_reuse_drop(" ++ e ++ ",_ctx);"
-      CProd _ _ | needsRC ct -> ctName ct ++ "_drop(" ++ e ++ ",_ctx);"
-      CSum _ _  | needsRC ct -> ctName ct ++ "_drop(" ++ e ++ ",_ctx);"
-      CProd _ _ -> ""
-      CSum _ _  -> ""
-      CPrim _ -> ""
-      CUnit -> ""
-      CEnum _ -> ""
+dropStmt ct e = maybe "" (\f -> f ++ "(" ++ e ++ ",_ctx);") (dropFun ct)
 
 -- heap blocks of boxes
 

@@ -77,6 +77,7 @@ import qualified Data.Text.Lazy.Builder as B
 import qualified Data.Text.Lazy as TL
 
 import Data.Monoid (mempty, mappend)
+import Data.String (IsString(..))
 
 infixr 5 </>,<//>,<->,<-->
 infixr 6 <.>,<+>
@@ -423,6 +424,10 @@ rtexts doc
       Colored f c d -> rtexts d
       _             -> []
 
+
+-- string literals are documents under `OverloadedStrings`; like `string`, a newline is a `line`
+instance IsString Doc where
+  fromString = string
 
 -----------------------------------------------------------
 -- Renderers
