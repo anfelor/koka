@@ -98,6 +98,11 @@ exE full expr
                           e2' <- exE (S.union full (fullOf [(x,t)])) e2
                           t' <- untagged x t
                           return (Let x t' e1' e2')
+      LetYield x t e1 e2 e3 -> do e1' <- exE full e1
+                                  e2' <- exE (S.union full (fullOf [(x,t)])) e2
+                                  e3' <- exE full e3
+                                  t' <- untagged x t
+                                  return (LetYield x t' e1' e2' e3')
       Join j ps e1 e2 -> do e1' <- exE (S.union full (fullOf [(x,t) | (x,_,t) <- ps])) e1
                             ps' <- mapM (\(x,m,t) -> (,,) x m <$> untagged x t) ps
                             Join j ps' e1' <$> exE full e2

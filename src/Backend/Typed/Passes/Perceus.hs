@@ -13,7 +13,8 @@
   exactly once and a set of borrowed variables it may only inspect. Owned
   variables that are not free in an expression are dropped at its start.
   In `let x = e1 in e2`, the owned variables that are still needed in `e2` are
-  borrowed in `e1`.
+  borrowed in `e1`; a `[let-yield]` is a `let` whose continuation is one of two branches,
+  and `x` is only bound in the one where no effect yields.
 
   Destructuring a dead owned variable moves its ownership to the binders
   (mode owned). Otherwise the binders are borrowed from the scrutinee (mode
@@ -168,6 +169,7 @@ consumedWith expr z x
       App _ _    -> True
       Jump _ _   -> True
       Let _ _ _ e2 -> not (S.member z (fvE e2)) && S.member x (fvE e2)
+      LetYield _ _ _ e2 e3 -> let live = fvE e2 `S.union` fvE e3 in not (S.member z live) && S.member x live
       _ | Just ds <- destructAOf expr
         -> dsScrut ds == z && not (isRead expr) && not (any (S.member z . fvE . snd) (dsAlts ds))
       _ | Just ds <- destructVOf expr
@@ -250,6 +252,16 @@ percE' pe owned expr
               e1' <- percE pe{ peBorrowed = peBorrowed pe `S.union` own2 } own1 e1
               e2' <- percE (bind pe [(x,V t)]) (own2 `S.union` ownedOf pe [(x,V t)]) e2
               return (hoistdupAll (\e1'' -> Let x t e1'' e2') e1')
+      -- like a `let`, whose continuation is one of two branches; `x` is only bound in `e2`
+      LetYield x t e1 e2 e3
+        -> do let live = fvE e2 `S.union` fvE e3
+                  own2 = owned `S.intersection` live
+                  own1 = owned `S.difference` live
+              e1' <- percE pe{ peBorrowed = peBorrowed pe `S.union` own2 } own1 e1
+              e2' <- percE (bind pe [(x,V t)]) (own2 `S.union` ownedOf pe [(x,V t)]) e2
+              e3' <- percE pe own2 e3
+              return (hoistdupAll (\e1'' -> LetYield x t e1'' e2' e3') e1')
+      Yielded _ -> return expr
       Call f tys vs
         -> do let ms = paramModes (peEnv pe) f (length vs)
               case [(i,v) | (i,(Borrowed,v)) <- zip [0..] (zip ms vs), not (isAtom v)] of

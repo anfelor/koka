@@ -9,7 +9,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- Type inference and environment queries shared by typed IR consumers.
 -- Keep inference in sync with the typing rules in Syntax.
-module Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, checkE, inferE, inferA, inferV
+module Backend.Typed.Query( Env(..), Gamma, noJoins, yieldJoins, envOf, bindAll, checkE, inferE, inferA, inferV
                           , inferVar, inferAVar, altTypes, unboxRuBinds, boxContents, reuseSize, unrollT, trivialTy, openFields
                           , funSig, paramModes, altPattern ) where
 
@@ -26,8 +26,14 @@ import Backend.Typed.Layout( layout, blockSize, isBlock, isScalar )
 
 type Gamma = M.Map Path Ty
 
--- the join points that can be jumped to: their parameter types and result type
-type Joins = M.Map Name ([VType],VType)
+-- J: the join points that can be jumped to (their parameter types and result type), and
+-- whether the result may be the dummy value of an effect yield (`⊢ʸ`)
+data Joins = Joins{ jsPoints :: M.Map Name ([VType],VType), jsYield :: Bool }
+
+-- ∅, and ∅ where the result may be a dummy (`⊢ʸ`)
+noJoins, yieldJoins :: Joins
+noJoins = Joins M.empty False
+yieldJoins = Joins M.empty True
 
 data Env = Env{ envTypes :: TypeDefs, envSigs :: Sigs }
 
@@ -103,8 +109,12 @@ inferExpr env g js expr
 inferExpr env g js expr
   = case expr of
       Ret v -> inferV env g v
-      Let x t e1 e2 -> do checkE env g M.empty e1 t
+      Let x t e1 e2 -> do checkE env g noJoins e1 t
                           inferE env (M.insert x (V t) g) js e2
+      LetYield x t e1 e2 e3 -> do checkE env g yieldJoins e1 t
+                                  branches [inferE env (M.insert x (V t) g) js e2, inferE env g js e3]
+      Yielded t | jsYield js -> return t
+                | otherwise -> Left "the dummy value of a yield where the result is inspected"
       Call f tys vs -> do (ps,r) <- funSig env f tys
                           checkArgs env g ps vs
                           return r
@@ -148,13 +158,13 @@ inferExpr env g js expr
                             unless (S.disjoint (S.fromList xs) (S.fromList [root n | (_,_,p) <- ps, Contents _ v _ <- descriptions p, Path n _ <- S.toList (fvV v)]))
                               (Left ("a description in the parameters of join point " ++ show j ++ " names a parameter"))
                             t <- inferE env (bindAll [(x,V p) | (x,_,p) <- ps] g) js e1
-                            checkE env g (M.insert j ([p | (_,_,p) <- ps],t) js) e2 t
+                            checkE env g js{ jsPoints = M.insert j ([p | (_,_,p) <- ps],t) (jsPoints js) } e2 t
                             return t
-      Jump j vs -> case M.lookup j js of
+      Jump j vs -> case M.lookup j (jsPoints js) of
                      Just (ps,t) -> checkArgs env g ps vs >> return t
                      Nothing -> Left ("jump to " ++ show j ++ " outside of its scope or not in tail position")
       Gen tvs e -> do unbound tvs (ftvCtx g e)
-                      t <- inferE env g M.empty e
+                      t <- inferE env g noJoins e
                       case t of
                         VPtr a -> return (VPtr (AForall tvs a))
                         _ -> Left ("generalization of a non-pointer: " ++ ppr t)
@@ -405,7 +415,7 @@ inferA env g val
              _ -> Left ("unknown open constructor " ++ show c)
       Lam ps r e -> do when (any containsReuse [t | x <- S.toList (fvA val), Just t <- [M.lookup x g]])
                          (Left "cannot capture reuse credits in a closure")
-                       checkE env (bindAll [(x,V t) | (x,_,t) <- ps] (M.delete nameHole g)) M.empty e r
+                       checkE env (bindAll [(x,V t) | (x,_,t) <- ps] (M.delete nameHole g)) yieldJoins e r
                        return (AFun [(m,t) | (_,m,t) <- ps] r)
       BoxIn x v -> do tx <- inferV env g (Var x)
                       tv <- inferV env g v

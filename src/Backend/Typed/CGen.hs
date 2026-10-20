@@ -57,7 +57,7 @@ data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [Strin
             , stLocal :: Bool }
 
 -- `cxJoins`: the label and the parameters of each join point in scope
-data Ctx = Ctx{ cxEnv :: Env, cxCEnv :: CEnv, cxGamma :: Gamma, cxNamed :: S.Set Path, cxSelf :: Maybe (Name,[Path])
+data Ctx = Ctx{ cxEnv :: Env, cxCEnv :: CEnv, cxGamma :: Gamma, cxSelf :: Maybe (Name,[Path])
               , cxJoins :: M.Map Name (Doc,[Path])
               , cxShared :: S.Set Path }   -- boxes known to be shared (the else branch of `IsUnique`)
 
@@ -484,16 +484,16 @@ leafValues t v
       _ -> [(collapse v,i) | i <- [0 .. length (leaves t) - 1]]
 
 -- `[deref]` and `[unroll]` keep the pointer
-genAlias :: Ctx -> Dest -> Doc -> Path -> Ty -> S.Set Path -> VExpr -> G [Doc]
-genAlias cx dest ve x t named e
-  = do s <- genE (bindVar cx{ cxNamed = named } x t) dest e
+genAlias :: Ctx -> Dest -> Doc -> Path -> Ty -> VExpr -> G [Doc]
+genAlias cx dest ve x t e
+  = do s <- genE (bindVar cx x t) dest e
        return ([declare "kk_box_t" x ve] ++ s)
 
 genUnbox :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
 genUnbox cx dest v x e
   = do A a <- tyOfName cx v
        t <- liftC (boxContents a)
-       ue <- unboxBlock (S.member v (cxNamed cx)) t (localName v)
+       ue <- unboxBlock t (localName v)
        genRead cx dest x t ue e
 
 -- An owned read lets the runtime release a heap-backed scalar.
@@ -541,22 +541,25 @@ dropScalar t e
                  Just 0  -> empty
                  Just n  -> "if (KK_INTF_SIZE <=" <+> int n <.> ")" <+> block [drop])
 
--- the payload of a box; only a box at a type variable can be Koka's `box-any`
-unboxBlock :: Bool -> VType -> Doc -> G Doc
-unboxBlock named t e
+-- the payload of a box, which is never the dummy value of a yield (`[let-yield]`)
+unboxBlock :: VType -> Doc -> G Doc
+unboxBlock t e
   = do ct <- ctype t
        case ct of
          CUnit -> return "kk_Unit"
          _ -> do bt <- blockType ct
-                 x <- fresh "ub"
-                 y <- fresh "ux"
-                 let payload b = "((" <.> bt <.> "*)kk_datatype_as_ptr(kk_datatype_unbox(" <.> b <.> "),_ctx))->p"
-                 if named then return (payload e) else
-                  return (stmtExpr ["kk_box_t" <+> y <+> "=" <+> e <.> ";",
-                                    cty ct <+> x <.> ";",
-                                    "if kk_unlikely(kt_box_is_any(" <.> y <.> ",_ctx))"
-                                      <+> block ["kk_valuetype_unbox_from_any((kk_box_t*)&" <.> x <.> ",sizeof(" <.> cty ct <.> ")," <.> y <.> ",KK_BORROWED,_ctx);"]
-                                      <+> "else" <+> block [x <+> "=" <+> payload y <.> ";"]] x)
+                 return ("((" <.> bt <.> "*)kk_datatype_as_ptr(kk_datatype_unbox(" <.> e <.> "),_ctx))->p")
+
+-- The dummy value of a yield: Koka's `box-any` in every pointer, which the runtime may drop
+-- (`kcompose`), as `kk_valuetype_unbox_from_any` makes it.
+yieldedValue :: CT -> G Doc
+yieldedValue ct
+  = case ct of
+      CUnit -> return "kk_Unit"
+      CBox -> return "kk_box_any(_ctx)"
+      _ -> do x <- fresh "yd"
+              return (stmtExpr [cty ct <+> x <+> "= {0};",
+                                "kk_valuetype_unbox_from_any((kk_box_t*)&" <.> x <.> ",sizeof(" <.> cty ct <.> "),kk_box_any(_ctx),KK_OWNED,_ctx);"] x)
 
 -- literals
 
@@ -752,15 +755,18 @@ genE cx dest expr
                   e <- genV cx v
                   return (assignTo dest ct e)
       Let x t e1 e2
+        -> do s1 <- genBound cx x t e1
+              s2 <- genE (bindVar cx x (V t)) dest e2
+              return (s1 ++ s2)
+      LetYield x t e1 e2 e3
+        -> do s1 <- genBound cx x t e1
+              s2 <- genE (bindVar cx x (V t)) dest e2
+              s3 <- genE cx dest e3
+              return (s1 ++ [ifChain [("kk_yielding(_ctx)",s3)] s2])
+      Yielded t
         -> do ct <- ctype t
-              s1 <- genE cx (DAssign (localName x)) e1
-              let cx' = (bindVar cx x (V t)){ cxNamed = namedOf cx e1 x }
-              s2 <- genE cx' dest e2
-              -- the binders of `e1` are out of scope in `e2`, and a path may be bound in both
-              let assign = case e1 of
-                             Ret _ -> s1
-                             _ -> [block s1]
-              return ([cty ct <+> localName x <.> ";"] ++ assign ++ s2)
+              e <- yieldedValue ct
+              return (assignTo dest ct e)
       Drop x e
         | S.member x (cxShared cx)   -- like Koka's C backend: a shared block only needs a decrement
         -> do s <- genE cx dest e
@@ -855,13 +861,11 @@ genE cx dest expr
       Deref _ v x e
         -> do VPtr a <- tyOf cx v
               ve <- genV cx v
-              genAlias cx dest ve x (A a) (case v of
-                                        Var z | S.member z (cxNamed cx) -> S.insert x (cxNamed cx)
-                                        _ -> cxNamed cx) e
+              genAlias cx dest ve x (A a) e
       Unroll _ v x e
         -> do A t <- tyOfName cx v
               a <- liftC (unrollT (cxEnv cx) t)
-              genAlias cx dest (localName v) x (A a) (S.insert x (cxNamed cx)) e
+              genAlias cx dest (localName v) x (A a) e
       Unbox _ v x e -> genUnbox cx dest v x e
       UnboxLazy v x e -> genUnbox cx dest v x e
       Unscalar m v x e -> genUnscalar cx dest m v x e
@@ -990,12 +994,21 @@ childrenA v = case v of
   BoxIn x w -> [(w,BoxIn x)]
   _ -> []
 
+-- declare the binder of a `let` and assign it the value of the bound expression
+genBound :: Ctx -> Path -> VType -> VExpr -> G [Doc]
+genBound cx x t e
+  = do ct <- ctype t
+       s <- genE cx (DAssign (localName x)) e
+       -- the binders of `e` are out of scope in the body, and a path may be bound in both
+       let assign = case e of
+                      Ret _ -> s
+                      _ -> [block s]
+       return ((cty ct <+> localName x <.> ";") : assign)
+
 -- A partition binder is an alias with a different static sum and tag origin.
 genSumBranch :: Ctx -> Dest -> Path -> Path -> Ty -> VExpr -> G [Doc]
 genSumBranch cx dest v x t e
-  = do let named = if S.member v (cxNamed cx) then S.insert x (cxNamed cx) else cxNamed cx
-           cx' = (bindVar cx x t){ cxNamed = named }
-       body <- genE cx' dest e
+  = do body <- genE (bindVar cx x t) dest e
        return ([declare "kk_box_t" x (localName v)] ++ body)
 
 -- Read the tag of a boxed sum; when every alternative is a heap block, the
@@ -1008,8 +1021,8 @@ tagDecl t tg ve = "kk_tag_t" <+> tg <+> "=" <+> tagRead <.> ";"
                 A a | shapeIsHeap a == Just True -> "kk_block_tag(kk_datatype_as_ptr(" <.> d <.> ",_ctx))"
                 _ -> "kk_datatype_tag(" <.> d <.> ",_ctx)"
 
--- Exhaustive boxed cases also accept the dummy result of an effect yield:
--- the final arm is the default, without emitting its body twice.
+-- The final arm of an exhaustive boxed case is the default, so that the switch
+-- needs no unreachable case (without emitting its body twice).
 switchCases :: Doc -> [([Int],[Doc])] -> Maybe [Doc] -> Doc
 switchCases tag brs def
   = "switch (" <.> tag <.> ")" <+> block ([branch (["case" <+> int t <.> ":" | t <- tags]
@@ -1237,13 +1250,6 @@ substFormat fmt args = go fmt
     -- Raw C newlines must not add indentation inside backslash-continued strings.
     go (x:xs) = text [x] <.> go xs
 
--- boxed values that are (parts of) values of named types, which are never Koka's `box-any`
-namedOf :: Ctx -> VExpr -> Path -> S.Set Path
-namedOf cx e x
-  = case e of
-      Ret (Var z) | S.member z (cxNamed cx) -> S.insert x (cxNamed cx)
-      _ -> cxNamed cx
-
 -- definitions
 
 genDef :: Env -> CEnv -> Def -> G (Doc,Doc,Doc)
@@ -1253,14 +1259,14 @@ genDef env cenv def
         -> do pcts <- mapM (\(_,_,t) -> ctype t) args
               rct  <- ctype res
               let g  = M.fromList [(x,V t) | (x,_,t) <- args]
-                  cx = Ctx env cenv g S.empty (Just (f,[x | (x,_,_) <- args])) M.empty S.empty
+                  cx = Ctx env cenv g (Just (f,[x | (x,_,_) <- args])) M.empty S.empty
               ss <- genE cx DReturn body
               let sig = cty rct <+> text (cName f) <.> "(" <.> hcat [cty ct <+> localName x <.> ", " | ((x,_,_),ct) <- zip args pcts] <.> "kk_context_t* _ctx)"
                   label = ["kt_tailcall: ;" | "goto kt_tailcall;" `isInfixOf` show (vcat ss)]
               return (sig <.> ";", sig <+> block (label ++ ss), empty)
       DefVal x _ t body
         -> do ct <- ctype t
-              let cx = Ctx env cenv M.empty S.empty Nothing M.empty S.empty
+              let cx = Ctx env cenv M.empty Nothing M.empty S.empty
               ss <- genE cx DReturn body
               let name  = text (cName x)
                   initf = name <.> "_init"
@@ -1276,7 +1282,7 @@ genWrapper env cenv f
         -> do pcts <- mapM (ctype . snd) ps
               rct  <- ctype r
               let xs  = [root (newHiddenName ("p" ++ show i)) | i <- [0..length ps - 1]]
-                  cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) S.empty Nothing M.empty S.empty
+                  cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) Nothing M.empty S.empty
               body <- genCall cx DReturn f (map AVar tvs) (map Var xs)
               let sig = "static" <+> cty rct <+> text (cName f) <.> "_fun(kk_function_t _fself" <.> hcat [", " <.> cty ct <+> localName x | (x,ct) <- zip xs pcts] <.> ", kk_context_t* _ctx)"
               return (sig <.> ";", sig <+> block ("kk_function_static_drop(_fself,_ctx);" : body))
@@ -1396,9 +1402,6 @@ runtimeHeader = vcat
   , "}"
   , "static inline void kt_reuse_free(kk_reuse_t r, kk_context_t* _ctx) {"
   , "  kk_assert_internal(r != kk_reuse_null && kk_block_is_unique(r)); kk_free_small(r,_ctx);"
-  , "}"
-  , "static inline bool kt_box_is_any(kk_box_t b, kk_context_t* _ctx) {"
-  , "  return (kk_box_is_ptr(b) && kk_block_has_tag(kk_ptr_unbox(b,_ctx), KK_TAG_BOX_ANY));"
   , "}"
   , "static inline bool kt_open_is(kk_box_t b, kk_string_t tag, kk_context_t* _ctx) {"
   , "  struct kt_open_s { kk_block_t _block; kk_string_t _tag; };"

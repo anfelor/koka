@@ -57,6 +57,8 @@ mentionedE :: VExpr -> [Path]
 mentionedE e = annotations ++ getConst (descendE (Const . (:[])) (Const . mentionedV) (\xs body -> Const (xs ++ mentionedE body)) e)
   where annotations = case e of
           Let _ t _ _ -> mentionedT t
+          LetYield _ t _ _ _ -> mentionedT t
+          Yielded t -> mentionedT t
           Call _ ts _ -> concatMap (mentionedT . VPtr) ts
           Join _ ps _ _ -> concatMap (mentionedT . (\(_,_,t) -> t)) ps
           _ -> []
@@ -306,6 +308,8 @@ descendB fn fv fb expr
   = case expr of
       Ret v                 -> Ret <$> fv v
       Let x t e1 e2         -> (\e1' (x',e2') -> Let x' t e1' e2') <$> plain e1 <*> one x Nothing e2
+      LetYield x t e1 e2 e3 -> (\e1' (x',e2') e3' -> LetYield x' t e1' e2' e3') <$> plain e1 <*> one x Nothing e2 <*> plain e3
+      Yielded _             -> pure expr
       Call f ts vs          -> Call f ts <$> traverse fv vs
       App f vs              -> App <$> fn f <*> traverse fv vs
       Unpair m v x y e      -> (\v' ((x',y'),e') -> Unpair m v' x' y' e') <$> fv v <*> two (x,SFst) (y,SSnd) e
@@ -342,6 +346,14 @@ descendB fn fv fb expr
     pair xs = case xs of
                 [x,y] -> (x,y)
                 _     -> error "Backend.Typed.Common.descendB: expecting two binders"
+
+-- A `[let-yield]` as the `let` that is taken if no effect yields, and its yielding branch,
+-- which is cold.
+yieldingAlts :: VExpr -> Maybe (VExpr,VExpr)
+yieldingAlts expr
+  = case expr of
+      LetYield x t e1 e2 e3 -> Just (Let x t e1 e2,e3)
+      _ -> Nothing
 
 -- the binder at a step from a variable
 child :: Path -> Step -> Path
@@ -620,6 +632,8 @@ substStepWith renameRoot recur scope sub expr
   where
     annotated = case expr of
       Let x t e1 e2 -> Let x (substVType sub t) e1 e2
+      LetYield x t e1 e2 e3 -> LetYield x (substVType sub t) e1 e2 e3
+      Yielded t -> Yielded (substVType sub t)
       Call f ts vs -> Call f (map (substAType sub) ts) vs
       Join j ps e1 e2 -> let sub' = hide [x | (x,_,_) <- ps] sub
                         in Join j [(x,m,substVType sub' t) | (x,m,t) <- ps] e1 e2
@@ -707,6 +721,8 @@ destructAOf expr
       Unpack{} -> Nothing
       Ret{} -> Nothing
       Let{} -> Nothing
+      LetYield{} -> Nothing
+      Yielded{} -> Nothing
       Call{} -> Nothing
       App{} -> Nothing
       CaseLit{} -> Nothing
@@ -736,6 +752,8 @@ destructVOf expr
       CaseOpen{} -> Nothing
       Ret{} -> Nothing
       Let{} -> Nothing
+      LetYield{} -> Nothing
+      Yielded{} -> Nothing
       Call{} -> Nothing
       App{} -> Nothing
       CaseLit{} -> Nothing
@@ -766,6 +784,8 @@ isRead expr
       Unpack{}    -> False
       Ret{}       -> False
       Let{}       -> False
+      LetYield{}  -> False
+      Yielded{}   -> False
       Call{}      -> False
       App{}       -> False
       CaseLit{}   -> False
@@ -796,6 +816,8 @@ keepsPointer expr
       CaseOpen{}  -> False
       Ret{}       -> False
       Let{}       -> False
+      LetYield{}  -> False
+      Yielded{}   -> False
       Call{}      -> False
       App{}       -> False
       CaseLit{}   -> False

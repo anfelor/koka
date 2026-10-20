@@ -160,6 +160,7 @@ reuseE expr
 reuseE expr
   = case expr of
       Let x t e1 e2 -> Let x t <$> reuseE e1 <*> bindReuse [(x,V t)] (reuseE e2)
+      LetYield x t e1 e2 e3 -> LetYield x t <$> reuseE e1 <*> bindReuse [(x,V t)] (reuseE e2) <*> reuseE e3
       Join j ps e1 e2 -> Join j ps <$> bindReuse [(x,V t) | (x,_,t) <- ps] (reuseE e1) <*> reuseE e2
       UnboxRu z r e -> do (_,g,_) <- ask
                           bs <- liftE (unboxRuBinds g z r)
