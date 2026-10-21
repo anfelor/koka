@@ -129,6 +129,56 @@ dropValue trivial fresh scope x t e
         VUnit -> return e
         VRaw _ -> return e
 
+-- Retain a borrowed value by duplicating its boxed operands or contexts. Unlike a
+-- drop, the destructurings only read: the original value remains available. Keep
+-- each derived duplication in a unit-valued let, so its borrowed parts do not
+-- escape into the continuation (or become extra captures of its closures).
+dupValue :: MonadFail m => (Ty -> Bool) -> m Path -> Scope -> Path -> Ty -> m K
+dupValue trivial fresh scope x t
+  | trivial t = return id
+  | otherwise = case t of
+      A _ -> return (Dup x)
+      V v -> case v of
+        VPtr _ -> do u <- fresh
+                     let y = child x SDeref
+                         body = Deref Borrowed (Var x) y (Dup y (Ret UnitV))
+                     return (Let u VUnit (reuseParts scope body))
+        VProd a b -> do u <- fresh
+                        let y = child x SFst
+                            z = child x SSnd
+                            parts = M.union (scopeOf [y,z]) scope
+                        ky <- dupValue trivial fresh parts y (V a)
+                        kz <- dupValue trivial fresh parts z (V b)
+                        return (Let u VUnit (reuseParts scope (Unpair Borrowed (Var x) y z (ky (kz (Ret UnitV))))))
+        VSum ts -> do u <- fresh
+                      alts <- mapM dupAlt (zip [0..] ts)
+                      return (Let u VUnit (reuseParts scope (CaseV Borrowed (Var x) alts)))
+          where
+            dupAlt (i,s)
+              = do let y = child x (SInjV i)
+                   k <- dupValue trivial fresh (M.insert y Nothing scope) y (V s)
+                   return (y,k (Ret UnitV))
+        VExists tvs s
+          -> do let y = child x SPack
+                u <- fresh
+                let start = minimum (0 : tvs ++ ftv s) - 1
+                    bs = take (length tvs) [start,start-1 ..]
+                    s' = inst tvs (map AVar bs) s
+                k <- dupValue trivial fresh (M.insert y Nothing scope) y (V s')
+                return (Let u VUnit (reuseParts scope (Unpack Borrowed (Var x) bs y (k (Ret UnitV)))))
+        VCtx _ _ _ -> return (Dup x)
+        VReuse _ _ _ -> fail "cannot duplicate a reuse credit"
+        VUnit -> return id
+        VRaw _ -> return id
+
+-- The primitive duplication rule, shared by the type and linearity checkers.
+checkDupType :: Ty -> Either String ()
+checkDupType t
+  = case t of
+      A _ -> Right ()
+      V (VCtx _ _ _) -> Right ()
+      V _ -> Left "dup of an unboxed value"
+
 -- values of these types need no reference counting, where `unroll` gives the body of a
 -- named type if it is known (a type with a single constructor without fields, for example)
 isTrivialWith :: (AType -> Maybe AType) -> Ty -> Bool

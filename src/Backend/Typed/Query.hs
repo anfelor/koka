@@ -137,7 +137,7 @@ inferExpr env g js expr
                        VReuse _ _ _ -> inferE env g js e
                        _ -> Left ("free of a non-credit: " ++ ppr t)
       Dup x e -> do t <- inferVar g x
-                    when (containsReuse t) (Left "cannot duplicate a reuse credit")
+                    checkDupType t
                     inferE env g js e
       IsUnique x e1 e2 -> do t <- inferVar g x
                              case t of

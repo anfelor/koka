@@ -39,10 +39,13 @@
 module Backend.Typed.Passes.DropSpec( dropSpecProgram ) where
 
 import qualified Data.Map as M
+import Control.Monad( guard )
+import Data.Maybe( listToMaybe )
+import Backend.Typed.Types( inst )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferAVar, inferV, altTypes, unboxRuBinds, boxContents, reuseSize )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferAVar, inferV, altTypes, unboxRuBinds, boxContents, reuseSize, trivialTy )
 
 type D a = M (Env,Gamma) NameSupply a
 
@@ -64,31 +67,104 @@ dropSpecProgram prog
     params DefVal{} = M.empty
 
 dsE :: VExpr -> D VExpr
-dsE (Dup p (Drop z e))
-  | p == child z SContents
-  = do (_,g) <- ask
-       s <- liftE (inferAVar g z >>= boxContents)
-       case reuseSize s of
-         Right n -> let (frames,dead,others,rest) = taken p e
-                        bound = concat [xs | f <- frames, Just ds <- [destructOf f], (xs,_) <- dsAlts ds]
-                    in case cover bound (map canonical dead) p of
-                         Just live | not (null dead) -> transfer n frames live dead (others rest)
-                         _ -> transfer n [] [p] [] e
-         Left _ -> Dup p . Drop z <$> dsE e
+dsE expr
+  = do (env,g) <- ask
+       case transferOf env g expr of
+         Just (z,p,n,e) -> specialize z p n e
+         Nothing -> dsPlain expr
+
+-- Recognize the derived duplication of whole box contents followed by their box's
+-- drop. Borrowed destructurings may already be in scope or still wrap the dups.
+transferOf :: Env -> Gamma -> VExpr -> Maybe (Path,Path,Int,VExpr)
+transferOf env g expr = do
+  x <- firstRead expr
+  listToMaybe [ (z,p,n,e)
+              | p@(Path r ss) <- reverse (prefixes x ++ [x]), not (null ss), last ss == SContents
+              , let z = Path r (init ss)
+              , Right s <- [inferAVar g z >>= boxContents]
+              , Right n <- [reuseSize s]
+              , Just (Drop y e) <- [stripDup env g (scopeOf (M.keys g)) p (V s) expr]
+              , y == z ]
   where
-    transfer n frames live dead cont
+    firstRead (Dup x _) = Just x
+    firstRead (Let _ VUnit e _) = firstRead e
+    firstRead e = do ds <- destructVOf e
+                     case dsScrut ds of Var x -> Just x; _ -> Nothing
+
+-- Strip precisely one structural duplication, whose borrowed destructurings
+-- remain local to its unit-valued let.
+stripDup :: Env -> Gamma -> Scope -> Path -> Ty -> VExpr -> Maybe VExpr
+stripDup env g scope x t expr
+  | trivialTy env t = Just expr
+  | otherwise = case t of
+      A _ -> leaf
+      V (VCtx _ _ _) -> leaf
+      V (VPtr a) -> sequenced $ frame [child x SDeref] (VPtr a) $ \sc e -> stripDup env g sc (child x SDeref) (A a) e
+      V (VProd a b) -> sequenced $ frame [child x SFst,child x SSnd] (VProd a b) $ \sc e -> do
+        rest <- stripDup env g sc (child x SFst) (V a) e
+        stripDup env g sc (child x SSnd) (V b) rest
+      V (VSum ts) -> do
+        Let _ VUnit bound rest <- Just expr
+        case [i | i <- [0..length ts-1], M.member (child x (SInjV i)) scope] of
+          (i:_) -> unit (child x (SInjV i)) (ts !! i) bound
+          [] -> do CaseV Borrowed (Var z) alts <- Just bound
+                   guard (z == x && length alts == length ts)
+                   sequence_ [guard (y == child x (SInjV i)) >> unit y s e | (i,((y,e),s)) <- zip [0..] (zip alts ts)]
+        return rest
+      V (VExists tvs s) -> do
+        Let _ VUnit bound rest <- Just expr
+        let y = child x SPack
+        if M.member y scope
+          then do V ty <- M.lookup y g
+                  unit y ty bound
+          else do Unpack Borrowed (Var z) bs w body <- Just bound
+                  guard (z == x && w == y && length bs == length tvs)
+                  unit y (inst tvs (map AVar bs) s) body
+        return rest
+      _ -> Nothing
+  where
+    leaf = case expr of Dup y e | x == y -> Just e; _ -> Nothing
+    unit y s e = do Ret UnitV <- stripDup env g (M.insert y Nothing scope) y (V s) e
+                    return ()
+    sequenced k = do Let _ VUnit bound rest <- Just expr
+                     Ret UnitV <- k bound
+                     return rest
+    frame ys s k bound
+      | all (`M.member` scope) ys = k scope bound
+      | Just ds <- destructVOf bound, dsMode ds == Borrowed, dsScrut ds == Var x
+      , [(zs,e)] <- dsAlts ds, zs == ys
+      , correct s bound = k (M.union (scopeOf ys) scope) e
+      | otherwise = Nothing
+    correct VPtr{} Deref{} = True
+    correct VProd{} Unpair{} = True
+    correct _ _ = False
+
+specialize :: Path -> Path -> Int -> VExpr -> D VExpr
+specialize z p n e
+  = let (frames,dead,others,rest) = taken p e
+        bound = concat [xs | f <- frames, Just ds <- [destructOf f], (xs,_) <- dsAlts ds]
+    in case cover bound (map canonical dead) p of
+         Just live | not (null dead) -> transfer frames live dead (others rest)
+         _ -> transfer [] [p] [] e
+  where
+    transfer frames live dead cont
       = under frames $
-        do (_,g) <- ask
+        do (env,g) <- ask
            s <- liftE (inferAVar g z >>= boxContents)
-           r  <- fresh "r"
+           r <- fresh "r"
            let r' = child z SCredit
                payload = Just (Contents (Just (boxTag z)) (Var p) s)
                t = VReuse MaybeEmpty n payload
                unique = UnboxRu z r' (foldr Drop (Ret (Var r')) dead)
-               shared = foldr Dup (Drop z (Ret (NoReuse n payload))) live
+           ks <- mapM (\x -> do
+                          tx <- liftE (inferVar g x)
+                          dupValue (trivialTy env) (fresh "u") (scopeOf (M.keys g)) x tx) live
+           let shared = compose ks (Drop z (Ret (NoReuse n payload)))
            cont' <- bind [(r,V t)] (dsE cont)
            return (Let r t (IsUnique z unique shared) (Free r cont'))
-dsE expr
+
+dsPlain :: VExpr -> D VExpr
+dsPlain expr
   | Just ds <- destructAOf expr
   = do (env,g) <- ask
        t <- liftE (inferVar g (dsScrut ds))
@@ -102,7 +178,7 @@ dsE expr
        v <- dsV (dsScrut ds)
        es <- sequence [bind (zip xs ts) (dsE e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
        return (dsBuild ds (dsMode ds) v es)
-dsE expr
+dsPlain expr
   = case expr of
       Let x t e1 e2 -> Let x t <$> dsE e1 <*> bind [(x,V t)] (dsE e2)
       LetYield x t e1 e2 e3 -> LetYield x t <$> dsE e1 <*> bind [(x,V t)] (dsE e2) <*> dsE e3
