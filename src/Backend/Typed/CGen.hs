@@ -752,15 +752,6 @@ declare ctype x e = ctype <+> localName x <+> "=" <+> e <.> ";"
 
 genE :: Ctx -> Dest -> VExpr -> G [Doc]
 genE cx dest expr
-  | Just (v,mk) <- hoistDeep expr
-  = do x <- root . newHiddenName <$> freshName "hoist"
-       let expr' = mk (Var x)
-       t <- tyOf cx v
-       ct <- ctype t
-       s <- genE cx (DAssign (localName x)) (Ret v)
-       rest <- genE (bindVar cx x (V t)) dest expr'
-       return ([cty ct <+> localName x <.> ";"] ++ s ++ rest)
-genE cx dest expr
   = case expr of
       Ret v -> do t <- tyOf cx v
                   ct <- ctype t
@@ -955,56 +946,6 @@ genE cx dest expr
                           return ("kt_open_is(" <.> ve <.> "," <.> tag <.> ",_ctx)", declare (cty fct) x fe : s)
               sd <- genE cx dest def
               return [ifChain brs sd]
-
--- bind deeply nested values first (C compilers limit the nesting of brackets)
-hoistDeep :: VExpr -> Maybe (VVal, VVal -> VExpr)
-hoistDeep expr
-  = case expr of
-      Ret v -> one v Ret
-      Call f ts vs -> many vs (Call f ts)
-      App f vs -> many vs (App f)
-      _ -> Nothing
-  where
-    one v k = do (w,mk) <- deep 0 v
-                 return (w,k . mk)
-    many vs k = case [(i,r) | (i,v) <- zip [0..] vs, Just r <- [deep 0 v]] of
-                  ((i,(w,mk)):_) -> Just (w, \x -> k (take i vs ++ [mk x] ++ drop (i+1) vs))
-                  [] -> Nothing
-    deep :: Int -> VVal -> Maybe (VVal, VVal -> VVal)
-    -- only whole values of named types, whose tags have no offset in an enclosing sum
-    deep d v
-      | d >= 24 && depth v > 8, Ptr _ _ <- v = Just (v,id)
-      | otherwise = case [(replace,r) | (w,replace) <- childrenV v, Just r <- [deep (d+1) w]] of
-                      ((replace,(u,mk)):_) -> Just (u, replace . mk)
-                      [] -> Nothing
-
--- nesting depth of value constructors
-depth :: VVal -> Int
-depth v
-  = case childrenV v of
-      [] -> 0
-      ws -> 1 + maximum (map (depth . fst) ws)
-
--- Unboxed children reached through boxed constructors, with typed rebuild functions.
-childrenV :: VVal -> [(VVal, VVal -> VVal)]
-childrenV v = case v of
-  Inj i t w -> [(w,Inj i t)]
-  Pair u w -> [(u,\x -> Pair x w),(w,Pair u)]
-  Ptr a w -> [(u,Ptr a . rebuild) | (u,rebuild) <- childrenA w]
-  Pack t ts w -> [(w,Pack t ts)]
-  TyApp w ts -> [(w,\x -> TyApp x ts)]
-  DupV w -> [(w,DupV)]
-  _ -> []
-
-childrenA :: AVal -> [(VVal, VVal -> AVal)]
-childrenA v = case v of
-  InjA i a w -> [(u,InjA i a . rebuild) | (u,rebuild) <- childrenA w]
-  Roll a w -> [(u,Roll a . rebuild) | (u,rebuild) <- childrenA w]
-  Box w -> [(w,Box)]
-  OpenCon c ts w -> [(w,OpenCon c ts)]
-  BoxAt r w -> [(w,BoxAt r)]
-  BoxIn x w -> [(w,BoxIn x)]
-  _ -> []
 
 -- declare the binder of a `let` and assign it the value of the bound expression
 genBound :: Ctx -> Path -> VType -> VExpr -> G [Doc]
