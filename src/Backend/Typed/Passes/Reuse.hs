@@ -191,7 +191,7 @@ ruE expr
       Gen _ _ -> plain
       Dup{} -> plain
       -- destructuring forms are handled above
-      Unpair{} -> plain
+      Proj{} -> plain
       CaseV{} -> plain
       CaseA{} -> plain
       SplitA{} -> plain

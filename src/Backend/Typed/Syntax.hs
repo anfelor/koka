@@ -205,7 +205,8 @@ data Lit = LitInt Integer
 
 -- Variables are paths: a root followed by the steps of the destructurings that lead from the
 -- root to the variable, outermost first. For example, `z.snd.deref` is the binder of
--- `let_q ptr x = z.snd` where `z.snd` is the binder of `let_q (z.fst, z.snd) = z`. The binders
+-- `let_q ptr x = z.snd` where `z.snd` is the binder of `let_q x = z.snd`. A projection
+-- (`[proj]`) contributes all of its steps. The binders
 -- of other forms are roots, and a root is bound only once in a definition. `Paths`
 -- establishes these invariants after elaboration and after `OrderFields` changes
 -- the product representation. The other passes preserve them; `Check` validates
@@ -214,7 +215,7 @@ data Path = Path Name [Step]
           deriving (Eq,Ord)
 
 -- the steps from the scrutinee of a destructuring form to its binders
-data Step = SFst | SSnd            -- [unpair]
+data Step = SFst | SSnd            -- [proj]
           | SInjV Int              -- [case]
           | SPack                  -- [unpack]
           | SDeref                 -- [deref]
@@ -526,12 +527,18 @@ data VExpr
   -- where the binder is the scrutinee's pointer: `[case]` on `⊕ᵢ Aᵢ`, `[deref]`, `[unroll]` and
   -- `[unpack]` (`keepsPointer`).
   --
-  --   Γ₁ ⊢ v :q V₁ ⊗ V₂    Γ₂, x :q V₁, y :q V₂ ⊢ e : W
-  --  ──────────────────────────────────────────────────── [unpair]
-  --   Γ₁, Γ₂ ⊢ let_q (x, y) = v in e : W
+  --   Γ₁ ⊢ v :q V    V at s̄ is U    Γ₂, x :q U ⊢ e : W
+  --  ──────────────────────────────────────────────── [proj]
+  --   Γ₁, Γ₂ ⊢ let_q x = v.s̄ in e : W
   --
-  -- For a variable scrutinee z, credit descriptions substitute (x,y) for z.
-  | Unpair Mode VVal Path Path VExpr
+  -- Reads and binds one part of a product, at the nonempty steps s̄ (each `fst` or `snd`)
+  -- from v: `V₁ ⊗ V₂` at `fst s̄` is V₁ at s̄, and at `snd s̄` it is V₂ at s̄. For a variable v
+  -- the binder is the path v.s̄, with that part's existing ownership; the other parts remain
+  -- available, and the intermediate products are not bound. In layout normal form
+  -- (`OrderFields`) a product is a right-nested chain of fields in memory order, and s̄
+  -- selects one field: `snd`ⁱ `fst`, or `snd`ⁱ for the last one. Code generation then reads
+  -- exactly that field, where the projection is.
+  | Proj Mode VVal [Step] Path VExpr
 
   --   Γ₁ ⊢ v :q ⊕ᵢ Vᵢ    Γ₂, xᵢ :q Vᵢ ⊢ eᵢ : W   (for each i)
   --  ────────────────────────────────────────────────────────── [case]

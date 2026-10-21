@@ -17,6 +17,7 @@ import Data.Monoid( Sum(..) )
 import Data.Functor.Identity( Identity(..) )
 import Data.List( isPrefixOf )
 import Data.Maybe( listToMaybe, fromMaybe )
+import Control.Monad( foldM )
 import Common.Name
 import Common.NamePrim( nameTpReuse )
 import Backend.Typed.Syntax
@@ -99,12 +100,10 @@ dropValue trivial fresh scope x t e
       V v -> case v of
         VPtr a -> do let y = child x SDeref
                      return (reuseParts scope (Deref Owned (Var x) y (Drop y e)))
-        VProd a b -> do let y = child x SFst
-                            z = child x SSnd
-                            parts = M.union (scopeOf [y,z]) scope
-                        rest <- dropValue trivial fresh parts z (V b) e
-                        body <- dropValue trivial fresh parts y (V a) rest
-                        return (reuseParts scope (Unpair Owned (Var x) y z body))
+        VProd{} -> do let fields = [f | f@(_,_,s) <- fieldsAt x v, not (trivial (V s))]
+                          parts = M.union (scopeOf [y | (y,_,_) <- fields]) scope
+                      body <- foldM (\rest (y,_,s) -> dropValue trivial fresh parts y (V s) rest) e (reverse fields)
+                      return (projectAll scope Owned x fields body)
         VSum ts -> do u <- fresh
                       alts <- mapM dropAlt (zip [0..] ts)
                       -- A continuation can bind roots. Keep it outside the case,
@@ -129,6 +128,35 @@ dropValue trivial fresh scope x t e
         VUnit -> return e
         VRaw _ -> return e
 
+-- The fields of a product along its right spine (`[proj]`): the steps to each field and its
+-- type. In layout normal form these are the fields in memory order.
+productFields :: VType -> [([Step],VType)]
+productFields t
+  = case t of
+      VProd a b -> ([SFst],a) : [(SSnd:ss,s) | (ss,s) <- spine b]
+      _ -> []
+  where
+    spine s@VProd{} = productFields s
+    spine s = [([],s)]
+
+-- the type at steps into a product
+partAt :: VType -> [Step] -> Maybe VType
+partAt t [] = Just t
+partAt (VProd a b) (s:ss)
+  = case s of
+      SFst -> partAt a ss
+      SSnd -> partAt b ss
+      _ -> Nothing
+partAt _ _ = Nothing
+
+-- the fields of a product variable, named by their paths
+fieldsAt :: Path -> VType -> [(Path,[Step],VType)]
+fieldsAt x t = [(foldl child x ss,ss,s) | (ss,s) <- productFields t]
+
+-- project the fields of a product variable around an expression, reusing those in scope
+projectAll :: Scope -> Mode -> Path -> [(Path,[Step],VType)] -> VExpr -> VExpr
+projectAll scope m x fields body = foldr (\(y,ss,_) e -> reuseParts scope (Proj m (Var x) ss y e)) body fields
+
 -- Retain a borrowed value by duplicating its boxed operands or contexts. Unlike a
 -- drop, the destructurings only read: the original value remains available. Keep
 -- each derived duplication in a unit-valued let, so its borrowed parts do not
@@ -143,13 +171,11 @@ dupValue trivial fresh scope x t
                      let y = child x SDeref
                          body = Deref Borrowed (Var x) y (Dup y (Ret UnitV))
                      return (Let u VUnit (reuseParts scope body))
-        VProd a b -> do u <- fresh
-                        let y = child x SFst
-                            z = child x SSnd
-                            parts = M.union (scopeOf [y,z]) scope
-                        ky <- dupValue trivial fresh parts y (V a)
-                        kz <- dupValue trivial fresh parts z (V b)
-                        return (Let u VUnit (reuseParts scope (Unpair Borrowed (Var x) y z (ky (kz (Ret UnitV))))))
+        VProd{} -> do u <- fresh
+                      let fields = [f | f@(_,_,s) <- fieldsAt x v, not (trivial (V s))]
+                          parts = M.union (scopeOf [y | (y,_,_) <- fields]) scope
+                      ks <- mapM (\(y,_,s) -> dupValue trivial fresh parts y (V s)) fields
+                      return (Let u VUnit (projectAll scope Borrowed x fields (foldr ($) (Ret UnitV) ks)))
         VSum ts -> do u <- fresh
                       alts <- mapM dupAlt (zip [0..] ts)
                       return (Let u VUnit (reuseParts scope (CaseV Borrowed (Var x) alts)))
@@ -349,32 +375,32 @@ mapV fa fv = runIdentity . descendV (Identity . fa) (Identity . fv)
 descendE :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([Path] -> VExpr -> f VExpr) -> VExpr -> f VExpr
 descendE fn fv fe = descendB fn fv (\bs e -> let xs = map fst bs in (,) xs <$> fe xs e)
 
--- Like `descendE`, but each binder comes with its step from the scrutinee, and `fb` gives new
--- binders for a subexpression. The binders of a `let` and a join point have no step,
+-- Like `descendE`, but each binder comes with its steps from the scrutinee, and `fb` gives new
+-- binders for a subexpression. The binders of a `let` and a join point have no steps,
 -- and neither has that of `[unbox-lazy]`, which takes the contents out of the box, or that of
 -- `[unscalar]`, which copies them.
-descendB :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([(Path,Maybe Step)] -> VExpr -> f ([Path],VExpr)) -> VExpr -> f VExpr
+descendB :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([(Path,[Step])] -> VExpr -> f ([Path],VExpr)) -> VExpr -> f VExpr
 descendB fn fv fb expr
   = case expr of
       Ret v                 -> Ret <$> fv v
-      Let x t e1 e2         -> (\e1' (x',e2') -> Let x' t e1' e2') <$> plain e1 <*> one x Nothing e2
-      LetYield x t e1 e2 e3 -> (\e1' (x',e2') e3' -> LetYield x' t e1' e2' e3') <$> plain e1 <*> one x Nothing e2 <*> plain e3
+      Let x t e1 e2         -> (\e1' (x',e2') -> Let x' t e1' e2') <$> plain e1 <*> one x [] e2
+      LetYield x t e1 e2 e3 -> (\e1' (x',e2') e3' -> LetYield x' t e1' e2' e3') <$> plain e1 <*> one x [] e2 <*> plain e3
       Yielded _             -> pure expr
       Call f ts vs          -> Call f ts <$> traverse fv vs
       App f vs              -> App <$> fn f <*> traverse fv vs
-      Unpair m v x y e      -> (\v' ((x',y'),e') -> Unpair m v' x' y' e') <$> fv v <*> two (x,SFst) (y,SSnd) e
-      CaseV m v alts        -> CaseV m <$> fv v <*> traverse (\(i,(x,e)) -> one x (Just (SInjV i)) e) (zip [0..] alts)
-      CaseA m v alts def    -> CaseA m <$> fn v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x (Just (SInjA i)) e) alts
-                                       <*> traverse (\(x,e) -> one x (Just SRest) e) def
-      SplitA m v k (x,e1) (y,e2) -> SplitA m <$> fn v <*> pure k <*> one x (Just SLo) e1 <*> one y (Just SHi) e2
-      Deref m v x e         -> (\v' (x',e') -> Deref m v' x' e') <$> fv v <*> one x (Just SDeref) e
-      Unroll m v x e        -> (\v' (x',e') -> Unroll m v' x' e') <$> fn v <*> one x (Just SRoll) e
-      Unbox m v x e         -> (\v' (x',e') -> Unbox m v' x' e') <$> fn v <*> one x (Just SContents) e
-      Unscalar m v x e      -> (\v' (x',e') -> Unscalar m v' x' e') <$> fn v <*> one x Nothing e
-      UnboxLazy v x e       -> (\v' (x',e') -> UnboxLazy v' x' e') <$> fn v <*> one x Nothing e
-      Unpack m v tvs x e    -> (\v' (x',e') -> Unpack m v' tvs x' e') <$> fv v <*> one x (Just SPack) e
+      Proj m v ss x e       -> (\v' (x',e') -> Proj m v' ss x' e') <$> fv v <*> one x ss e
+      CaseV m v alts        -> CaseV m <$> fv v <*> traverse (\(i,(x,e)) -> one x [SInjV i] e) (zip [0..] alts)
+      CaseA m v alts def    -> CaseA m <$> fn v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x [SInjA i] e) alts
+                                       <*> traverse (\(x,e) -> one x [SRest] e) def
+      SplitA m v k (x,e1) (y,e2) -> SplitA m <$> fn v <*> pure k <*> one x [SLo] e1 <*> one y [SHi] e2
+      Deref m v x e         -> (\v' (x',e') -> Deref m v' x' e') <$> fv v <*> one x [SDeref] e
+      Unroll m v x e        -> (\v' (x',e') -> Unroll m v' x' e') <$> fn v <*> one x [SRoll] e
+      Unbox m v x e         -> (\v' (x',e') -> Unbox m v' x' e') <$> fn v <*> one x [SContents] e
+      Unscalar m v x e      -> (\v' (x',e') -> Unscalar m v' x' e') <$> fn v <*> one x [] e
+      UnboxLazy v x e       -> (\v' (x',e') -> UnboxLazy v' x' e') <$> fn v <*> one x [] e
+      Unpack m v tvs x e    -> (\v' (x',e') -> Unpack m v' tvs x' e') <$> fv v <*> one x [SPack] e
       CaseLit v alts def    -> CaseLit <$> fv v <*> traverse (\(l,e) -> (,) l <$> plain e) alts <*> plain def
-      CaseOpen m v alts def -> CaseOpen m <$> fn v <*> traverse (\(c,x,e) -> (\(x',e') -> (c,x',e')) <$> one x (Just (SOpen c)) e) alts
+      CaseOpen m v alts def -> CaseOpen m <$> fn v <*> traverse (\(c,x,e) -> (\(x',e') -> (c,x',e')) <$> one x [SOpen c] e) alts
                                           <*> plain def
       Gen tvs e             -> Gen tvs <$> plain e
       Drop x e              -> Drop <$> fn x <*> plain e
@@ -382,20 +408,16 @@ descendB fn fv fb expr
       Dup x e               -> Dup <$> fn x <*> plain e
       IsUnique x e1 e2      -> IsUnique <$> fn x <*> plain e1 <*> plain e2
       IfFull r e1 e2        -> IfFull <$> fn r <*> plain e1 <*> plain e2
-      UnboxRu v r e         -> (\v' (r',e') -> UnboxRu v' r' e') <$> fn v <*> one r (Just SCredit) e
+      UnboxRu v r e         -> (\v' (r',e') -> UnboxRu v' r' e') <$> fn v <*> one r [SCredit] e
       Join j ps e1 e2       -> (\(xs,e1') e2' -> Join j [(x',m,t) | (x',(_,m,t)) <- zip xs ps] e1' e2')
-                                 <$> fb [(x,Nothing) | (x,_,_) <- ps] e1 <*> plain e2
+                                 <$> fb [(x,[]) | (x,_,_) <- ps] e1 <*> plain e2
       Jump j vs             -> Jump j <$> traverse fv vs
   where
     plain e = snd <$> fb [] e
     one x s e = (\(xs,e') -> (single xs,e')) <$> fb [(x,s)] e
-    two (x,s) (y,t) e = (\(xs,e') -> (pair xs,e')) <$> fb [(x,Just s),(y,Just t)] e
     single xs = case xs of
                   [x] -> x
                   _   -> error "Backend.Typed.Common.descendB: expecting one binder"
-    pair xs = case xs of
-                [x,y] -> (x,y)
-                _     -> error "Backend.Typed.Common.descendB: expecting two binders"
 
 -- A `[let-yield]` as the `let` that is taken if no effect yields, and its yielding branch,
 -- which is cold.
@@ -472,10 +494,11 @@ valueAt vals (Path x ss)
       (w:_) -> Just w
       [] -> Nothing
 
--- The path of a binder with a step (`descendB`) from the scrutinee `scrutVar`; the other
+-- The path of a binder with steps (`descendB`) from the scrutinee `scrutVar`; the other
 -- binders are roots.
-pathOf :: Maybe Path -> Maybe Step -> Maybe Path
-pathOf z s = child <$> z <*> s
+pathOf :: Maybe Path -> [Step] -> Maybe Path
+pathOf _ [] = Nothing
+pathOf z ss = (\x -> foldl child x ss) <$> z
 
 -- the arguments of each jump to a join point; jumps are never inside values, and an inner
 -- join of the same name shadows it
@@ -637,9 +660,9 @@ knownAlt scope expr = do
          Nothing -> dsMode <$> destructVOf expr
   let alts = getConst (descendB (const (Const [])) (const (Const [])) (\bs e -> Const [(bs,e)]) expr)
       indices = case expr of CaseA _ _ as _ -> [i | (i,_,_) <- as]; _ -> []
-  listToMaybe [i | m /= Unique, (i,(bs@(_:_),_)) <- zip [0..] alts, Just ss <- [mapM snd bs]
-                , all (\s -> M.member (child z s) scope) ss
-                , SRest `notElem` ss || M.lookup (child z SRest) scope == Just (Just indices)]
+  listToMaybe [i | m /= Unique, (i,(bs@(_:_),_)) <- zip [0..] alts, let ss = map snd bs, all (not . null) ss
+                , all (\s -> M.member (foldl child z s) scope) ss
+                , [SRest] `notElem` ss || M.lookup (child z SRest) scope == Just (Just indices)]
 
 -- Reuse parts while constructing a destructuring form.
 reuseParts :: Scope -> VExpr -> VExpr
@@ -765,7 +788,7 @@ destructAOf expr
       Unscalar m v x e      -> Just (Destruct m v [([x],e)] (\m' v' es -> Unscalar m' v' x (head es)))
       CaseOpen m v alts def -> Just (Destruct m v ([([x],e) | (_,x,e) <- alts] ++ [([],def)])
                                        (\m' v' es -> CaseOpen m' v' [(c,x,e) | ((c,x,_),e) <- zip alts es] (last es)))
-      Unpair{} -> Nothing
+      Proj{} -> Nothing
       CaseV{} -> Nothing
       Deref{} -> Nothing
       Unpack{} -> Nothing
@@ -790,7 +813,7 @@ destructVOf :: VExpr -> Maybe (Destruct VVal)
 destructVOf expr
   = case expr of
       SplitA{} -> Nothing
-      Unpair m v x y e      -> Just (Destruct m v [([x,y],e)] (\m' v' es -> Unpair m' v' x y (head es)))
+      Proj m v ss x e       -> Just (Destruct m v [([x],e)] (\m' v' es -> Proj m' v' ss x (head es)))
       CaseV m v alts        -> Just (Destruct m v [([x],e) | (x,e) <- alts] (\m' v' es -> CaseV m' v' (zip (map fst alts) es)))
       Deref m v x e         -> Just (Destruct m v [([x],e)] (\m' v' es -> Deref m' v' x (head es)))
       Unpack m v tvs x e    -> Just (Destruct m v [([x],e)] (\m' v' es -> Unpack m' v' tvs x (head es)))
@@ -826,7 +849,7 @@ isRead expr
       UnboxLazy{} -> True
       Unscalar{}  -> False
       CaseOpen{}  -> True
-      Unpair{}    -> False
+      Proj{}      -> False
       CaseV{}     -> False
       CaseA{}     -> False
       Deref{}     -> False
@@ -858,7 +881,7 @@ keepsPointer expr
       Deref{}     -> True
       Unroll{}    -> True
       Unpack{}    -> True
-      Unpair{}    -> False
+      Proj{}      -> False
       CaseV{}     -> False
       Unbox{}     -> False
       UnboxLazy{} -> False
