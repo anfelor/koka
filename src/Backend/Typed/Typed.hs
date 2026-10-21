@@ -35,6 +35,7 @@ import Backend.Typed.Passes.SinkJoins( sinkJoinsProgram )
 import Backend.Typed.Passes.JoinArgs( joinArgsProgram )
 import Backend.Typed.Passes.Inline( inlineProgram )
 import Backend.Typed.Passes.Paths( pathsProgram )
+import Backend.Typed.Passes.Hoist( hoistProgram )
 import Backend.Typed.Passes.OrderFields( orderFieldsProgram )
 import Backend.Typed.Linear( checkLinear )
 import Backend.Typed.Fip( checkFip )
@@ -52,7 +53,7 @@ typedFromCore platform enableReuse nt imports uniq core
         (dsprog,msgs)          = runPasses prog (label "check" (checkProgram prog)) passes
         -- without reuse every constructor allocates
         fipMsgs                = if enableReuse && null msgs then label "fip" (checkFip (fipsOf (core:imports)) (groupsOf core) dsprog) else []
-        (ordered,orderMsgs)    = if null elabErrs && null msgs then runPasses dsprog [] [("orderfields",True,orderFieldsProgram)] else (dsprog,[])
+        (ordered,orderMsgs)    = if null elabErrs && null msgs then runPasses dsprog [] [("orderfields",True,orderFieldsProgram),("hoist",True,hoistProgram)] else (dsprog,[])
     in (ordered, label "elab" elabErrs ++ msgs ++ fipMsgs ++ orderMsgs ++ label "note" notes)
   where
     pure' f prog = (f prog,[])
