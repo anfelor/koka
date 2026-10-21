@@ -642,13 +642,14 @@ data VExpr
   -- is freed without a test.
   | Free Path VExpr
 
-  --   Γ, x : t ⊢ e : W    t contains no reuse credits
-  --  ─────────────────────────── [dup]
-  --   Γ, x :^ t ⊢ dup x; e : W
+  --   Γ, x : A ⊢ e : W                 Γ, x : ctx⟨A,B⟩ ⊢ e : W
+  --  ───────────────────────── [dup]  ─────────────────────────────────── [dup-ctx]
+  --   Γ, x :^ A ⊢ dup x; e : W         Γ, x :^ ctx⟨A,B⟩ ⊢ dup x; e : W
   --
   -- Duplicate a variable in place: `x` gains an owned reference and keeps its name, so the
   -- copy is still a part of the variables on its path (see "Structural rules"). With
-  -- `[contract]` before it, `x` stays available borrowed as well.
+  -- `[contract]` before it, `x` stays available borrowed as well. Other unboxed values
+  -- are destructured borrowed to duplicate their boxed components (`Common.dupValue`).
   | Dup Path VExpr
 
   --   Γ, x :! t ⊢ e₁ : W    Γ, x : t ⊢ e₂ : W    t = Box V with |V| defined, or t = T⟨B̄⟩* with T lazy

@@ -434,7 +434,7 @@ checkE env g js expr
       Drop x e -> before (consume env g x) (checkE env g js e)
       Free r e -> before (consume env g r) (checkE env g js e)
       Dup x e -> do t <- liftE (inferVar g x)
-                    when (containsReuse t) (fail "cannot duplicate a reuse credit")
+                    liftE (checkDupType t)
                     before (dupVar env g x) (checkE env g js e)
       -- the test reads the variable without borrowing it, which is unique in the first branch
       IsUnique x e1 e2 -> do m <- ownerMode x

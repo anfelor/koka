@@ -100,7 +100,7 @@ indirect t shapes ind x v
        z <- fresh "z"
        let a = child d SDeref
            ref = Ptr t (Roll t (injA shapes ind (BoxIn x (Var r))))
-           shared = Dup r (Let d (VPtr t) (Ret ref) (Deref Owned (Var d) a (Drop a (Ret (Var r)))))
+           shared = Deref Borrowed (Var r) (child r SDeref) (Dup (child r SDeref) (Let d (VPtr t) (Ret ref) (Deref Owned (Var d) a (Drop a (Ret (Var r))))))
            unique = Let z VUnit (Call nameLazyFree [t] [Var x]) (Ret (Var r))
        return (Let r (VPtr t) (Ret v) (IsUnique x unique shared))
 
