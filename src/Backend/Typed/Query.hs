@@ -22,7 +22,7 @@ import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Layout( layout, blockSize, isBlock, isScalar )
+import Backend.Typed.Layout( layout, blockSize, isBlock, isScalar, isEnum )
 
 type Gamma = M.Map Path Ty
 
@@ -404,7 +404,7 @@ inferA env g val
                   noHeapCredit t
                   return (ABox t)
       Scalar v -> do t <- inferV env g v
-                     unless (isScalar t) (Left ("not a scalar: " ++ ppr t))
+                     unless (isScalar t || isEnum t) (Left ("not a scalar: " ++ ppr t))
                      return (AScalar t)
       OpenCon c tys v
         -> case M.lookup c (envSigs env) of

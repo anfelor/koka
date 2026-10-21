@@ -283,6 +283,10 @@ codeGenTyped term flags imports mod
            (tprog,msgs) = typedFromCore (platformFromFlags flags) (parcReuse flags) newtypes (mapMaybe modCore imports) 1000000 (fromJust (modCore mod))
        when (showTyped flags) $ termInfo term (pretty tprog)
        mapM_ (\(phase,msg) -> termInfo term (text ("typed " ++ phase ++ ": " ++ msg))) msgs
+       -- FIP diagnostics are advisory, like the frontend's FIP warnings.
+       -- Structural/type/linearity failures invalidate the lowering boundary.
+       when (typedC flags && any (\(phase,_) -> phase `notElem` ["note","fip"]) msgs) $
+         raiseIO "typed backend validation failed; C generation stopped"
        when (typedC flags) $
          do let outDir  = dirname (modIfacePath mod)
                 cores   = mapMaybe modCore (mod:imports)
@@ -296,6 +300,7 @@ codeGenTyped term flags imports mod
                                   (S.fromList [Core.defName d | Core.DefNonRec d <- Core.coreProgDefs (fromJust (modCore mod)),
                                                                 Core.defInline d == InlineAlways || Core.isInlineable 5 d])
                 (hdr,csrc,errs) = TC.cgenModule cenv tprog
+            unless (null errs) $ raiseIO ("typed C generation failed: " ++ intercalate "\n" errs)
             createDirectoryIfMissing True outDir
             writeFile (joinPath outDir (ktHeader (modName mod))) hdr
             writeFile (joinPath outDir (TC.ktFileName (modName mod) ++ ".c")) csrc

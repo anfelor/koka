@@ -116,8 +116,10 @@ owning m
 --   A sub-sum keeps the tags of its alternatives, with gaps for those it excludes.
 -- - `Scalar V` is Koka's `box` of a scalar V (`Layout.isScalar`: a raw type or an enumeration
 --   that Koka boxes by itself): an immediate value, or a block that the runtime allocates (such
---   as a large `float64`). It has no tag, so it is not a shape, and it is not reused. Nothing
---   relies on its uniqueness: `[if-unique]` and `[unbox-ru]` do not apply to it. `boxA`
+--   as a large `float64`). It has no tag, so it is not a shape, and it is not reused.
+--   Product normalization can expose an enumeration directly as its scalar payload;
+--   this retains the explicit `Scalar` boxing operation chosen during elaboration.
+--   Nothing relies on its uniqueness: `[if-unique]` and `[unbox-ru]` do not apply to it. `boxA`
 --   chooses it for a scalar outside a sum.
 -- - `a`, `a⟨B̄⟩` and `T⟨B̄⟩` without a definition are opaque: a value of such a type can only be
 --   passed around.
@@ -205,8 +207,9 @@ data Lit = LitInt Integer
 -- root to the variable, outermost first. For example, `z.snd.deref` is the binder of
 -- `let_q ptr x = z.snd` where `z.snd` is the binder of `let_q (z.fst, z.snd) = z`. The binders
 -- of other forms are roots, and a root is bound only once in a definition. `Paths`
--- establishes these invariants after elaboration; subsequent passes preserve them
--- and `Check` validates their output directly.
+-- establishes these invariants after elaboration and after `OrderFields` changes
+-- the product representation. The other passes preserve them; `Check` validates
+-- each pass's output directly.
 data Path = Path Name [Step]
           deriving (Eq,Ord)
 

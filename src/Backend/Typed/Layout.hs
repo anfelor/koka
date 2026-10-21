@@ -17,8 +17,8 @@
   Structs are named by a hash of their layout so modules agree on them.
 -}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Layout( CT(..), PrimType(..), EnumSize(..), layout, leaves, leafSlots, isEnum, orderFields, shapeIsHeap
-                           , ctName, scanOf, rawOf, needsRC
+module Backend.Typed.Layout( CT(..), PrimType(..), EnumSize(..), layout, orderedLayout, leaves, leafSlots, isEnum, orderFields, shapeIsHeap
+                           , checkLayout, ctName, scanOf, rawOf, needsRC
                            , structDefs, blockName, blockDef, blockSize, isBlock, isScalar
                            , dupExpr, dropStmt, dupFun, dropFun, rawCType, primBox, scalarHeapSize, fnv
                            ) where
@@ -70,25 +70,35 @@ shapeIsHeap (ASum ((_,t):ts))
 shapeIsHeap _ = Nothing
 
 layout :: VType -> CT
-layout t
+layout = layoutWith True
+
+-- After OrderFields the IR itself specifies memory order. Earlier passes still
+-- ask for the eventual layout when computing allocation and reuse sizes.
+orderedLayout :: VType -> CT
+orderedLayout = layoutWith False
+
+layoutWith :: Bool -> VType -> CT
+layoutWith reorder t
   = case t of
       VRaw n      -> CPrim (rawCType n)
-      VExists _ b -> layout b
+      VExists _ b -> lay b
       VReuse _ _ _  -> CReuse
       VSum ts | isEnum t -> CEnum (enumSize (length ts))
       VSum ts     -> let alts = map altLayout ts
                      in CSum (structName ("S[" ++ intercalate "|" (map (maybe "U" canonCT) alts) ++ "]")) alts
-      VProd _ _   -> case map layout (leaves t) of
+      VProd _ _   -> case map lay (leaves t) of
+                       [] -> CUnit
                        [ct] -> ct
                        cts  -> CProd (structName ("P(" ++ intercalate "," [show i ++ ":" ++ canonCT ct | (i,ct) <- zip [0::Int ..] cts] ++ ")"))
-                                     (orderFields (zip [0..] cts))
+                                     ((if reorder then orderFields else id) (zip [0..] cts))
       VUnit       -> CUnit
       VPtr _      -> CBox
       -- Koka's `cctx`: `res` and the address of the hole, which is boxed as a value
       -- (`kk_field_addr_t`), so duplicating and dropping it does nothing
-      VCtx _ a b  -> layout (VProd (VPtr a) (VPtr b))
+      VCtx _ a b  -> lay (VProd (VPtr a) (VPtr b))
   where
-    altLayout s = case layout s of
+    lay = layoutWith reorder
+    altLayout s = case lay s of
                     CUnit -> Nothing
                     ct    -> Just ct
 
@@ -118,6 +128,7 @@ isEnum t
       _ -> False
   where
     isUnitT VUnit = True
+    isUnitT (VProd a b) = isUnitT a && isUnitT b
     isUnitT (VExists _ b) = isUnitT b
     isUnitT _ = False
 
@@ -413,3 +424,28 @@ primBox p
       PrimFloat     -> Just "kk_float"
       PrimFieldAddr -> Nothing
       PrimBox       -> Nothing
+
+-- Every advertised scanned word must be a boxed word, at the start of the
+-- object. Counts alone are insufficient for products of mixed aggregates.
+checkLayout :: CT -> [String]
+checkLayout ct = prefix ++ nested
+  where
+    prefix = ["invalid scanned prefix in " ++ ctName ct
+             | scanned ct /= [0,8 .. 8 * scanOf ct - 1]
+               || any (\(off,n) -> off < 8 * scanOf ct && off+n > 0) (rawRanges ct)]
+    nested = case ct of
+      CProd _ fs -> concatMap (checkLayout . snd) fs
+      CSum _ as -> concatMap checkLayout [a | Just a <- as]
+      _ -> []
+    fields fs = zip (fieldOffsets (map (sizeAlign . snd) fs)) (map snd fs)
+    scanned c = case c of
+      CBox -> [0]
+      CProd _ fs -> [off+i | (off,f) <- fields fs, i <- scanned f]
+      CSum{} -> [0,8 .. 8 * scanOf c - 1]
+      _ -> []
+    rawRanges c = case c of
+      CProd _ fs -> [(off+i,n) | (off,f) <- fields fs, (i,n) <- rawRanges f]
+      CSum _ as -> [(8+i,n) | Just a <- as, (i,n) <- rawRanges a]
+      CBox -> []
+      CUnit -> []
+      _ -> [(0,fst (sizeAlign c))]

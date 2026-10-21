@@ -41,6 +41,8 @@ library
       Backend.Typed.Elab.Types
       Backend.Typed.Fip
       Backend.Typed.Layout
+      Backend.Typed.ValidateLayout
+      Backend.Typed.Product
       Backend.Typed.Linear
       Backend.Typed.Monad
       Backend.Typed.Names
@@ -49,6 +51,7 @@ library
       Backend.Typed.Passes.CopyReset
       Backend.Typed.Passes.JoinArgs
       Backend.Typed.Passes.Inline
+      Backend.Typed.Passes.OrderFields
       Backend.Typed.Passes.DropSpec
       Backend.Typed.Passes.ExpandReuse
       Backend.Typed.Passes.Lazy
