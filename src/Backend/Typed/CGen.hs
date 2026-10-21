@@ -36,7 +36,10 @@ import Backend.Typed.Common
 import Backend.Typed.Types( inst, prodV, collapse, Types(..) )
 import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuBinds, unrollT, openFields, boxContents, reuseSize )
 import Backend.Typed.Names( nameLazyFree )
-import Backend.Typed.Layout hiding( dupExpr, dropStmt )
+import Backend.Typed.Layout hiding( dupExpr, dropStmt, layout )
+import Backend.Typed.ValidateLayout( checkLayoutProgram )
+import Backend.Typed.Product( normalizeVType, leafOrder )
+import Backend.Typed.TypeInfo( schemeFieldTypes )
 import Backend.Typed.Monad
 
 data External = External{ extFormat :: String, extType :: Type }
@@ -145,7 +148,7 @@ dropStmt ct e = maybe empty (\f -> text f <.> "(" <.> e <.> ",_ctx);") (dropFun 
 
 ctype :: VType -> G CT
 ctype t
-  = do let ct = layout t
+  = do let ct = orderedLayout t
        mapM_ (uncurry defineStruct) (structDefs ct)
        return ct
 
@@ -645,10 +648,13 @@ genOpenCon cx c tys v
   = do (fields,kfields) <- openConFields cx c tys
        e <- genV cx v
        x <- fresh "o"
-       let ft = prodV fields
+       let ft = normalizeVType (prodV fields)
+           order = leafOrder (prodV fields)
        args <- forM (zip3 [0..] fields kfields) $ \(i,f,kt) ->
-                 do p <- projLeaves ft x (sum (map (length . leaves) (take i fields))) f
-                    fct <- ctype f
+                 do let start = sum (map (length . leaves) (take i fields))
+                        indices = [length (takeWhile (/= (start+j)) order) | j <- leafOrder f]
+                    p <- projIndices ft x indices (normalizeVType f)
+                    fct <- ctype (normalizeVType f)
                     return (toKoka fct (kokaCType kt) p)
        fct <- ctype ft
        let new = text (kokaName (makeHiddenName "new" c))
@@ -658,21 +664,27 @@ genOpenCon cx c tys v
 openConFields :: Ctx -> Name -> [AType] -> G ([VType],[Type])
 openConFields cx c tys
   = case M.lookup c (envSigs (cxEnv cx)) of
-      Just (SigCon tvs f _) ->
-        do let fs = inst tvs tys f
-           ktypes <- conKokaFields cx c
-           return (fieldsOf (length ktypes) fs, ktypes)
+      Just SigCon{} ->
+        do ci <- conInfoOf cx c
+           fields <- liftC (schemeFieldTypes (ceNewtypes (cxCEnv cx)) tys (conInfoType ci))
+           return (fields, map snd (conInfoParams ci))
       _ -> failG ("unknown open constructor " ++ show c)
-  where
-    fieldsOf 0 _ = []
-    fieldsOf 1 t = [t]
-    fieldsOf n (VProd a b) = a : fieldsOf (n-1) b
-    fieldsOf n t = [t]
 
-conKokaFields :: Ctx -> Name -> G [Type]
-conKokaFields cx c
-  = do ci <- conInfoOf cx c
-       return (map snd (conInfoParams ci))
+-- External constructor arguments retain their source grouping. A source field
+-- can span several normalized fields, so gather it only at this API boundary.
+projIndices :: VType -> Doc -> [Int] -> VType -> G Doc
+projIndices whole e indices part
+  = do ct <- ctype part
+       wct <- ctype whole
+       let field i = case wct of
+                       CProd{} -> "(" <.> e <.> ").f" <.> int i
+                       _ -> e
+       case ct of
+         CUnit -> return "kk_Unit"
+         CProd _ fs -> do y <- fresh "external"
+                          return (stmtExpr ((cty ct <+> y <.> ";") :
+                            [y <.> ".f" <.> int j <+> "=" <+> field i <.> ";" | ((j,_),i) <- zip fs indices]) y)
+         _ -> return (case indices of { i:_ -> field i; [] -> "kk_Unit" })
 
 conInfoOf :: Ctx -> Name -> G ConInfo
 conInfoOf cx c
@@ -1072,17 +1084,25 @@ openFieldExpr :: Name -> [VType] -> [Type] -> [String] -> Doc -> G Doc
 openFieldExpr c fields kfields names ve
   = do let acc n = text (kokaName (makeHiddenName "as" c)) <.> "(kt_unbox_datatype(" <.> ve <.> "),_ctx)->" <.> text n
        vals <- forM (zip3 fields kfields names) $ \(f,kt,n) ->
-                 do fct <- ctype f
+                 do fct <- ctype (normalizeVType f)
                     return (fromKoka (kokaCType kt) fct (acc n))
-       case fields of
-         [] -> return "kk_Unit"
-         [_] -> return (head vals)
-         _ -> do ct <- ctype (prodV fields)
-                 y <- fresh "of"
-                 let go i [] = []
-                     go i ((f,v):rest) = let n = length (leaves f)
-                                         in [y <.> ".f" <.> int i <+> "=" <+> v <.> ";" | n == 1] ++ go (i+n) rest
-                 return (stmtExpr ((cty ct <+> y <.> ";") : go 0 (zip fields vals)) y)
+       parts <- forM (zip fields vals) $ \(f,v) ->
+                  do ct <- ctype (normalizeVType f)
+                     x <- fresh "ofv"
+                     let order = leafOrder f
+                         field j = case ct of { CProd{} -> x <.> ".f" <.> int j; _ -> x }
+                         original = [field (length (takeWhile (/= i) order)) | i <- [0 .. length order - 1]]
+                     return (cty ct <+> x <+> "=" <+> v <.> ";",original)
+       ct <- ctype (normalizeVType (prodV fields))
+       let original = concatMap snd parts
+           ordered = [original !! i | i <- leafOrder (prodV fields)]
+           declarations = map fst parts
+       case ct of
+         CProd _ fs -> do y <- fresh "of"
+                          return (stmtExpr (declarations ++ [cty ct <+> y <.> ";"] ++
+                            [y <.> ".f" <.> int i <+> "=" <+> v <.> ";" | ((i,_),v) <- zip fs ordered]) y)
+         CUnit -> return (stmtExpr declarations "kk_Unit")
+         _ -> return (stmtExpr declarations (head ordered))
 
 -- calls
 
@@ -1292,6 +1312,8 @@ genWrapper env cenv f
 
 cgenModule :: CEnv -> Program -> (String,String,[String])
 cgenModule cenv prog
+  | errs@(_:_) <- checkLayoutProgram prog = ("","",errs)
+  | otherwise
   = let env = envOf prog
         -- (prototype, definition in the header, definition in the C file, initialization)
         genDefE :: Def -> G (Either String (Doc,Doc,Doc,Doc))

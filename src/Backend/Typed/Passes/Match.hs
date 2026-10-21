@@ -18,6 +18,7 @@ module Backend.Typed.Passes.Match( matchProgram ) where
 
 import qualified Data.Map as Map
 import Data.List( sortOn )
+import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
@@ -30,7 +31,7 @@ matchProgram :: Program -> (Program,[String])
 matchProgram prog
   = let run d = case evalM (matchE (defBody d)) (envOf prog,params d)
                           () of
-                  Right e -> (d{ defBody = e },[])
+                  Right e -> (d{ defBody = reuseEstablished (defScope d) e },[])
                   Left err -> (d,[show (defName d) ++ ": " ++ err])
         (defs,errs) = unzip (map run (progDefs prog))
     in (prog{ progDefs = defs },concat errs)
@@ -118,3 +119,17 @@ matchV = descendV matchA matchV
 matchA :: AVal -> Match AVal
 matchA (Lam ps r e) = Lam ps r <$> bind [(x,V t) | (x,_,t) <- ps] (matchE e)
 matchA a = descendA pure matchA matchV a
+
+-- Partitioning changes the paths of branch binders. A continuation may already
+-- destructure that same part; select its established alternative instead of
+-- binding the path twice. Unique eliminations must retain their ownership use.
+reuseEstablished :: Scope -> VExpr -> VExpr
+reuseEstablished scope e
+  | Just _ <- knownAlt scope e = reuseEstablished scope (reuseParts scope e)
+  | otherwise = runIdentity (descendE Identity (Identity . value) branch e)
+  where
+    branch xs b = Identity (reuseEstablished (bindScope e xs scope) b)
+    value = mapV atom value
+    atom (Lam ps r b) = Lam ps r (reuseEstablished (lambdaScope ps) b)
+    atom a = mapA id atom value a
+    lambdaScope ps = Map.union (scopeOf [x | (x,_,_) <- ps]) scope
