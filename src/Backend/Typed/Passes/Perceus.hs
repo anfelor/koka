@@ -155,7 +155,7 @@ percE pe owned expr
        case [z | (_,z) <- deps, not (S.member z live)] of
          (z:_) -> settle pe owned expr z [x | (x,z') <- deps, z' == z]
          [] -> case [x | (x,z) <- deps, consumedWith expr z x] of
-                 xs@(_:_) -> dupAll xs <$> percE pe (S.union owned (S.fromList xs)) expr
+                 xs@(_:_) -> percE pe (S.union owned (S.fromList xs)) expr >>= dupAll pe xs
                  [] -> do let dead = S.toList (owned `S.difference` live)
                           expr' <- percE' pe (owned `S.intersection` live) expr
                           dropNames pe dead expr'
@@ -191,8 +191,8 @@ settle pe owned expr z xs
          [] -> case [p | x <- xs, Just p <- [contentsOn x]] of
                  (p@(Path _ ss):_) -> do let y = Path (pathRoot z) (init ss)
                                              others = [x | x <- xs, not (x `within` p)]
-                                         dupAll others . Dup p . Drop y <$> percE pe (S.insert p (S.union owned' (S.fromList others))) expr
-                 [] -> dupAll xs <$> (percE pe (S.union owned' (S.fromList xs)) expr >>= dropNames pe [z])
+                                         percE pe (S.insert p (S.union owned' (S.fromList others))) expr >>= dupAll pe (others ++ [p]) . Drop y
+                 [] -> percE pe (S.union owned' (S.fromList xs)) expr >>= dropNames pe [z] >>= dupAll pe xs
   where
     shorter a b = if length (stepsFrom z a) <= length (stepsFrom z b) then a else b
     pathRoot (Path r _) = r
@@ -287,7 +287,7 @@ percE' pe owned expr
       Gen tvs e -> Gen tvs <$> percE' pe owned e
       Drop x e -> Drop x <$> percE' pe owned e
       Free r e -> Free r <$> percE' pe owned e
-      Dup x e -> Dup x <$> percE pe (S.insert x owned) e
+      Dup x e -> percE pe (S.insert x owned) e >>= dupAll pe [x]
       CaseLit v alts def
         -> do alts' <- mapM (\(l,e) -> (,) l <$> percE pe owned e) alts
               def'  <- percE pe owned def
@@ -295,14 +295,30 @@ percE' pe owned expr
       _ -> fail "unexpected destructuring form"
 
 -- duplicate variables in place
-dupAll :: [Path] -> K
-dupAll xs e = foldr Dup e xs
+dupAll :: PEnv -> [Path] -> VExpr -> P VExpr
+dupAll pe xs e = ($ e) <$> dupK pe xs
+
+dupK :: PEnv -> [Path] -> P K
+dupK pe xs = compose <$> mapM step xs
+  where
+    step x = do t <- tyOfVar pe x
+                dupValue (trivialTy (peEnv pe)) (fresh "u") (scopeOf (M.keys (peGamma pe))) x t
 
 -- the dups at the start of the bound expression of a `let` come before the `let`, so that
 -- it binds a value where it can (such as a unique one)
 hoistdupAll :: (VExpr -> VExpr) -> VExpr -> VExpr
 hoistdupAll k (Dup x e) = Dup x (hoistdupAll k e)
+hoistdupAll k (Let x VUnit bound e)
+  | retains bound = Let x VUnit bound (hoistdupAll k e)
 hoistdupAll k e = k e
+
+-- The unit-valued part of a derived duplication, with no calls or allocations.
+retains :: VExpr -> Bool
+retains (Ret UnitV) = True
+retains (Dup _ e) = retains e
+retains (Let _ VUnit e1 e2) = retains e1 && retains e2
+retains e | Just ds <- destructVOf e, dsMode ds == Borrowed = all (retains . snd) (dsAlts ds)
+retains _ = False
 
 -- destructuring
 
@@ -365,7 +381,7 @@ eagerBody pe owned zName (bs,e)
                      `S.union` S.fromList dupped
        body <- percE (bind pe bs) own e
        withDrop <- if zDead then dropNames pe zName body else return body
-       return (dupAll dupped withDrop)
+       dupAll (bind pe bs) dupped withDrop
 
 -- values
 
@@ -395,7 +411,8 @@ useVal _ _ Borrowed i v = return (id,i,v)
 useVal pe lastOcc Unique i v = useVal pe lastOcc Owned i v
 useVal pe lastOcc Owned i val
   = case val of
-      Var x -> return (if M.lookup x lastOcc == Just i || maybe False (trivialTy (peEnv pe)) (M.lookup x (peGamma pe)) then id else Dup x, i+1, val)
+      Var x -> do k <- if M.lookup x lastOcc == Just i then return id else dupK pe [x]
+                  return (k,i+1,val)
       Glob _ _ -> do t <- typeOfV pe val
                      return (id,i,if trivialTy (peEnv pe) (V t) then val else DupV val)
       DupV _ -> return (id,i,val)
@@ -412,7 +429,8 @@ useA pe lastOcc i val
                   inner = PEnv (peEnv pe) g S.empty Nothing M.empty
                   own  = S.fromList ([x | x <- caps, maybe False (not . trivialTy (peEnv pe)) (M.lookup x g)] ++ [x | (x,_,t) <- ps, not (trivialTy (peEnv pe) (V t))])
               e' <- percE inner own e
-              return (dupAll dups, i + length caps, Lam ps r e')
+              k <- dupK pe dups
+              return (k, i + length caps, Lam ps r e')
       _ -> useChildren pe lastOcc i (descendA stepName (stepA pe lastOcc) (stepV pe lastOcc) val)
   where
     moves x j = M.lookup x lastOcc == Just j
