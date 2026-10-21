@@ -115,8 +115,9 @@ renE global ren expr
                let inScope = S.fromList (M.elems ren)
                    alts = getConst (descendB (const (Const [])) (const (Const [])) (\bs e -> Const [(bs,e)]) expr)
                listToMaybe [(zip (map fst bs) ps, e) | m /= Unique, (bs@(_:_),e) <- alts
-                           , Just ss <- [mapM snd bs], SRest `notElem` ss || M.lookup (child z SRest) rests == Just indices
-                           , let ps = map (child z) ss, all (`S.member` inScope) ps]
+                           , let ss = map snd bs, all (not . null) ss
+                           , [SRest] `notElem` ss || M.lookup (child z SRest) rests == Just indices
+                           , let ps = map (foldl child z) ss, all (`S.member` inScope) ps]
     indices = case expr of
                 CaseA _ _ as _ -> [i | (i,_,_) <- as]
                 _ -> []
@@ -126,7 +127,7 @@ renE global ren expr
                   e' <- renE global (M.union (M.fromList (zip (map fst bs) xs)) ren) e
                   return (xs,e')
     bind (x,s) = case pathOf scrut s of
-                   Just x' -> do when (s == Just SRest) (modify (\st -> st{ rsRests = M.insert x' indices (rsRests st) }))
+                   Just x' -> do when (s == [SRest]) (modify (\st -> st{ rsRests = M.insert x' indices (rsRests st) }))
                                  record x x'
                    Nothing -> bindRoot x
     annotated = case expr of

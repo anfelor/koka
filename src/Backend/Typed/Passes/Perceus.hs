@@ -104,14 +104,17 @@ typeOfV :: PEnv -> VVal -> P VType
 typeOfV pe v = liftE (inferV (peEnv pe) (peGamma pe) v)
 
 -- Discard variables using their types, expanding unboxed aggregates into moves. An
--- aggregate whose parts are bound is discarded by discarding its parts.
+-- aggregate whose parts are bound is discarded by discarding its parts. A product
+-- may have only one projection in scope, so expand its drop to cover both parts.
 dropNames :: PEnv -> [Path] -> VExpr -> P VExpr
 dropNames pe xs e = foldM step e (reverse xs)
   where
     step body x = do t <- tyOfVar pe x
-                     case partsOf pe x of
-                       ps@(_:_) | not (pointer t) -> dropNames pe ps body
-                       _ -> dropValue (trivialTy (peEnv pe)) (fresh "d") (scopeOf (M.keys (peGamma pe))) x t body
+                     let discard = dropValue (trivialTy (peEnv pe)) (fresh "d") (scopeOf (M.keys (peGamma pe))) x t body
+                     case (t,partsOf pe x) of
+                       (V VProd{},_) -> discard
+                       (_,ps@(_:_)) | not (pointer t) -> dropNames pe ps body
+                       _ -> discard
 
 -- the parts of a variable that are bound and not of a trivial type
 partsOf :: PEnv -> Path -> [Path]
@@ -149,6 +152,20 @@ keepsPtr s
 -- expressions
 
 percE :: PEnv -> VarSet -> VExpr -> P VExpr
+-- Materialize a scheduled borrowed selection before settling its owner. The
+-- selected binding can then survive the transfer, rather than being read back
+-- from a backing snapshot afterward. A scalar read similarly copies trivial
+-- contents into an independent root before its owner is settled. Only leading
+-- reads are handled here; neither is moved across calls or guards.
+percE pe owned expr@Unscalar{}
+  = percE' pe owned expr
+percE pe owned expr@(Deref _ (Var _) x (Unscalar _ z _ _))
+  | x == z
+  = percE' pe owned expr
+percE pe owned expr
+  | Just ds <- destructVOf expr, productProjection expr
+  , dsMode ds == Borrowed, Var _ <- dsScrut ds
+  = percE' pe owned expr
 percE pe owned expr
   = do let live = fvE expr
            deps = [(x,z) | x <- S.toList live, Just z <- [ownerOf pe owned x]]
@@ -164,6 +181,7 @@ percE pe owned expr
 consumedWith :: VExpr -> Path -> Path -> Bool
 consumedWith expr z x
   = case expr of
+      Proj{}     -> False
       Ret _      -> True
       Call _ _ _ -> True
       App _ _    -> True
@@ -186,7 +204,13 @@ settle pe owned expr z xs
   = do t <- tyOfVar pe z
        let owned' = S.delete z owned
        case [x | x <- xs, all keepsPtr (stepsFrom z x)] of
-         _ | not (pointer t) -> percE pe (S.union owned' (S.fromList (partsOf pe z))) expr
+         _ | V v@VProd{} <- t -> do
+               let fields = [f | f@(_,_,s) <- fieldsAt z v, not (trivialTy (peEnv pe) (V s))]
+                   missing = [f | f@(y,_,_) <- fields, M.notMember y (peGamma pe)]
+               if null missing
+                 then percE pe (S.union owned' (S.fromList [y | (y,_,_) <- fields])) expr
+                 else percE pe owned (projectAll M.empty Borrowed z missing expr)
+           | not (pointer t) -> percE pe (S.union owned' (S.fromList (partsOf pe z))) expr
          (y:ys) -> percE pe (S.insert (foldr shorter y ys) owned') expr
          [] -> case [p | x <- xs, Just p <- [contentsOn x]] of
                  (p@(Path _ ss):_) -> do let y = Path (pathRoot z) (init ss)
@@ -320,6 +344,10 @@ retains (Let _ VUnit e1 e2) = retains e1 && retains e2
 retains e | Just ds <- destructVOf e, dsMode ds == Borrowed = all (retains . snd) (dsAlts ds)
 retains _ = False
 
+productProjection :: VExpr -> Bool
+productProjection Proj{} = True
+productProjection _ = False
+
 -- destructuring
 
 -- make the scrutinee a variable or global
@@ -358,7 +386,7 @@ destruct pe owned z expr binderss bodies
                       Just x -> [x]
                       _     -> []
            deadIn e = not (any (`S.member` fvE e) zName)
-           moveAll  = zOwned && not (isRead expr) && all deadIn bodies
+           moveAll  = zOwned && not (isRead expr) && not (productProjection expr) && all deadIn bodies
        if moveAll
          then do let own = owned `S.difference` S.fromList zName
                  es <- mapM (\(bs,e) -> percE (bind pe bs) (own `S.union` ownedOf pe bs) e) (zip binderss bodies)

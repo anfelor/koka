@@ -39,7 +39,9 @@
 module Backend.Typed.Passes.DropSpec( dropSpecProgram ) where
 
 import qualified Data.Map as M
-import Control.Monad( guard )
+import qualified Data.Set as S
+import Control.Monad( guard, foldM )
+import Data.List( nub )
 import Data.Maybe( listToMaybe )
 import Backend.Typed.Types( inst )
 import Backend.Typed.Syntax
@@ -100,9 +102,8 @@ stripDup env g scope x t expr
       A _ -> leaf
       V (VCtx _ _ _) -> leaf
       V (VPtr a) -> sequenced $ frame [child x SDeref] (VPtr a) $ \sc e -> stripDup env g sc (child x SDeref) (A a) e
-      V (VProd a b) -> sequenced $ frame [child x SFst,child x SSnd] (VProd a b) $ \sc e -> do
-        rest <- stripDup env g sc (child x SFst) (V a) e
-        stripDup env g sc (child x SSnd) (V b) rest
+      V v@VProd{} -> let fields = [f | f@(_,_,s) <- fieldsAt x v, not (trivialTy env (V s))]
+                     in sequenced $ projections fields (\sc e -> foldM (\rest (y,_,s) -> stripDup env g sc y (V s) rest) e fields) scope
       V (VSum ts) -> do
         Let _ VUnit bound rest <- Just expr
         case [i | i <- [0..length ts-1], M.member (child x (SInjV i)) scope] of
@@ -124,6 +125,14 @@ stripDup env g scope x t expr
       _ -> Nothing
   where
     leaf = case expr of Dup y e | x == y -> Just e; _ -> Nothing
+    projections [] k sc bound = k sc bound
+    projections ((y,_,_):fs) k sc bound
+      | M.member y sc = projections fs k sc bound
+      | otherwise = do ds <- destructVOf bound
+                       guard (dsMode ds == Borrowed && dsScrut ds == Var x)
+                       [([z],e)] <- Just (dsAlts ds)
+                       guard (z == y)
+                       projections fs k (M.insert y Nothing sc) e
     unit y s e = do Ret UnitV <- stripDup env g (M.insert y Nothing scope) y (V s) e
                     return ()
     sequenced k = do Let _ VUnit bound rest <- Just expr
@@ -136,14 +145,17 @@ stripDup env g scope x t expr
       , correct s bound = k (M.union (scopeOf ys) scope) e
       | otherwise = Nothing
     correct VPtr{} Deref{} = True
-    correct VProd{} Unpair{} = True
     correct _ _ = False
 
 specialize :: Path -> Path -> Int -> VExpr -> D VExpr
 specialize z p n e
-  = let (frames,dead,others,rest) = taken p e
-        bound = concat [xs | f <- frames, Just ds <- [destructOf f], (xs,_) <- dsAlts ds]
-    in case cover bound (map canonical dead) p of
+  = do (_,g) <- ask
+       let (frames,dead,others,rest) = taken p e
+           -- Scheduled projections may already be in scope before the transfer.
+           -- They expose the same parts as the leading destructurings in `e`.
+           bound = S.toList (M.keysSet g `S.union` S.fromList
+                     (concat [xs | f <- frames, Just ds <- [destructOf f], (xs,_) <- dsAlts ds]))
+       case cover bound (map canonical dead) p of
          Just live | not (null dead) -> transfer frames live dead (others rest)
          _ -> transfer [] [p] [] e
   where
@@ -214,14 +226,27 @@ destructOf expr
       Nothing -> destructVOf expr
 
 -- The parts of `v` that are not dead, where `bound` are the parts in scope: a variable with
--- a dead part is split into its parts.
+-- a dead part is split into its parts only when all of them are available.
 cover :: [Path] -> [Path] -> Path -> Maybe [Path]
 cover bound dead v
   | any (v `within`) dead = Just []
-  | any (`within` v) dead = case [x | x <- bound, x `within` v, length (stepsFrom v x) == 1] of
+  | any (`within` v) dead = case immediate of
                               [] -> Nothing
-                              xs -> concat <$> mapM (cover bound dead) xs
+                              xs -> do guard (complete (map (stepsFrom v) xs))
+                                       concat <$> mapM (cover bound dead) xs
   | otherwise = Just [v]
+  where
+    -- the bound parts of `v` with no bound part between them and `v` (a projection binds a
+    -- field at several steps)
+    below = [x | x <- bound, x `within` v, x /= v]
+    immediate = [x | x <- below, not (any (\y -> y /= x && x `within` y) below)]
+    -- A projection exposes only one field; the parts must make up all of `v`.
+    complete sss
+      | [] `elem` sss = all null sss
+      | otherwise = all part heads
+      where
+        heads = nub (map head sss)
+        part s = maybe True (`elem` heads) (sibling s) && complete [ss | (t:ss) <- sss, t == s]
 
 -- the destructurings `fs` (with one alternative each) around an expression in the scope of their binders
 under :: [VExpr] -> D VExpr -> D VExpr

@@ -160,7 +160,7 @@ prettyExpr expr
       Call f [] vs -> nm f <.> args vs
       Call f ts vs -> nm f <.> tyArgs ts <.> args vs
       App f vs -> pv f <.> args vs
-      Unpair m v x y e -> letIn (mode m) (parens (pv x <.> comma <+> pv y)) (prettyVal v) e
+      Proj m v ss x e -> letIn (mode m) (pv x) (atomVal v <.> hcat [text "." <.> text (show s) | s <- ss]) e
       CaseV m v alts -> caseOf (text "case" <.> mode m) (prettyVal v) [(text "inj" <.> int i <+> pv x, e) | (i,(x,e)) <- zip [0..] alts]
       SplitA m v k (x,e1) (y,e2) -> caseOf (text "split" <.> mode m) (pv v <+> text "at" <+> int k) [(pv x, e1), (pv y, e2)]
       CaseA m v alts def -> caseOf (text "case" <.> mode m) (pv v)

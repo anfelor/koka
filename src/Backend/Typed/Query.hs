@@ -184,7 +184,6 @@ inferDestruct env g js expr t alts
 -- The scrutinee of an unboxed destructuring in its selected alternative, in terms of its binders.
 altPattern :: VExpr -> Ty -> Int -> [Path] -> Maybe VVal
 altPattern expr t i xs = case (expr,t,xs) of
-  (Unpair{}, _, [a,b]) -> Just (Pair (Var a) (Var b))
   (CaseV{}, V s, [a]) -> Just (Inj i s (Var a))
   (Unpack _ _ tvs _ _, V s, [a]) -> Just (Pack s (map AVar tvs) (Var a))
   _ -> Nothing
@@ -204,7 +203,7 @@ ftvCtx g e = concat [ftv t | x <- S.toList (fvE e), Just t <- [M.lookup x g]]
 altTypes :: Env -> Ty -> VExpr -> Q [[Ty]]
 altTypes env t expr
   = case (expr,t) of
-      (Unpair{}, V (VProd a b)) -> return [[V a, V b]]
+      (Proj _ _ ss@(_:_) _ _, V s) | Just u <- partAt s ss -> return [[V u]]
       (CaseV _ _ alts, V (VSum ts)) | length ts == length alts -> return [[V s] | s <- ts]
       (SplitA _ _ k _ _, A a@(ASum ts)) -> do
         checkShape a

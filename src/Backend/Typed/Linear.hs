@@ -23,7 +23,8 @@
   and a parent is consumed once all of its parts are. The binder of `[deref]`, `[unroll]`,
   `[case-a]`, `[split-a]` or `[unpack]` of a boxed value is the pointer of its scrutinee, so
   consuming or testing it consumes or tests the scrutinee (`key`). So does a part whose
-  sibling is of a trivial type, and in an alternative whose binder of a trivial type is all of
+  sibling is of a trivial type, which is determined from the type of the parent: a projection
+  binds only its field, not the products around it (`[proj]`). In an alternative whose binder of a trivial type is all of
   the scrutinee (`Nothing`), the scrutinee needs no references. The mode of a
   destructuring of a variable is therefore irrelevant (an owned destructuring is a borrowed one
   whose parts are consumed), except that a unique destructuring consumes a unique scrutinee:
@@ -74,6 +75,7 @@ module Backend.Typed.Linear( checkLinear ) where
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad( unless, when, forM_, foldM )
+import Data.List( inits )
 import Data.Functor.Const( Const(..) )
 import Common.Name
 import Backend.Typed.Syntax
@@ -120,6 +122,18 @@ checkDef env def
 -- the parameters that are not of a trivial type
 params :: Env -> [(Path,Mode,VType)] -> [(Path,Mode)]
 params env ps = [(x,m) | (x,m,t) <- ps, not (trivialTy env (V t))]
+
+-- The parts of a trivial type beside the way from a variable to its part `x`, from the type of
+-- the variable: a projection leaves the products on its way unbound.
+trivialSiblings :: Env -> Gamma -> Path -> Path -> [Path]
+trivialSiblings env g z@(Path _ zs) (Path _ xs)
+  = case M.lookup z g of
+      Just (V t) -> [q | (pre,s) <- zip (inits steps) steps, Just s' <- [sibling s]
+                       , Just u <- [partAt t (pre ++ [s'])], trivialTy env (V u)
+                       , let q = foldl child z (pre ++ [s'])]
+      _ -> []
+  where
+    steps = drop (length zs) xs
 
 -- references
 
@@ -503,7 +517,7 @@ destruct env g js m v alts
                     -- that is all of `z` (see `key`) makes `z` trivial in its alternative.
                     alt zc bs e
                       = do let ts = [x | (x,t) <- bs, trivialTy env t]
-                           modify (S.union (S.fromList ts))
+                           modify (S.union (S.fromList (ts ++ concatMap (trivialSiblings env g z . fst) bs)))
                            tr <- get
                            u <- checkE env (bindAll bs g) js e
                            return (not (trivialVar env g z) && any ((== zc) . key tr) ts, u)

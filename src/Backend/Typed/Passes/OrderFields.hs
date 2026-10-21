@@ -4,7 +4,7 @@
 -----------------------------------------------------------------------------
 
 -- Lower logical products to right-associated products in memory order. The
--- logical tree lives only in this pass; every emitted Pair and Unpair refers to
+-- logical tree lives only in this pass; every emitted Pair and projection refers to
 -- the normalized type. Moving fields apart is expressed by ordinary IR terms,
 -- so Check and Linear validate the resulting program before C generation.
 module Backend.Typed.Passes.OrderFields( orderFieldsProgram, checkOrdered ) where
@@ -23,7 +23,7 @@ import Backend.Typed.ValidateLayout( programTypes, checkLayoutProgram )
 import Backend.Typed.Passes.Paths( pathsProgram )
 
 data Tree = Tree VType Form
-data Form = Atom VVal | Product Tree Tree | Package [AType] Tree | Empty
+data Form = Atom VVal | Projected VVal [Step] | Product Tree Tree | Package [AType] Tree | Empty
 
 treeType :: Tree -> VType
 treeType (Tree t _) = t
@@ -133,31 +133,44 @@ stabilize mode tree@(Tree t form) = case form of
   Atom Var{} -> return tree
   Atom v -> do x <- fresh
                if mode /= Borrowed then emit (Let x (normalizeVType t) (Ret v))
-                 else do y <- fresh
-                         -- A borrowed structural value needs a borrowed root,
+                 else do -- A borrowed structural value needs a borrowed root,
                          -- not a let that would acquire an owned reference.
                          -- The trivial sentinel keeps this an ordinary typed
                          -- destructuring, in normalized field order.
                          let sentinel = Lit (LitChar '\0')
                          if productOrder [t,VRaw nameTpChar] == [0,1]
-                           then emit (Unpair Borrowed (Pair v sentinel) x y)
-                           else emit (Unpair Borrowed (Pair sentinel v) y x)
+                           then emit (Proj Borrowed (Pair v sentinel) [SFst] x)
+                           else emit (Proj Borrowed (Pair sentinel v) [SSnd] x)
                return (Tree t (Atom (Var x)))
-  Product a b -> Tree t <$> (Product <$> stabilize mode a <*> stabilize mode b)
-  Package ts a -> Tree t . Package ts <$> stabilize mode a
+  Projected v steps -> do w <- readProjected mode v steps
+                          return (Tree t (Atom w))
+  Product a b -> Tree t <$> (Product <$> operand a <*> operand b)
+  Package ts a -> Tree t . Package ts <$> operand a
   Empty -> return tree
+  where
+    -- Selecting a logical tail names its construction once, but does not
+    -- evaluate the physical field plans that it contains. Owned selections
+    -- still materialize their operands at the ownership boundary.
+    operand a@(Tree _ Projected{}) | mode == Borrowed = return a
+    operand a = stabilize mode a
 
-split :: Mode -> VVal -> Int -> N [VVal]
-split _ _ 0 = return []
-split _ v 1 = return [v]
-split mode v n = do
-  (a,b) <- case v of
-             Var x -> return (child x SFst,child x SSnd)
-             _ -> (,) <$> fresh <*> fresh
-  emit (Unpair mode v a b)
-  (Var a :) <$> split Borrowed (Var b) (n-1)
+-- Physical paths are plans inside this pass, not eager IR destructurings.
+-- Emit a path only when its selected logical field is evaluated.
+split :: Mode -> VVal -> Int -> N [Form]
+split _ v n = return (go [] n)
+  where
+    go _ 0 = []
+    go ss 1 = [if null ss then Atom v else Projected v ss]
+    go ss k = Projected v (ss ++ [SFst]) : go (ss ++ [SSnd]) (k-1)
 
-restore :: VType -> [AType] -> [VVal] -> (Tree,[AType],[VVal])
+readProjected :: Mode -> VVal -> [Step] -> N VVal
+readProjected _ v [] = return v
+readProjected mode v ss = do
+  x <- case v of { Var p -> return (foldl child p ss); _ -> fresh }
+  emit (Proj mode v ss x)
+  return (Var x)
+
+restore :: VType -> [AType] -> [Form] -> (Tree,[AType],[Form])
 restore t ws fs = case t of
   VProd a b -> let { (x,ws1,fs1) = restore a ws fs
                   ; (y,ws2,fs2) = restore b ws1 fs1 }
@@ -167,7 +180,7 @@ restore t ws fs = case t of
                  in (Tree t (Package ts x),ws2,fs1)
   VUnit -> (Tree t Empty,ws,fs)
   _ -> case fs of
-         v:rest -> (Tree t (Atom v),ws,rest)
+         v:rest -> (Tree t v,ws,rest)
          [] -> error "OrderFields.restore: missing field"
 
 gather :: Mode -> Tree -> N ([AType],[(VType,VVal)])
@@ -178,6 +191,8 @@ gather mode tree = do
     Package ts x -> do (ws,fs) <- gather mode x; return (ts ++ ws,fs)
     Empty -> return ([],[])
     Atom v -> return ([],[(t,v)])
+    Projected v ss -> do w <- readProjected mode v ss
+                         return ([],[(t,w)])
 
 value :: Mode -> Tree -> N VVal
 value _ (Tree _ (Atom v)) = return v
@@ -244,17 +259,13 @@ name x = do vs <- asks values
               Nothing -> return x
               _ -> fail ("non-variable named operand: " ++ show x)
 
+-- Each projection stays where the source has it, so code generation reads a field where it
+-- is used. The emission wrappers evaluate their operands exactly once.
 ne :: VExpr -> N VExpr
 ne e = expression (go e)
   where
     go expr = case expr of
-      Unpair mode v x y body -> do cx <- ask
-                                   s <- liftE (inferV (sourceEnv cx) (sourceGamma cx) v)
-                                   tss <- liftE (altTypes (sourceEnv cx) (V s) expr)
-                                   t <- tree mode v >>= force mode >>= stabilize mode
-                                   case (t,tss) of
-                                     (Tree _ (Product a b),[bs]) -> bind (zip [x,y] bs) [(x,a),(y,b)] (ne body)
-                                     _ -> fail "unpair of a non-product"
+      Proj mode v ss x body -> project mode v ss x body
       Unpack mode v tvs x body -> do cx <- ask
                                      t <- liftE (inferV (sourceEnv cx) (sourceGamma cx) v)
                                      tss <- liftE (altTypes (sourceEnv cx) (V t) expr)
@@ -292,6 +303,19 @@ ne e = expression (go e)
                                             es <- sequence [bindVars (zip xs bs) (ne b) | ((xs,b),bs) <- zip (dsAlts ds) ts]
                                             return (dsBuild ds (dsMode ds) z es)
       _ -> descendE name nv (\_ -> ne) expr
+    project mode v ss x body = do
+      cx <- ask
+      s <- liftE (inferV (sourceEnv cx) (sourceGamma cx) v)
+      u <- maybe (fail "projection of a non-product") return (partAt s ss)
+      selected <- tree mode v >>= select mode ss >>= stabilize mode
+      bind [(x,V u)] [(x,selected)] (ne body)
+    -- the logical part at the steps of a projection
+    select _ [] t = return t
+    select mode (s:ss) t = do
+      t' <- force mode t
+      case t' of
+        Tree _ (Product l r) -> select mode ss (if s == SFst then l else r)
+        _ -> fail "projection of a non-product"
 
 -- Apply aliases to descriptions after all binders have been visited: a credit
 -- may describe a value whose binder is no longer in scope.
@@ -312,7 +336,7 @@ rewriteDescriptions vs d = case d of
     expose t@(Tree s (Atom (Var x))) = case s of
       VProd{} -> let (_,fs) = productParts s
                      indices = productOrder fs
-                     fields = symbolic x (length fs)
+                     fields = map Atom (symbolic x (length fs))
                      original = [fields !! length (takeWhile (/= i) indices) | i <- [0 .. length fs-1]]
                  in case restore s [] original of { (a,_,_) -> a }
       _ -> t
@@ -321,6 +345,7 @@ rewriteDescriptions vs d = case d of
     symbolic x 1 = [Var x]
     symbolic x n = Var (child x SFst) : symbolic (child x SSnd) (n-1)
     describe (Tree _ (Atom v)) = Just v
+    describe (Tree _ (Projected v ss)) = project v ss
     describe t = case normalizeDescription (Contents Nothing (logicalTree t) (treeType t)) of
                    Just (Contents _ v _) -> Just v
                    Nothing -> Nothing
@@ -329,6 +354,9 @@ rewriteDescriptions vs d = case d of
       Package ts a -> Pack t ts (logicalTree a)
       Empty -> UnitV
       Atom v -> v
+      Projected v ss -> case project v ss of
+        Just w -> w
+        Nothing -> error "OrderFields: nonstructural description projection"
     description (Contents k v t)
       | any (\x -> any (x `within`) unknown) (S.toList (fvV v)) = Nothing
       | otherwise = Just (Contents k (replaceV sub v) (ty t))
