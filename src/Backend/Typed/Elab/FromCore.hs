@@ -20,6 +20,7 @@ import Kind.Newtypes
 import Type.Type
 import qualified Core.Core as C
 import Core.Core( TName(..), typeOf )
+import qualified Core.CoreVar as CV
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Elab.Types( typeDefs )
@@ -37,7 +38,7 @@ elabProgram :: Platform -> Newtypes -> [C.Core] -> C.Core -> (Program,[String],[
 elabProgram platform nt imports core
   = let defs    = filter (not . isContextAccessor) (C.flattenDefGroups (C.coreProgDefs core))
         isigs   = M.fromList [(n,withModes modes sig) | (n,(tp,isFun,modes)) <- M.toList (importSigs (core:imports)), Right sig <- [typeSig nt tp isFun]]
-        env0    = Env nt S.empty S.empty isigs M.empty S.empty
+        env0    = Env nt S.empty S.empty isigs M.empty S.empty M.empty
         tdefs   = typeDefs platform nt
         run (sigs,ds,errs,notes) def
           = let label msg = show (C.defName def) ++ ": " ++ msg
@@ -172,10 +173,20 @@ elabLet def body
        else if hasHole en (C.defExpr def)
          then do (k,v) <- elabVal (C.defExpr def)
                  k <$> withHole x (Just v) (elabExpr body)
+       -- Match introduces aliases for pattern fields. Preserve their getters:
+       -- binding a projected value inside a let would acquire a reference and
+       -- hide the alias from copy propagation before Perceus.
+       else if fieldAlias en (C.defExpr def)
+         then do t <- vt (C.defType def)
+                 getter <- elabValAt t (C.defExpr def)
+                 withFields [(x,getter)] (elabExpr body)
          else do t  <- vt (C.defType def)
                  e1 <- elabExprAt t (C.defExpr def)
                  e2 <- withLocals [x] (elabExpr body)
                  return (Let (root x) t e1 e2)
+  where
+    fieldAlias en (C.Var (TName y _) _) = M.member y (envFields en)
+    fieldAlias _ _ = False
 
 elabGen :: [TVar] -> C.Expr -> Type -> E VExpr
 elabGen tvs e tp
@@ -339,8 +350,8 @@ splitForall tp
 
 elabValAt :: VType -> C.Expr -> E (K,VVal)
 elabValAt expect@(VPtr a@(AFun qs _)) (C.Lam pars _ body) | length qs == length pars
-  = do lam <- elabLam expect pars body
-       return (id, Ptr a lam)
+  = do (k,lam) <- captureFields body (elabLam expect pars body)
+       return (k, Ptr a lam)
 elabValAt expect expr
   = do (k1,v) <- elabVal expr
        t <- vt (typeOf expr)
@@ -370,12 +381,14 @@ elabVal expr
                         return (k1 . k2,v')
       C.TypeLam tvs e | not (any tvarStar tvs) -> elabVal e
       C.Lam pars _ body -> do t <- vt (typeOf expr)
-                              lam <- elabLam t pars body
-                              genVal t lam
+                              (k,lam) <- captureFields body (elabLam t pars body)
+                              (kg,v) <- genVal t lam
+                              return (k . kg,v)
       C.TypeLam tvs (C.Lam pars _ body)
         -> do t <- vt (typeOf expr)
-              lam <- withTVars (map typevarId tvs) (elabLam (stripForallV t) pars body)
-              genVal t lam
+              (k,lam) <- captureFields body (withTVars (map typevarId tvs) (elabLam (stripForallV t) pars body))
+              (kg,v) <- genVal t lam
+              return (k . kg,v)
       C.TypeLam tvs e | isValue e -> elabTypeLam [typevarId tv | tv <- tvs, tvarStar tv] e (typeOf expr)
       _ -> do t <- vt (typeOf expr)
               x <- fresh "a"
@@ -406,6 +419,17 @@ etaCon :: C.Expr -> [(Name,Type)] -> Type -> E (K,VVal)
 etaCon con pars eff
   = do xs <- mapM (\(_,tp) -> (\x -> TName x tp) <$> freshName "c") pars
        elabVal (C.Lam xs eff (C.App con [C.Var x C.InfoNone | x <- xs]))
+
+-- A closure retains the fields it captures now, so its body uses established
+-- component variables instead of reading through a parent captured by accident.
+captureFields :: C.Expr -> E a -> E (K,a)
+captureFields body action = do
+  en <- env
+  let fields = [(x,getter) | TName x _ <- S.toList (CV.fv body), Just getter <- [M.lookup x (envFields en)]]
+      ks = [k | (_, (k,_)) <- fields]
+      bound = [(x,(id,v)) | (x,(_,v)) <- fields]
+  a <- withFields bound action
+  return (compose ks,a)
 
 elabLam :: VType -> [TName] -> C.Expr -> E AVal
 elabLam (VPtr (AFun qs res)) pars body
@@ -447,7 +471,9 @@ elabNamed e x tp info tys
   = do expect <- vt (typeOf (mkTypeApp (C.Var (TName x tp) info) tys))
        if S.member x (envLocals e)
          then do tys' <- instArgs tp tys
-                 instLocal x tp tys' expect
+                 let (k,v) = M.findWithDefault (id,Var (root x)) x (envFields e)
+                 (ki,w) <- instLocal v tp tys' expect
+                 return (k . ki,w)
          else do sig <- globalSig x tp info
                  case sig of
                    SigFun tvs ps r -> do (tysD,params,res) <- instFun x sig tp tys
@@ -465,11 +491,11 @@ etaOwned x tysD params res
   = do ys <- mapM (const (fresh "e")) params
        return (Lam [(y,Owned,p) | (y,p) <- zip ys params] res (Call x tysD (map Var ys)))
 
-instLocal :: Name -> Type -> [AType] -> VType -> E (K,VVal)
-instLocal x _ [] _ = return (id, Var (root x))
-instLocal x tp tys' expect
+instLocal :: VVal -> Type -> [AType] -> VType -> E (K,VVal)
+instLocal v _ [] _ = return (id,v)
+instLocal v tp tys' expect
   = do a <- ptrType tp
-       coerce (VPtr (instA a tys')) expect (TyApp (Var (root x)) tys')
+       coerce (VPtr (instA a tys')) expect (TyApp v tys')
 
 ptrType :: Type -> E AType
 ptrType tp = do t <- vt tp
@@ -753,9 +779,9 @@ openAlt info vargs (con,br@(C.Branch [pat] _))
   = do recordOpenSig info (conInfoName con) (conInfoType con)
        x <- fresh "o"
        fields <- fieldTypes vargs con
-       body <- withLocals (patBinders pat) (branchBody br)
-       k <- destructure (zip (map subBinder (C.patConPatterns pat)) fields) (Var x)
-       return (conInfoName con, x, k body)
+       getters <- destructure (zip (map subBinder (C.patConPatterns pat)) fields) (id,Var x)
+       body <- withFields getters (branchBody br)
+       return (conInfoName con, x, body)
 openAlt _ _ _ = failE "unexpected open branch after matching"
 
 findBranch :: ConInfo -> [C.Branch] -> Maybe C.Branch
@@ -770,16 +796,16 @@ findBranch con brs
 conBranch :: [AType] -> ConInfo -> Either Path VVal -> Maybe C.Branch -> E VExpr
 conBranch _ con _ Nothing = failE ("missing branch for " ++ show (conInfoName con))
 conBranch vargs con y (Just br@(C.Branch [pat] _))
-  = do body <- withTVars (patExistIds pat) (withLocals (patBinders pat) (branchBody br))
-       case pat of
-         C.PatCon _ subs _ _ exists _ _ _ | not (null subs) ->
-           do fields <- fieldTypes vargs con
-              let exIds = [typevarId tv | tv <- exists, tvarStar tv]
-                  exSub = M.fromList (zip (conExists con) (map AVar exIds))
-              (k1,payload) <- openCon y (conExists con) exIds
-              k2 <- destructure (zip (map subBinder subs) (map (subst exSub) fields)) payload
-              return (k1 (k2 body))
-         _ -> return body
+  = withTVars (patExistIds pat) $ case pat of
+      C.PatCon _ subs _ _ exists _ _ _ | not (null subs) -> do
+        fields <- fieldTypes vargs con
+        let exIds = [typevarId tv | tv <- exists, tvarStar tv]
+            exSub = M.fromList (zip (conExists con) (map AVar exIds))
+        (k,payload) <- openCon y (conExists con) exIds
+        getters <- destructure (zip (map subBinder subs) (map (subst exSub) fields)) (id,payload)
+        body <- withFields getters (branchBody br)
+        return (k body)
+      _ -> branchBody br
 conBranch _ _ _ (Just _) = failE "unexpected branch after matching"
 
 openCon :: Either Path VVal -> [TVar] -> [TVar] -> E (K,VVal)
@@ -808,19 +834,21 @@ subBinder :: C.Pattern -> Maybe TName
 subBinder (C.PatVar x _) = Just x
 subBinder _              = Nothing
 
-destructure :: [(Maybe TName,VType)] -> VVal -> E K
-destructure [(x,s)] p = bindField x s p
-destructure ((x,s):rest) p
-  = do y <- fresh "f"
-       r <- fresh "q"
-       k1 <- bindField x s (Var y)
-       k2 <- destructure rest (Var r)
-       return (Unpair Owned p y r . k1 . k2)
-destructure [] _ = return id
+-- Construct field getters without emitting reads. A variable occurrence asks
+-- for its getter in the expression that actually uses the field.
+-- Field i of n is at the steps `snd`ⁱ `fst`, and the last one at `snd`ⁿ⁻¹ (`[proj]`).
+destructure :: [(Maybe TName,VType)] -> (K,VVal) -> E [(Name,(K,VVal))]
+destructure [(x,s)] getter = bindField x s getter
+destructure fields (k,p) = concat <$> mapM field (zip [0..] fields)
+  where
+    n = length fields
+    field (i,(x,s)) = do
+      y <- fresh "field"
+      bindField x s (k . Proj Borrowed p (replicate i SSnd ++ [SFst | i < n-1]) y,Var y)
 
-bindField :: Maybe TName -> VType -> VVal -> E K
-bindField Nothing _ _ = return id
-bindField (Just (TName x tp)) s v
-  = do t <- vt tp
-       (k,w) <- coerce s t v
-       return (k . Let (root x) t (Ret w))
+bindField :: Maybe TName -> VType -> (K,VVal) -> E [(Name,(K,VVal))]
+bindField Nothing _ _ = return []
+bindField (Just (TName x tp)) s (read,v) = do
+  t <- vt tp
+  (k,w) <- coerce s t v
+  return [(x,(read . k,w))]

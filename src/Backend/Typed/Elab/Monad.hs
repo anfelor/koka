@@ -7,7 +7,7 @@
 -----------------------------------------------------------------------------
 
 module Backend.Typed.Elab.Monad( Env(..), St(..), E
-                              , runE, failE, tr, env, withLocals, withTVars, withHole, inClosure
+                              , runE, failE, tr, env, withLocals, withFields, withTVars, withHole, inClosure
                               , fresh, freshName, recordSig, note, vt
                               ) where
 
@@ -16,6 +16,7 @@ import qualified Data.Set as S
 import Common.Name
 import Type.Type
 import Kind.Newtypes
+import Backend.Typed.Common( K )
 import Backend.Typed.Syntax
 import Backend.Typed.TypeInfo
 import Backend.Typed.Monad
@@ -25,7 +26,8 @@ import Backend.Typed.Monad
 -- in the IR; their uses become parts of a `ctx` value.
 -- `envCaptured`: the locals that the innermost closure captures.
 data Env = Env{ envNT :: Newtypes, envLocals :: S.Set Name, envTVars :: S.Set TVar, envSigs :: Sigs
-              , envHoles :: M.Map Name (Maybe VVal), envCaptured :: S.Set Name }
+              , envHoles :: M.Map Name (Maybe VVal), envCaptured :: S.Set Name
+              , envFields :: M.Map Name (K,VVal) }
 
 data St = St{ stUniq :: Int, stSigs :: Sigs, stNotes :: [String] }
 
@@ -44,7 +46,14 @@ env :: E Env
 env = ask
 
 withLocals :: [Name] -> E a -> E a
-withLocals xs = local (\e -> e{ envLocals = foldr S.insert (envLocals e) xs, envCaptured = foldr S.delete (envCaptured e) xs })
+withLocals xs = local (\e -> e{ envLocals = foldr S.insert (envLocals e) xs, envCaptured = foldr S.delete (envCaptured e) xs
+                                           , envFields = foldr M.delete (envFields e) xs })
+
+-- Pattern-field getters are emitted at each use, rather than eagerly at the
+-- match. Paths subsequently reuses already established canonical components.
+withFields :: [(Name,(K,VVal))] -> E a -> E a
+withFields fs action = withLocals (map fst fs)
+  (local (\e -> e{ envFields = M.union (M.fromList fs) (envFields e) }) action)
 
 -- the body of a closure, which captures the locals in scope
 inClosure :: E a -> E a

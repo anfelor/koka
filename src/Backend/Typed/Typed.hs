@@ -36,7 +36,7 @@ import Backend.Typed.Passes.JoinArgs( joinArgsProgram )
 import Backend.Typed.Passes.Inline( inlineProgram )
 import Backend.Typed.Passes.Paths( pathsProgram )
 import Backend.Typed.Passes.Hoist( hoistProgram )
-import Backend.Typed.Passes.OrderFields( orderFieldsProgram )
+import Backend.Typed.Passes.OrderFields( orderFieldsProgram, checkOrdered )
 import Backend.Typed.Linear( checkLinear )
 import Backend.Typed.Fip( checkFip )
 
@@ -46,14 +46,14 @@ typedFromCore platform enableReuse nt imports uniq core
   = let (acore,_)              = runUnique uniq (matchCore nt core)
         (eprog,elabErrs,notes) = elabProgram platform nt imports acore
         prog                   = pathsProgram eprog
-        passes                 = [("anf",False,pure' anfProgram), ("contify",False,contifyProgram), ("simplify",False,pure' simplifyProgram), ("yields",False,pure' yieldsProgram), ("perceus",True,perceusProgram), ("lazy",True,lazyProgram)
+        passes                 = [("anf",False,pure' anfProgram), ("contify",False,contifyProgram), ("simplify",False,pure' simplifyProgram), ("yields",False,pure' yieldsProgram), ("orderfields",False,orderFieldsProgram), ("perceus",True,perceusProgram), ("lazy",True,lazyProgram)
                                    ,("dropspec",True,dropSpecProgram)] ++ [("reuse",True,reuseProgram) | enableReuse]
                                    ++ [("match",True,matchProgram), ("sinkjoins",True,pure' sinkJoinsProgram), ("joinargs",True,pure' joinArgsProgram)]
                                    ++ concat [[("copyreset",True,pure' copyResetProgram),("expandreuse",True,pure' expandReuseProgram)] | enableReuse] ++ [("inline",True,inlineProgram)]
         (dsprog,msgs)          = runPasses prog (label "check" (checkProgram prog)) passes
         -- without reuse every constructor allocates
         fipMsgs                = if enableReuse && null msgs then label "fip" (checkFip (fipsOf (core:imports)) (groupsOf core) dsprog) else []
-        (ordered,orderMsgs)    = if null elabErrs && null msgs then runPasses dsprog [] [("orderfields",True,orderFieldsProgram),("hoist",True,hoistProgram)] else (dsprog,[])
+        (ordered,orderMsgs)    = if null elabErrs && null msgs then runPasses dsprog [] [("layout",True,\p -> (p,checkOrdered p)),("hoist",True,hoistProgram)] else (dsprog,[])
     in (ordered, label "elab" elabErrs ++ msgs ++ fipMsgs ++ orderMsgs ++ label "note" notes)
   where
     pure' f prog = (f prog,[])

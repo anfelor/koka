@@ -381,6 +381,7 @@ projLeaves whole e start part
        ct <- ctype part
        wct <- ctype whole
        case (n, wct) of
+         _ | start == 0 && ct == wct -> return e
          (0,_) -> return "kk_Unit"
          (_,CProd _ _) | n == 1 -> return ("(" <.> e <.> ").f" <.> int start)
          (_,CProd _ _)
@@ -485,6 +486,34 @@ leafValues t v
       (VExists _ s, Pack _ _ w) -> leafValues s w
       (VExists _ s, Var x) -> leafValues s (Var (child x SPack))
       _ -> [(collapse v,i) | i <- [0 .. length (leaves t) - 1]]
+
+-- A projection reads exactly the selected field (`[proj]`), where it is.
+genProjection :: Ctx -> Dest -> VVal -> [Step] -> Path -> VExpr -> G [Doc]
+genProjection cx dest v ss x e = do
+  t <- tyOf cx v
+  (base,pre) <- case v of
+    Var z -> do let b = localName z
+                return (b,[])
+    _ -> do ve <- genV cx v
+            z <- fresh "product"
+            ct <- ctype t
+            return (z,[cty ct <+> z <+> "=" <+> ve <.> ";"])
+  (start,u) <- liftC (fieldRange t ss)
+  ct <- ctype u
+  p <- projLeaves t base start u
+  body <- genE (bindVar cx x (V u)) dest e
+  return (pre ++ [declare (cty ct) x p] ++ body)
+
+-- the first leaf and the type of the part at the steps of a projection
+fieldRange :: VType -> [Step] -> Either String (Int,VType)
+fieldRange t [] = Right (0,t)
+fieldRange (VProd a b) (s:ss)
+  = case s of
+      SFst -> fieldRange a ss
+      SSnd -> do (i,u) <- fieldRange b ss
+                 return (length (leaves a) + i,u)
+      _ -> Left "projection at a non-product step"
+fieldRange _ _ = Left "projection of a non-product"
 
 -- `[deref]` and `[unroll]` keep the pointer
 genAlias :: Ctx -> Dest -> Doc -> Path -> Ty -> VExpr -> G [Doc]
@@ -841,19 +870,7 @@ genE cx dest expr
               let call = "kk_function_call(" <.> cty rct <.> ",(kk_function_t" <.> hcat [", " <.> cty ct | ct <- pcts] <.> ", kk_context_t*),"
                          <.> fx <.> ",(" <.> fx <.> hcat [", " <.> a | a <- args] <.> ", _ctx),_ctx)"
               return [block (("kk_function_t" <+> fx <+> "= kk_datatype_unbox(" <.> localName f <.> ");") : assignTo dest rct call)]
-      Unpair _ v x y e
-        -> do VProd a b <- tyOf cx v
-              ve <- genV cx v
-              z <- fresh "u"
-              wct <- ctype (VProd a b)
-              px <- projLeaves (VProd a b) z 0 a
-              py <- projLeaves (VProd a b) z (length (leaves a)) b
-              cta <- ctype a
-              ctb <- ctype b
-              s <- genE (bindVar (bindVar cx x (V a)) y (V b)) dest e
-              return ([cty wct <+> z <+> "=" <+> ve <.> ";",
-                       declare (cty cta) x px,
-                       declare (cty ctb) y py] ++ s)
+      Proj _ v ss x e -> genProjection cx dest v ss x e
       Unpack _ v tvs x e
         -> do whole@(VExists bs body) <- tyOf cx v
               let t = inst bs (map AVar tvs) body
