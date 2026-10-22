@@ -58,15 +58,13 @@
     - The parts of an owned variable are owned: consuming a part takes it out of its parent, and
       the parent is consumed once all of its parts are: both components of a pair, the contents
       and the credit of a box, or the binder of any other destructuring. The binder of `[case-a]`,
-      `[split-a]`, `[deref]`, `[unroll]` or `[unpack]` at a boxed type is the parent's pointer:
-      consuming it, or testing it with `[if-unique]`, consumes or tests the parent (so it is unique
+      `[split-a]`, `[deref]` or `[unroll]` at a boxed type is the parent's pointer, and that of
+      `[unpack]` (a no-op) is the parent itself: consuming it, or testing it with `[if-unique]`, consumes or tests the parent (so it is unique
       where the parent is). Hence an owned destructuring of a variable is a borrowed one whose
       binders are consumed, and only a unique destructuring needs its mode: it consumes a unique
       scrutinee.
-    - A variable may hold several owned references (`[dup]` keeps the name), and Γ is a multiset:
-      `Γ, x : t, x : t` holds two. A reference held by a part outlives the consumption of its
-      parent, which consumes one reference of each of its parts. For example, after
-      `dup z.fst; drop z` the context still holds `z.fst : V`.
+    - `[dup]` binds its copy as a new root, so a variable holds at most one owned reference.
+      For example, after `val y = dup z.fst; drop z` the context holds `y : V`.
     - After `Loads`, the contents of a box are a *place* (`Layout.placeBinders`): `z.contents`
       of a product, and the binder of `[unpack]` of a place, stay in the block of `z`. Every use of a place reads the block and needs a reference to the credit
       `z.credit`, which consuming `z`, or the credit after `[unbox-ru]`, consumes. A `[proj]`
@@ -347,8 +345,8 @@ data VVal
   --
   -- As in the paper, a variable is only a value at an unboxed type. A variable `x :q A` at a boxed
   -- type (bound by `[case]` on `⊕ᵢ Aᵢ`, `[deref]` or `[unroll]`) is only an *operand*: the
-  -- scrutinee of a destructuring form or `[unscalar]`, the variable of `[drop]` or `[if-unique]`, the value of
-  -- `[dup]` or the function of `[app]`. It cannot be stored again as a boxed value.
+  -- scrutinee of a destructuring form or `[unscalar]`, the variable of `[drop]` or `[if-unique]`, or
+  -- the function of `[app]`. It cannot be stored again as a boxed value.
   = Var Path
 
   --   x : ∀ā. V ∈ Σ
@@ -402,7 +400,7 @@ data VVal
   --  ────────────────────────────── [dup-glob]
   --   ∅ ⊢ dup x[B̄] : V[B̄/ā]
   --
-  -- An owned reference to a top-level value. Variables are duplicated in place (`[dup]`).
+  -- An owned reference to a top-level value. Variables are duplicated by `[dup]`.
   | DupV VVal
 
   --  ────────────────────── [no-reuse]
@@ -669,15 +667,15 @@ data VExpr
   -- is freed without a test.
   | Free Path VExpr
 
-  --   Γ, x : A ⊢ e : W                 Γ, x : ctx⟨A,B⟩ ⊢ e : W
-  --  ───────────────────────── [dup]  ─────────────────────────────────── [dup-ctx]
-  --   Γ, x :^ A ⊢ dup x; e : W         Γ, x :^ ctx⟨A,B⟩ ⊢ dup x; e : W
+  --   Γ, y : V ⊢ e : W    V is not a credit
+  --  ──────────────────────────────── [dup]
+  --   Γ, x :^ V ⊢ val y = dup x; e : W
   --
-  -- Duplicate a variable in place: `x` gains an owned reference and keeps its name, so the
-  -- copy is still a part of the variables on its path (see "Structural rules"). With
-  -- `[contract]` before it, `x` stays available borrowed as well. Other unboxed values
-  -- are destructured borrowed to duplicate their boxed components (`Common.dupValue`).
-  | Dup Path VExpr
+  -- Duplicate an unboxed variable of any type (its pointers and contexts) into a new root
+  -- `y`, the copy. The parts of `x` in scope are not parts of `y`, which has none until it
+  -- is destructured. A boxed operand is duplicated through the pointer it was dereferenced
+  -- from.
+  | Dup Path Path VExpr
 
   --   Γ, x :! t ⊢ e₁ : W    Γ, x : t ⊢ e₂ : W    t = Box V with |V| defined, or t = T⟨B̄⟩* with T lazy
   --  ───────────────────────────────────────────────────────────────────────────────────── [if-unique]
