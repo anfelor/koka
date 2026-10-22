@@ -20,7 +20,7 @@ module Backend.Typed.CGen( CEnv(..), External(..), cgenModule, runtimeHeader, cN
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Char( isAlphaNum, ord, isDigit )
-import Data.List( isInfixOf )
+import Data.List( isInfixOf, zip4 )
 import Data.Maybe( fromMaybe )
 import qualified Numeric
 import Control.Monad( forM, when )
@@ -33,13 +33,11 @@ import Kind.Newtypes
 import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Types( inst, prodV, collapse, Types(..) )
+import Backend.Typed.Types( inst, collapse, Types(..) )
 import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuBinds, unrollT, openFields, boxContents, reuseSize )
 import Backend.Typed.Names( nameLazyFree )
 import Backend.Typed.Layout hiding( dupExpr, dropStmt, layout )
 import Backend.Typed.ValidateLayout( checkLayoutProgram )
-import Backend.Typed.Product( normalizeVType, leafOrder )
-import Backend.Typed.TypeInfo( schemeFieldTypes )
 import Backend.Typed.Monad
 
 data External = External{ extFormat :: String, extType :: Type }
@@ -338,7 +336,7 @@ genAIn cx tag val
       BoxAt r v -> genBox cx tag (At r) v
       BoxIn x v -> genBox cx tag (In x) v
       Scalar v -> genScalar cx v
-      OpenCon c tys v -> genOpenCon cx c tys v
+      OpenCon c tys vs -> genOpenCon cx c tys vs
       Lam ps r e -> genLam cx ps r e
 
 prodLeafVals :: VVal -> [VVal]
@@ -682,48 +680,25 @@ lamFree :: [(Path,Mode,VType)] -> VExpr -> S.Set Path
 lamFree ps e = fvA (Lam ps VUnit e)
 
 -- open datatypes use the constructors of Koka's headers
-genOpenCon :: Ctx -> Name -> [AType] -> VVal -> G Doc
-genOpenCon cx c tys v
+genOpenCon :: Ctx -> Name -> [AType] -> [VVal] -> G Doc
+genOpenCon cx c tys vs
   = do (fields,kfields) <- openConFields cx c tys
-       e <- genV cx v
-       x <- fresh "o"
-       let ft = normalizeVType (prodV fields)
-           order = leafOrder (prodV fields)
-       args <- forM (zip3 [0..] fields kfields) $ \(i,f,kt) ->
-                 do let start = sum (map (length . leaves) (take i fields))
-                        indices = [length (takeWhile (/= (start+j)) order) | j <- leafOrder f]
-                    p <- projIndices ft x indices (normalizeVType f)
-                    fct <- ctype (normalizeVType f)
-                    return (toKoka fct (kokaCType kt) p)
-       fct <- ctype ft
+       args <- forM (zip3 vs fields kfields) $ \(v,f,kt) ->
+                 do e <- genV cx v
+                    fct <- ctype f
+                    return (toKoka fct (kokaCType kt) e)
        let new = text (kokaName (makeHiddenName "new" c))
-       return (stmtExpr [cty fct <+> x <+> "=" <+> e <.> ";"]
-                        ("kt_box_datatype(" <.> new <.> "(" <.> (if null args then empty else "kk_reuse_null,0,") <.> hcat [a <.> "," | a <- args] <.> "_ctx))"))
+       return ("kt_box_datatype(" <.> new <.> "(" <.> (if null args then empty else "kk_reuse_null,0,") <.> hcat [a <.> "," | a <- args] <.> "_ctx))")
 
+-- the fields of an open constructor at type arguments, with their Koka types
 openConFields :: Ctx -> Name -> [AType] -> G ([VType],[Type])
 openConFields cx c tys
   = case M.lookup c (envSigs (cxEnv cx)) of
-      Just SigCon{} ->
+      Just (SigCon _ _ n) ->
         do ci <- conInfoOf cx c
-           fields <- liftC (schemeFieldTypes (ceNewtypes (cxCEnv cx)) tys (conInfoType ci))
+           fields <- liftC (openFields (cxEnv cx) c (ACon n tys))
            return (fields, map snd (conInfoParams ci))
       _ -> failG ("unknown open constructor " ++ show c)
-
--- External constructor arguments retain their source grouping. A source field
--- can span several normalized fields, so gather it only at this API boundary.
-projIndices :: VType -> Doc -> [Int] -> VType -> G Doc
-projIndices whole e indices part
-  = do ct <- ctype part
-       wct <- ctype whole
-       let field i = case wct of
-                       CProd{} -> "(" <.> e <.> ").f" <.> int i
-                       _ -> e
-       case ct of
-         CUnit -> return "kk_Unit"
-         CProd _ fs -> do y <- fresh "external"
-                          return (stmtExpr ((cty ct <+> y <.> ";") :
-                            [y <.> ".f" <.> int j <+> "=" <+> field i <.> ";" | ((j,_),i) <- zip fs indices]) y)
-         _ -> return (case indices of { i:_ -> field i; [] -> "kk_Unit" })
 
 conInfoOf :: Ctx -> Name -> G ConInfo
 conInfoOf cx c
@@ -964,17 +939,17 @@ genE cx dest expr
               return [ifChain brs sd]
       CaseOpen _ v alts def
         -> do let ve = localName v
-              A tv <- tyOfName cx v
-              brs <- forM alts $ \(c,x,e) ->
-                       do f <- liftC (openFields (cxEnv cx) c tv)
-                          tys <- openTypeArgs cx v
+              brs <- forM alts $ \(c,xs,e) ->
+                       do tys <- openTypeArgs cx v
                           (fields,kfields) <- openConFields cx c tys
-                          fct <- ctype f
                           names <- conFieldNames cx c
-                          fe <- openFieldExpr c fields kfields names ve
-                          s <- genE (bindVar cx x (V f)) dest e
+                          let acc n = text (kokaName (makeHiddenName "as" c)) <.> "(kt_unbox_datatype(" <.> ve <.> "),_ctx)->" <.> text n
+                          decls <- forM (zip4 xs fields kfields names) $ \(x,f,kt,n) ->
+                                     do fct <- ctype f
+                                        return (declare (cty fct) x (fromKoka (kokaCType kt) fct (acc n)))
+                          s <- genE (foldl (\cx' (x,f) -> bindVar cx' x (V f)) cx (zip xs fields)) dest e
                           let tag = text (kokaName (makeHiddenName "tag" c))
-                          return ("kt_open_is(" <.> ve <.> "," <.> tag <.> ",_ctx)", declare (cty fct) x fe : s)
+                          return ("kt_open_is(" <.> ve <.> "," <.> tag <.> ",_ctx)", decls ++ s)
               sd <- genE cx dest def
               return [ifChain brs sd]
 
@@ -1051,30 +1026,6 @@ kokaLocal n
 
 cReserved :: [String]
 cReserved = ["bool","toString","arguments","eval","char","int","intptr_t","long","short","signed","size_t","ssize_t","intptr_t","uintptr_t","unsigned","uint8_t","double","auto","extern","float","goto","inline","restrict","sizeof","static","volatile","async","await","break","case","catch","class","continue","const","debugger","default","delete","do","else","finally","for","function","if","in","instanceof","new","return","register","switch","struct","this","throw","try","typeof","typedef","union","var","void","while","with","yield","class","enum","export","extends","import","super","errno","exception_info","or","timezone"]
-
-openFieldExpr :: Name -> [VType] -> [Type] -> [String] -> Doc -> G Doc
-openFieldExpr c fields kfields names ve
-  = do let acc n = text (kokaName (makeHiddenName "as" c)) <.> "(kt_unbox_datatype(" <.> ve <.> "),_ctx)->" <.> text n
-       vals <- forM (zip3 fields kfields names) $ \(f,kt,n) ->
-                 do fct <- ctype (normalizeVType f)
-                    return (fromKoka (kokaCType kt) fct (acc n))
-       parts <- forM (zip fields vals) $ \(f,v) ->
-                  do ct <- ctype (normalizeVType f)
-                     x <- fresh "ofv"
-                     let order = leafOrder f
-                         field j = case ct of { CProd{} -> x <.> ".f" <.> int j; _ -> x }
-                         original = [field (length (takeWhile (/= i) order)) | i <- [0 .. length order - 1]]
-                     return (cty ct <+> x <+> "=" <+> v <.> ";",original)
-       ct <- ctype (normalizeVType (prodV fields))
-       let original = concatMap snd parts
-           ordered = [original !! i | i <- leafOrder (prodV fields)]
-           declarations = map fst parts
-       case ct of
-         CProd _ fs -> do y <- fresh "of"
-                          return (stmtExpr (declarations ++ [cty ct <+> y <.> ";"] ++
-                            [y <.> ".f" <.> int i <+> "=" <+> v <.> ";" | ((i,_),v) <- zip fs ordered]) y)
-         CUnit -> return (stmtExpr declarations "kk_Unit")
-         _ -> return (stmtExpr declarations (head ordered))
 
 -- calls
 

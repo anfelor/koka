@@ -416,7 +416,7 @@ fipA ptr val
                       return (if full then c else c <> b)
       Roll _ a -> fipA Nothing a
       InjA _ _ a -> fipA ptr a
-      OpenCon _ _ w -> (<> allocation) <$> fipV w
+      OpenCon _ _ ws -> (<> allocation) . mconcat <$> mapM fipV ws
       Lam ps _ e -> do require mayAlloc "allocating a lambda expression"
                        let enter fe = fe{ fGamma = bindAll [(x,V t) | (x,_,t) <- ps] (fGamma fe), fJoins = M.empty, fTail = False }
                        fst <$> local enter (fipE e)

@@ -6,13 +6,13 @@
 -- The normal form of products at the representation boundary. Existentials
 -- move outside a product; contexts remain atomic (their two fields are scanned).
 module Backend.Typed.Product( normalizeVType, normalizeAType, productParts, productOrder
-                            , normalizeDescription, normalizeStructural, leafOrder, variablesV ) where
+                            , normalizeDescription, normalizeStructural, variablesV ) where
 
 import Control.Monad.State
 import Backend.Typed.Syntax
 import Backend.Typed.Types( Types(..), inst, prodV )
 import Backend.Typed.Common( child )
-import Backend.Typed.Layout( layout, orderFields, leaves )
+import Backend.Typed.Layout( layout, orderFields )
 
 normalizeAType :: AType -> AType
 normalizeAType a = case a of
@@ -126,9 +126,3 @@ normalizeStructural t v = case (t,v) of
     pairValues [w] = w
     pairValues (w:ws) = Pair w (pairValues ws)
 
--- Old leaf indices, in the normalized order. Used only at the boundary to
--- Koka's external constructor API, whose arguments retain source order.
-leafOrder :: VType -> [Int]
-leafOrder t = let { (_,fs) = productParts t
-                 ; starts = scanl (+) 0 (map (length . leaves) fs) }
-             in concat [[starts !! i .. starts !! (i+1) - 1] | i <- productOrder fs]

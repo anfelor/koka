@@ -212,7 +212,7 @@ data Lit = LitInt Integer
 -- Variables are paths: a root followed by the steps of the destructurings that lead from the
 -- root to the variable, outermost first. For example, `z.snd.deref` is the binder of
 -- `let_q ptr x = z.snd` where `z.snd` is the binder of `let_q x = z.snd`. A projection
--- (`[proj]`) contributes all of its steps. The binders
+-- (`[proj]`), and a field of `[case-open]`, contributes all of its steps. The binders
 -- of other forms are roots, and a root is bound only once in a definition. `Paths`
 -- establishes these invariants after elaboration and after `OrderFields` changes
 -- the product representation. The other passes preserve them; `Check` validates
@@ -300,12 +300,14 @@ data AVal
   -- Koka's `box` of a scalar, which allocates only if the value is not immediate.
   | Scalar VVal
 
-  --   C : ∀ā. V -> T⟨ā⟩ ∈ Σ    Γ ⊢ v : V[B̄/ā]
-  --  ─────────────────────────────────────────── [open-con]
-  --   Γ ⊢ C[B̄] v : T⟨B̄⟩
+  --   C : ∀ā. V̄ -> T⟨ā⟩ ∈ Σ    Γᵢ ⊢ vᵢ : Vᵢ[B̄/ā]
+  --  ───────────────────────────────────────────── [open-con]
+  --   Γ̄ ⊢ C[B̄](v̄) : T⟨B̄⟩
   --
-  -- A constructor of an open datatype (whose constructors are spread over modules).
-  | OpenCon Name [AType] VVal
+  -- A constructor of an open datatype (whose constructors are spread over modules), with one
+  -- value for each of its source fields: code generation passes them to Koka's constructor
+  -- as they are, so their layout is that of each field on its own.
+  | OpenCon Name [AType] [VVal]
 
   --   ⌊Γ⌋, x̄ : V̄ | ∅ ⊢ʸ e : W    q̄ = ·
   --  ───────────────────────────────────────── [lam]
@@ -622,12 +624,15 @@ data VExpr
   --   Γ₁, Γ₂ ⊢ case v of { lᵢ -> eᵢ; _ -> e } : W
   | CaseLit VVal [(Lit,VExpr)] VExpr
 
-  --   Γ₁ ⊢ v :^ T⟨B̄⟩    Cᵢ : ∀ā. Vᵢ -> T⟨ā⟩ ∈ Σ    Γ₂, xᵢ :^ Vᵢ[B̄/ā] ⊢ eᵢ : W    Γ₂ ⊢ e : W
+  --   Γ₁ ⊢ v :^ T⟨B̄⟩    Cᵢ : ∀ā. V̄ᵢ -> T⟨ā⟩ ∈ Σ    Γ₂, x̄ᵢ :^ V̄ᵢ[B̄/ā] ⊢ eᵢ : W    Γ₂ ⊢ e : W
   --  ──────────────────────────────────────────────────────────────────────────────── [case-open]
-  --   Γ₁, Γ₂ ⊢ case^ v of { Cᵢ xᵢ -> eᵢ; _ -> e } : W
+  --   Γ₁, Γ₂ ⊢ case^ v of { Cᵢ(x̄ᵢ) -> eᵢ; _ -> e } : W
   --
-  -- Matching on the tag of an open datatype, with a mandatory default. Always borrowed.
-  | CaseOpen Mode Path [(Name,Path,VExpr)] VExpr
+  -- Matching on the tag of an open datatype, with a mandatory default. Always borrowed. An
+  -- alternative binds one binder for each source field. For a variable v the binders are the
+  -- parts of `v.C` at the steps of the fields of a right-nested product, like `[proj]`: field
+  -- i of n at `snd`ⁱ `fst`, the last one at `snd`ⁿ⁻¹ (just `v.C` if there is one field).
+  | CaseOpen Mode Path [(Name,[Path],VExpr)] VExpr
 
   --   Γ | ∅ ⊢ e : A*    ā ∉ ftv(Γ)
   --  ──────────────────────────────── [gen]
@@ -742,7 +747,7 @@ data Def
 -- signatures Σ
 data Sig = SigFun [TVar] [(Mode,VType)] VType  -- f : ∀ā. (q̄ V̄) -> W
          | SigVal [TVar] VType                 -- x : ∀ā. V
-         | SigCon [TVar] VType Name            -- C : ∀ā. V -> T⟨ā⟩, a constructor of an open type T
+         | SigCon [TVar] [VType] Name          -- C : ∀ā. V̄ -> T⟨ā⟩, a constructor of an open type T
          deriving (Show)
 
 type Sigs = M.Map Name Sig

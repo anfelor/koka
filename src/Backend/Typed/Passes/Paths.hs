@@ -164,7 +164,7 @@ renA global ren val
                        Lam [(x',m,replaceVType sub t) | (x',(_,m,t)) <- zip xs ps] (replaceVType sub r) <$> renE global ren' e
       InjA i a v -> InjA i (tyA a) <$> renA global ren v
       Roll a v -> Roll (tyA a) <$> renA global ren v
-      OpenCon c ts v -> OpenCon c (map tyA ts) <$> renV global ren v
+      OpenCon c ts vs -> OpenCon c (map tyA ts) <$> mapM (renV global ren) vs
       _ -> descendA (pure . look ren) (renA global ren) (renV global ren) val
   where
     tyA = replaceAType (described global ren)
