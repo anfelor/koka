@@ -20,7 +20,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Layout( CT(..), EnumSize(..), layout, readInPlace, placeBinders, leaves, leafSlots, isEnum, orderFields, shapeIsHeap
                            , checkLayout, ctName, scanOf, rawOf, needsRC
-                           , structDefs, blockName, blockDef, blockSize, isBlock, isScalar
+                           , structDefs, blockName, blockDef, blockSize, isBlock, scalarField
                            , dupExpr, dropStmt, dupFun, dropFun, primBox, scalarHeapSize, fnv
                            ) where
 
@@ -305,15 +305,16 @@ isBlock ct
       CUnit     -> False
       CReuse    -> False
 
--- Koka boxes a raw value, or a struct of one, by itself (`Scalar V`). An enumeration is a
--- sum and boxed by its tag.
-isScalar :: VType -> Bool
-isScalar t
-  = case (t,layout t) of
-      (VSum _, _)  -> False
-      (_, CPrim _) -> True
-      (_, CEnum _) -> True
-      _            -> False
+-- the only field of a product of a raw value or an enumeration and units, which Koka boxes like
+-- that field: as `Scalar raw`, or as the shape of the enumeration
+scalarField :: VType -> Maybe VType
+scalarField t
+  = case (t, leaves t) of
+      (VSum _, _)      -> Nothing
+      (VRaw _, _)      -> Nothing
+      (_, [s@(VRaw _)]) -> Just s
+      (_, [s]) | isEnum s -> Just s
+      _                -> Nothing
 
 sizeAlign :: CT -> (Int,Int)
 sizeAlign ct
@@ -375,22 +376,19 @@ primSize r
 -- immediate boxing of raw values (as in Koka)
 -- the largest `KK_INTF_SIZE` at which Koka's box of a scalar may be a heap block (kklib's
 -- `box.h`), or `Nothing` if it may be one on every target
-scalarHeapSize :: CT -> Maybe Int
-scalarHeapSize ct
-  = case ct of
-      CEnum _ -> Just 4   -- boxed as an `int32`
-      CPrim r -> case r of
-                   RInt8    -> Just 0
-                   RUInt8   -> Just 0
-                   RInt16   -> Just 2
-                   RInt32   -> Just 4
-                   RFloat32 -> Just 4
-                   RChar    -> Just 4
-                   RInt64   -> Just 8
-                   RFloat64 -> Just 8
-                   RSSize   -> Nothing
-                   RIntPtr  -> Nothing
-      _ -> Nothing
+scalarHeapSize :: Raw -> Maybe Int
+scalarHeapSize r
+  = case r of
+      RInt8    -> Just 0
+      RUInt8   -> Just 0
+      RInt16   -> Just 2
+      RInt32   -> Just 4
+      RFloat32 -> Just 4
+      RChar    -> Just 4
+      RInt64   -> Just 8
+      RFloat64 -> Just 8
+      RSSize   -> Nothing
+      RIntPtr  -> Nothing
 
 primBox :: Raw -> (String,String)
 primBox r

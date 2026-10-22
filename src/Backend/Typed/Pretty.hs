@@ -38,7 +38,7 @@ prettyA :: AType -> Doc
 prettyA a
   = case a of
       ABox t        -> text "Box" <.> parens (prettyV t)
-      AScalar t     -> text "Scalar" <.> parens (prettyV t)
+      AScalar r     -> text "Scalar" <.> parens (prettyRaw r)
       AUnit         -> text "1"
       ASum ts       -> parens (hsep (punctuate (text " +")
                         [text (show i) <.> text ":" <.> prettyA t | (i,t) <- ts]))
