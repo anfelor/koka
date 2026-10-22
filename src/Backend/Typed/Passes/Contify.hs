@@ -5,6 +5,7 @@
 -- terms of the Apache License, Version 2.0. A copy of the License can be
 -- found in the LICENSE file at the root of this distribution.
 -----------------------------------------------------------------------------
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 -- Turn nonescaping local closures called only in tail position into closed
 -- join points. Captured unboxed variables become explicit owned parameters.

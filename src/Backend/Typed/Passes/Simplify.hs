@@ -5,6 +5,7 @@
 -- terms of the Apache License, Version 2.0. A copy of the License can be
 -- found in the LICENSE file at the root of this distribution.
 -----------------------------------------------------------------------------
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 {- Copy propagation (before Perceus): `let x = ret y in e` becomes `e[x := y]`.
 

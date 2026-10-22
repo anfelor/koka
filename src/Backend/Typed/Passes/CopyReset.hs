@@ -5,6 +5,7 @@
 -- terms of the Apache License, Version 2.0. A copy of the License can be
 -- found in the LICENSE file at the root of this distribution.
 -----------------------------------------------------------------------------
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 {- Copying the continuation of a reset into both branches (after `JoinArgs`, before
   `ExpandReuse`), as in Lean's old `ExpandResetReuse` on its IR.
