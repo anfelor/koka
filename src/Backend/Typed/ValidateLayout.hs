@@ -2,6 +2,7 @@
 -- Copyright 2026, Microsoft Research, Daan Leijen, Anton Lorenzen.
 -- Licensed under the Apache License, Version 2.0.
 -----------------------------------------------------------------------------
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 -- Validate the representation boundary independently of product normalization.
 module Backend.Typed.ValidateLayout( checkLayoutProgram, programTypes ) where

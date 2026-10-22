@@ -5,6 +5,7 @@
 -- terms of the Apache License, Version 2.0. A copy of the License can be
 -- found in the LICENSE file at the root of this distribution.
 -----------------------------------------------------------------------------
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 {- Shape boxed dispatch after the ownership passes, without moving or copying
    branch bodies. Exhaustive cases become binary partitions: prefer a boundary

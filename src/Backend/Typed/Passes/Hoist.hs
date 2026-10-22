@@ -2,6 +2,7 @@
 -- Copyright 2026, Microsoft Research, Daan Leijen, Anton Lorenzen.
 -- Licensed under the Apache License, Version 2.0.
 -----------------------------------------------------------------------------
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 -- Bound C expression nesting before computing backend plans. Hoisting is an
 -- ordinary typed-IR transformation, checked before any C is emitted.

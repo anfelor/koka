@@ -2,6 +2,7 @@
 -- Copyright 2026, Microsoft Research, Daan Leijen, Anton Lorenzen.
 -- Licensed under the Apache License, Version 2.0.
 -----------------------------------------------------------------------------
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 -- Lower logical products to right-associated products in memory order. The
 -- logical tree lives only in this pass; every emitted Pair and projection refers to

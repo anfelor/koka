@@ -5,6 +5,7 @@
 -- terms of the Apache License, Version 2.0. A copy of the License can be
 -- found in the LICENSE file at the root of this distribution.
 -----------------------------------------------------------------------------
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 -- the monad of all passes: an environment, a state and failure with a message

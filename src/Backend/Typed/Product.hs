@@ -2,6 +2,7 @@
 -- Copyright 2026, Microsoft Research, Daan Leijen, Anton Lorenzen.
 -- Licensed under the Apache License, Version 2.0.
 -----------------------------------------------------------------------------
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 -- The normal form of products at the representation boundary. Existentials
 -- move outside a product; contexts remain atomic (their two fields are scanned).
