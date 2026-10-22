@@ -17,7 +17,7 @@ import qualified Data.Map as M
 import Control.Monad( foldM )
 import Common.NamePrim( nameTpInt, nameTpString, nameTpAny )
 import Backend.Typed.Syntax
-import Backend.Typed.Layout( isScalar )
+import Backend.Typed.Layout( scalarField )
 
 type Sub = M.Map TVar AType
 
@@ -76,7 +76,7 @@ traverseReuseContents f = goV
       VRaw _ -> pure t
     goA a = case a of
       ABox t -> ABox <$> goV t
-      AScalar t -> AScalar <$> goV t
+      AScalar _ -> pure a
       ASum ts -> ASum <$> traverse (\(i,t) -> (,) i <$> goA t) ts
       AFun ps r -> AFun <$> traverse (\(m,t) -> (,) m <$> goV t) ps <*> goV r
       AForall vs b -> AForall vs <$> goA b
@@ -143,7 +143,7 @@ substA sub a
       AApp v ts     -> applyA (M.findWithDefault (AVar v) v sub) (map (substA sub) ts)
       ACon n ts     -> ACon n (map (substA sub) ts)
       ABox t        -> ABox (substV sub t)
-      AScalar t     -> AScalar (substV sub t)
+      AScalar _     -> a
       ASum ts       -> ASum [(i,substA sub t) | (i,t) <- ts]
       AFun ps r     -> AFun [(m,substV sub p) | (m,p) <- ps] (substV sub r)
       AForall tvs b -> AForall tvs (substA (foldr M.delete sub tvs) b)
@@ -181,7 +181,7 @@ ftvA a
       AApp v ts     -> v : concatMap ftvA ts
       ACon _ ts     -> concatMap ftvA ts
       ABox t        -> ftvV t
-      AScalar t     -> ftvV t
+      AScalar _     -> []
       ASum ts       -> concatMap (ftvA . snd) ts
       AFun ps r     -> concatMap (ftvV . snd) ps ++ ftvV r
       AForall vs b  -> filter (`notElem` vs) (ftvA b)
@@ -228,13 +228,15 @@ boxFunA a
       ACon _ _      -> a
       ALam _ _      -> a
 
--- Koka's `box`: a scalar is boxed by itself, any other value as a shape
+-- Koka's `box`: a raw value is boxed by itself, any other value as a shape, and a product of a
+-- single raw value or enumeration (`scalarField`) like that field
 boxA :: VType -> AType
 boxA t
   = case t of
       VSum [s] -> boxA s
-      _ | isScalar t -> AScalar t
-        | otherwise  -> shapeA t
+      VRaw r   -> AScalar r
+      _ | Just s <- scalarField t -> boxA s
+        | otherwise -> shapeA t
 
 -- the shape of a boxed value: a flat sum of its leaves, which have tags
 shapeA :: VType -> AType
@@ -334,7 +336,7 @@ eqA s t
       (ACon n ss, ACon m ts)  -> n == m && eqAs ss ts
       (AApp v ss, AApp w ts)  -> v == w && eqAs ss ts
       (ABox a, ABox b)        -> eqV a b
-      (AScalar a, AScalar b)  -> eqV a b
+      (AScalar a, AScalar b)  -> a == b
       (ASum ss, ASum ts)      -> map fst ss == map fst ts && eqAs (map snd ss) (map snd ts)
       (AFun ps r, AFun qs s') -> eqVs (map snd ps) (map snd qs) && eqV r s'
       (AForall as a, AForall bs b) | length as == length bs
@@ -380,7 +382,7 @@ matchAWith tvs sub pat t
                      ABox s -> matchVWith tvs sub p s
                      _ -> Nothing
       AScalar p -> case t of
-                     AScalar s -> matchVWith tvs sub p s
+                     AScalar s | p == s -> Just sub
                      _ -> Nothing
       ASum ps   -> case t of
                      ASum ts | map fst ps == map fst ts -> matchAs sub (map snd ps) (map snd ts)

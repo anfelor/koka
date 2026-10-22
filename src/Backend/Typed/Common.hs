@@ -265,7 +265,7 @@ containsReuse (V v) = case v of
   VCtx _ _ _ -> False
 containsReuse (A a) = case a of
   ABox v -> containsReuse (V v)
-  AScalar v -> containsReuse (V v)
+  AScalar _ -> False
   ASum ts -> any (containsReuse . A . snd) ts
   AForall _ b -> containsReuse (A b)
   ALam _ b -> containsReuse (A b)

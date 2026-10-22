@@ -16,7 +16,6 @@ import Backend.Typed.Layout( layout, orderFields )
 normalizeAType :: AType -> AType
 normalizeAType a = case a of
   ABox t -> ABox (normalizeVType t)
-  AScalar t -> AScalar (normalizeVType t)
   ASum ts -> ASum [(i,normalizeAType b) | (i,b) <- ts]
   AFun ps r -> AFun [(m,normalizeVType t) | (m,t) <- ps] (normalizeVType r)
   AForall vs b -> AForall vs (normalizeAType b)
@@ -74,7 +73,6 @@ variablesV t = case t of
 variablesA :: AType -> [TVar]
 variablesA a = case a of
   ABox t -> variablesV t
-  AScalar t -> variablesV t
   ASum ts -> concatMap (variablesA . snd) ts
   AFun ps r -> concatMap (variablesV . snd) ps ++ variablesV r
   AForall vs b -> vs ++ variablesA b
@@ -82,4 +80,5 @@ variablesA a = case a of
   AVar v -> [v]
   AApp v ts -> v : concatMap variablesA ts
   ACon _ ts -> concatMap variablesA ts
+  AScalar _ -> []
   AUnit -> []

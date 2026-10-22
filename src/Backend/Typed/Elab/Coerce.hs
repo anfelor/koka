@@ -14,7 +14,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types
-import Backend.Typed.Layout( isScalar )
+import Backend.Typed.Layout( leaves, scalarField )
 import Backend.Typed.Elab.Monad
 import Backend.Typed.Pretty( ppr )
 
@@ -49,8 +49,39 @@ boxV t v
   | isMultiSum t = do r <- fresh "b"
                       body <- leafAV t v (\i a -> return (Ret (Ptr (boxA t) (injA (shapeLeaves t) i a))))
                       return (Let r (VPtr (boxA t)) body, Var r)
-  | isScalar t   = return (id, Ptr (AScalar t) (Scalar v))
+  | VRaw r <- t  = return (id, Ptr (AScalar r) (Scalar v))
+  | Just s <- scalarField t = do (k1,w) <- fieldOf t v
+                                 (k2,b) <- boxV s w
+                                 return (k1 . k2, b)
   | otherwise    = return (id, Ptr (boxA t) (boxLeaf t v))
+
+-- the only field `w` of `v : t` (`scalarField`)
+fieldOf :: VType -> VVal -> E (K,VVal)
+fieldOf t v
+  = case t of
+      VProd a b -> do x <- fresh "f"
+                      let (step,s) = if null (leaves a) then (SSnd,b) else (SFst,a)
+                      (k,w) <- fieldOf s (Var x)
+                      return (Proj Owned v [step] x . k, w)
+      VExists tvs b -> do x <- fresh "f"
+                          (k,w) <- fieldOf b (Var x)
+                          return (Unpack Owned v tvs x . k, w)
+      _ -> return (id, v)
+
+-- the value of type `t` whose only field (`scalarField`) is `w`; the existentials of `t` do not
+-- occur in its fields, which are units apart from `w`
+withField :: VType -> VVal -> VVal
+withField t w
+  = case t of
+      VProd a b | null (leaves a) -> Pair (unitOf a) (withField b w)
+                | otherwise       -> Pair (withField a w) (unitOf b)
+      VExists tvs b -> Pack t (map (const atAny) tvs) (withField b w)
+      _ -> w
+  where
+    unitOf s = case s of
+                 VProd a b -> Pair (unitOf a) (unitOf b)
+                 VExists tvs b -> Pack s (map (const atAny) tvs) (unitOf b)
+                 _ -> UnitV
 
 -- the boxed leaf of `v : t` and its position in `shapeLeaves(t)`, given to the continuation in
 -- every alternative
@@ -92,22 +123,26 @@ unboxV t v
 
 unboxAV :: VType -> Path -> E (K,VVal)
 unboxAV t a
+  | Just s <- scalarField t
+  = do (k,w) <- unboxAV s a
+       return (k, withField t w)
+  | otherwise
   = case t of
       VUnit -> return (id, UnitV)
       VSum _ | isMultiSum t ->
         do r <- fresh "s"
            body <- caseSum fresh (shapeLeaves t) a (\j y -> (\(k,w) -> k (Ret w)) <$> unboxLeaf t j y)
            return (Let r t body, Var r)
-      VSum _      -> unbox
-      VPtr _      -> unbox
-      VProd _ _   -> unbox
-      VRaw _      -> unbox
-      VExists _ _ -> unbox
-      VReuse _ _ _  -> unbox
-      VCtx _ _ _  -> unbox
+      VSum _      -> unbox Unbox
+      VPtr _      -> unbox Unbox
+      VProd _ _   -> unbox Unbox
+      VRaw _      -> unbox Unscalar
+      VExists _ _ -> unbox Unbox
+      VReuse _ _ _  -> unbox Unbox
+      VCtx _ _ _  -> unbox Unbox
   where
-    unbox = do x <- fresh "x"
-               return ((if isScalar t then Unscalar else Unbox) Owned a x, Var x)
+    unbox form = do x <- fresh "x"
+                    return (form Owned a x, Var x)
 
 -- the value of type `t` whose leaf at position `j` is `y`
 unboxLeaf :: VType -> Int -> Path -> E (K,VVal)

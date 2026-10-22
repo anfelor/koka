@@ -39,7 +39,6 @@ checkLayoutProgram p = concatMap check (programTypes p)
     exists _ = False
     atomic a = case a of
       ABox t -> check t
-      AScalar t -> check t
       ASum ts -> concatMap (atomic . snd) ts
       AFun ps r -> concatMap check (r : map snd ps)
       AForall _ b -> atomic b
@@ -62,7 +61,6 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
       DefVal _ vs t e -> vars vs ++ (t : et e)
     at a = case a of
       ABox t -> [t]
-      AScalar t -> [t]
       ASum ts -> concatMap (at . snd) ts
       AFun ps r -> r : map snd ps
       AForall _ b -> at b
