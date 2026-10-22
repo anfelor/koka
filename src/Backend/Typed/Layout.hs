@@ -9,15 +9,16 @@
 {- The C representation of unboxed types.
 
   - pointer-sized types are `kk_box_t`; raw types are their C type; unit is `kk_unit_t`;
-  - an unboxed product is a struct whose leaves are ordered as in Koka: fields with
-    pointers first, then raw fields by decreasing alignment;
+  - an unboxed product is a struct of its leaves in the order of its type; in layout normal
+    form (`OrderFields`) that is Koka's order (`orderFields`): fields with pointers first,
+    then raw fields by decreasing alignment;
   - an unboxed sum is a struct with a `kk_value_tag_t` and a union of its alternatives
     (or the smallest unsigned integer that holds its tag if all alternatives are unit);
   - a box is a heap block with the payload after the header.
   Structs are named by a hash of their layout so modules agree on them.
 -}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Layout( CT(..), PrimType(..), EnumSize(..), layout, orderedLayout, readInPlace, placeBinders, leaves, leafSlots, isEnum, orderFields, shapeIsHeap
+module Backend.Typed.Layout( CT(..), PrimType(..), EnumSize(..), layout, readInPlace, placeBinders, leaves, leafSlots, isEnum, orderFields, shapeIsHeap
                            , checkLayout, ctName, scanOf, rawOf, needsRC
                            , structDefs, blockName, blockDef, blockSize, isBlock, isScalar
                            , dupExpr, dropStmt, dupFun, dropFun, rawCType, primBox, scalarHeapSize, fnv
@@ -69,20 +70,12 @@ shapeIsHeap (ASum ((_,t):ts))
        if all (== b) bs then Just b else Nothing
 shapeIsHeap _ = Nothing
 
-layout :: VType -> CT
-layout = layoutWith True
-
--- After OrderFields the IR itself specifies memory order. Earlier passes still
--- ask for the eventual layout when computing allocation and reuse sizes.
-orderedLayout :: VType -> CT
-orderedLayout = layoutWith False
-
 -- A product in a box is read in place: code generation binds the contents of the box as a
 -- pointer into its block, and each projection reads one field (`Passes.Loads`).
 readInPlace :: VType -> Bool
 readInPlace t
   = case t of
-      VProd{} -> case orderedLayout t of { CProd{} -> True; _ -> False }
+      VProd{} -> case layout t of { CProd{} -> True; _ -> False }
       VExists _ b -> readInPlace b
       _ -> False
 
@@ -98,28 +91,29 @@ placeBinders isPlace e xs ts
   where
     inPlace z = [(x,z) | (x,V t) <- zip xs ts, readInPlace t]
 
-layoutWith :: Bool -> VType -> CT
-layoutWith reorder t
+-- The layout of a type, with the leaves of a product in the order of the type: memory order
+-- once the program is in layout normal form (`OrderFields`).
+layout :: VType -> CT
+layout t
   = case t of
       VRaw n      -> CPrim (rawCType n)
-      VExists _ b -> lay b
+      VExists _ b -> layout b
       VReuse _ _ _  -> CReuse
       VSum ts | isEnum t -> CEnum (enumSize (length ts))
       VSum ts     -> let alts = map altLayout ts
                      in CSum (structName ("S[" ++ intercalate "|" (map (maybe "U" canonCT) alts) ++ "]")) alts
-      VProd _ _   -> case map lay (leaves t) of
+      VProd _ _   -> case map layout (leaves t) of
                        [] -> CUnit
                        [ct] -> ct
                        cts  -> CProd (structName ("P(" ++ intercalate "," [show i ++ ":" ++ canonCT ct | (i,ct) <- zip [0::Int ..] cts] ++ ")"))
-                                     ((if reorder then orderFields else id) (zip [0..] cts))
+                                     (zip [0..] cts)
       VUnit       -> CUnit
       VPtr _      -> CBox
       -- Koka's `cctx`: `res` and the address of the hole, which is boxed as a value
       -- (`kk_field_addr_t`), so duplicating and dropping it does nothing
-      VCtx _ a b  -> lay (VProd (VPtr a) (VPtr b))
+      VCtx _ a b  -> layout (VProd (VPtr a) (VPtr b))
   where
-    lay = layoutWith reorder
-    altLayout s = case lay s of
+    altLayout s = case layout s of
                     CUnit -> Nothing
                     ct    -> Just ct
 

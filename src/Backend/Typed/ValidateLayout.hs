@@ -11,16 +11,17 @@ import Data.Functor.Const( Const(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Layout
+import Backend.Typed.Product( productOrder )
 
 checkLayoutProgram :: Program -> [String]
 checkLayoutProgram p = concatMap check (programTypes p)
   where
-    check t = normal t ++ checkLayout (orderedLayout t)
+    check t = normal t ++ checkLayout (layout t)
     normal t = case t of
       VProd a b -> ["product is not in layout normal form" | compound a || empty b || ordered /= [0..length fs-1]]
                    ++ normal a ++ normal b
-        where fs = map orderedLayout (leaves t)
-              ordered = map fst (orderFields (zip [0..] fs))
+        where fs = leaves t
+              ordered = productOrder fs
       VExists _ b -> ["nested existential in layout normal form" | exists b] ++ normal b
       VPtr a -> atomic a
       VSum ts -> concatMap normal ts
