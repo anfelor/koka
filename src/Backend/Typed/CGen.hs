@@ -36,7 +36,8 @@ import Backend.Typed.Common
 import Backend.Typed.Types( inst, collapse, Types(..) )
 import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuBinds, unrollT, openFields, boxContents, reuseSize )
 import Backend.Typed.Names( nameLazyFree )
-import Backend.Typed.Layout hiding( dupExpr, dropStmt, layout )
+import Backend.Typed.Layout hiding( dupExpr, dropStmt )
+import Backend.Typed.Product( productOrder )
 import Backend.Typed.ValidateLayout( checkLayoutProgram )
 import Backend.Typed.Monad
 
@@ -148,7 +149,7 @@ dropStmt ct e = maybe empty (\f -> text f <.> "(" <.> e <.> ",_ctx);") (dropFun 
 
 ctype :: VType -> G CT
 ctype t
-  = do let ct = orderedLayout t
+  = do let ct = layout t
        mapM_ (uncurry defineStruct) (structDefs ct)
        return ct
 
@@ -486,9 +487,9 @@ reuseMatches :: Ty -> VType -> VVal -> Maybe (Maybe Int,Int,[Bool])
 reuseMatches rt t v
   = case rt of
       V (VReuse _ _ (Just (Contents k old ot)))
-        -> let slots s w = zip (leafSlots (orderedLayout s)) (leafValues s w)
+        -> let slots s w = zip (leafSlots (layout s)) (leafValues s w)
                kept = slots ot old
-           in Just (k, scanOf (orderedLayout ot), [leaf `elem` kept | leaf <- slots t v])
+           in Just (k, scanOf (layout ot), [leaf `elem` kept | leaf <- slots t v])
       _ -> Nothing
 
 -- The value of each leaf of a value of type `t`, as a value in normal form (`collapse`) and
@@ -646,7 +647,10 @@ genLam cx ps r e
                                Just t -> return (x,t)
                                Nothing -> failG ("unbound captured variable " ++ show x)) caps
        capCts <- mapM (ctOf . snd) capTys
-       let fields = orderFields (zip [0..] capCts)
+       -- the captures in memory order, like the fields of a product
+       let fields = [(i,capCts !! i) | i <- productOrder (map (capType . snd) capTys)]
+           capType (V t) = t
+           capType (A a) = VPtr a
            scan   = 1 + sum (map (scanOf . snd) fields)
        n <- freshName "lam"
        let sname = "struct kt_clo" <.> text n

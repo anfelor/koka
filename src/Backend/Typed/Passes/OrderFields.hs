@@ -10,12 +10,10 @@
 module Backend.Typed.Passes.OrderFields( orderFieldsProgram, checkOrdered ) where
 
 import qualified Data.Map as M
-import qualified Data.Set as S
-import Data.Functor.Identity( Identity(..) )
 import Common.NamePrim( nameTpChar )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Types( Types(..), inst, mapReuseContents )
+import Backend.Typed.Types( Types(..), inst )
 import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, altTypes, unboxRuBinds, paramModes )
 import Backend.Typed.Monad
 import Backend.Typed.Product
@@ -30,16 +28,15 @@ treeType (Tree t _) = t
 
 data Ctx = Ctx{ sourceEnv :: Env, sourceGamma :: Gamma, values :: M.Map Path Tree
               , typeSub :: M.Map TVar AType }
-data St = St{ supply :: NameSupply, typeSupply :: Int, wraps :: [VExpr -> VExpr]
-            , aliases :: M.Map Path Tree }
+data St = St{ supply :: NameSupply, typeSupply :: Int, wraps :: [VExpr -> VExpr] }
 type N a = M Ctx St a
 
 orderFieldsProgram :: Program -> (Program,[String])
 orderFieldsProgram prog
   = let run d = case runM (normalizeDef d) (Ctx (envOf prog) M.empty M.empty M.empty)
-                         (St (freshFor d) firstType [] M.empty) of
+                         (St (freshFor d) firstType []) of
                   Left err -> (d,[show (defName d) ++ ": " ++ err])
-                  Right (d',st) -> (rewriteDescriptions (aliases st) d',[])
+                  Right (d',_) -> (d',[])
         (ds,errs) = unzip (map run (progDefs prog))
         result = pathsProgram prog{ progTypes = M.map normDef (progTypes prog)
                                   , progSigs = M.map normSig (progSigs prog), progDefs = ds }
@@ -84,8 +81,7 @@ na :: AType -> N AType
 na a = asks (\cx -> normalizeAType (subst (typeSub cx) a))
 
 bind :: [(Path,Ty)] -> [(Path,Tree)] -> N a -> N a
-bind bs vs action = do modify (\st -> st{ aliases = M.union (aliases st) (M.fromList vs) })
-                       local (\cx -> cx{ sourceGamma = bindAll bs (sourceGamma cx)
+bind bs vs action = local (\cx -> cx{ sourceGamma = bindAll bs (sourceGamma cx)
                                        , values = M.union (M.fromList vs) (values cx) }) action
 
 bindVars :: [(Path,Ty)] -> N a -> N a
@@ -235,10 +231,6 @@ atom mode v = case v of
   Context b w -> do b' <- na b
                     w' <- local (\cx -> cx{ sourceGamma = M.insert nameHole (V (VPtr b)) (sourceGamma cx) }) (nv w)
                     return (Context b' w')
-  NoReuse n p -> do t <- nt (VReuse MaybeEmpty n p)
-                    case t of
-                      VReuse _ _ p' -> return (NoReuse n p')
-                      _ -> fail "normalization changed a credit into a value"
   _ -> descendV av nv v
 
 av :: AVal -> N AVal
@@ -316,72 +308,6 @@ ne e = expression (go e)
       case t' of
         Tree _ (Product l r) -> select mode ss (if s == SFst then l else r)
         _ -> fail "projection of a non-product"
-
--- Apply aliases to descriptions after all binders have been visited: a credit
--- may describe a value whose binder is no longer in scope.
-rewriteDescriptions :: M.Map Path Tree -> Def -> Def
-rewriteDescriptions vs d = case d of
-  DefFun f ts ps r e -> DefFun f ts [(x,m,ty t) | (x,m,t) <- ps] (ty r) (re e)
-  DefVal f ts t e -> DefVal f ts (ty t) (re e)
-  where
-    -- Exact entries for logical descendants take precedence over valueAt's
-    -- prefix projection, whose fst/snd would now mean the physical product.
-    descriptions = M.union (M.map describe vs) (M.unions [descendants x t | (x,t) <- M.toList vs])
-    sub = M.mapMaybe id descriptions
-    unknown = M.keys (M.filter (maybe True (const False)) descriptions)
-    descendants x t = case expose t of
-      Tree _ (Product a b) -> let a' = child x SFst; b' = child x SSnd
-                              in M.unions [M.fromList [(a',describe a),(b',describe b)],descendants a' a,descendants b' b]
-      _ -> M.empty
-    expose t@(Tree s (Atom (Var x))) = case s of
-      VProd{} -> let (_,fs) = productParts s
-                     indices = productOrder fs
-                     fields = map Atom (symbolic x (length fs))
-                     original = [fields !! length (takeWhile (/= i) indices) | i <- [0 .. length fs-1]]
-                 in case restore s [] original of { (a,_,_) -> a }
-      _ -> t
-    expose t = t
-    symbolic _ 0 = []
-    symbolic x 1 = [Var x]
-    symbolic x n = Var (child x SFst) : symbolic (child x SSnd) (n-1)
-    describe (Tree _ (Atom v)) = Just v
-    describe (Tree _ (Projected v ss)) = project v ss
-    describe t = case normalizeDescription (Contents Nothing (logicalTree t) (treeType t)) of
-                   Just (Contents _ v _) -> Just v
-                   Nothing -> Nothing
-    logicalTree (Tree t f) = case f of
-      Product a b -> Pair (logicalTree a) (logicalTree b)
-      Package ts a -> Pack t ts (logicalTree a)
-      Empty -> UnitV
-      Atom v -> v
-      Projected v ss -> case project v ss of
-        Just w -> w
-        Nothing -> error "OrderFields: nonstructural description projection"
-    description (Contents k v t)
-      | any (\x -> any (x `within`) unknown) (S.toList (fvV v)) = Nothing
-      | otherwise = Just (Contents k (replaceV sub v) (ty t))
-    ty = mapReuseContents (>>= description)
-    aty a = case ty (VPtr a) of { VPtr b -> b; _ -> a }
-    re e = runIdentity (descendE Identity (Identity . rv) (\_ b -> Identity (re b)) annotated)
-      where
-        annotated = case e of
-          Let x t a b -> Let x (ty t) a b
-          LetYield x t a b c -> LetYield x (ty t) a b c
-          Join j ps a b -> Join j [(x,m,ty t) | (x,m,t) <- ps] a b
-          Yielded t -> Yielded (ty t)
-          Call f ts args -> Call f (map aty ts) args
-          _ -> e
-    rv v = case v of
-      Ptr a w -> Ptr (aty a) (ra w)
-      Inj i t w -> Inj i (ty t) (rv w)
-      Pack t ts w -> Pack (ty t) (map aty ts) (rv w)
-      NoReuse n p -> NoReuse n (p >>= description)
-      _ -> mapV ra rv v
-    ra a = case a of
-      Lam ps r e -> Lam [(x,m,ty t) | (x,m,t) <- ps] (ty r) (re e)
-      Roll t w -> Roll (aty t) (ra w)
-      InjA i t w -> InjA i (aty t) (ra w)
-      _ -> mapA id ra rv a
 
 -- Normal-form validation is separate from type checking: well-typed products
 -- can still be in the wrong physical order.
