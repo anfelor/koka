@@ -67,6 +67,12 @@
       `Γ, x : t, x : t` holds two. A reference held by a part outlives the consumption of its
       parent, which consumes one reference of each of its parts. For example, after
       `dup z.fst; drop z` the context still holds `z.fst : V`.
+    - After `Loads`, the contents of a box are a *place* (`Layout.placeBinders`): `z.contents`
+      of a product, and the binder of `[unpack]` of a place, stay in the block of `z`. Every use of a place reads the block and needs a reference to the credit
+      `z.credit`, which consuming `z`, or the credit after `[unbox-ru]`, consumes. A `[proj]`
+      of a place copies its field out of the block, so the binder holds only its own
+      references. Code generation may also load a place at once (`--feager-loads`), which is
+      sound as the box is live at `[bunbox]`.
 
   Constructor contexts
 
@@ -581,7 +587,8 @@ data VExpr
   --   Γ₁, Γ₂ ⊢ let^ box x = v in e : W
   --
   -- Reading the contents of a box is always borrowed. The paper's owned `[unbox]`, which keeps
-  -- the block as a credit, is `[unbox-ru]` and requires the box to be unique.
+  -- the block as a credit, is `[unbox-ru]` and requires the box to be unique. After `Loads`,
+  -- `x` is a place in the block of `v`, which a read of `x` needs (see "Structural rules").
   | Unbox Mode Path Path VExpr
 
   --   Γ₁ ⊢ v :q Scalar V    Γ₂, x : V ⊢ e : W
@@ -606,7 +613,8 @@ data VExpr
   --  ────────────────────────────────────────────────────────────────── [unpack]
   --   Γ₁, Γ₂ ⊢ let_q pack[b̄] x = v in e : W
   --
-  -- For a variable scrutinee z, credit descriptions substitute pack[b̄] x for z.
+  -- For a variable scrutinee z, credit descriptions substitute pack[b̄] x for z. The binder of
+  -- a place is a place too.
   | Unpack Mode VVal [TVar] Path VExpr
 
   --   Γ₁ ⊢ v :^ V    lᵢ : V    Γ₂ ⊢ eᵢ : W    Γ₂ ⊢ e : W

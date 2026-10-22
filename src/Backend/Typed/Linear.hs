@@ -62,6 +62,13 @@
   join point is unique if the body uses its variable as unique. A jump is checked like a call that also passes the
   captured variables.
 
+  After `Loads` (`checkLinear True`), the contents of a box are a *place* in its block
+  (`Layout.placeBinders`): a use of a place reads the block, so it needs the credit of the
+  box, `z.credit`, which every consumption of `z` consumes. A field that a projection reads is
+  copied out of the block. A join point whose body reads a place also captures the credit of
+  its box, borrowed, unless it captures the credit or the box anyway. A closure copies its
+  captures when it is created, so its body has no places.
+
   Descriptions need no check here: a root is bound only once in a definition (`Check`) and
   the variables at its paths always denote its parts, so a name in a description denotes the
   same value everywhere. Only a jump binds variables again, the parameters of its join point,
@@ -81,14 +88,15 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
+import Backend.Typed.Layout( placeBinders )
 import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuBinds, paramModes, trivialTy )
 
 -- the mode of the variables at and below each owner: the roots in scope, and in the body of a
 -- join point the variables it captures
 type Owners = M.Map Path Mode
 
--- the parts of a trivial type, recorded where they are bound (a path denotes the same part in
--- the whole definition, see `Syntax.Path`)
+-- the parts of a trivial type, recorded where a destructuring binds a part of their parent (a
+-- path denotes the same part in the whole definition, see `Syntax.Path`)
 type Trivial = S.Set Path
 
 -- numbers of references to variables (`key`), without zeros; a reference to a variable is one
@@ -100,24 +108,28 @@ type Counts = M.Map Path Int
 -- one), and the variables that it borrows and that it consumes as unique.
 data Use = Use{ uNet :: Counts, uPeak :: Counts, uBorrowed :: S.Set Path, uUnique :: S.Set Path }
 
-type L a = M Owners Trivial a
+-- the places in scope, with their boxes (if places are checked)
+type Places = Maybe (M.Map Path Path)
+
+type L a = M (Owners,Places) Trivial a
 
 -- the modes of the parameters of the join points in scope, and the variables they capture
 -- with their modes
 type Joins = M.Map Name ([Mode],[(Path,Mode)])
 
-checkLinear :: Program -> [String]
-checkLinear prog
-  = [show (defName d) ++ ": " ++ err | d <- progDefs prog, Left err <- [checkDef (envOf prog) d]]
+-- whether places must be read while their blocks are live (after `Loads`)
+checkLinear :: Bool -> Program -> [String]
+checkLinear places prog
+  = [show (defName d) ++ ": " ++ err | d <- progDefs prog, Left err <- [checkDef places (envOf prog) d]]
 
-checkDef :: Env -> Def -> Either String ()
-checkDef env def
+checkDef :: Bool -> Env -> Def -> Either String ()
+checkDef places env def
   = case def of
       DefFun _ _ args _ body
         -> run (M.fromList [(x,V t) | (x,_,t) <- args]) (params env args) body
       DefVal _ _ _ body -> run M.empty [] body
   where
-    run g ps body = evalM (closed ps (checkE env g M.empty body)) M.empty S.empty
+    run g ps body = evalM (closed ps (checkE env g M.empty body)) (M.empty,if places then Just M.empty else Nothing) S.empty
 
 -- the parameters that are not of a trivial type
 params :: Env -> [(Path,Mode,VType)] -> [(Path,Mode)]
@@ -246,7 +258,15 @@ leave xs u
                    (S.filter (not . mine) (uBorrowed u)) (S.filter (not . mine) (uUnique u)))
 
 withOwners :: [(Path,Mode)] -> L a -> L a
-withOwners xs = local (M.union (M.fromList xs))
+withOwners xs = local (\(os,pl) -> (M.union (M.fromList xs) os,pl))
+
+-- the scope of binders that are places of the variables (or boxes) given with them
+withPlaces :: [(Path,Path)] -> L a -> L a
+withPlaces xs = local (\(os,pl) -> (os,fmap (\m -> M.union (M.fromList [(x,M.findWithDefault z z m) | (x,z) <- xs]) m) pl))
+
+-- the box of a place
+placeOf :: Path -> L (Maybe Path)
+placeOf x = asks (\(_,pl) -> pl >>= M.lookup x)
 
 -- the scope of binders that are new roots with a mode
 roots :: Env -> Mode -> [(Path,Ty)] -> L Use -> L Use
@@ -257,7 +277,7 @@ roots env m bs check
 -- a body (of a function or closure) whose only variables are its parameters
 closed :: [(Path,Mode)] -> L Use -> L ()
 closed ps check
-  = do u <- local (const (M.fromList ps)) check
+  = do u <- local (\(_,pl) -> (M.fromList ps,fmap (const M.empty) pl)) check
        _ <- leave ps u
        return ()
 
@@ -266,7 +286,7 @@ closed ps check
 -- the mode of a variable: that of the longest variable on its path that is an owner
 ownerMode :: Path -> L Mode
 ownerMode x
-  = do os <- ask
+  = do os <- asks fst
        case [m | p <- x : reverse (prefixes x), Just m <- [M.lookup p os]] of
          (m:_) -> return m
          [] -> fail ("unbound variable " ++ show x)
@@ -274,10 +294,18 @@ ownerMode x
 trivialVar :: Env -> Gamma -> Path -> Bool
 trivialVar env g x = maybe False (trivialTy env) (M.lookup x g)
 
--- A use of a variable that is not of a trivial type: it consumes `n` references (as unique
--- if the mode is) and borrows the variable if `b`.
+-- A use of a variable: a use of a place first reads the block of its box.
 useVar :: Env -> Gamma -> Mode -> Int -> Bool -> Path -> L Use
 useVar env g m n b x
+  = do mz <- placeOf x
+       case mz of
+         Just z -> uses [useRef env g Borrowed 0 False (child z SCredit), useRef env g m n b x]
+         Nothing -> useRef env g m n b x
+
+-- A use of a reference that is not of a trivial type: it consumes `n` references (as unique
+-- if the mode is) and borrows the variable if `b`.
+useRef :: Env -> Gamma -> Mode -> Int -> Bool -> Path -> L Use
+useRef env g m n b x
   | trivialVar env g x = return noUse
   | otherwise
   = do o <- ownerMode x
@@ -343,8 +371,9 @@ ownedA env g val
       Box v -> ownedV env g v
       Scalar v -> ownedV env g v
       OpenCon _ _ v -> ownedV env g v
-      BoxAt r v -> uses [consume env g r, ownedV env g v]
-      BoxIn x v -> uses [consume env g x, ownedV env g v]
+      -- the value is evaluated before the block is written
+      BoxAt r v -> uses [ownedV env g v, consume env g r]
+      BoxIn x v -> uses [ownedV env g v, consume env g x]
 
 -- a unique value is a unique variable, a fresh context, or a structural value of unique values
 uniqueV :: Env -> Gamma -> VVal -> L Use
@@ -409,7 +438,10 @@ checkE env g js expr
              (fail ("unique destructuring of a value that is not a pointer: " ++ show v))
            t <- infer
            tss <- liftE (altTypes env t expr)
-           destruct env g js m v [(zip xs ts, e) | ((xs,e),ts) <- zip alts tss]
+           pl <- asks snd
+           let isPlace p = maybe False (M.member p) pl
+               places = concat [placeBinders isPlace expr xs ts | ((xs,_),ts) <- zip alts tss]
+           withPlaces places (destruct env g js m v [(zip xs ts, e) | ((xs,e),ts) <- zip alts tss])
 checkE env g js expr
   = case expr of
       Ret v -> ownedV env g v
@@ -434,9 +466,11 @@ checkE env g js expr
       -- the captured variables that are not parts of other captured variables
       Join j ps e1 e2 -> do let fvs = S.toList (fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps])
                             let xs = [x | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
-                            u <- local (const (M.fromList (params env ps ++ [(x,Unique) | x <- xs])))
+                            boxes <- mapM placeOf fvs
+                            let blocks = S.toList (S.fromList [c | Just z <- boxes, let c = child z SCredit, not (any (c `within`) xs)])
+                            u <- local (\(_,pl) -> (M.fromList (params env ps ++ [(x,Unique) | x <- xs] ++ [(c,Borrowed) | c <- blocks]),pl))
                                        (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) js e1)
-                            caps <- concat <$> mapM (captured u) xs
+                            caps <- (++ [(c,Borrowed) | c <- blocks]) . concat <$> mapM (captured u) xs
                             _ <- leave (params env ps ++ caps) u
                             checkE env g (M.insert j ([m | (_,m,_) <- ps],caps) js) e2
       App f vs -> do ft <- liftE (inferVar g f)
