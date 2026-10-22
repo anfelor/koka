@@ -5,6 +5,7 @@
 -- terms of the Apache License, Version 2.0. A copy of the License can be
 -- found in the LICENSE file at the root of this distribution.
 -----------------------------------------------------------------------------
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 -- Reassociate nested lets. Roots are unique throughout a definition, so moving a
 -- let out of its bound computation cannot capture a variable in its continuation.
