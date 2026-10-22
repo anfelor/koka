@@ -165,11 +165,16 @@ data VType = VPtr AType                 -- A*
            | VUnit                      -- 𝟙
            | VSum [VType]               -- ⊕ᵢ Vᵢ, n-ary (a Koka value type with several constructors)
            | VProd VType VType          -- V ⊗ W
-           | VRaw Name                  -- raw: unboxed primitives (`int32`, `float64`, `char`, ...)
+           | VRaw Raw                   -- raw: unboxed primitives (`int32`, `float64`, `char`, ...)
            | VExists [TVar] VType       -- ∃ā. V
            | VReuse Fill Int (Maybe Contents) -- ◇n[k; p : V] or ◆n[k; p : V]: if nonempty, an n-byte block with tag k containing p
            | VCtx Fill AType AType      -- ctx⟨A,B⟩ or ctx⁺⟨A,B⟩: an A with a hole of type B*, nonempty if full
            deriving (Eq,Show)
+
+-- raw types: the primitive value types of Koka (`TypeInfo.rawType`), named by their C type
+data Raw = RChar | RSSize | RIntPtr | RFloat64 | RFloat32
+         | RInt64 | RInt32 | RInt16 | RInt8 | RUInt8
+         deriving (Eq,Show)
 
 -- The description `k; p : V` of a credit's block: the tag k in its header and its contents, an
 -- unevaluated structural value p of type V with |V| = n. It carries no ownership, and its names denote the values they were

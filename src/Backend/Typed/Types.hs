@@ -15,7 +15,7 @@ module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReus
 import Data.Functor.Identity( Identity(..) )
 import qualified Data.Map as M
 import Control.Monad( foldM )
-import Common.NamePrim( nameTpInt, nameTpString, nameTpChar, nameTpFloat, nameTpAny )
+import Common.NamePrim( nameTpInt, nameTpString, nameTpAny )
 import Backend.Typed.Syntax
 import Backend.Typed.Layout( isScalar )
 
@@ -118,8 +118,8 @@ prodV (t:ts) = VProd t (prodV ts)
 vtInt, vtString, vtChar, vtFloat :: VType
 vtInt    = VPtr (ACon nameTpInt [])
 vtString = VPtr (ACon nameTpString [])
-vtChar   = VRaw nameTpChar
-vtFloat  = VRaw nameTpFloat
+vtChar   = VRaw RChar
+vtFloat  = VRaw RFloat64
 
 atAny :: AType
 atAny = ACon nameTpAny []
