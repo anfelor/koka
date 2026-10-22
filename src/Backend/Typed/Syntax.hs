@@ -120,13 +120,12 @@ owning m
 --   Sums are flat: their alternatives are `Box V` or `1` (`a + 1` or `T⟨B̄⟩ + 1` has no known
 --   tags), indexed by their runtime tags, which are increasing and start at 1 as in Koka.
 --   A sub-sum keeps the tags of its alternatives, with gaps for those it excludes.
--- - `Scalar V` is Koka's `box` of a scalar V (`Layout.isScalar`: a raw type or an enumeration
---   that Koka boxes by itself): an immediate value, or a block that the runtime allocates (such
---   as a large `float64`). It has no tag, so it is not a shape, and it is not reused.
---   Product normalization can expose an enumeration directly as its scalar payload;
---   this retains the explicit `Scalar` boxing operation chosen during elaboration.
---   Nothing relies on its uniqueness: `[if-unique]` and `[unbox-ru]` do not apply to it. `boxA`
---   chooses it for a scalar outside a sum.
+-- - `Scalar raw` is Koka's `box` of a raw value: an immediate value, or a block that the runtime
+--   allocates (such as a large `float64`). It has no tag, so it is not a shape, and it is not
+--   reused. Nothing relies on its uniqueness: `[if-unique]` and `[unbox-ru]` do not apply to it.
+--   `boxA` chooses it for a raw value outside a sum, and for a product whose only field is one
+--   (`Layout.scalarField`), which Koka boxes like that field; an enumeration there is boxed as
+--   its shape.
 -- - `a`, `a⟨B̄⟩` and `T⟨B̄⟩` without a definition are opaque: a value of such a type can only be
 --   passed around.
 -- - `λā.A` only occurs as the argument of a higher-kinded variable, and applying it is
@@ -134,7 +133,7 @@ owning m
 -- - `unroll(T⟨B̄⟩) = A[B̄/ā]` for a definition `T⟨ā⟩ := A` (`TypeDef`); in the paper `T⟨B̄⟩` is
 --   `μt.A[B̄/ā]` with the recursive occurrences replaced by `t`.
 data AType = ABox VType                 -- Box V
-           | AScalar VType              -- Scalar V
+           | AScalar Raw                -- Scalar raw
            | AUnit                      -- 1
            | ASum [(Int,AType)]         -- ⊕ᵢ Aᵢ, indexed by tags
            | AFun [(Mode,VType)] VType  -- (q̄ V̄) -> W, for top-level functions and closures alike
@@ -298,11 +297,11 @@ data AVal
   -- A fresh allocation: the paper's `alloc_n; box v`.
   | Box VVal
 
-  --   Γ ⊢ v : V    V scalar
-  --  ────────────────────────── [scalar]
-  --   Γ ⊢ scalar v : Scalar V
+  --   Γ ⊢ v : raw
+  --  ────────────────────────────── [scalar]
+  --   Γ ⊢ scalar v : Scalar raw
   --
-  -- Koka's `box` of a scalar, which allocates only if the value is not immediate.
+  -- Koka's `box` of a raw value, which allocates only if the value is not immediate.
   | Scalar VVal
 
   --   C : ∀ā. V̄ -> T⟨ā⟩ ∈ Σ    Γᵢ ⊢ vᵢ : Vᵢ[B̄/ā]
@@ -598,8 +597,8 @@ data VExpr
   -- `x` is a place in the block of `v`, which a read of `x` needs (see "Structural rules").
   | Unbox Mode Path Path VExpr
 
-  --   Γ₁ ⊢ v :q Scalar V    Γ₂, x : V ⊢ e : W
-  --  ─────────────────────────────────────────── [unscalar]
+  --   Γ₁ ⊢ v :q Scalar raw    Γ₂, x : raw ⊢ e : W
+  --  ───────────────────────────────────────────── [unscalar]
   --   Γ₁, Γ₂ ⊢ let_q scalar x = v in e : W
   --
   -- Reading a scalar copies its contents, which are trivial: `x` is a root, not a part of `v`.

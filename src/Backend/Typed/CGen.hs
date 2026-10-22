@@ -528,9 +528,8 @@ genUnbox cx dest v x e
 -- An owned read lets the runtime release a heap-backed scalar.
 genUnscalar :: Ctx -> Dest -> Mode -> Path -> Path -> VExpr -> G [Doc]
 genUnscalar cx dest m v x e
-  = do A (AScalar t) <- tyOfName cx v
-       ue <- unboxScalar m t (localName v)
-       genRead cx dest x t ue e
+  = do A (AScalar r) <- tyOfName cx v
+       genRead cx dest x (VRaw r) (unboxScalar m r (localName v)) e
 
 -- bind the contents `ue : t` that were read from a box or scalar
 genRead :: Ctx -> Dest -> Path -> VType -> Doc -> VExpr -> G [Doc]
@@ -553,33 +552,25 @@ bindPlace cx x t d = let cx' = bindVar cx x (V t) in cx'{ cxPlaces = M.insert x 
 -- Koka's `box` of a scalar
 genScalar :: Ctx -> VVal -> G Doc
 genScalar cx v
-  = do ct <- tyOf cx v >>= ctype
+  = do VRaw r <- tyOf cx v
        e <- genV cx v
-       case ct of
-         CPrim r | (box,_) <- primBox r -> return (text box <.> "(" <.> e <.> ",_ctx)")
-         CEnum _ -> return ("kk_int32_box((int32_t)" <.> e <.> ",_ctx)")
-         _ -> failG ("not a scalar: " ++ show ct)
+       return (text (fst (primBox r)) <.> "(" <.> e <.> ",_ctx)")
 
-unboxScalar :: Mode -> VType -> Doc -> G Doc
-unboxScalar mode t e
-  = do ct <- ctype t
-       let borrow = if owning mode then "KK_OWNED" else "KK_BORROWED"
-       case ct of
-         CPrim r | (_,unbox) <- primBox r -> return (text unbox <.> "(" <.> e <.> "," <.> borrow <.> ",_ctx)")
-         CEnum _ -> return ("(" <.> cty ct <.> ")kk_int32_unbox(" <.> e <.> "," <.> borrow <.> ",_ctx)")
-         _ -> failG ("not a scalar: " ++ show ct)
+unboxScalar :: Mode -> Raw -> Doc -> Doc
+unboxScalar mode r e
+  = let borrow = if owning mode then "KK_OWNED" else "KK_BORROWED"
+    in text (snd (primBox r)) <.> "(" <.> e <.> "," <.> borrow <.> ",_ctx)"
 
 -- Koka's box of a scalar is a heap block only on targets where the scalar is not immediate
 -- (`scalarHeapSize`), and needs no drop elsewhere. Like kklib's unbox, which ignores
 -- ownership there, this does not release a polymorphic `kk_box_any` either.
-dropScalar :: VType -> Doc -> G Doc
-dropScalar t e
-  = do ct <- ctype t
-       let drop = dropStmt CBox e
-       return (case scalarHeapSize ct of
-                 Nothing -> drop
-                 Just 0  -> empty
-                 Just n  -> "if (KK_INTF_SIZE <=" <+> int n <.> ")" <+> block [drop])
+dropScalar :: Raw -> Doc -> Doc
+dropScalar r e
+  = let drop = dropStmt CBox e
+    in case scalarHeapSize r of
+         Nothing -> drop
+         Just 0  -> empty
+         Just n  -> "if (KK_INTF_SIZE <=" <+> int n <.> ")" <+> block [drop]
 
 -- the payload of a box, which is never the dummy value of a yield (`[let-yield]`)
 unboxBlock :: VType -> Doc -> G Doc
@@ -796,7 +787,7 @@ genE cx dest expr
         -> do t <- tyOfName cx x
               ve <- genVar cx x
               d <- case t of
-                     A (AScalar st) -> dropScalar st ve
+                     A (AScalar r) -> return (dropScalar r ve)
                      _ -> (`dropStmt` ve) <$> ctOf t
               s <- genE cx dest e
               return (d : s)

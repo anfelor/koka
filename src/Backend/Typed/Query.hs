@@ -22,7 +22,7 @@ import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Layout( layout, blockSize, isBlock, isScalar, isEnum )
+import Backend.Typed.Layout( layout, blockSize, isBlock )
 
 type Gamma = M.Map Path Ty
 
@@ -224,7 +224,7 @@ altTypes env t expr
                             return [[A b]]
       (Unbox{}, A (ABox s)) -> return [[V s]]
       (UnboxLazy{}, A (ABox s)) -> return [[V s]]
-      (Unscalar{}, A (AScalar s)) -> return [[V s]]
+      (Unscalar{}, A (AScalar r)) -> return [[V (VRaw r)]]
       (Unpack _ _ tvs _ _, V (VExists bs s)) | length bs == length tvs -> return [[V (inst bs (map AVar tvs) s)]]
       (CaseOpen _ _ alts _, A a) -> do fss <- mapM (\(c,_,_) -> openFields env c a) alts
                                        return (map (map V) fss ++ [[]])
@@ -350,7 +350,7 @@ checkReuseTy ty = case ty of
     VRaw _ -> return ()
   A a -> case a of
     ABox t -> checkReuseTy (V t)
-    AScalar t -> checkReuseTy (V t)
+    AScalar _ -> return ()
     ASum ts -> mapM_ (checkReuseTy . A . snd) ts
     AFun ps r -> mapM_ (checkReuseTy . V) (map snd ps ++ [r])
     AForall _ b -> checkReuseTy (A b)
@@ -403,8 +403,9 @@ inferA env g val
                   noHeapCredit t
                   return (ABox t)
       Scalar v -> do t <- inferV env g v
-                     unless (isScalar t || isEnum t) (Left ("not a scalar: " ++ ppr t))
-                     return (AScalar t)
+                     case t of
+                       VRaw r -> return (AScalar r)
+                       _ -> Left ("not a raw value: " ++ ppr t)
       OpenCon c tys vs
         -> case M.lookup c (envSigs env) of
              Just (SigCon tvs fs n) | length tvs == length tys && length fs == length vs
