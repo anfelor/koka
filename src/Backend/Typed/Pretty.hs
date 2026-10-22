@@ -94,7 +94,7 @@ prettyAVal val
       Roll _ v   -> text "roll" <+> atomAVal v
       Box v      -> text "box" <+> atomVal v
       Scalar v   -> text "scalar" <+> atomVal v
-      OpenCon c ts v -> nm c <.> tyArgs ts <+> atomVal v
+      OpenCon c ts vs -> nm c <.> tyArgs ts <.> args vs
       Lam ps r e -> text "fn" <.> params ps <+> colon <+> prettyV r <+> text "->" <-> indent 2 (prettyExpr e)
       BoxAt r v   -> text "box@" <.> pv r <+> atomVal v
       BoxIn x v   -> text "box-in@" <.> pv x <+> atomVal v
@@ -182,7 +182,7 @@ prettyExpr expr
                          <-> indent 2 (prettyExpr e1) <-> text "in" <+> align (prettyExpr e2)
       Jump j vs -> text "jump" <+> nm j <.> args vs
       Gen vs e -> text "gen" <+> hsep (map tv vs) <.> text "." <+> align (prettyExpr e)
-      CaseOpen m v alts def -> caseOf (text "case" <.> mode m) (pv v) ([(nm c <+> pv x, e) | (c,x,e) <- alts] ++ [(text "_", def)])
+      CaseOpen m v alts def -> caseOf (text "case" <.> mode m) (pv v) ([(nm c <.> parens (commaSep (map pv xs)), e) | (c,xs,e) <- alts] ++ [(text "_", def)])
 
 -- `let` with a mode, followed by the body on the next line
 letIn :: Doc -> Doc -> Doc -> VExpr -> Doc

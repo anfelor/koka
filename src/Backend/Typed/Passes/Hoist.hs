@@ -118,7 +118,7 @@ childrenA v = case v of
   InjA i a w -> [(u,InjA i a . rebuild) | (u,rebuild) <- childrenA w]
   Roll a w -> [(u,Roll a . rebuild) | (u,rebuild) <- childrenA w]
   Box w -> [(w,Box)]
-  OpenCon c ts w -> [(w,OpenCon c ts)]
+  OpenCon c ts ws -> [(w,\x -> OpenCon c ts (take i ws ++ [x] ++ drop (i+1) ws)) | (i,w) <- zip [0..] ws]
   BoxAt r w -> [(w,BoxAt r)]
   BoxIn x w -> [(w,BoxIn x)]
   _ -> []

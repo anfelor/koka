@@ -543,13 +543,13 @@ elabOpenCon info vargs cname scheme args
   = do recordOpenSig info cname scheme
        fields <- schemeFields vargs scheme
        (ks,vs) <- unzip <$> mapM (\(t,arg) -> elabValAt t arg) (zip fields args)
-       return (compose ks, Ptr (ACon (dataInfoName info) vargs) (OpenCon cname vargs (prodVal vs)))
+       return (compose ks, Ptr (ACon (dataInfoName info) vargs) (OpenCon cname vargs vs))
 
 recordOpenSig :: DataInfo -> Name -> Type -> E ()
 recordOpenSig info cname scheme
   = do let tvs = [typevarId tv | tv <- dataInfoParams info, tvarStar tv]
        fields <- schemeFields (map AVar tvs) scheme
-       recordSig cname (SigCon tvs (prodV fields) (dataInfoName info))
+       recordSig cname (SigCon tvs fields (dataInfoName info))
 
 schemeFields :: [AType] -> Type -> E [VType]
 schemeFields vargs scheme
@@ -774,14 +774,15 @@ elabOpenCase info vargs v brs
                  []    -> failE "open match without default"
        return (Deref Owned v p (CaseOpen Owned p alts def))
 
-openAlt :: DataInfo -> [AType] -> (ConInfo,C.Branch) -> E (Name,Path,VExpr)
+-- one binder for each field
+openAlt :: DataInfo -> [AType] -> (ConInfo,C.Branch) -> E (Name,[Path],VExpr)
 openAlt info vargs (con,br@(C.Branch [pat] _))
   = do recordOpenSig info (conInfoName con) (conInfoType con)
-       x <- fresh "o"
        fields <- fieldTypes vargs con
-       getters <- destructure (zip (map subBinder (C.patConPatterns pat)) fields) (id,Var x)
+       xs <- mapM (const (fresh "o")) fields
+       getters <- concat <$> sequence [bindField (subBinder p) s (id,Var x) | (p,s,x) <- zip3 (C.patConPatterns pat) fields xs]
        body <- withFields getters (branchBody br)
-       return (conInfoName con, x, body)
+       return (conInfoName con, xs, body)
 openAlt _ _ _ = failE "unexpected open branch after matching"
 
 findBranch :: ConInfo -> [C.Branch] -> Maybe C.Branch

@@ -139,6 +139,11 @@ productFields t
     spine s@VProd{} = productFields s
     spine s = [([],s)]
 
+-- the steps to the fields of a right-nested product of `n` fields (`productFields`): field i at
+-- `snd`ⁱ `fst` and the last one at `snd`ⁿ⁻¹
+fieldSteps :: Int -> [[Step]]
+fieldSteps n = [replicate i SSnd ++ [SFst] | i <- [0 .. n-2]] ++ [replicate (n-1) SSnd | n > 0]
+
 -- the type at steps into a product
 partAt :: VType -> [Step] -> Maybe VType
 partAt t [] = Just t
@@ -338,7 +343,7 @@ descendA fn fa fv val
       Roll a v       -> Roll a <$> fa v
       Box v          -> Box <$> fv v
       Scalar v       -> Scalar <$> fv v
-      OpenCon c ts v -> OpenCon c ts <$> fv v
+      OpenCon c ts vs -> OpenCon c ts <$> traverse fv vs
       BoxAt r v      -> BoxAt <$> fn r <*> fv v
       BoxIn x v      -> BoxIn <$> fn x <*> fv v
       Fun _          -> pure val
@@ -400,7 +405,7 @@ descendB fn fv fb expr
       UnboxLazy v x e       -> (\v' (x',e') -> UnboxLazy v' x' e') <$> fn v <*> one x [] e
       Unpack m v tvs x e    -> (\v' (x',e') -> Unpack m v' tvs x' e') <$> fv v <*> one x [SPack] e
       CaseLit v alts def    -> CaseLit <$> fv v <*> traverse (\(l,e) -> (,) l <$> plain e) alts <*> plain def
-      CaseOpen m v alts def -> CaseOpen m <$> fn v <*> traverse (\(c,x,e) -> (\(x',e') -> (c,x',e')) <$> one x [SOpen c] e) alts
+      CaseOpen m v alts def -> CaseOpen m <$> fn v <*> traverse (\(c,xs,e) -> (\(xs',e') -> (c,xs',e')) <$> fb (zip xs (map (SOpen c :) (fieldSteps (length xs)))) e) alts
                                           <*> plain def
       Gen tvs e             -> Gen tvs <$> plain e
       Drop x e              -> Drop <$> fn x <*> plain e
@@ -592,7 +597,7 @@ substAWith renameRoot recur scope sub val
                          (substVType sub' r) (recur (M.union (scopeOf ys) scope) sub' e)
       InjA i a v -> InjA i (substAType sub a) (goA v)
       Roll a v -> Roll (substAType sub a) (goA v)
-      OpenCon c ts v -> OpenCon c (map (substAType sub) ts) (goV v)
+      OpenCon c ts vs -> OpenCon c (map (substAType sub) ts) (map goV vs)
       _ -> mapA (substName sub) goA goV val
   where
     goA = substAWith renameRoot recur scope sub
@@ -786,8 +791,8 @@ destructAOf expr
       Unbox m v x e         -> Just (Destruct m v [([x],e)] (\m' v' es -> Unbox m' v' x (head es)))
       UnboxLazy v x e       -> Just (Destruct Borrowed v [([x],e)] (\_ v' es -> UnboxLazy v' x (head es)))
       Unscalar m v x e      -> Just (Destruct m v [([x],e)] (\m' v' es -> Unscalar m' v' x (head es)))
-      CaseOpen m v alts def -> Just (Destruct m v ([([x],e) | (_,x,e) <- alts] ++ [([],def)])
-                                       (\m' v' es -> CaseOpen m' v' [(c,x,e) | ((c,x,_),e) <- zip alts es] (last es)))
+      CaseOpen m v alts def -> Just (Destruct m v ([(xs,e) | (_,xs,e) <- alts] ++ [([],def)])
+                                       (\m' v' es -> CaseOpen m' v' [(c,xs,e) | ((c,xs,_),e) <- zip alts es] (last es)))
       Proj{} -> Nothing
       CaseV{} -> Nothing
       Deref{} -> Nothing

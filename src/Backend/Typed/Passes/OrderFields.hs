@@ -53,7 +53,7 @@ orderFieldsProgram prog
     normSig s = case s of
       SigFun vs ps r -> SigFun vs [(m,normalizeVType t) | (m,t) <- ps] (normalizeVType r)
       SigVal vs t -> SigVal vs (normalizeVType t)
-      SigCon vs t n -> SigCon vs (normalizeVType t) n
+      SigCon vs ts n -> SigCon vs (map normalizeVType ts) n
 
 fresh :: N Path
 fresh = state (\st -> let (x,s) = freshPathFrom "fields" (supply st) in (x,st{ supply = s }))
@@ -245,7 +245,7 @@ av :: AVal -> N AVal
 av a = case a of
   InjA i t w -> InjA i <$> na t <*> av w
   Roll t w -> Roll <$> na t <*> av w
-  OpenCon c ts w -> OpenCon c <$> mapM na ts <*> nv w
+  OpenCon c ts ws -> OpenCon c <$> mapM na ts <*> mapM nv ws
   Lam ps r e -> do ps' <- mapM (\(x,m,t) -> (,,) x m <$> nt t) ps
                    r' <- nt r
                    e' <- bindVars [(x,V t) | (x,_,t) <- ps] (ne e)
