@@ -135,17 +135,24 @@ checkDef places env def
 params :: Env -> [(Path,Mode,VType)] -> [(Path,Mode)]
 params env ps = [(x,m) | (x,m,t) <- ps, not (trivialTy env (V t))]
 
--- The parts of a trivial type beside the way from a variable to its part `x`, from the type of
--- the variable: a projection leaves the products on its way unbound.
-trivialSiblings :: Env -> Gamma -> Path -> Path -> [Path]
-trivialSiblings env g z@(Path _ zs) (Path _ xs)
-  = case M.lookup z g of
-      Just (V t) -> [q | (pre,s) <- zip (inits steps) steps, Just s' <- [sibling s]
-                       , Just u <- [partAt t (pre ++ [s'])], trivialTy env (V u)
-                       , let q = foldl child z (pre ++ [s'])]
-      _ -> []
+-- The parts of a trivial type beside the way from a product `p : t` to its part `x`: a
+-- projection, and `[case-open]`, leave the products on the way unbound.
+trivialSiblings :: Env -> Path -> VType -> Path -> [Path]
+trivialSiblings env p@(Path _ ps) t (Path _ xs)
+  = [foldl child p ss | (pre,s) <- zip (inits steps) steps, Just s' <- [sibling s]
+                      , let ss = pre ++ [s'], Just u <- [partAt t ss], trivialTy env (V u)]
   where
-    steps = drop (length zs) xs
+    steps = drop (length ps) xs
+
+-- The product that a destructuring of `z` with binders `bs` takes apart, with its type: `z`
+-- for a projection, and `z.C`, the fields of the binders, for `[case-open]`.
+destructed :: Gamma -> Path -> [(Path,Ty)] -> Maybe (Path,VType)
+destructed g z@(Path _ zs) bs
+  = case (M.lookup z g, bs) of
+      (Just (V t), _) -> Just (z,t)
+      (_, (Path _ ss,_):_:_) | (SOpen c : _) <- drop (length zs) ss
+        -> Just (child z (SOpen c), foldr1 VProd [t | (_,V t) <- bs])
+      _ -> Nothing
 
 -- references
 
@@ -370,7 +377,7 @@ ownedA env g val
       Roll _ v -> ownedA env g v
       Box v -> ownedV env g v
       Scalar v -> ownedV env g v
-      OpenCon _ _ v -> ownedV env g v
+      OpenCon _ _ vs -> uses (map (ownedV env g) vs)
       -- the value is evaluated before the block is written
       BoxAt r v -> uses [ownedV env g v, consume env g r]
       BoxIn x v -> uses [ownedV env g v, consume env g x]
@@ -551,7 +558,7 @@ destruct env g js m v alts
                     -- that is all of `z` (see `key`) makes `z` trivial in its alternative.
                     alt zc bs e
                       = do let ts = [x | (x,t) <- bs, trivialTy env t]
-                           modify (S.union (S.fromList (ts ++ concatMap (trivialSiblings env g z . fst) bs)))
+                           modify (S.union (S.fromList (ts ++ [q | Just (p,t) <- [destructed g z bs], (x,_) <- bs, q <- trivialSiblings env p t x])))
                            tr <- get
                            u <- checkE env (bindAll bs g) js e
                            return (not (trivialVar env g z) && any ((== zc) . key tr) ts, u)

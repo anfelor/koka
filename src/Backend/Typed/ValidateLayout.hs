@@ -55,7 +55,7 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
     sig s = case s of
       SigFun vs ps r -> vars vs ++ (r : map snd ps)
       SigVal vs t -> vars vs ++ [t]
-      SigCon vs t _ -> vars vs ++ [t]
+      SigCon vs ts _ -> vars vs ++ ts
     def d = case d of
       DefFun _ vs ps r e -> vars vs ++ (r : map (\(_,_,t) -> t) ps ++ et e)
       DefVal _ vs t e -> vars vs ++ (t : et e)
@@ -93,5 +93,5 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
       Lam ps r e -> r : map (\(_,_,t) -> t) ps ++ et e
       Roll t w -> at t ++ avTypes w
       InjA _ t w -> at t ++ avTypes w
-      OpenCon _ ts w -> concatMap at ts ++ vt w
+      OpenCon _ ts ws -> concatMap at ts ++ concatMap vt ws
       _ -> getConst (descendA (const (Const [])) (Const . avTypes) (Const . vt) a)

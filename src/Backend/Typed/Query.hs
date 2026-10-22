@@ -15,7 +15,7 @@ module Backend.Typed.Query( Env(..), Gamma, noJoins, yieldJoins, envOf, bindAll,
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Control.Monad( zipWithM_, unless, when )
+import Control.Monad( zipWithM_, unless, when, forM_ )
 import Common.Name
 import Lib.PPrint( Pretty )
 import Backend.Typed.Syntax
@@ -226,8 +226,8 @@ altTypes env t expr
       (UnboxLazy{}, A (ABox s)) -> return [[V s]]
       (Unscalar{}, A (AScalar s)) -> return [[V s]]
       (Unpack _ _ tvs _ _, V (VExists bs s)) | length bs == length tvs -> return [[V (inst bs (map AVar tvs) s)]]
-      (CaseOpen _ _ alts _, A a) -> do fs <- mapM (\(c,_,_) -> openFields env c a) alts
-                                       return ([[V f] | f <- fs] ++ [[]])
+      (CaseOpen _ _ alts _, A a) -> do fss <- mapM (\(c,_,_) -> openFields env c a) alts
+                                       return (map (map V) fss ++ [[]])
       _ -> Left ("cannot destructure a value of type " ++ ppr t)
 
 -- the binder of `[unbox-ru]`: the credit of the block of a unique box, whose tag follows from
@@ -290,10 +290,10 @@ trivialTy :: Env -> Ty -> Bool
 trivialTy env = isTrivialWith (either (const Nothing) Just . unrollT env)
 
 -- the fields of an open constructor at an instance `T⟨B̄⟩` of its type
-openFields :: Env -> Name -> AType -> Q VType
+openFields :: Env -> Name -> AType -> Q [VType]
 openFields env c t
   = case (M.lookup c (envSigs env), t) of
-      (Just (SigCon tvs f n), ACon m args) | n == m && length tvs == length args -> return (inst tvs args f)
+      (Just (SigCon tvs fs n), ACon m args) | n == m && length tvs == length args -> return (map (inst tvs args) fs)
       (Just (SigCon _ _ _), _) -> Left ("open constructor " ++ show c ++ " does not match " ++ ppr (A t))
       _ -> Left ("unknown open constructor " ++ show c)
 
@@ -405,11 +405,12 @@ inferA env g val
       Scalar v -> do t <- inferV env g v
                      unless (isScalar t || isEnum t) (Left ("not a scalar: " ++ ppr t))
                      return (AScalar t)
-      OpenCon c tys v
+      OpenCon c tys vs
         -> case M.lookup c (envSigs env) of
-             Just (SigCon tvs f n) | length tvs == length tys
-               -> do noHeapCredit (inst tvs tys f)
-                     checkV env g v (inst tvs tys f)
+             Just (SigCon tvs fs n) | length tvs == length tys && length fs == length vs
+               -> do forM_ (zip vs fs) $ \(v,f) ->
+                       do noHeapCredit (inst tvs tys f)
+                          checkV env g v (inst tvs tys f)
                      return (ACon n tys)
              _ -> Left ("unknown open constructor " ++ show c)
       Lam ps r e -> do when (any containsReuse [t | x <- S.toList (fvA val), Just t <- [M.lookup x g]])
