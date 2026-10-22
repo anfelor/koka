@@ -227,6 +227,7 @@ data Flags
          , optctailCtxPath  :: !Bool
          , optUnroll        :: !Int
          , optEagerPatBind  :: !Bool      -- bind pattern fields as early as possible?
+         , typedEagerLoads  :: !Bool      -- typed backend: load the contents of a box when it is read
          , parcReuse        :: !Bool
          , parcSpecialize   :: !Bool
          , parcReuseSpec    :: !Bool
@@ -279,6 +280,7 @@ instance Hashable Flags where
           show $ optctailCtxPath flags,
           show $ optUnroll flags,
           show $ optEagerPatBind flags,
+          show $ typedEagerLoads flags,
           show $ parcReuse flags,
           show $ parcSpecialize flags,
           show $ parcReuseSpec flags,
@@ -380,6 +382,7 @@ flagsNull
           True -- optctailCtxPath
           (-1) -- optUnroll
           False -- optEagerPatBind (read fields as late as possible)
+          False -- typedEagerLoads
           True -- parc reuse
           True -- parc specialize
           True -- parc reuse specialize
@@ -523,6 +526,7 @@ options = (\(xss,yss) -> (concat xss, concat yss)) $ unzip
  , hide $ fflag       ["specialize"]  (\b f -> f{optSpecialize=b})    "enable inline specialization"
  , hide $ fflag       ["unroll"]      (\b f -> f{optUnroll=(if b then 1 else 0)}) "enable recursive definition unrolling"
  , hide $ fflag       ["eagerpatbind"] (\b f -> f{optEagerPatBind=b}) "load pattern fields as early as possible"
+ , hide $ fflag       ["eager-loads"] (\b f -> f{typedEagerLoads=b}) "typed backend: load the contents of a box at once instead of in place"
  , hide $ fflag       ["infchain"]     (\b f -> f{allowInfiniteChains=b}) "allow infinite implicit chains"
 
  -- deprecated

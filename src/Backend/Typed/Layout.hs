@@ -17,7 +17,7 @@
   Structs are named by a hash of their layout so modules agree on them.
 -}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Layout( CT(..), PrimType(..), EnumSize(..), layout, orderedLayout, leaves, leafSlots, isEnum, orderFields, shapeIsHeap
+module Backend.Typed.Layout( CT(..), PrimType(..), EnumSize(..), layout, orderedLayout, readInPlace, placeBinders, leaves, leafSlots, isEnum, orderFields, shapeIsHeap
                            , checkLayout, ctName, scanOf, rawOf, needsRC
                            , structDefs, blockName, blockDef, blockSize, isBlock, isScalar
                            , dupExpr, dropStmt, dupFun, dropFun, rawCType, primBox, scalarHeapSize, fnv
@@ -76,6 +76,27 @@ layout = layoutWith True
 -- ask for the eventual layout when computing allocation and reuse sizes.
 orderedLayout :: VType -> CT
 orderedLayout = layoutWith False
+
+-- A product in a box is read in place: code generation binds the contents of the box as a
+-- pointer into its block, and each projection reads one field (`Passes.Loads`).
+readInPlace :: VType -> Bool
+readInPlace t
+  = case t of
+      VProd{} -> case orderedLayout t of { CProd{} -> True; _ -> False }
+      VExists _ b -> readInPlace b
+      _ -> False
+
+-- The binders of a destructuring that are places (`[bunbox]`), with the variable that each is
+-- a place of: the contents of a box `z` are a place of `z`, and the binder of `[unpack]` of a
+-- place `p` is a place of `p`.
+placeBinders :: (Path -> Bool) -> VExpr -> [Path] -> [Ty] -> [(Path,Path)]
+placeBinders isPlace e xs ts
+  = case e of
+      Unbox _ z _ _ -> inPlace z
+      Unpack _ (Var p) _ _ _ | isPlace p -> inPlace p
+      _ -> []
+  where
+    inPlace z = [(x,z) | (x,V t) <- zip xs ts, readInPlace t]
 
 layoutWith :: Bool -> VType -> CT
 layoutWith reorder t
