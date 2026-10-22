@@ -556,7 +556,7 @@ genScalar cx v
   = do ct <- tyOf cx v >>= ctype
        e <- genV cx v
        case ct of
-         CPrim p | Just (box,_) <- primBox p -> return (text box <.> "(" <.> e <.> ",_ctx)")
+         CPrim r | (box,_) <- primBox r -> return (text box <.> "(" <.> e <.> ",_ctx)")
          CEnum _ -> return ("kk_int32_box((int32_t)" <.> e <.> ",_ctx)")
          _ -> failG ("not a scalar: " ++ show ct)
 
@@ -565,7 +565,7 @@ unboxScalar mode t e
   = do ct <- ctype t
        let borrow = if owning mode then "KK_OWNED" else "KK_BORROWED"
        case ct of
-         CPrim p | Just (_,unbox) <- primBox p -> return (text unbox <.> "(" <.> e <.> "," <.> borrow <.> ",_ctx)")
+         CPrim r | (_,unbox) <- primBox r -> return (text unbox <.> "(" <.> e <.> "," <.> borrow <.> ",_ctx)")
          CEnum _ -> return ("(" <.> cty ct <.> ")kk_int32_unbox(" <.> e <.> "," <.> borrow <.> ",_ctx)")
          _ -> failG ("not a scalar: " ++ show ct)
 

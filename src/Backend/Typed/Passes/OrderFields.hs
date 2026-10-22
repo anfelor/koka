@@ -10,7 +10,6 @@
 module Backend.Typed.Passes.OrderFields( orderFieldsProgram, checkOrdered ) where
 
 import qualified Data.Map as M
-import Common.NamePrim( nameTpChar )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types( Types(..), inst )
@@ -134,7 +133,7 @@ stabilize mode tree@(Tree t form) = case form of
                          -- The trivial sentinel keeps this an ordinary typed
                          -- destructuring, in normalized field order.
                          let sentinel = Lit (LitChar '\0')
-                         if productOrder [t,VRaw nameTpChar] == [0,1]
+                         if productOrder [t,VRaw RChar] == [0,1]
                            then emit (Proj Borrowed (Pair v sentinel) [SFst] x)
                            else emit (Proj Borrowed (Pair sentinel v) [SSnd] x)
                return (Tree t (Atom (Var x)))

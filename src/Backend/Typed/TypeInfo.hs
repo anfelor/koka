@@ -121,9 +121,25 @@ isValueInfo info = dataDefIsValue (dataInfoDef info) || dataInfoName info == nam
 valueBody :: Newtypes -> DataInfo -> [AType] -> Tr VType
 valueBody nt info vargs
   = case dataInfoConstrs info of
-      []    -> Right (VRaw (dataInfoName info))
+      []    -> VRaw <$> rawType (dataInfoName info)
       [con] -> conValueFields nt vargs con
       cons  -> VSum <$> mapM (conValueFields nt vargs) cons
+
+-- the primitive value types, which have no constructors; a `marker` is an `int32` (as in Koka)
+rawType :: Name -> Tr Raw
+rawType n
+  | n == nameTpChar    = Right RChar
+  | n == nameTpSSizeT  = Right RSSize
+  | n == nameTpIntPtrT = Right RIntPtr
+  | n == nameTpFloat   = Right RFloat64
+  | n == nameTpFloat32 = Right RFloat32
+  | n == nameTpFloat16 = Right RFloat32
+  | n == nameTpInt64   = Right RInt64
+  | n == nameTpInt32 || n == nameTpMarker = Right RInt32
+  | n == nameTpInt16   = Right RInt16
+  | n == nameTpInt8    = Right RInt8
+  | n == nameTpByte    = Right RUInt8
+  | otherwise          = Left ("unknown raw type " ++ show n)
 
 conValueFields :: Newtypes -> [AType] -> ConInfo -> Tr VType
 conValueFields nt vargs con = existsV (conExists con) <$> conFields nt vargs con
