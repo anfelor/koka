@@ -66,12 +66,15 @@ matchE expr
   = case expr of
       Let x t e1 e2 -> Let x t <$> matchE e1 <*> bind [(x,V t)] (matchE e2)
       LetYield x t e1 e2 e3 -> LetYield x t <$> matchE e1 <*> bind [(x,V t)] (matchE e2) <*> matchE e3
-      Join j ps e1 e2 -> Join j ps <$> local (\(env,_) -> (env,Map.fromList [(x,V t) | (x,_,t) <- ps])) (matchE e1)
-                                 <*> matchE e2
+      Join j ps e1 e2 -> Join j ps <$> bind [(x,V t) | (x,_,t) <- ps] (matchE e1) <*> matchE e2
       UnboxRu v r e
         -> do (_,g) <- ask
               bs <- liftE (unboxRuBinds g v r)
               UnboxRu v r <$> bind bs (matchE e)
+      Dup x y e
+        -> do (_,g) <- ask
+              t <- liftE (inferVar g x)
+              Dup x y <$> bind [(y,t)] (matchE e)
       _ -> descendE pure matchV (\_ -> matchE) expr
 
 partition :: Mode -> Path -> [(Int,AType)] -> [(Int,Path,VExpr)] -> Maybe (Path,VExpr) -> Match VExpr

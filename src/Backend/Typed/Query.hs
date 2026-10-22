@@ -136,9 +136,9 @@ inferExpr env g js expr
                      case t of
                        VReuse _ _ _ -> inferE env g js e
                        _ -> Left ("free of a non-credit: " ++ ppr t)
-      Dup x e -> do t <- inferVar g x
-                    checkDupType t
-                    inferE env g js e
+      Dup x y e -> do t <- inferVar g x
+                      checkDupType t
+                      inferE env (bindAll [(y,t)] g) js e
       IsUnique x e1 e2 -> do t <- inferVar g x
                              case t of
                                V (VPtr (ACon n _)) | Just TypeDef{ tdefLazy = Just _ } <- M.lookup n (envTypes env)

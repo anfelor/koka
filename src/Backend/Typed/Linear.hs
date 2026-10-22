@@ -21,8 +21,8 @@
   reference to each of its parts (both components of a pair, the contents and the credit of a
   box, and the only part at any other step), so consuming a part takes it out of its parent,
   and a parent is consumed once all of its parts are. The binder of `[deref]`, `[unroll]`,
-  `[case-a]`, `[split-a]` or `[unpack]` of a boxed value is the pointer of its scrutinee, so
-  consuming or testing it consumes or tests the scrutinee (`key`). So does a part whose
+  `[case-a]` or `[split-a]` of a boxed value is the pointer of its scrutinee, and that of
+  `[unpack]` is its scrutinee, so consuming or testing it consumes or tests the scrutinee (`key`). So does a part whose
   sibling is of a trivial type, which is determined from the type of the parent: a projection
   binds only its field, not the products around it (`[proj]`). In an alternative whose binder of a trivial type is all of
   the scrutinee (`Nothing`), the scrutinee needs no references. The mode of a
@@ -34,10 +34,10 @@
   its old fields, see `Lazy`). `Unscalar` copies the trivial contents of a scalar into a root,
   so its mode matters: an owned read consumes the scalar.
 
-  `dup x` gives `x` one more reference under the same name, so a variable may hold several:
-  the references are counted (`Counts`), where a reference to a variable stands for one to
-  each of its parts (`refine`). After `dup z.fst; drop z`, for example, `z.fst` still holds a
-  reference, and so does `z.fst` after a `let` that consumes the other parts of `z`.
+  `val y = dup x` borrows `x` and binds its copy `y` as a new owned root. The references are
+  counted (`Counts`), where a reference to a variable stands for one to each of its parts
+  (`refine`): `z.fst` holds a reference after a `let` that consumes the other parts of `z`, for
+  example.
 
   A unique variable is owned and holds the only reference to its block, so `UnboxRu` may
   take its contents and keep its block as a credit. An owned variable is unique in the
@@ -55,12 +55,12 @@
   unique one may be consumed as unique (`leave`).
 
   The body of a join point is checked like the body of a function whose parameters include
-  the variables it captures: unique if the body uses them as unique, borrowed if their owner
-  is borrowed and the body does not consume them (a join point is not recursive and runs in
-  the scope of its definition), and owned otherwise, with as many references as the body
-  consumes (Γ_c is a multiset). The jumps use them in the same way, so a `let` before the
-  join point is unique if the body uses its variable as unique. A jump is checked like a call that also passes the
-  captured variables.
+  the variables it captures, including those of the join points it jumps to: unique if the
+  body uses them as unique, borrowed if the body does not consume them (a join point is not
+  recursive and runs in the scope of its definition), and owned otherwise, with as many
+  references as the body consumes (Γ_c is a multiset). The jumps use them in the same way, so a
+  `let` before the join point is unique if the body uses its variable as unique. A jump is
+  checked like a call that also passes the captured variables.
 
   After `Loads` (`checkLinear True`), the contents of a box are a *place* in its block
   (`Layout.placeBinders`): a use of a place reads the block, so it needs the credit of the
@@ -331,10 +331,6 @@ inspect, readVar :: Env -> Gamma -> Path -> L Use
 inspect env g = useVar env g Borrowed 0 True
 readVar env g = useVar env g Borrowed 0 False
 
--- `dup x` borrows `x` and gives it another reference
-dupVar :: Env -> Gamma -> Path -> L Use
-dupVar env g = useVar env g Borrowed (-1) True
-
 -- values
 
 ownedV :: Env -> Gamma -> VVal -> L Use
@@ -470,8 +466,10 @@ checkE env g js expr
       Jump j vs -> case M.lookup j js of
                      Just (ms,caps) -> args caps ms vs
                      Nothing -> fail ("jump to unknown join point " ++ show j)
-      -- the captured variables that are not parts of other captured variables
-      Join j ps e1 e2 -> do let fvs = S.toList (fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps])
+      -- the captured variables that are not parts of other captured variables, including those
+      -- of the join points that the body jumps to
+      Join j ps e1 e2 -> do let fvs = S.toList (S.union (fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps])
+                                                         (S.fromList [x | (k,(_,cs)) <- M.toList js, not (null (jumpArgs k e1)), (x,_) <- cs]))
                             let xs = [x | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
                             boxes <- mapM placeOf fvs
                             let blocks = S.toList (S.fromList [c | Just z <- boxes, let c = child z SCredit, not (any (c `within`) xs)])
@@ -488,9 +486,10 @@ checkE env g js expr
       Gen _ e -> checkE env g M.empty e
       Drop x e -> before (consume env g x) (checkE env g js e)
       Free r e -> before (consume env g r) (checkE env g js e)
-      Dup x e -> do t <- liftE (inferVar g x)
-                    liftE (checkDupType t)
-                    before (dupVar env g x) (checkE env g js e)
+      -- the copy is a new root
+      Dup x y e -> do t <- liftE (inferVar g x)
+                      liftE (checkDupType t)
+                      before (inspect env g x) (roots env Owned [(y,t)] (checkE env (bindAll [(y,t)] g) js e))
       -- the test reads the variable without borrowing it, which is unique in the first branch
       IsUnique x e1 e2 -> do m <- ownerMode x
                              when (m == Borrowed) (fail ("uniqueness test of a variable that is not owned: " ++ show x))
@@ -519,15 +518,15 @@ checkE env g js expr
                             [borrowedV env g v | (Borrowed,v) <- zip ms vs] ++
                             [inspect env g x | (x,Borrowed) <- caps])
     -- A variable is captured unique if the body uses it as unique (the jump then uses it as
-    -- unique), borrowed if its owner is borrowed and the body does not consume it, and owned
-    -- otherwise, once for each reference that the body consumes.
+    -- unique), borrowed if the body does not consume it, and owned otherwise, once for each
+    -- reference that the body consumes. (An owned variable that is captured borrowed is not
+    -- consumed by the jump, which its scope then rejects.)
     captured :: Use -> Path -> L [(Path,Mode)]
     captured u x
-      = do o <- ownerMode x
-           k <- keyOf x
+      = do k <- keyOf x
            let consumed = [n | (p,n) <- M.toList (uNet u), n > 0, p `within` k || k `within` p]
            return (if S.member k (uUnique u) then [(x,Unique)]
-                   else if o == Borrowed && null consumed then [(x,Borrowed)]
+                   else if null consumed then [(x,Borrowed)]
                    else replicate (maximum (1 : consumed)) (x,Owned))
 
 -- The binders of a destructuring of a variable are its parts, and an owned or unique

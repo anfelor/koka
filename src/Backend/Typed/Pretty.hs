@@ -187,7 +187,7 @@ prettyExpr expr
       UnboxLazy v x e -> letIn (text "-lazy") (text "box" <+> pv x) (pv v) e
       Unpack m v vs x e -> letIn (mode m) (text "pack" <.> brackets (commaSep (map tv vs)) <+> pv x) (prettyVal v) e
       CaseLit v alts def -> caseOf (text "case") (prettyVal v) ([(prettyLit l, e) | (l,e) <- alts] ++ [(text "_", def)])
-      Dup x e -> text "dup" <+> pv x <.> semi <-> prettyExpr e
+      Dup x y e -> text "val" <+> pv y <+> text "= dup" <+> pv x <.> semi <-> prettyExpr e
       Drop x e -> text "drop" <+> pv x <.> semi <-> prettyExpr e
       Free r e -> text "free" <+> pv r <.> semi <-> prettyExpr e
       IsUnique x e1 e2 -> ifThen (text "if-unique" <+> pv x) e1 e2

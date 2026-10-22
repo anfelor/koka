@@ -273,13 +273,15 @@ fipE expr
         -> do full <- isFull r
               when full (require mayDealloc ("freeing the reuse credit " ++ show r ++ " causes deallocation"))
               fipE e
-      Dup x e
+      Dup x y e
         -> do t <- typeOfVar x
               u <- untracked t
               b <- isBorrowed x
               unless (u || (b && isFun t))
                 (require mayAlloc ("the variable " ++ show x ++ " is duplicated (causing sharing and preventing reuse)"))
-              fipE e
+              -- the copy of a borrowed function is only called
+              let borrowCopy fe = if b && isFun t then fe{ fInfo = (fInfo fe){ iBorrowed = y : iBorrowed (fInfo fe) } } else fe
+              local borrowCopy (bind [(y,t)] (fipE e))
       IsUnique _ e1 _ -> fipE e1
       IfFull r e1 e2
         -> do full <- isFull r

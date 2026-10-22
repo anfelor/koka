@@ -23,6 +23,7 @@ import qualified Data.Set as S
 import Data.Char( isAlphaNum, ord, isDigit )
 import Data.List( isInfixOf, zip4 )
 import Data.Maybe( fromMaybe )
+import Data.Functor.Const( Const(..) )
 import qualified Numeric
 import Control.Monad( forM, when )
 import Lib.PPrint( Doc, text, string, int, integer, empty, isEmptyDoc, line, nest, align, vcat, hcat, hsep, (<.>), (<+>), (<->) )
@@ -64,7 +65,8 @@ data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [Strin
 data Ctx = Ctx{ cxEnv :: Env, cxCEnv :: CEnv, cxGamma :: Gamma, cxSelf :: Maybe (Name,[Path])
               , cxJoins :: M.Map Name (Doc,[Path])
               , cxPlaces :: M.Map Path Doc  -- places, read through the pointer to their box (`genUnbox`)
-              , cxShared :: S.Set Path }   -- boxes known to be shared (the else branch of `IsUnique`)
+              , cxShared :: S.Set Path     -- boxes known to be shared (the else branch of `IsUnique`)
+              , cxSources :: Sources }     -- the copies and join parameters of the definition (`sameBits`)
 
 type G a = M () St a
 
@@ -138,10 +140,10 @@ dupExpr ct e = maybe e (\f -> text f <.> "(" <.> e <.> ",_ctx)") (dupFun ct)
 -- Like aggregate dup helpers, keep field dups inline: a call can spill another
 -- live field and enlarge even the unique path's stack frame. Root dups may be
 -- tail calls, so leave their inlining to the C compiler.
-dupAt :: Path -> CT -> Doc
-dupAt x CBox | Path _ (_:_) <- canonical x
-  = "kt_box_dup_inline(" <.> localName x <.> ",_ctx)"
-dupAt x ct = dupExpr ct (localName x)
+dupAt :: Path -> CT -> Doc -> Doc
+dupAt x CBox ve | Path _ (_:_) <- canonical x
+  = "kt_box_dup_inline(" <.> ve <.> ",_ctx)"
+dupAt _ ct ve = dupExpr ct ve
 
 dropStmt :: CT -> Doc -> Doc
 dropStmt ct e = maybe empty (\f -> text f <.> "(" <.> e <.> ",_ctx);") (dropFun ct)
@@ -322,7 +324,7 @@ holeMember cx ct v
 
 -- Injections only contain construction forms, so their tag can be passed down to
 -- the allocation; a box or unit outside a sum has tag 1. Existing boxed operands are
--- duplicated in place (`Dup`).
+-- duplicated through their pointers (`Dup`).
 genA :: Ctx -> AVal -> G Doc
 genA cx = genAIn cx 1
 
@@ -437,7 +439,7 @@ genBox cx tag at v
                                              -- A described credit is a unique block of its described payload,
                                              -- so its header only needs the new tag and scan size, where they differ,
                                              -- and only the fields that change are stored. Dups still run, in `y`.
-                                             update = case reuseMatches rt t v of
+                                             update = case reuseMatches rt t (sameBitsV (cxSources cx) v) of
                                                         Just (k,oldScan,matches) -> [setTag k, setScan oldScan, setPath] ++ writes matches
                                                         Nothing -> ["kk_block_init(&" <.> x <.> "->_block,sizeof(" <.> bt <.> ")," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ");",
                                                                     x <.> "->p =" <+> y <.> ";"]
@@ -481,7 +483,8 @@ fieldRange _ _ = Left "projection of a non-product"
 -- The tag and the scan size that the description of a credit records for its block, and for
 -- each leaf of the new payload whether its C slot already holds its bits: the old payload has
 -- a leaf at the same offset, with the same layout and the same value (`Inline` makes equal
--- values syntactically equal, so the payload names the variables of the description).
+-- values syntactically equal, so the payload names the variables of the description or their
+-- copies, `sameBits`).
 -- Payloads of different types can thus share slots. A dup preserves a field's bits, but its
 -- reference-count effect must still run.
 reuseMatches :: Ty -> VType -> VVal -> Maybe (Maybe Int,Int,[Bool])
@@ -492,6 +495,45 @@ reuseMatches rt t v
                kept = slots ot old
            in Just (k, scanOf (layout ot), [leaf `elem` kept | leaf <- slots t v])
       _ -> Nothing
+
+-- Where a variable gets the bits of another variable: a copy (`[dup]`) gets those of its
+-- variable, and a parameter of a join point those of its arguments.
+data Source = Copy Path | Param [VVal]
+
+type Sources = M.Map Path Source
+
+sources :: VExpr -> Sources
+sources expr = M.union here (getConst (descendE (const (Const M.empty)) (Const . sourcesV) (\_ e -> Const (sources e)) expr))
+  where
+    here = case expr of
+             Dup x y _ -> M.singleton y (Copy x)
+             Join j ps _ e2 -> M.fromList [(y,Param [vs !! i | vs <- jumpArgs j e2]) | (i,(y,_,_)) <- zip [0..] ps]
+             _ -> M.empty
+    sourcesV = getConst . descendV (Const . sourcesA) (Const . sourcesV)
+    sourcesA a = case a of
+                   Lam _ _ e -> sources e
+                   _ -> getConst (descendA (const (Const M.empty)) (Const . sourcesA) (Const . sourcesV) a)
+
+-- The variable whose bits a variable has, through the longest prefix of its path that has a
+-- source: a join parameter has the bits of its arguments if they are the same.
+sameBits :: Sources -> Path -> Path
+sameBits src x@(Path r ss)
+  = case [(k,s) | k <- [length ss, length ss - 1 .. 0], Just s <- [M.lookup (Path r (take k ss)) src]] of
+      ((k,s):_) -> case s of
+                     Copy y -> extend (sameBits src y) (drop k ss)
+                     Param vs | Just (y:ys) <- mapM sameOf vs, all (== y) ys -> extend y (drop k ss)
+                     _ -> x
+      [] -> x
+  where
+    extend (Path y ts) rest = Path y (ts ++ rest)
+    sameOf (Var y) = Just (sameBits src y)
+    sameOf _ = Nothing
+
+sameBitsV :: Sources -> VVal -> VVal
+sameBitsV src v
+  = case v of
+      Var x -> Var (sameBits src x)
+      _ -> mapV id (sameBitsV src) v
 
 -- The value of each leaf of a value of type `t`, as a value in normal form (`collapse`) and
 -- the index of a leaf in it: equal descriptions have equal bits. A variable of a product or
@@ -799,11 +841,12 @@ genE cx dest expr
                            V (VReuse Full _ _) -> "kt_reuse_free(" <.> localName r <.> ",_ctx);"
                            _ -> dropStmt CReuse (localName r)
               return (free : s)
-      Dup x e
-        -> do ct <- tyOfName cx x >>= ctOf
+      Dup x y e
+        -> do t <- tyOfName cx x
+              ct <- ctOf t
               ve <- genVar cx x
-              s <- genE cx dest e
-              return (["(void)" <.> dupAt x ct <.> ";" | needsRC ct] ++ s)
+              s <- genE (bindVar cx y t) dest e
+              return (declare (cty ct) y (dupAt x ct ve) : s)
       IsUnique x e1 e2
         -> do t <- liftC (inferVar (cxGamma cx) x)
               s1 <- genE cx dest e1
@@ -1198,14 +1241,14 @@ genDef env cenv def
         -> do pcts <- mapM (\(_,_,t) -> ctype t) args
               rct  <- ctype res
               let g  = M.fromList [(x,V t) | (x,_,t) <- args]
-                  cx = Ctx env cenv g (Just (f,[x | (x,_,_) <- args])) M.empty M.empty S.empty
+                  cx = Ctx env cenv g (Just (f,[x | (x,_,_) <- args])) M.empty M.empty S.empty (sources body)
               ss <- genE cx DReturn body
               let sig = cty rct <+> text (cName f) <.> "(" <.> hcat [cty ct <+> localName x <.> ", " | ((x,_,_),ct) <- zip args pcts] <.> "kk_context_t* _ctx)"
                   label = ["kt_tailcall: ;" | "goto kt_tailcall;" `isInfixOf` show (vcat ss)]
               return (sig <.> ";", sig <+> block (label ++ ss), empty)
       DefVal x _ t body
         -> do ct <- ctype t
-              let cx = Ctx env cenv M.empty Nothing M.empty M.empty S.empty
+              let cx = Ctx env cenv M.empty Nothing M.empty M.empty S.empty (sources body)
               ss <- genE cx DReturn body
               let name  = text (cName x)
                   initf = name <.> "_init"
@@ -1221,7 +1264,7 @@ genWrapper env cenv f
         -> do pcts <- mapM (ctype . snd) ps
               rct  <- ctype r
               let xs  = [root (newHiddenName ("p" ++ show i)) | i <- [0..length ps - 1]]
-                  cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) Nothing M.empty M.empty S.empty
+                  cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) Nothing M.empty M.empty S.empty M.empty
               body <- genCall cx DReturn f (map AVar tvs) (map Var xs)
               let sig = "static" <+> cty rct <+> text (cName f) <.> "_fun(kk_function_t _fself" <.> hcat [", " <.> cty ct <+> localName x | (x,ct) <- zip xs pcts] <.> ", kk_context_t* _ctx)"
               return (sig <.> ";", sig <+> block ("kk_function_static_drop(_fself,_ctx);" : body))
