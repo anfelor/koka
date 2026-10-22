@@ -251,7 +251,7 @@ elabApp f args resTp
                  callWith (return . Call g tysD . zipWith ctxCopy copies) params res args resTp
          _ -> do (k1,fv) <- elabVal f
                  (params,res) <- funType f
-                 body <- callWith (applyFun fv) (map snd params) res args resTp
+                 body <- callWith (applyFun (AFun params res) fv) (map snd params) res args resTp
                  return (k1 body)
 
 globalOf :: C.Expr -> E (Maybe (Name,Sig,Type,[Type]))

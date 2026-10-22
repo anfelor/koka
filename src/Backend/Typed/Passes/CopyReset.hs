@@ -19,6 +19,13 @@
     if-unique z then (..; let r : ◆n[k; p : V] = ret r' in e)
     else (..; e[r := empty])
 
+  `DropSpec` makes the test the scope of a join point that takes the credit (besides the parts
+  that it passes on, and the credits that `Reuse` adds), which is copied into both branches in
+  the same way, with lets that bind its parameters:
+
+    join j(ȳ,r : ◇n[k; p : V]) = e
+    if-unique z then (..; jump j(v̄,r')) else (..; jump j(w̄,no-reuse n [k; p : V]))
+
   In the unique branch the credit is full, so `ExpandReuse` tests nothing and code generation
   writes its blocks in place. In the other branch it is empty: `box@r v` becomes `box v`,
   `free r` and `if-full r` disappear, and any other use of `r` becomes `no-reuse n [k; p : V]`.
@@ -69,6 +76,14 @@ crE expr
         -> do e1 <- crE e
               e2 <- cloneE (state (freshPathFrom "cr")) (emptied r (NoReuse n p) e)
               return (IsUnique z (atRet (\v -> Let r (VReuse Full n p) (Ret v) e1) u) (atRet (const e2) s))
+      Join j ps e (IsUnique z u s)
+        | [Jump j1 vs1] <- ends u, [Jump j2 vs2] <- ends s, j1 == j, j2 == j
+        , ((i,r,n,p):_) <- [(i,r,n,p) | (i,((r,_,VReuse MaybeEmpty n p),Var (Path _ ss@(_:_)),NoReuse _ _)) <- zip [0 :: Int ..] (zip3 ps vs1 vs2), last ss == SCredit]
+        , consumed False r e, straightReuse r e, not (allocatesFresh e), size e <= copyLimit, apart u e, apart s e
+        -> do e1 <- crE e
+              let lets vs body = foldr (\((y,_,t),v) -> Let y t (Ret v)) body [b | (k,b) <- zip [0..] (zip ps vs), k /= i]
+              e2 <- cloneE (state (freshPathFrom "cr")) (lets vs2 (emptied r (NoReuse n p) e))
+              return (IsUnique z (atEnd (const (lets vs1 (Let r (VReuse Full n p) (Ret (vs1 !! i)) e1))) u) (atEnd (const e2) s))
       _ -> descendE pure crV (\_ -> crE) expr
 
 -- Copy a straight-line reconstruction, not the control flow leading to it.
@@ -96,23 +111,31 @@ crA val
       Lam ps r e -> Lam ps r <$> crE e
       _ -> descendA pure crA crV val
 
--- The values returned by a branch of the test: the `ret`s at its end, through forms with one
--- subexpression (but not join points, whose bodies capture their variables).
-rets :: VExpr -> [VVal]
-rets expr
+-- The statements at the end of a branch of the test, through forms with one subexpression
+-- (but not join points, whose bodies capture their variables).
+ends :: VExpr -> [VExpr]
+ends expr
   = case (expr,body expr) of
-      (Ret v,_) -> [v]
-      (Let _ _ _ e,_) -> rets e
-      (_,[e]) -> rets e
+      (Let _ _ _ e,_) -> ends e
+      (_,[e]) -> ends e
+      _ | isStatement expr -> [expr]
       _ -> []
+
+-- the values returned by a branch of the test
+rets :: VExpr -> [VVal]
+rets expr = [v | Ret v <- ends expr]
+
+-- replace the statement at the end of a branch
+atEnd :: (VExpr -> VExpr) -> VExpr -> VExpr
+atEnd f expr
+  = case expr of
+      Let x t e1 e -> Let x t e1 (atEnd f e)
+      _ | isStatement expr -> f expr
+      _ -> runIdentity (descendE Identity Identity (\_ e -> Identity (atEnd f e)) expr)
 
 -- replace the `ret` at the end of a branch
 atRet :: (VVal -> VExpr) -> VExpr -> VExpr
-atRet f expr
-  = case expr of
-      Ret v -> f v
-      Let x t e1 e -> Let x t e1 (atRet f e)
-      _ -> runIdentity (descendE Identity Identity (\_ e -> Identity (atRet f e)) expr)
+atRet f = atEnd (\e -> case e of Ret v -> f v; _ -> e)
 
 -- whether the binders of a branch are not used or bound again in the continuation, which
 -- moves into their scope

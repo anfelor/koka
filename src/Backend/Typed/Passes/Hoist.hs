@@ -59,6 +59,10 @@ expr e = case e of
     (_,g) <- ask
     bs <- liftE (unboxRuBinds g z r)
     UnboxRu z r <$> bind bs (expr b)
+  Dup x y b -> do
+    (_,g) <- ask
+    t <- liftE (inferVar g x)
+    Dup x y <$> bind [(y,t)] (expr b)
   IfFull r a b -> do
     (_,g) <- ask
     rt <- liftE (inferVar g r)

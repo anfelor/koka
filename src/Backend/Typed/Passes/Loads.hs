@@ -12,9 +12,8 @@
   Code generation reads a product in a box in place (`Layout.placeBinders`): the binder of
   `[bunbox]` is a *place*, a pointer into the block, as is the binder of `[unpack]` of a
   place, and each `[proj]` of a place reads one field where the projection is. A place is thus only valid while its block is intact, which the typing rules
-  before this pass do not require: after their boxed fields are duplicated
-  (`Common.dupValue`) and `z` is dropped, the contents outlive the box, and after `[unbox-ru]`
-  they outlive the credit. `Linear` checks the result of this pass with places.
+  before this pass do not require: they let the contents of `z` be read after `z` is
+  dropped, and after `[unbox-ru]` after the credit is used. `Linear` checks the result of this pass with places.
 
   An event may release the block of a box `z` if it consumes an operand that `z` is a part
   or an alias of (`owners`), or the credit `z.credit`, which is then freed or written over
@@ -105,6 +104,10 @@ scoped e = case e of
     (_,g,_,_) <- ask
     bs <- liftE (unboxRuBinds g z r)
     UnboxRu z r <$> bind bs [] (expr b)
+  Dup x y b -> do
+    (_,g,_,_) <- ask
+    t <- liftE (inferVar g x)
+    Dup x y <$> bind [(y,t)] [] (expr b)
   IfFull r a b -> do
     (_,g,_,_) <- ask
     rt <- liftE (inferVar g r)

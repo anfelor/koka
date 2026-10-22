@@ -162,53 +162,13 @@ fieldsAt x t = [(foldl child x ss,ss,s) | (ss,s) <- productFields t]
 projectAll :: Scope -> Mode -> Path -> [(Path,[Step],VType)] -> VExpr -> VExpr
 projectAll scope m x fields body = foldr (\(y,ss,_) e -> reuseParts scope (Proj m (Var x) ss y e)) body fields
 
--- Retain a borrowed value by duplicating its boxed operands or contexts. Unlike a
--- drop, the destructurings only read: the original value remains available. Keep
--- each derived duplication in a unit-valued let, so its borrowed parts do not
--- escape into the continuation (or become extra captures of its closures).
-dupValue :: MonadFail m => (Ty -> Bool) -> m Path -> Scope -> Path -> Ty -> m K
-dupValue trivial fresh scope x t
-  | trivial t = return id
-  | otherwise = case t of
-      A _ -> return (Dup x)
-      V v -> case v of
-        VPtr _ -> do u <- fresh
-                     let y = child x SDeref
-                         body = Deref Borrowed (Var x) y (Dup y (Ret UnitV))
-                     return (Let u VUnit (reuseParts scope body))
-        VProd{} -> do u <- fresh
-                      let fields = [f | f@(_,_,s) <- fieldsAt x v, not (trivial (V s))]
-                          parts = M.union (scopeOf [y | (y,_,_) <- fields]) scope
-                      ks <- mapM (\(y,_,s) -> dupValue trivial fresh parts y (V s)) fields
-                      return (Let u VUnit (projectAll scope Borrowed x fields (foldr ($) (Ret UnitV) ks)))
-        VSum ts -> do u <- fresh
-                      alts <- mapM dupAlt (zip [0..] ts)
-                      return (Let u VUnit (reuseParts scope (CaseV Borrowed (Var x) alts)))
-          where
-            dupAlt (i,s)
-              = do let y = child x (SInjV i)
-                   k <- dupValue trivial fresh (M.insert y Nothing scope) y (V s)
-                   return (y,k (Ret UnitV))
-        VExists tvs s
-          -> do let y = child x SPack
-                u <- fresh
-                let start = minimum (0 : tvs ++ ftv s) - 1
-                    bs = take (length tvs) [start,start-1 ..]
-                    s' = inst tvs (map AVar bs) s
-                k <- dupValue trivial fresh (M.insert y Nothing scope) y (V s')
-                return (Let u VUnit (reuseParts scope (Unpack Borrowed (Var x) bs y (k (Ret UnitV)))))
-        VCtx _ _ _ -> return (Dup x)
-        VReuse _ _ _ -> fail "cannot duplicate a reuse credit"
-        VUnit -> return id
-        VRaw _ -> return id
-
--- The primitive duplication rule, shared by the type and linearity checkers.
+-- The duplication rule, shared by the type and linearity checkers.
 checkDupType :: Ty -> Either String ()
 checkDupType t
   = case t of
-      A _ -> Right ()
-      V (VCtx _ _ _) -> Right ()
-      V _ -> Left "dup of an unboxed value"
+      V (VReuse _ _ _) -> Left "dup of a reuse credit"
+      V _ -> Right ()
+      A _ -> Left "dup of a boxed value"
 
 -- values of these types need no reference counting, where `unroll` gives the body of a
 -- named type if it is known (a type with a single constructor without fields, for example)
@@ -381,7 +341,7 @@ descendE :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([Path] -> 
 descendE fn fv fe = descendB fn fv (\bs e -> let xs = map fst bs in (,) xs <$> fe xs e)
 
 -- Like `descendE`, but each binder comes with its steps from the scrutinee, and `fb` gives new
--- binders for a subexpression. The binders of a `let` and a join point have no steps,
+-- binders for a subexpression. The binders of a `let`, a dup and a join point have no steps,
 -- and neither has that of `[unbox-lazy]`, which takes the contents out of the box, or that of
 -- `[unscalar]`, which copies them.
 descendB :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([(Path,[Step])] -> VExpr -> f ([Path],VExpr)) -> VExpr -> f VExpr
@@ -410,7 +370,7 @@ descendB fn fv fb expr
       Gen tvs e             -> Gen tvs <$> plain e
       Drop x e              -> Drop <$> fn x <*> plain e
       Free r e              -> Free <$> fn r <*> plain e
-      Dup x e               -> Dup <$> fn x <*> plain e
+      Dup x y e             -> (\x' (y',e') -> Dup x' y' e') <$> fn x <*> one y [] e
       IsUnique x e1 e2      -> IsUnique <$> fn x <*> plain e1 <*> plain e2
       IfFull r e1 e2        -> IfFull <$> fn r <*> plain e1 <*> plain e2
       UnboxRu v r e         -> (\v' (r',e') -> UnboxRu v' r' e') <$> fn v <*> one r [SCredit] e
@@ -877,7 +837,8 @@ isRead expr
       Join{}      -> False
       Jump{}      -> False
 
--- the binders of these destructuring forms are the scrutinee's pointer, so they may be unique
+-- the binders of these destructuring forms are the scrutinee's pointer (the scrutinee itself
+-- for `[unpack]`), so they may be unique
 keepsPointer :: VExpr -> Bool
 keepsPointer expr
   = case expr of

@@ -11,8 +11,7 @@
 
   A structural value (variables, pairs, injections, `()` and literals) is rebuilt from its
   parts at no cost, so `let x = ret v` becomes `e[x := v]`, at any type and however often `x`
-  is used: a `dup x` duplicates the variables of `v`, and a destructuring of `x` is that of
-  `v`, which selects its alternative. A part of `x` is the part of `v` at its steps
+  is used: a destructuring of `x` is that of `v`, which selects its alternative. A part of `x` is the part of `v` at its steps
   (`valueAt`). A name denotes the same value in the whole definition, so the substitution
   applies everywhere, including the descriptions that name `x` out of its scope.
 
@@ -25,7 +24,8 @@
   ownership. Descriptions and the checking rules stay unchanged.
 
   Bindings that keep a literal dereference named are retained, preserving its operand
-  path without introducing a fresh root. Existentials are not inlined: unpacking a known
+  path without introducing a fresh root, and so are those of values that are duplicated as
+  a whole (`[dup]` takes a variable). Existentials are not inlined: unpacking a known
   `pack` would substitute its types.
 -}
 module Backend.Typed.Passes.Inline( inlineProgram ) where
@@ -90,19 +90,13 @@ structural v
       Lit _ -> True
       _ -> False
 
--- the variables of a structural value, once for each occurrence
-occurrences :: VVal -> [Path]
-occurrences v
-  = case v of
-      Var x -> [x]
-      _ -> getConst (descendV (const (Const [])) (Const . occurrences) v)
-
 valuesE :: VExpr -> (Values,S.Set Path)
 valuesE expr = here <> getConst (descendE (const (Const mempty)) (Const . valuesV) (\_ e -> Const (valuesE e)) expr)
   where
     here = case expr of
              Let x _ (Ret v) _ | structural v -> (M.singleton x v,S.empty)
              Deref _ (Var x) _ _ -> (M.empty,S.singleton x)
+             Dup x _ _ -> (M.empty,S.singleton x)
              _ -> mempty
 
 valuesV :: VVal -> (Values,S.Set Path)
@@ -119,7 +113,6 @@ inlineE :: Values -> VExpr -> VExpr
 inlineE vals expr
   = case expr of
       Let x _ _ e | M.member x vals -> inlineE vals e
-      Dup x e | Just w <- known vals x -> foldr Dup (inlineE vals e) (occurrences w)
       Proj _ (Var z) ss _ e | Just w@Pair{} <- known vals z, Just _ <- project w ss -> inlineE vals e
       CaseV _ (Var z) alts | Just (Inj i _ _) <- known vals z -> inlineE vals (snd (alts !! i))
       _ -> runIdentity (descendE Identity (Identity . inlineV vals) (\_ e -> Identity (inlineE vals e)) expr)
@@ -166,6 +159,9 @@ reuseE expr
       UnboxRu z r e -> do (_,g,_) <- ask
                           bs <- liftE (unboxRuBinds g z r)
                           UnboxRu z r <$> bindReuse bs (reuseE e)
+      Dup x y e -> do (_,g,_) <- ask
+                      t <- liftE (inferVar g x)
+                      Dup x y <$> bindReuse [(y,t)] (reuseE e)
       _ -> descendE pure reuseV (\_ -> reuseE) expr
 
 enumType :: VType -> Bool

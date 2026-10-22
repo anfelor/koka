@@ -189,7 +189,10 @@ ruE expr
       Call _ _ _ -> plain
       App _ _ -> plain
       Gen _ _ -> plain
-      Dup{} -> plain
+      Dup x y e
+        -> do g <- asks reGamma
+              t <- liftE (inferVar g x)
+              Dup x y <$> bind [(y,t)] (ruE e)
       -- destructuring forms are handled above
       Proj{} -> plain
       CaseV{} -> plain

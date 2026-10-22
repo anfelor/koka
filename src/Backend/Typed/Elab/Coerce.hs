@@ -178,27 +178,30 @@ wrapFun tvs itvs ps r qs s v
        (ks,args) <- unzip <$> mapM (\((_,q),(_,p),y) -> coerce q p (Var y)) (zip3 qs ps ys)
        x  <- fresh "r"
        (kr,res) <- coerce r s (Var x)
-       call <- applyFun (tapp v (map AVar itvs)) args
+       call <- applyFun (AFun ps r) (tapp v (map AVar itvs)) args
        let body = compose ks (Let x r call (kr (Ret res)))
            lam  = Lam [(y,m,q) | (y,(m,q)) <- zip ys qs] s body
        genVal (VPtr (forallA tvs (AFun qs s))) lam
 
 -- Immediately applied coercion adapters need no closure. Bind arguments outside
 -- the lambda's scope first, so its parameters cannot capture names in later arguments.
--- A top-level function is called directly rather than through its static closure.
-applyFun :: VVal -> [VVal] -> E VExpr
-applyFun (Ptr _ (Lam ps _ body)) args
+-- A top-level function is called directly rather than through its static closure. Any
+-- other function value of type `a` is bound first, so that the closure that `[app]`
+-- consumes is a part of a variable, which can be duplicated (`[dup]` is on pointers).
+applyFun :: AType -> VVal -> [VVal] -> E VExpr
+applyFun _ (Ptr _ (Lam ps _ body)) args
   = do xs <- mapM (const (fresh "arg")) args
        let bind (x,t,v) = Let x t (Ret v)
            actuals = [(x,t,v) | (x,(_,_,t),v) <- zip3 xs ps args]
            formals = [(p,t,Var x) | ((p,_,t),x) <- zip ps xs]
        return (compose (map bind actuals ++ map bind formals) body)
-applyFun fv args
+applyFun a fv args
   | Just (f,tys) <- knownFun fv []
   = return (Call f tys args)
   | otherwise
-  = do g <- fresh "f"
-       return (Deref Owned fv g (App g args))
+  = do s <- fresh "f"
+       let g = child s SDeref
+       return (Let s (VPtr a) (Ret fv) (Deref Owned (Var s) g (App g args)))
 
 -- a top-level function applied to all its type arguments; as a closure its parameters are owned
 knownFun :: VVal -> [AType] -> Maybe (Name,[AType])
