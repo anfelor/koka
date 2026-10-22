@@ -18,36 +18,28 @@
   Structs are named by a hash of their layout so modules agree on them.
 -}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Layout( CT(..), PrimType(..), EnumSize(..), layout, readInPlace, placeBinders, leaves, leafSlots, isEnum, orderFields, shapeIsHeap
+module Backend.Typed.Layout( CT(..), EnumSize(..), layout, readInPlace, placeBinders, leaves, leafSlots, isEnum, orderFields, shapeIsHeap
                            , checkLayout, ctName, scanOf, rawOf, needsRC
                            , structDefs, blockName, blockDef, blockSize, isBlock, isScalar
-                           , dupExpr, dropStmt, dupFun, dropFun, rawCType, primBox, scalarHeapSize, fnv
+                           , dupExpr, dropStmt, dupFun, dropFun, primBox, scalarHeapSize, fnv
                            ) where
 
 import Data.Char( ord )
 import Data.Bits( xor )
 import Data.Word( Word64 )
 import Data.List( intercalate, foldl', sortOn )
-import Data.Maybe( isJust )
 import Data.Ord( Down(..) )
 import qualified Numeric
-import Common.Name
-import Common.NamePrim
 import Backend.Typed.Syntax
 
 data CT = CBox
-        | CPrim PrimType
+        | CPrim Raw
         | CUnit
         | CEnum EnumSize              -- the width of the tag
         | CProd String [(Int,CT)]     -- leaves in memory order, with their position in the product
         | CSum String [Maybe CT]      -- the payload of each alternative (if not unit)
         | CReuse                      -- a reuse credit
         deriving (Eq,Show)
-
-data PrimType = PrimChar | PrimSSize | PrimIntPtr | PrimDouble | PrimInt64
-              | PrimUInt8 | PrimInt8 | PrimInt16 | PrimInt32 | PrimFloat
-              | PrimFieldAddr | PrimBox
-              deriving (Eq,Show)
 
 data EnumSize = Enum8 | Enum16 | Enum32
               deriving (Eq,Show)
@@ -96,7 +88,7 @@ placeBinders isPlace e xs ts
 layout :: VType -> CT
 layout t
   = case t of
-      VRaw n      -> CPrim (rawCType n)
+      VRaw r      -> CPrim r
       VExists _ b -> layout b
       VReuse _ _ _  -> CReuse
       VSum ts | isEnum t -> CEnum (enumSize (length ts))
@@ -319,7 +311,7 @@ isScalar :: VType -> Bool
 isScalar t
   = case (t,layout t) of
       (VSum _, _)  -> False
-      (_, CPrim p) -> isJust (primBox p)
+      (_, CPrim _) -> True
       (_, CEnum _) -> True
       _            -> False
 
@@ -352,54 +344,33 @@ fieldOffsets = go 0
 alignUp :: Int -> Int -> Int
 alignUp n a = ((n + a - 1) `div` a) * a
 
-primName :: PrimType -> String
-primName p
-  = case p of
-      PrimChar      -> "kk_char_t"
-      PrimSSize     -> "kk_ssize_t"
-      PrimIntPtr    -> "intptr_t"
-      PrimDouble    -> "double"
-      PrimInt64     -> "int64_t"
-      PrimUInt8     -> "uint8_t"
-      PrimInt8      -> "int8_t"
-      PrimInt16     -> "int16_t"
-      PrimInt32     -> "int32_t"
-      PrimFloat     -> "float"
-      PrimFieldAddr -> "kk_field_addr_t"
-      PrimBox       -> "kk_box_t"
+primName :: Raw -> String
+primName r
+  = case r of
+      RChar    -> "kk_char_t"
+      RSSize   -> "kk_ssize_t"
+      RIntPtr  -> "intptr_t"
+      RFloat64 -> "double"
+      RFloat32 -> "float"
+      RInt64   -> "int64_t"
+      RInt32   -> "int32_t"
+      RInt16   -> "int16_t"
+      RInt8    -> "int8_t"
+      RUInt8   -> "uint8_t"
 
-primSize :: PrimType -> Int
-primSize p
-  = case p of
-      PrimUInt8     -> 1
-      PrimInt8      -> 1
-      PrimInt16     -> 2
-      PrimInt32     -> 4
-      PrimChar      -> 4
-      PrimFloat     -> 4
-      PrimSSize     -> 8
-      PrimIntPtr    -> 8
-      PrimDouble    -> 8
-      PrimInt64     -> 8
-      PrimFieldAddr -> 8
-      PrimBox       -> 8
-
-rawCType :: Name -> PrimType
-rawCType n
-  | n == nameTpChar    = PrimChar
-  | n == nameTpSSizeT  = PrimSSize
-  | n == nameTpIntPtrT = PrimIntPtr
-  | n == nameTpFloat   = PrimDouble
-  | n == nameTpInt64   = PrimInt64
-  | n == nameTpByte    = PrimUInt8
-  | n == nameTpInt8    = PrimInt8
-  | n == nameTpInt16   = PrimInt16
-  | n == nameTpInt32 || n == nameTpMarker = PrimInt32
-  | n == nameTpFloat32 = PrimFloat
-  | n == nameTpFloat16 = PrimFloat
-  | n == nameTpFieldAddr = PrimFieldAddr
-  | n == nameTpAny     = PrimBox
-  | otherwise          = PrimIntPtr
+primSize :: Raw -> Int
+primSize r
+  = case r of
+      RUInt8   -> 1
+      RInt8    -> 1
+      RInt16   -> 2
+      RInt32   -> 4
+      RChar    -> 4
+      RFloat32 -> 4
+      RSSize   -> 8
+      RIntPtr  -> 8
+      RFloat64 -> 8
+      RInt64   -> 8
 
 -- immediate boxing of raw values (as in Koka)
 -- the largest `KK_INTF_SIZE` at which Koka's box of a scalar may be a heap block (kklib's
@@ -408,37 +379,33 @@ scalarHeapSize :: CT -> Maybe Int
 scalarHeapSize ct
   = case ct of
       CEnum _ -> Just 4   -- boxed as an `int32`
-      CPrim p -> case p of
-                   PrimInt8      -> Just 0
-                   PrimUInt8     -> Just 0
-                   PrimInt16     -> Just 2
-                   PrimInt32     -> Just 4
-                   PrimFloat     -> Just 4
-                   PrimChar      -> Just 4
-                   PrimInt64     -> Just 8
-                   PrimDouble    -> Just 8
-                   PrimSSize     -> Nothing
-                   PrimIntPtr    -> Nothing
-                   PrimFieldAddr -> Nothing
-                   PrimBox       -> Nothing
+      CPrim r -> case r of
+                   RInt8    -> Just 0
+                   RUInt8   -> Just 0
+                   RInt16   -> Just 2
+                   RInt32   -> Just 4
+                   RFloat32 -> Just 4
+                   RChar    -> Just 4
+                   RInt64   -> Just 8
+                   RFloat64 -> Just 8
+                   RSSize   -> Nothing
+                   RIntPtr  -> Nothing
       _ -> Nothing
 
-primBox :: PrimType -> Maybe (String,String)
-primBox p
-  = fmap (\base -> (base ++ "_box", base ++ "_unbox")) $
-    case p of
-      PrimChar      -> Just "kk_char"
-      PrimSSize     -> Just "kk_ssize"
-      PrimIntPtr    -> Just "kk_intptr"
-      PrimDouble    -> Just "kk_double"
-      PrimInt64     -> Just "kk_int64"
-      PrimUInt8     -> Just "kk_uint8"
-      PrimInt8      -> Just "kk_int8"
-      PrimInt16     -> Just "kk_int16"
-      PrimInt32     -> Just "kk_int32"
-      PrimFloat     -> Just "kk_float"
-      PrimFieldAddr -> Nothing
-      PrimBox       -> Nothing
+primBox :: Raw -> (String,String)
+primBox r
+  = (\base -> (base ++ "_box", base ++ "_unbox")) $
+    case r of
+      RChar    -> "kk_char"
+      RSSize   -> "kk_ssize"
+      RIntPtr  -> "kk_intptr"
+      RFloat64 -> "kk_double"
+      RFloat32 -> "kk_float"
+      RInt64   -> "kk_int64"
+      RInt32   -> "kk_int32"
+      RInt16   -> "kk_int16"
+      RInt8    -> "kk_int8"
+      RUInt8   -> "kk_uint8"
 
 -- Every advertised scanned word must be a boxed word, at the start of the
 -- object. Counts alone are insufficient for products of mixed aggregates.

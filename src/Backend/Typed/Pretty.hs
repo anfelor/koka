@@ -65,9 +65,23 @@ prettyV t
       VUnit      -> text "I"
       VSum ts    -> parens (hsep (punctuate (text " (+)") (map prettyV ts)))
       VProd x y  -> parens (prettyV x <+> text "(x)" <+> prettyV y)
-      VRaw n     -> nm n
+      VRaw r     -> prettyRaw r
       VExists vs t -> parens (text "exists" <+> hsep (map tv vs) <.> text "." <+> prettyV t)
       VCtx f a b -> text ("ctx" ++ (if f == Full then "+" else "")) <.> angles (commaSep [prettyA a, prettyA b])
+
+prettyRaw :: Raw -> Doc
+prettyRaw r
+  = text (case r of
+            RChar    -> "char"
+            RSSize   -> "ssize_t"
+            RIntPtr  -> "intptr_t"
+            RFloat64 -> "float64"
+            RFloat32 -> "float32"
+            RInt64   -> "int64"
+            RInt32   -> "int32"
+            RInt16   -> "int16"
+            RInt8    -> "int8"
+            RUInt8   -> "uint8")
 
 prettyT :: Ty -> Doc
 prettyT (A a) = prettyA a
