@@ -183,13 +183,13 @@ elabLet def body
        else if hasHole en (C.defExpr def)
          then do (k,v) <- elabVal (C.defExpr def)
                  k <$> withHole x (Just v) (elabExpr body)
-       -- Match introduces aliases for pattern fields. Preserve their getters:
-       -- binding a projected value inside a let would acquire a reference and
-       -- hide the alias from copy propagation before Perceus.
+       -- Match binds a pattern variable where the source first needs it (`Match.guardChain`):
+       -- the field is read there, once. Its binder stays a part of the box (`[proj]`); a `let`
+       -- would bind an owned root and acquire a reference.
        else if fieldAlias en (C.defExpr def)
          then do t <- vt (C.defType def)
-                 getter <- elabValAt t (C.defExpr def)
-                 withFields [(x,getter)] (elabExpr body)
+                 (k,v) <- elabValAt t (C.defExpr def)
+                 k <$> withFields [(x,(id,v))] (elabExpr body)
          else do t  <- vt (C.defType def)
                  e1 <- elabExprAt t (C.defExpr def)
                  e2 <- withLocals [x] (elabExpr body)

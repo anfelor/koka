@@ -63,7 +63,8 @@ shapeIsHeap (ASum ((_,t):ts))
 shapeIsHeap _ = Nothing
 
 -- A product in a box is read in place: code generation binds the contents of the box as a
--- pointer into its block, and each projection binds a place of one field.
+-- pointer into its block, and a projection of a place reads the field into a local, unless
+-- the field is such a product itself.
 readInPlace :: VType -> Bool
 readInPlace t
   = case t of
@@ -72,13 +73,15 @@ readInPlace t
       _ -> False
 
 -- The binders of a destructuring that are places (`[bunbox]`), with the variable that each is
--- a place of: the contents of a box `z` are a place of `z`, and the binder of `[unpack]` of a
--- place `p` is a place of `p`.
+-- a place of: the contents of a box `z` are a place of `z`, and the binders of `[unpack]` and
+-- `[proj]` of a place `p` are places of `p`. Each only if its type is read in place: other
+-- parts of a place are loaded where they are bound.
 placeBinders :: (Path -> Bool) -> VExpr -> [Path] -> [Ty] -> [(Path,Path)]
 placeBinders isPlace e xs ts
   = case e of
       Unbox _ z _ _ -> inPlace z
       Unpack _ (Var p) _ _ _ | isPlace p -> inPlace p
+      Proj _ (Var p) _ _ _ | isPlace p -> inPlace p
       _ -> []
   where
     inPlace z = [(x,z) | (x,V t) <- zip xs ts, readInPlace t]
