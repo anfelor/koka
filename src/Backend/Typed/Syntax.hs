@@ -47,6 +47,11 @@
 
     - Variables of a trivial type are unrestricted: they may be weakened and contracted at either
       mode, and used owned or borrowed. They need no `dup` or `drop`. (Not in the paper.)
+      Those in the contents of a box `z` (on a path with a `contents` step) are read from its
+      block, so only `[dup]`, which loads them, and a case on them (such as one on the
+      immediate side of a split) read them, borrowing the block `z.credit`, until
+      `[unbox-ru]` of `z` takes the contents out of the block. A projection or unpack binds
+      a part of them without reading it, and descriptions do not read them.
     - A unique variable `x :! t` is owned and holds the only reference to its block. It may be used
       as an owned one. Any borrowed use of `x`, or of a variable on its path, may duplicate the
       reference and demotes it to `x : t`; branches agree on the weaker status.
@@ -676,7 +681,8 @@ data VExpr
   -- Duplicate an unboxed variable of any type (its pointers and contexts) into a new root
   -- `y`, the copy. The parts of `x` in scope are not parts of `y`, which has none until it
   -- is destructured. A boxed operand is duplicated through the pointer it was dereferenced
-  -- from.
+  -- from. At a trivial type it is a plain copy: Perceus copies the trivial parts of the
+  -- contents of a box (*loads* them out of its block) before they are read.
   | Dup Path Path VExpr
 
   --   Γ, x :! t ⊢ e₁ : W    Γ, x : t ⊢ e₂ : W    t = Box V with |V| defined, or t = T⟨B̄⟩* with T lazy

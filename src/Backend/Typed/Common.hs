@@ -431,6 +431,14 @@ within (Path x ss) (Path y ts) = x == y && ts `isPrefixOf` ss
 stepsFrom :: Path -> Path -> [Step]
 stepsFrom (Path _ ts) (Path _ ss) = drop (length ts) ss
 
+-- the box whose block holds a variable in its contents: the variable before the last
+-- `contents` step on its path
+boxOf :: Path -> Maybe Path
+boxOf (Path x ss)
+  = case break (== SContents) (reverse ss) of
+      (_,SContents : rest) -> Just (Path x (reverse rest))
+      _ -> Nothing
+
 -- the variable that a destructuring form destructures
 scrutVar :: VExpr -> Maybe Path
 scrutVar expr
