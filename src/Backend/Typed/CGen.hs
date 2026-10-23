@@ -450,10 +450,10 @@ genBox cx tag at v
                                return (stmtExpr [cty ct <+> v <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> clear <.> ";",
                                                  setPath, x <.> "->p =" <+> v <.> ";"] box)
 
--- A projection reads exactly the selected field (`[proj]`), where it is: that of a place
--- binds a place (a sub-place, read at its uses), and that of any other value copies it.
-genProjection :: Ctx -> Dest -> VVal -> [Step] -> Path -> VExpr -> G [Doc]
-genProjection cx dest v ss x e = do
+-- A projection reads exactly the selected field (`[proj]`), where it is, and copies it into a
+-- local. A product read in place stays a place (`isPlace`), read at its uses.
+genProjection :: Ctx -> Dest -> VExpr -> VVal -> [Step] -> Path -> VExpr -> G [Doc]
+genProjection cx dest proj v ss x e = do
   t <- tyOf cx v
   (base,pre) <- case v of
     Var z -> do b <- genVar cx z
@@ -464,9 +464,12 @@ genProjection cx dest v ss x e = do
             return (z,[cty ct <+> z <+> "=" <+> ve <.> ";"])
   (start,u) <- liftC (fieldRange t ss)
   p <- projLeaves t base start u
-  case v of
-    Var z | M.member z (cxPlaces cx) -> genE (bindPlace cx x u p) dest e
-    _ -> do ct <- ctype u
+  if isPlace cx proj x (V u)
+    then genE (bindPlace cx x u p) dest e
+  -- a later pass may remove every use (DropSpec removes the drop of a field that reuse overwrites)
+  else if not (any (`within` x) (fvE e))
+    then genE (bindVar cx x (V u)) dest e
+    else do ct <- ctype u
             body <- genE (bindVar cx x (V u)) dest e
             return (pre ++ [declare (cty ct) x p] ++ body)
 
@@ -517,7 +520,8 @@ genAlias cx dest ve x t e
        return ([declare "kk_box_t" x ve] ++ s)
 
 -- A place stays in its box: it is read at its uses, while the box is alive (Linear), and loaded
--- at `[dup]` and at `[unbox-ru]` (`genUnboxRu`).
+-- at `[proj]` of a field that is not a place (`genProjection`), at `[dup]` and at `[unbox-ru]`
+-- (`genUnboxRu`).
 genUnbox :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
 genUnbox cx dest v x e
   = do A a <- tyOfName cx v
@@ -873,7 +877,7 @@ genE cx dest expr
               let call = "kk_function_call(" <.> cty rct <.> ",(kk_function_t" <.> hcat [", " <.> cty ct | ct <- pcts] <.> ", kk_context_t*),"
                          <.> fx <.> ",(" <.> fx <.> hcat [", " <.> a | a <- args] <.> ", _ctx),_ctx)"
               return [block (("kk_function_t" <+> fx <+> "= kk_datatype_unbox(" <.> localName f <.> ");") : assignTo dest rct call)]
-      Proj _ v ss x e -> genProjection cx dest v ss x e
+      Proj _ v ss x e -> genProjection cx dest expr v ss x e
       Unpack _ v tvs x e
         -> do VExists bs body <- tyOf cx v
               let t = inst bs (map AVar tvs) body

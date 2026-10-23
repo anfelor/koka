@@ -73,13 +73,15 @@
     - `[dup]` binds its copy as a new root, so a variable holds at most one owned reference.
       For example, after `val y = dup z.fst; drop z` the context holds `y : V`.
     - Code generation reads the contents of a box in place (`Layout.placeBinders`): `z.contents`
-      of a product, and the binders of `[proj]` and `[unpack]` of a place, stay in the block of
-      `z`, and a use reads the block. It loads them (copies them out of the block) only at
-      `[dup]` and at `[unbox-ru]` of `z`, which may free or write the block. These rules
-      make that sound: a non-trivial part of `z.contents` is used only before `z` is
-      consumed (after `[unbox-ru]` it is out of scope, and its loaded copy is a part of
-      `z.taken`), and a trivial part only by `[dup]`. Code generation may also load
-      a place at once (`--feager-loads`), which is sound as the box is live at `[bunbox]`.
+      of a product, and the binders of `[proj]` and `[unpack]` of a place that are products
+      themselves, stay in the block of `z`, and a use reads the block. It loads them (copies
+      them out of the block) at `[proj]` of any other field, at `[dup]`, and at `[unbox-ru]`
+      of `z`, which may free or write the block. These rules make that sound: a non-trivial
+      part of `z.contents` is used only before `z` is consumed (after `[unbox-ru]` it is out
+      of scope, and its loaded copy is a part of `z.taken`), and a trivial part only by
+      `[dup]`. A load at a borrowed `[proj]` is sound as the box is live there. Code
+      generation may also load a place at once (`--feager-loads`), which is sound as the box
+      is live at `[bunbox]`.
 
   Constructor contexts
 
