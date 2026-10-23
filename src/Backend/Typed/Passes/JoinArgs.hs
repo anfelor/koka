@@ -33,7 +33,7 @@ joinArgsProgram prog = prog{ progDefs = [d{ defBody = jaE (defScope d) (defBody 
 jaE :: Scope -> VExpr -> VExpr
 jaE scope expr
   = case expr of
-      Join j ps e1 e2
+      Join j tvs ps e1 e2
         -> let e1' = jaE (M.union (scopeOf [x | (x,_,_) <- ps]) scope) e1
                e2' = jaE scope e2
                bound = S.fromList (bindersE e1' ++ bindersE e2')
@@ -44,7 +44,7 @@ jaE scope expr
                sub = M.fromList [(x,Var y) | ((x,_,_),Just y) <- zip ps ys]
                kept :: [a] -> [a]
                kept vs = [v | (v,Nothing) <- zip vs ys]
-           in Join j (kept ps) (substEIn (M.union (scopeOf [x | (x,_,_) <- kept ps]) scope) (valueAt sub) e1') (substJump j (Jump j . kept) e2')
+           in Join j tvs (kept ps) (substEIn (M.union (scopeOf [x | (x,_,_) <- kept ps]) scope) (valueAt sub) e1') (substJump j (\ts -> Jump j ts . kept) e2')
       _ -> runIdentity (descendE Identity (Identity . jaV scope) (\xs e -> Identity (jaE (bindScope expr xs scope) e)) expr)
 
 jaV :: Scope -> VVal -> VVal

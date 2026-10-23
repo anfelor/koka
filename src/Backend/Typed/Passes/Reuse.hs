@@ -140,16 +140,16 @@ ruE expr
         -> do e1' <- ruE e1
               es <- branches [([(x,V t)],e2),([],e3)]
               return (LetYield x t e1' (es !! 0) (es !! 1))
-      Join j ps e1 e2
+      Join j tvs ps e1 e2
         -> do (e1',as) <- scope (Just []) (bind [(x,V t) | (x,_,t) <- ps] (ruE e1))
               let rs = fromMaybe [] as
               e2' <- local (\re -> re{ reJoins = M.insert j (map snd rs) (reJoins re) }) (ruE e2)
-              return (Join j (ps ++ [(r,Owned,VReuse MaybeEmpty n Nothing) | (r,n) <- rs]) e1' e2')
-      Jump j vs
+              return (Join j tvs (ps ++ [(r,Owned,VReuse MaybeEmpty n Nothing) | (r,n) <- rs]) e1' e2')
+      Jump j ts vs
         -> do vs' <- mapM ruV vs
               ns  <- asks (M.findWithDefault [] j . reJoins)
               rs  <- mapM takeCredit ns
-              return (Jump j (vs' ++ [maybe (NoReuse n Nothing) Var r | (r,n) <- zip rs ns]))
+              return (Jump j ts (vs' ++ [maybe (NoReuse n Nothing) Var r | (r,n) <- zip rs ns]))
       CaseLit v alts def
         -> do es <- branches [([],e) | e <- map snd alts ++ [def]]
               return (CaseLit v (zip (map fst alts) es) (last es))

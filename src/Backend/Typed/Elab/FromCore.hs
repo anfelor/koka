@@ -22,6 +22,8 @@ import Type.Type
 import qualified Core.Core as C
 import Core.Core( TName(..), typeOf )
 import qualified Core.CoreVar as CV
+import Core.Pretty()
+import qualified Type.TypeVar as TV
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Elab.Types( typeDefs )
@@ -37,7 +39,7 @@ import Backend.Typed.Pretty( ppr )
 
 elabProgram :: Platform -> Newtypes -> [C.Core] -> C.Core -> (Program,[String],[String])
 elabProgram platform nt imports core
-  = let defs    = filter (not . isContextAccessor) (C.flattenDefGroups (C.coreProgDefs core))
+  = let defs    = map closeDef (filter (not . isContextAccessor) (C.flattenDefGroups (C.coreProgDefs core)))
         isigs   = M.fromList [(n,withModes modes sig) | (n,(tp,isFun,modes)) <- M.toList (importSigs (core:imports)), Right sig <- [typeSig nt tp isFun]]
         env0    = Env nt S.empty S.empty isigs M.empty S.empty M.empty
         tdefs   = typeDefs platform nt
@@ -48,6 +50,10 @@ elabProgram platform nt imports core
                  Left err -> (sigs, ds, errs ++ [label err], notes)
         (sigs,ds,errs,notes) = foldl run (M.empty,[],[],[]) defs
     in (Program (C.coreProgName core) tdefs sigs ds, errs, notes)
+
+-- Koka leaves the type variables that nothing constrains free: they become `any`
+closeDef :: C.Def -> C.Def
+closeDef def = TV.subNew [(tv,typeAny) | tv <- TV.tvsList (TV.ftv def), tvarStar tv] TV.|-> def
 
 -- Koka's accessors of the fields of its abstract `cctx` would expose the hole. A context is
 -- abstract in the IR, so they are left out.
@@ -143,15 +149,18 @@ elabExpr :: C.Expr -> E VExpr
 elabExpr expr
   = case expr of
       C.Let [] body -> elabExpr body
-      C.Let (C.DefNonRec (C.Def{ C.defName = j, C.defExpr = C.Lam pars _ e1 }) : dgs) body | isJoinName j
+      C.Let (C.DefNonRec (C.Def{ C.defName = j, C.defExpr = lam }) : dgs) body | isJoinName j, Just (tvs,pars,e1) <- splitLam lam
         -> do let linear = linearContexts e1
-              ps  <- mapM (\p -> (\t -> (root (getName p),paramMode Own (S.member (getName p) linear),t)) <$> vt (tnameType p)) pars
-              e1' <- withLocals (map getName pars) (elabExpr e1)
-              Join j ps e1' <$> elabExpr (C.Let dgs body)
-      C.App (C.Var (TName j tp) _) args | isJoinName j, Just (pars,_,_) <- splitFunType tp
-        -> do (ks,vs) <- unzip <$> mapM (\((_,ptp),arg) -> do t <- vt ptp
+                  tvs'   = [typevarId tv | tv <- tvs, tvarStar tv]
+              (ps,e1') <- withTVars tvs' $
+                          do ps <- mapM (\p -> (\t -> (root (getName p),paramMode Own (S.member (getName p) linear),t)) <$> vt (tnameType p)) pars
+                             (,) ps <$> withLocals (map getName pars) (elabExpr e1)
+              Join j tvs' ps e1' <$> elabExpr (C.Let dgs body)
+      C.App f args | (Just (TName j tp,_),tys) <- splitTypeApp f, isJoinName j, Just (pars,_,_) <- splitFunType (typeOf f)
+        -> do tys' <- instArgs tp tys
+              (ks,vs) <- unzip <$> mapM (\((_,ptp),arg) -> do t <- vt ptp
                                                               elabValAt t arg) (zip pars args)
-              return (compose ks (Jump j vs))
+              return (compose ks (Jump j tys' vs))
       C.Let (C.DefNonRec def : dgs) body
         -> elabLet def (C.Let dgs body)
       C.Let (C.DefRec defs : _) _

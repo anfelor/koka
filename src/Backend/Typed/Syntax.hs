@@ -18,7 +18,7 @@
   Contexts and judgements
 
     Γ ::= ∅ | Γ, x :q V | Γ, x :q A             variables
-    J ::= ∅ | J, j : Γ_c; (q̄ V̄) -> W           join points in scope, with their captures
+    J ::= ∅ | J, j : Γ_c; ∀ā. (q̄ V̄) -> W       join points in scope, with their captures
     Σ                                          signatures (`Sigs`)
 
     Γ ⊢ a :q A       the boxed value a has type A
@@ -721,9 +721,9 @@ data VExpr
   -- has tag tag(z).
   | UnboxRu Path Path VExpr
 
-  --   Γ_c, x̄ :q̄ V̄ | J ⊢ e₁ : W    Γ, Γ_c | J, j : Γ_c; (q̄ V̄) -> W ⊢ e₂ : W
-  --  ──────────────────────────────────────────────────────────────────── [join]
-  --   Γ, Γ_c | J ⊢ join j(x̄ :q̄ V̄) = e₁ in e₂ : W
+  --   Γ_c, x̄ :q̄ V̄ | J ⊢ e₁ : W    Γ, Γ_c | J, j : Γ_c; ∀ā. (q̄ V̄) -> W ⊢ e₂ : W    ā ∉ ftv(Γ_c, W)
+  --  ────────────────────────────────────────────────────────────────────────────────── [join]
+  --   Γ, Γ_c | J ⊢ join j⟨ā⟩(x̄ :q̄ V̄) = e₁ in e₂ : W
   --
   -- A join point captures the variables Γ_c that are free in its body (those that are
   -- not parts of other free variables, see "Structural rules"), and is not
@@ -737,14 +737,16 @@ data VExpr
   -- `ExpandReuse` introduce captures. A captured variable must not be bound again in e₂, so every jump sees
   -- the same variable. The descriptions in V̄ do not name the parameters x̄, as every jump
   -- binds them to different values (a jump can only pass an empty credit for them).
-  | Join Name [(Path,Mode,VType)] VExpr VExpr
+  -- The type parameters ā abstract over the witnesses of existentials that are unpacked
+  -- before the jumps (`Elab.Match`).
+  | Join Name [TVar] [(Path,Mode,VType)] VExpr VExpr
 
-  --   j : Γ_c; (q̄ V̄) -> W ∈ J    Γᵢ ⊢ vᵢ :qᵢ Vᵢ
-  --  ──────────────────────────────────────────────── [jump]
-  --   Γ_c, Γ₁, ..., Γₙ | J ⊢ jump j(v₁, ..., vₙ) : W
+  --   j : Γ_c; ∀ā. (q̄ V̄) -> W ∈ J    Γᵢ ⊢ vᵢ :qᵢ Vᵢ[B̄/ā]
+  --  ──────────────────────────────────────────────────────── [jump]
+  --   Γ_c, Γ₁, ..., Γₙ | J ⊢ jump j[B̄](v₁, ..., vₙ) : W
   --
   -- A jump passes the captured variables to the join point as well as its arguments.
-  | Jump Name [VVal]
+  | Jump Name [AType] [VVal]
   deriving (Eq,Show)
 
 -- Definitions `⊢ def`, with `f : ∀ā. (q̄ V̄) -> W ∈ Σ` and `x : ∀ā. V ∈ Σ`

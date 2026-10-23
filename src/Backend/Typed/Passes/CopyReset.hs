@@ -51,6 +51,7 @@
 -}
 module Backend.Typed.Passes.CopyReset( copyResetProgram ) where
 
+import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
 import Data.Functor.Identity( Identity(..) )
@@ -58,6 +59,7 @@ import Data.Monoid( Sum(..), Any(..), All(..) )
 import Control.Monad.State
 import Backend.Typed.Syntax
 import Backend.Typed.Common
+import Backend.Typed.Types( Types(..) )
 
 type C a = State NameSupply a
 
@@ -79,14 +81,15 @@ crE expr
         -> do e1 <- crE e
               e2 <- cloneE (state (freshPathFrom "cr")) (emptied r (NoReuse n p) e)
               return (IsUnique z (atRet (\v -> Let r (VReuse Full n p) (Ret v) e1) u) (atRet (const e2) s))
-      Join j ps e (IsUnique z u s)
-        | [Jump j1 vs1] <- ends u, [Jump j2 vs2] <- ends s, j1 == j, j2 == j
+      Join j tvs ps e (IsUnique z u s)
+        | [Jump j1 ts1 vs1] <- ends u, [Jump j2 ts2 vs2] <- ends s, j1 == j, j2 == j
         , ((i,r,n,p):_) <- [(i,r,n,p) | (i,((r,_,VReuse MaybeEmpty n p),Var c,NoReuse _ _)) <- zip [0 :: Int ..] (zip3 ps vs1 vs2), S.member c (unboxRuCredits u)]
         , consumed False r e, straightReuse r e, not (allocatesFresh e), size e <= copyLimit, apart u e, apart s e
         -> do e1 <- crE e
-              let lets vs body = foldr (\((y,_,t),v) -> Let y t (Ret v)) body [b | (k,b) <- zip [0..] (zip ps vs), k /= i]
-              e2 <- cloneE (state (freshPathFrom "cr")) (lets vs2 (emptied r (NoReuse n p) e))
-              return (IsUnique z (atEnd (const (lets vs1 (Let r (VReuse Full n p) (Ret (vs1 !! i)) e1))) u) (atEnd (const e2) s))
+              let lets ts vs body = let sub = M.fromList (zip tvs ts)
+                                    in foldr (\((y,_,t),v) -> Let y (subst sub t) (Ret v)) (substTypesE sub body) [b | (k,b) <- zip [0..] (zip ps vs), k /= i]
+              e2 <- cloneE (state (freshPathFrom "cr")) (lets ts2 vs2 (emptied r (NoReuse n p) e))
+              return (IsUnique z (atEnd (const (lets ts1 vs1 (Let r (VReuse Full n p) (Ret (vs1 !! i)) e1))) u) (atEnd (const e2) s))
       _ -> descendE pure crV (\_ -> crE) expr
 
 -- the credits that `[unbox-ru]` binds in an expression
@@ -170,7 +173,7 @@ consumed freeing r expr
       Free r' e -> if r' == r then freeing else consumed freeing r e
       Let _ _ e1 e2 | isStatement e1 -> if mentions e1 then direct e1 else consumed freeing r e2
                     | otherwise -> not (mentions e1) && consumed freeing r e2
-      Join _ _ e1 e2 -> not (mentions e1) && consumed freeing r e2
+      Join _ _ _ e1 e2 -> not (mentions e1) && consumed freeing r e2
       IfFull r' _ _ | r' == r -> False
       _ | isStatement expr -> direct expr
       _ -> getAll (getConst (descendE (const (Const (All True))) (\v -> Const (All (not (S.member r (fvV v)))))
