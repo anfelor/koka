@@ -10,7 +10,11 @@
 {- Linearity checker for programs after Perceus.
 
   Variables of a trivial type (without pointers, also through named types: `trivialTy`) are
-  unrestricted. Every other variable is a path (see
+  unrestricted, except that one in the contents of a box `z` (on a path with a `contents`
+  step, `boxOf`) is read from the block of `z`: only `val y = dup x`, which loads it, and a
+  case on it may read it, and they read the block `z.credit`, unless `UnboxRu` took the
+  contents of `z` out of its block (`Taken`). A projection or unpack of it binds a part
+  without reading it, and descriptions do not read it. Every other variable is a path (see
   `Syntax.Path`) and has the mode of its owner, the longest variable on its path that is a
   root (or, in the body of a join point, a variable it captures). An owned root holds one
   reference, which must be consumed exactly once on every path; a borrowed root (a borrowed
@@ -111,7 +115,10 @@ data Use = Use{ uConsumed :: Keys, uNeeded :: Keys, uBorrowed :: S.Set Path, uUn
 -- the places in scope, with the credits of their blocks (if places are checked)
 type Places = Maybe (M.Map Path Path)
 
-type L a = M (Owners,Places) Trivial a
+-- the boxes whose contents `[unbox-ru]` took out of their blocks
+type Taken = S.Set Path
+
+type L a = M (Owners,Places,Taken) Trivial a
 
 -- the modes of the parameters of the join points in scope, and the variables they capture
 -- with their modes
@@ -129,7 +136,7 @@ checkDef places env def
         -> run (M.fromList [(x,V t) | (x,_,t) <- args]) (params env args) body
       DefVal _ _ _ body -> run M.empty [] body
   where
-    run g ps body = evalM (closed ps (checkE env g M.empty body)) (M.empty,if places then Just M.empty else Nothing) S.empty
+    run g ps body = evalM (closed ps (checkE env g M.empty body)) (M.empty,if places then Just M.empty else Nothing,S.empty) S.empty
 
 -- the parameters that are not of a trivial type
 params :: Env -> [(Path,Mode,VType)] -> [(Path,Mode)]
@@ -256,16 +263,16 @@ leave xs u
                    (S.filter (not . mine) (uBorrowed u)) (S.filter (not . mine) (uUnique u)))
 
 withOwners :: [(Path,Mode)] -> L a -> L a
-withOwners xs = local (\(os,pl) -> (M.union (M.fromList xs) os,pl))
+withOwners xs = local (\(os,pl,tk) -> (M.union (M.fromList xs) os,pl,tk))
 
 -- the scope of binders that are places of the boxes (or places) given with them: a place of a
 -- box `z` is read through its block `z.credit`
 withPlaces :: [(Path,Path)] -> L a -> L a
-withPlaces xs = local (\(os,pl) -> (os,fmap (\m -> M.union (M.fromList [(x,M.findWithDefault (child z SCredit) z m) | (x,z) <- xs]) m) pl))
+withPlaces xs = local (\(os,pl,tk) -> (os,fmap (\m -> M.union (M.fromList [(x,M.findWithDefault (child z SCredit) z m) | (x,z) <- xs]) m) pl,tk))
 
 -- the credit that a place is read through
 creditOf :: Path -> L (Maybe Path)
-creditOf x = asks (\(_,pl) -> pl >>= M.lookup x)
+creditOf x = asks (\(_,pl,_) -> pl >>= M.lookup x)
 
 -- the scope of binders that are new roots with a mode
 roots :: Env -> Mode -> [(Path,Ty)] -> L Use -> L Use
@@ -276,7 +283,7 @@ roots env m bs check
 -- a body (of a function or closure) whose only variables are its parameters
 closed :: [(Path,Mode)] -> L Use -> L ()
 closed ps check
-  = do u <- local (\(_,pl) -> (M.fromList ps,fmap (const M.empty) pl)) check
+  = do u <- local (\(_,pl,_) -> (M.fromList ps,fmap (const M.empty) pl,S.empty)) check
        _ <- leave ps u
        return ()
 
@@ -285,7 +292,7 @@ closed ps check
 -- the mode of a variable: that of the longest variable on its path that is an owner
 ownerMode :: Path -> L Mode
 ownerMode x
-  = do os <- asks fst
+  = do os <- asks (\(os,_,_) -> os)
        case [m | p <- x : reverse (prefixes x), Just m <- [M.lookup p os]] of
          (m:_) -> return m
          [] -> fail ("unbound variable " ++ show x)
@@ -305,13 +312,32 @@ useVar env g m b x
 -- is owned (as unique if the mode is) and borrows the variable if `b`.
 useRef :: Env -> Gamma -> Mode -> Bool -> Path -> L Use
 useRef env g m b x
-  | trivialVar env g x = return noUse
+  | trivialVar env g x = loaded x
   | otherwise
   = do o <- ownerMode x
        when (m == Unique && o == Borrowed) (fail ("unique use of a variable that is not unique: " ++ show x))
        p <- keyOf x
        return (Use (if owning m then S.singleton p else S.empty) (S.singleton p) (if b then S.singleton p else S.empty)
                    (if m == Unique then S.singleton p else S.empty))
+
+-- A variable of a trivial type in the contents of a box is read from the block of the box, so
+-- only a dup or a case may read it (`loadOf`), unless `[unbox-ru]` took the contents out of
+-- the block.
+loaded :: Path -> L Use
+loaded x
+  = do tk <- asks (\(_,_,tk) -> tk)
+       case boxOf x of
+         Just z | S.notMember z tk -> fail ("read of a trivial part of the contents of a box that is not loaded: " ++ show x)
+         _ -> return noUse
+
+-- A dup of a variable of a trivial type in the contents of a box `z` loads it: it reads the
+-- block `z.credit`, unless `[unbox-ru]` took the contents out of the block.
+loadOf :: Env -> Gamma -> Path -> L Use
+loadOf env g x
+  = do tk <- asks (\(_,_,tk) -> tk)
+       case boxOf x of
+         Just z | S.notMember z tk -> useRef env g Borrowed False (child z SCredit)
+         _ -> return noUse
 
 -- consume a reference
 consume, uniqueName :: Env -> Gamma -> Path -> L Use
@@ -433,10 +459,10 @@ checkE env g js expr
              (fail ("unique destructuring of a value that is not a pointer: " ++ show v))
            t <- infer
            tss <- liftE (altTypes env t expr)
-           pl <- asks snd
+           pl <- asks (\(_,pl,_) -> pl)
            let isPlace p = maybe False (M.member p) pl
                places = concat [placeBinders isPlace expr xs ts | ((xs,_),ts) <- zip alts tss]
-           withPlaces places (destruct env g js m v [(zip xs ts, e) | ((xs,e),ts) <- zip alts tss])
+           withPlaces places (destruct env g js m (bindsPart expr) v [(zip xs ts, e) | ((xs,e),ts) <- zip alts tss])
 checkE env g js expr
   = case expr of
       Ret v -> ownedV env g v
@@ -465,7 +491,7 @@ checkE env g js expr
                             let xs = [x | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
                             cs <- mapM creditOf fvs
                             let blocks = S.toList (S.fromList [c | Just c <- cs, not (any (c `within`) xs)])
-                            u <- local (\(_,pl) -> (M.fromList (params env ps ++ [(x,Unique) | x <- xs] ++ [(c,Borrowed) | c <- blocks]),pl))
+                            u <- local (\(_,pl,tk) -> (M.fromList (params env ps ++ [(x,Unique) | x <- xs] ++ [(c,Borrowed) | c <- blocks]),pl,tk))
                                        (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) js e1)
                             -- a jump reads the captured places before it consumes their credits
                             let (inPlace,others) = partition (`elem` [y | (y,Just _) <- zip fvs cs]) xs
@@ -483,7 +509,7 @@ checkE env g js expr
       -- the copy is a new root
       Dup x y e -> do t <- liftE (inferVar g x)
                       liftE (checkDupType t)
-                      before (inspect env g x) (roots env Owned [(y,t)] (checkE env (bindAll [(y,t)] g) js e))
+                      before ((if trivialVar env g x then loadOf else inspect) env g x) (roots env Owned [(y,t)] (checkE env (bindAll [(y,t)] g) js e))
       -- the test reads the variable without borrowing it, which is unique in the first branch
       IsUnique x e1 e2 -> do m <- ownerMode x
                              when (m == Borrowed) (fail ("uniqueness test of a variable that is not owned: " ++ show x))
@@ -496,12 +522,13 @@ checkE env g js expr
                            u2 <- before (consume env g r) (checkE env g js e2)
                            before (readVar env g r) (branches [u1, u2])
       -- a unique use of `z` that consumes its block `z.credit` (leaving its contents) and binds
-      -- the block as a new root, through which the places of `z` are read
+      -- the block as a new root, through which the places of `z` are read; the contents are
+      -- taken out of the block, so their trivial parts are loaded
       UnboxRu z r e
         -> do bs <- liftE (unboxRuBinds g z r)
               u <- uniqueName env g z
               c <- keyOf (child z SCredit)
-              let credit = local (\(os,pl) -> (os,fmap (M.map (\p -> if p == child z SCredit then r else p)) pl))
+              let credit = local (\(os,pl,tk) -> (os,fmap (M.map (\p -> if p == child z SCredit then r else p)) pl,S.insert z tk))
               before (return u{ uConsumed = S.singleton c }) (credit (roots env Owned bs (checkE env (bindAll bs g) js e)))
       CaseLit v alts def -> before (borrowedV env g v) (branches =<< mapM (checkE env g js) (def : map snd alts))
       _ -> fail "unexpected destructuring form"
@@ -525,12 +552,20 @@ checkE env g js expr
                    else if null (overlapping (uConsumed u) (S.singleton k)) then (x,Borrowed)
                    else (x,Owned))
 
+-- a projection or an unpack binds a part of its scrutinee without reading it
+bindsPart :: VExpr -> Bool
+bindsPart expr
+  = case expr of
+      Proj{} -> True
+      Unpack{} -> True
+      _ -> False
+
 -- The binders of a destructuring of a variable are its parts, and an owned or unique
 -- destructuring consumes those of a trivial type. A unique destructuring consumes its
 -- scrutinee as unique, so its alternatives must consume the scrutinee. The binders of a
 -- destructuring of another value are new roots with the mode of the destructuring.
-destruct :: Env -> Gamma -> Joins -> Mode -> VVal -> [([(Path,Ty)],VExpr)] -> L Use
-destruct env g js m v alts
+destruct :: Env -> Gamma -> Joins -> Mode -> Bool -> VVal -> [([(Path,Ty)],VExpr)] -> L Use
+destruct env g js m part v alts
   = case v of
       Var z -> do zc <- keyOf z
                   rs <- sequence [alt zc bs e | (bs,e) <- alts]
@@ -545,12 +580,16 @@ destruct env g js m v alts
                                    in branches [if whole then adopt u else u | (whole,u) <- rs]
                          [] -> branches (map snd rs)
                   if m /= Unique || trivialVar env g z
-                    then before (readVar env g z) (return u)
+                    then before scrutinee (return u)
                     else do unless (S.filter (`within` zc) (refine tr [zc] (uConsumed u)) == S.singleton zc)
                               (fail ("unique destructuring does not consume its scrutinee: " ++ show z))
                             use <- uniqueName env g z
                             return u{ uNeeded = S.union (uNeeded use) (uNeeded u), uUnique = S.union (uUnique use) (uUnique u) }
                   where
+                    -- a case on a trivial part of the contents of a box reads its block, like a dup
+                    scrutinee | not (trivialVar env g z) = readVar env g z
+                              | part = return noUse
+                              | otherwise = loadOf env g z
                     -- The parts of a trivial type need no references. A binder of a trivial type
                     -- that is all of `z` (see `key`) makes `z` trivial in its alternative.
                     alt zc bs e

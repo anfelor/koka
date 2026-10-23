@@ -41,6 +41,11 @@
   parts of a copy that it binds itself (`renameCopies`). Only the function of `[app]` is
   copied at a boxed type, through the pointer it is the dereference of.
 
+  A variable of a trivial type needs no references, but one in the contents of a box is read
+  from the block of the box, which may be freed or reused once the box is consumed. It is
+  therefore copied (a load) where it is first read (`loadsOf`) or before its owner is given
+  up while it is still needed, whichever comes first, and the later uses read the copy.
+
   Exception (as Koka's Parc): `lazy-eval-locked` *takes* the fields of the lazy value
   `@lazy` in every branch that passes `@lazy` on. The parts of `@lazy` are borrowed
   without duplication and the contents of its box are taken as owned (`UnboxLazy`), so that
@@ -57,6 +62,7 @@ import qualified Data.Set as S
 import Control.Monad( foldM )
 import Data.Functor.Const( Const(..) )
 import Data.List( isSuffixOf, partition )
+import Data.Maybe( isJust, isNothing )
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
@@ -131,10 +137,15 @@ partsOf pe z
 -- evaluation have none
 ownerOf :: PEnv -> VarSet -> Path -> Maybe Path
 ownerOf pe owned x
-  | S.member x owned || maybe True (trivialTy (peEnv pe)) (M.lookup x (peGamma pe)) = Nothing
+  | S.member x owned || maybe True (unrestricted pe x) (M.lookup x (peGamma pe)) = Nothing
   | otherwise = case [z | z <- reverse (prefixes x), S.member z owned] of
                   (z:_) | Just z /= peLazy pe -> Just z
                   _ -> Nothing
+
+-- A variable of a trivial type needs no references, unless it is in the contents of a box,
+-- where it is read from the block (see `copy`).
+unrestricted :: PEnv -> Path -> Ty -> Bool
+unrestricted pe x t = trivialTy (peEnv pe) t && isNothing (boxOf x)
 
 pointer :: Ty -> Bool
 pointer t
@@ -252,6 +263,9 @@ tyOfVar :: PEnv -> Path -> P Ty
 tyOfVar pe x = maybe (fail ("unknown variable " ++ show x)) return (M.lookup x (peGamma pe))
 
 percE' :: PEnv -> VarSet -> VExpr -> P VExpr
+percE' pe owned expr
+  | xs@(_:_) <- loadsOf pe expr
+  = withCopies pe owned xs return expr
 percE' pe owned (Unbox m z x e)
   | Just lz <- peLazy pe, z `within` lz, S.member lz owned, S.member lz (fvE e)
   = do t <- tyOfVar pe z
@@ -341,12 +355,14 @@ percE' pe owned expr
 
 -- A copy of a variable for a use that takes it: a new root with a duplicate of the variable,
 -- or of the pointer of a closure, which it is the dereference of (a closure is not under a
--- sum). It comes with the duplication, the variable, and the binders of the copy.
+-- sum). It comes with the duplication, the variable, and the binders of the copy. A variable
+-- of a trivial type is not copied, unless it is in the contents of a box: its copy loads it
+-- out of the block (see `loadsOf`).
 copy :: PEnv -> Path -> P (K,Path,Path,[(Path,Ty)])
 copy pe x
   = do t <- tyOfVar pe x
        case (t,x) of
-         _ | trivialTy (peEnv pe) t -> return (id,x,x,[])
+         _ | unrestricted pe x t -> return (id,x,x,[])
          (V _,_) -> do y <- fresh "u"
                        return (Dup x y,x,y,[(y,t)])
          (A _,Path r ss) | (SDeref : rest) <- reverse ss
@@ -357,13 +373,29 @@ copy pe x
                  return (Dup p q . Deref Borrowed (Var q) y,x,y,[(q,tp),(y,t)])
          _ -> fail ("duplication of a boxed variable that is not a dereferenced pointer: " ++ show x)
 
+-- The trivial variables in the contents of boxes that an expression reads before its
+-- subexpressions in tail position: they are copied there, so that every later use reads the
+-- copy (a load), even after the box is consumed. A projection or unpack of a variable binds a
+-- part of it without reading it, and a dup copies it already.
+loadsOf :: PEnv -> VExpr -> [Path]
+loadsOf pe expr = [x | x <- S.toList here, Just t <- [M.lookup x (peGamma pe)], trivialTy (peEnv pe) t, isJust (boxOf x)]
+  where
+    here = case expr of
+           Let _ _ e1 _ -> fvE e1
+           LetYield _ _ e1 _ _ -> fvE e1
+           Proj _ (Var _) _ _ _ -> S.empty
+           Unpack _ (Var _) _ _ _ -> S.empty
+           Dup{} -> S.empty
+           _ -> getConst (descendE (Const . S.singleton) (Const . fvV) (\_ _ -> Const S.empty) expr)
+
 -- Copy the variables `xs` for an expression, which takes the copies as owned; `k` comes
 -- between the copies and the expression.
 withCopies :: PEnv -> VarSet -> [Path] -> (VExpr -> P VExpr) -> VExpr -> P VExpr
 withCopies pe owned xs k expr
   = do cs <- mapM (copy pe) xs
        let ren = [(x,y) | (_,x,y,_) <- cs, x /= y]
-       body <- percE (bind pe (concat [bs | (_,_,_,bs) <- cs])) (S.union owned (S.fromList (map snd ren)))
+           bs  = concat [bs' | (_,_,_,bs') <- cs]
+       body <- percE (bind pe bs) (S.union owned (ownedOf pe [b | b@(y,_) <- bs, y `elem` map snd ren]))
                      (renameCopies (peGamma pe) ren expr)
        compose [d | (d,_,_,_) <- cs] <$> k body
 
