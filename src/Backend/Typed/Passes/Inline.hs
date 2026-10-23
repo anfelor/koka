@@ -20,7 +20,8 @@
   after `JoinArgs`, so that a captured variable is inlined into the join body as well.
 
   In an enum alternative, a reused payload can name its old enum field instead of the
-  equal constructor constant. Only fields still in scope are used; enum values carry no
+  equal constructor constant, or a variable with its bits (`sameBits`), such as the copy
+  that Perceus loads it into. Only variables still in scope are used; enum values carry no
   ownership. Descriptions and the checking rules stay unchanged.
 
   Bindings that keep a literal dereference named are retained, preserving its operand
@@ -46,7 +47,7 @@ type Values = M.Map Path VVal
 inlineProgram :: Program -> (Program,[String])
 inlineProgram prog
   = let inlined = prog{ progDefs = map inlineDef (progDefs prog) }
-        run d = case evalM (reuseE (defBody d)) (envOf inlined,params d,M.empty) () of
+        run d = case evalM (reuseE (defBody d)) (envOf inlined,params d,M.empty,sources (defBody d)) () of
                   Right e -> (d{ defBody = e },[])
                   Left err -> (d,[show (defName d) ++ ": " ++ err])
         (defs,errs) = unzip (map run (progDefs inlined))
@@ -126,27 +127,28 @@ inlineA vals val
       Lam ps r e -> Lam ps r (inlineE vals e)
       _ -> mapA id (inlineA vals) (inlineV vals) val
 
--- The enum facts are local to a branch, unlike the structural lets above.
-type Reuse a = M (Env,Gamma,Values) () a
+-- The enum facts are local to a branch, unlike the structural lets above. The sources of
+-- the definition give the variables with the bits of others.
+type Reuse a = M (Env,Gamma,Values,Sources) () a
 
 bindReuse :: [(Path,Ty)] -> Reuse a -> Reuse a
-bindReuse bs = local (\(env,g,facts) -> (env,bindAll bs g,facts))
+bindReuse bs = local (\(env,g,facts,src) -> (env,bindAll bs g,facts,src))
 
 reuseE :: VExpr -> Reuse VExpr
 reuseE expr
   | Just ds <- destructAOf expr
-  = do (env,g,_) <- ask
+  = do (env,g,_,_) <- ask
        t <- liftE (inferVar g (dsScrut ds))
        tss <- liftE (altTypes env t expr)
        es <- sequence [bindReuse (zip xs ts) (reuseE e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
        return (dsBuild ds (dsMode ds) (dsScrut ds) es)
   | Just ds <- destructVOf expr
-  = do (env,g,_) <- ask
+  = do (env,g,_,_) <- ask
        t <- liftE (inferV env g (dsScrut ds))
        tss <- liftE (altTypes env (V t) expr)
        let enumBranch :: Int -> Reuse a -> Reuse a
            enumBranch i = case expr of
-             CaseV _ (Var z) _ | enumType t -> local (\(env,g,facts) -> (env,g,M.insert z (Inj i t UnitV) facts))
+             CaseV _ (Var z) _ | enumType t -> local (\(env,g,facts,src) -> (env,g,M.insert z (Inj i t UnitV) facts,src))
              _ -> id
        v <- reuseV (dsScrut ds)
        es <- sequence [bindReuse (zip xs ts) (enumBranch i (reuseE e)) | (i,((xs,e),ts)) <- zip [0..] (zip (dsAlts ds) tss)]
@@ -156,10 +158,10 @@ reuseE expr
       Let x t e1 e2 -> Let x t <$> reuseE e1 <*> bindReuse [(x,V t)] (reuseE e2)
       LetYield x t e1 e2 e3 -> LetYield x t <$> reuseE e1 <*> bindReuse [(x,V t)] (reuseE e2) <*> reuseE e3
       Join j ps e1 e2 -> Join j ps <$> bindReuse [(x,V t) | (x,_,t) <- ps] (reuseE e1) <*> reuseE e2
-      UnboxRu z r e -> do (_,g,_) <- ask
+      UnboxRu z r e -> do (_,g,_,_) <- ask
                           bs <- liftE (unboxRuBinds g z r)
                           UnboxRu z r <$> bindReuse bs (reuseE e)
-      Dup x y e -> do (_,g,_) <- ask
+      Dup x y e -> do (_,g,_,_) <- ask
                       t <- liftE (inferVar g x)
                       Dup x y <$> bindReuse [(y,t)] (reuseE e)
       _ -> descendE pure reuseV (\_ -> reuseE) expr
@@ -174,21 +176,24 @@ reuseV = descendV reuseA reuseV
 reuseA :: AVal -> Reuse AVal
 reuseA val
   = case val of
-      BoxAt r v -> do (_,g,facts) <- ask
+      BoxAt r v -> do (_,g,facts,src) <- ask
                       v' <- reuseV v
                       t <- liftE (inferVar g r)
                       return (BoxAt r (case t of
-                        V (VReuse _ _ (Just (Contents _ old _))) -> restore g facts old v'
+                        V (VReuse _ _ (Just (Contents _ old _))) -> restore g facts src old v'
                         _ -> v'))
       Lam ps r e -> Lam ps r <$> bindReuse [(x,V t) | (x,_,t) <- ps]
-                                  (local (\(env,g,_) -> (env,g,M.empty)) (reuseE e))
+                                  (local (\(env,g,_,src) -> (env,g,M.empty,src)) (reuseE e))
       _ -> descendA pure reuseA reuseV val
 
--- Prefer the old field's variable only where the branch proves it equals the new
--- constant. Description names may be out of scope, and must not become runtime uses.
-restore :: Gamma -> Values -> VVal -> VVal -> VVal
-restore g facts old new
-  | Var x <- old, Just (V t) <- M.lookup x g, enumType t, M.lookup x facts == Just new = Var x
+-- Prefer the old field's variable, or one with its bits, only where the branch proves it
+-- equals the new constant. Description names may be out of scope, and must not become
+-- runtime uses.
+restore :: Gamma -> Values -> Sources -> VVal -> VVal -> VVal
+restore g facts src old new
+  | Var x <- old
+  , (y:_) <- [y | y <- x : M.keys facts, y == x || sameBits src y == x, Just (V t) <- [M.lookup y g], enumType t, M.lookup y facts == Just new]
+  = Var y
   | Pair a b <- new, Just x <- project old [SFst], Just y <- project old [SSnd]
-  = Pair (restore g facts x a) (restore g facts y b)
+  = Pair (restore g facts src x a) (restore g facts src y b)
   | otherwise = new

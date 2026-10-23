@@ -877,3 +877,42 @@ keepsPointer expr
       UnboxRu{}   -> False
       Join{}      -> False
       Jump{}      -> False
+
+-- Where a variable gets the bits of another variable: a copy (`[dup]`) gets those of its
+-- variable, and a parameter of a join point those of its arguments.
+data Source = Copy Path | Param [VVal]
+
+type Sources = M.Map Path Source
+
+sources :: VExpr -> Sources
+sources expr = M.union here (getConst (descendE (const (Const M.empty)) (Const . sourcesV) (\_ e -> Const (sources e)) expr))
+  where
+    here = case expr of
+             Dup x y _ -> M.singleton y (Copy x)
+             Join j ps _ e2 -> M.fromList [(y,Param [vs !! i | vs <- jumpArgs j e2]) | (i,(y,_,_)) <- zip [0..] ps]
+             _ -> M.empty
+    sourcesV = getConst . descendV (Const . sourcesA) (Const . sourcesV)
+    sourcesA a = case a of
+                   Lam _ _ e -> sources e
+                   _ -> getConst (descendA (const (Const M.empty)) (Const . sourcesA) (Const . sourcesV) a)
+
+-- The variable whose bits a variable has, through the longest prefix of its path that has a
+-- source: a join parameter has the bits of its arguments if they are the same.
+sameBits :: Sources -> Path -> Path
+sameBits src x@(Path r ss)
+  = case [(k,s) | k <- [length ss, length ss - 1 .. 0], Just s <- [M.lookup (Path r (take k ss)) src]] of
+      ((k,s):_) -> case s of
+                     Copy y -> extend (sameBits src y) (drop k ss)
+                     Param vs | Just (y:ys) <- mapM sameOf vs, all (== y) ys -> extend y (drop k ss)
+                     _ -> x
+      [] -> x
+  where
+    extend (Path y ts) rest = Path y (ts ++ rest)
+    sameOf (Var y) = Just (sameBits src y)
+    sameOf _ = Nothing
+
+sameBitsV :: Sources -> VVal -> VVal
+sameBitsV src v
+  = case v of
+      Var x -> Var (sameBits src x)
+      _ -> mapV id (sameBitsV src) v
