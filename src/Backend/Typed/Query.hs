@@ -230,8 +230,8 @@ altTypes env t expr
                                        return (map (map V) fss ++ [[]])
       _ -> Left ("cannot destructure a value of type " ++ ppr t)
 
--- the binder of `[unbox-ru]`: the credit of the block of a unique box, whose tag follows from
--- the path of the box, and whose contents `z.contents` must have been read
+-- the binder of `[unbox-ru]`: the credit of the block of a unique box, a new root, whose tag
+-- follows from the path of the box, and whose contents `z.contents` must have been read
 unboxRuBinds :: Gamma -> Path -> Path -> Q [(Path,Ty)]
 unboxRuBinds g z r
   = do s <- inferAVar g z >>= boxContents
