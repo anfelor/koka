@@ -22,7 +22,7 @@
 -}
 module Backend.Typed.Elab.Match( matchCore ) where
 
-import Data.List( nubBy, findIndex )
+import Data.List( nubBy, findIndex, partition )
 import qualified Data.Set as S
 import Common.Name
 import Backend.Typed.Names
@@ -161,16 +161,13 @@ compile env xs rows@(_:rest)
   = do let rows'@((binds,pats,guards):_) = map (stripVars xs) rows
        case findIndex isRefutable pats of
          Nothing -> do fallback <- compile env xs rest
-                       return (makeLet (bindDefs (used guards binds)) (guardChain guards fallback))
+                       return (guardChain binds guards fallback)
          Just i  -> switch env xs i rows'
 
--- Koka names every pattern (`@pat`), mostly without using it
-used :: [Guard] -> [Bind] -> [Bind]
-used guards binds = [b | b@(y,_) <- binds, y `S.member` fvs]
-  where fvs = S.unions [freeLocals t `S.union` freeLocals e | Guard t e <- guards]
-
 bindDefs :: [Bind] -> [DefGroup]
-bindDefs binds = [DefNonRec (makeDef (getName y) (Var x InfoNone)) | (y,x) <- reverse binds]
+-- `stripVars` appends bindings in pattern order, with outer nodes before their
+-- children. Preserve that order when their field getters become IR projections.
+bindDefs binds = [DefNonRec (makeDef (getName y) (Var x InfoNone)) | (y,x) <- binds]
 
 stripVars :: [TName] -> Row -> Row
 stripVars xs (binds,pats,guards)
@@ -184,12 +181,23 @@ isRefutable :: Pattern -> Bool
 isRefutable PatWild = False
 isRefutable _       = True
 
-guardChain :: [Guard] -> Expr -> Expr
-guardChain [] fallback = fallback
-guardChain (Guard test body : gs) fallback
-  | isExprTrue test = body
-  | otherwise       = Case [test] [Branch [patTrue] [Guard exprTrue body]
-                                  ,Branch [PatWild] [Guard exprTrue (guardChain gs fallback)]]
+-- Like Koka's C backend (`genGuard`), a pattern variable is bound where it is first needed:
+-- before the test that uses it, or at the start of the body
+guardChain :: [Bind] -> [Guard] -> Expr -> Expr
+guardChain _ [] fallback = fallback
+guardChain binds (Guard test body : gs) fallback
+  | isExprTrue test = makeLet (bindDefs bodyBinds) body
+  | otherwise       = makeLet (bindDefs testBinds) $
+                      Case [test] [Branch [patTrue] [Guard exprTrue (makeLet (bindDefs bodyBinds) body)]
+                                  ,Branch [PatWild] [Guard exprTrue (guardChain rest gs fallback)]]
+  where (testBinds,bodyBinds,rest) = splitBinds binds test body
+
+-- the binds that a test uses, those that only its body uses, and those left for the next guard.
+-- Koka names every pattern (`@pat`), mostly without using it.
+splitBinds :: [Bind] -> Expr -> Expr -> ([Bind],[Bind],[Bind])
+splitBinds binds test body = (testBinds, filter (usedIn body) rest, rest)
+  where (testBinds,rest) = partition (usedIn test) binds
+        usedIn e (y,_)   = y `S.member` freeLocals e
 
 switch :: Env -> [TName] -> Int -> [Row] -> Unique Expr
 switch env xs i rows
