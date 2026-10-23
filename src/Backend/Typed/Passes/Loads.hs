@@ -15,11 +15,12 @@
   before this pass do not require: they let the contents of `z` be read after `z` is
   dropped, and after `[unbox-ru]` after the credit is used. `Linear` checks the result of this pass with places.
 
-  An event may release the block of a box `z` if it consumes an operand that `z` is a part
-  or an alias of (`owners`), or the credit `z.credit`, which is then freed or written over
-  (`[unbox-ru]` itself keeps the block). Before an event, this pass projects every field of a
-  place of a released block that is read after it, and the later projections reuse these
-  loads. A product that is read as a whole after such an event is loaded field by field, and
+  Each place is read through the credit of its block: the block `z.credit` of its box `z`, or
+  after `[unbox-ru]` the credit that it binds. An event may release the block if it consumes
+  an operand that `z` is a part or an alias of (`owners`), or the credit, which is then freed
+  or written over (`[unbox-ru]` itself keeps the block). Before an event, this pass projects
+  every field of a place of a released block that is read after it, and the later projections
+  reuse these loads. A product that is read as a whole after such an event is loaded field by field, and
   its later reads use the product of the loaded fields.
 -}
 module Backend.Typed.Passes.Loads( loadsProgram ) where
@@ -34,7 +35,7 @@ import Backend.Typed.Monad
 import Backend.Typed.Query
 import Backend.Typed.Layout( placeBinders )
 
--- the box of each place in scope
+-- the credit of each place in scope
 type Places = M.Map Path Path
 
 -- the places read as a whole after their blocks may be released, as products of their loaded
@@ -103,7 +104,7 @@ scoped e = case e of
   UnboxRu z r b -> do
     (_,g,_,_) <- ask
     bs <- liftE (unboxRuBinds g z r)
-    UnboxRu z r <$> bind bs [] (expr b)
+    UnboxRu z r <$> bind bs [] (local (\(env,g',ps,l) -> (env,g',takeBlock z r ps,l)) (expr b))
   Dup x y b -> do
     (_,g,_,_) <- ask
     t <- liftE (inferVar g x)
@@ -121,9 +122,9 @@ scoped e = case e of
                 when (M.member x l) (fail ("a place is used as a whole operand after its block may be released: " ++ show x))
                 return x
 
--- the places among the binders of a destructuring, with their boxes
+-- the places among the binders of a destructuring, with their credits
 places :: VExpr -> [Path] -> [Ty] -> L [(Path,Path)]
-places e xs ts = asks (\(_,_,ps,_) -> [(x,M.findWithDefault z z ps) | (x,z) <- placeBinders (`M.member` ps) e xs ts])
+places e xs ts = asks (\(_,_,ps,_) -> [(x,M.findWithDefault (child z SCredit) z ps) | (x,z) <- placeBinders (`M.member` ps) e xs ts])
 
 bind :: [(Path,Ty)] -> [(Path,Path)] -> L a -> L a
 bind bs ps = local (\(env,g,places,l) -> (env,bindAll bs g,M.union (M.fromList ps) places,l))
@@ -139,7 +140,7 @@ atom :: AVal -> L AVal
 atom (Lam ps r e) = Lam ps r <$> local (\(env,g,_,l) -> (env,bindAll [(x,V t) | (x,_,t) <- ps] g,M.empty,l)) (expr e)
 atom a = descendA pure atom value a
 
--- The subexpressions that run after an expression may have released blocks, with the boxes
+-- The subexpressions that run after an expression may have released blocks, with the credits
 -- of those blocks. The body of a join point runs after its jumps.
 continuations :: Env -> Places -> VExpr -> [(S.Set Path,VExpr)]
 continuations env ps e = case e of
@@ -148,13 +149,21 @@ continuations env ps e = case e of
   Join _ _ a b -> [(releasedIn env ps b,a)]
   _ -> [(released env ps e,k) | k <- subExprs e]
 
--- the boxes of places whose blocks an expression may release, not counting its subexpressions
+-- the credits of places whose blocks an expression may release, not counting its subexpressions
 released :: Env -> Places -> VExpr -> S.Set Path
 released env ps e
-  = S.fromList [z | o <- S.toList (owners env e), (p,z) <- M.toList ps, p `within` canonical o || o == child z SCredit]
+  = S.fromList [c | o <- S.toList (owners env e), (p,c) <- M.toList ps, p `within` canonical o || o == c]
 
+-- (A block that `[unbox-ru]` takes is released by its credit.)
 releasedIn :: Env -> Places -> VExpr -> S.Set Path
-releasedIn env ps e = S.unions (released env ps e : map (releasedIn env ps) (subExprs e))
+releasedIn env ps e
+  = case e of
+      UnboxRu z r b -> S.map (\c -> if c == r then child z SCredit else c) (releasedIn env (takeBlock z r ps) b)
+      _ -> S.unions (released env ps e : map (releasedIn env ps) (subExprs e))
+
+-- the places of `z` are read through the credit `r` after `[unbox-ru]` takes its block
+takeBlock :: Path -> Path -> Places -> Places
+takeBlock z r = M.map (\c -> if c == child z SCredit then r else c)
 
 -- The operands that an expression consumes, not counting its subexpressions. A destructuring
 -- of a variable only exposes its parts.

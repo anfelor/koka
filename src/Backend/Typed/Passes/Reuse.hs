@@ -222,7 +222,7 @@ offer r n use unusedOp e
 -- the paper's `[dropru]`, derived from `[if-unique]` and `[unbox-ru]`
 dropReuse :: Path -> Path -> Int -> VExpr -> R VExpr
 dropReuse x r n e
-  = do let r' = child x SCredit
+  = do r' <- fresh
        g <- asks reGamma
        env <- asks reEnv
        s <- liftE (inferAVar g x >>= boxContents)

@@ -26,6 +26,9 @@
     join j(ȳ,r : ◇n[k; p : V]) = e
     if-unique z then (..; jump j(v̄,r')) else (..; jump j(w̄,no-reuse n [k; p : V]))
 
+  The credit parameter is the one to which the unique branch passes the credit `r'` that it
+  binds by `[unbox-ru]`.
+
   In the unique branch the credit is full, so `ExpandReuse` tests nothing and code generation
   writes its blocks in place. In the other branch it is empty: `box@r v` becomes `box v`,
   `free r` and `if-full r` disappear, and any other use of `r` becomes `no-reuse n [k; p : V]`.
@@ -78,13 +81,20 @@ crE expr
               return (IsUnique z (atRet (\v -> Let r (VReuse Full n p) (Ret v) e1) u) (atRet (const e2) s))
       Join j ps e (IsUnique z u s)
         | [Jump j1 vs1] <- ends u, [Jump j2 vs2] <- ends s, j1 == j, j2 == j
-        , ((i,r,n,p):_) <- [(i,r,n,p) | (i,((r,_,VReuse MaybeEmpty n p),Var (Path _ ss@(_:_)),NoReuse _ _)) <- zip [0 :: Int ..] (zip3 ps vs1 vs2), last ss == SCredit]
+        , ((i,r,n,p):_) <- [(i,r,n,p) | (i,((r,_,VReuse MaybeEmpty n p),Var c,NoReuse _ _)) <- zip [0 :: Int ..] (zip3 ps vs1 vs2), S.member c (unboxRuCredits u)]
         , consumed False r e, straightReuse r e, not (allocatesFresh e), size e <= copyLimit, apart u e, apart s e
         -> do e1 <- crE e
               let lets vs body = foldr (\((y,_,t),v) -> Let y t (Ret v)) body [b | (k,b) <- zip [0..] (zip ps vs), k /= i]
               e2 <- cloneE (state (freshPathFrom "cr")) (lets vs2 (emptied r (NoReuse n p) e))
               return (IsUnique z (atEnd (const (lets vs1 (Let r (VReuse Full n p) (Ret (vs1 !! i)) e1))) u) (atEnd (const e2) s))
       _ -> descendE pure crV (\_ -> crE) expr
+
+-- the credits that `[unbox-ru]` binds in an expression
+unboxRuCredits :: VExpr -> S.Set Path
+unboxRuCredits expr
+  = case expr of
+      UnboxRu _ r e -> S.insert r (unboxRuCredits e)
+      _ -> getConst (descendE (const (Const S.empty)) (const (Const S.empty)) (\_ e -> Const (unboxRuCredits e)) expr)
 
 -- Copy a straight-line reconstruction, not the control flow leading to it.
 -- In particular, copying a tree descent's key test and context composition can

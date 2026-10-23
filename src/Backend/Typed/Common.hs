@@ -341,9 +341,9 @@ descendE :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([Path] -> 
 descendE fn fv fe = descendB fn fv (\bs e -> let xs = map fst bs in (,) xs <$> fe xs e)
 
 -- Like `descendE`, but each binder comes with its steps from the scrutinee, and `fb` gives new
--- binders for a subexpression. The binders of a `let`, a dup and a join point have no steps,
--- and neither has that of `[unbox-lazy]`, which takes the contents out of the box, or that of
--- `[unscalar]`, which copies them.
+-- binders for a subexpression. The binders of a `let`, a dup, a join point and the credit of
+-- `[unbox-ru]` have no steps, and neither has that of `[unbox-lazy]`, which takes the contents
+-- out of the box, or that of `[unscalar]`, which copies them.
 descendB :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([(Path,[Step])] -> VExpr -> f ([Path],VExpr)) -> VExpr -> f VExpr
 descendB fn fv fb expr
   = case expr of
@@ -373,7 +373,7 @@ descendB fn fv fb expr
       Dup x y e             -> (\x' (y',e') -> Dup x' y' e') <$> fn x <*> one y [] e
       IsUnique x e1 e2      -> IsUnique <$> fn x <*> plain e1 <*> plain e2
       IfFull r e1 e2        -> IfFull <$> fn r <*> plain e1 <*> plain e2
-      UnboxRu v r e         -> (\v' (r',e') -> UnboxRu v' r' e') <$> fn v <*> one r [SCredit] e
+      UnboxRu v r e         -> (\v' (r',e') -> UnboxRu v' r' e') <$> fn v <*> one r [] e
       Join j ps e1 e2       -> (\(xs,e1') e2' -> Join j [(x',m,t) | (x',(_,m,t)) <- zip xs ps] e1' e2')
                                  <$> fb [(x,[]) | (x,_,_) <- ps] e1 <*> plain e2
       Jump j vs             -> Jump j <$> traverse fv vs

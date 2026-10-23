@@ -108,8 +108,8 @@ specialize parts z s n e
   = do (_,g) <- ask
        j <- state (freshNameFrom "dsj")
        r <- fresh "r"
+       r' <- fresh "c"
        let p = child z SContents
-           r' = child z SCredit
            payload = Just (Contents (Just (boxTag z)) (Var p) s)
            t = VReuse MaybeEmpty n payload
            ps = [(y,Owned,ty) | ((x,y),_) <- parts, Just (V ty) <- [M.lookup x g]] ++ [(r,Owned,t)]
