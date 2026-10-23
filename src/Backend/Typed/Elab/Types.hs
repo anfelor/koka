@@ -19,7 +19,7 @@ import Kind.Newtypes
 import Type.Type( typevarId, conInfoName, conInfoIsLazy )
 import Backend.Typed.Syntax
 import Backend.Typed.Types( sumOf )
-import Backend.Typed.TypeInfo
+import Backend.Typed.Elab.TypeInfo
 
 refBody :: Newtypes -> DataInfo -> Tr (Maybe AType)
 refBody nt info

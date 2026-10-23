@@ -19,7 +19,7 @@ import Type.Type
 import Kind.Newtypes
 import Backend.Typed.Common( K )
 import Backend.Typed.Syntax
-import Backend.Typed.TypeInfo
+import Backend.Typed.Elab.TypeInfo
 import Backend.Typed.Monad
 
 -- `envHoles`: the variables bound to the parts of a constructor context under construction:

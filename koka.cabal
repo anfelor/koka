@@ -38,6 +38,7 @@ library
       Backend.Typed.Elab.FromCore
       Backend.Typed.Elab.Match
       Backend.Typed.Elab.Monad
+      Backend.Typed.Elab.TypeInfo
       Backend.Typed.Elab.Types
       Backend.Typed.Fip
       Backend.Typed.Layout
@@ -66,7 +67,6 @@ library
       Backend.Typed.Pretty
       Backend.Typed.Query
       Backend.Typed.Syntax
-      Backend.Typed.TypeInfo
       Backend.Typed.Typed
       Backend.Typed.Types
       Common.ColorScheme
