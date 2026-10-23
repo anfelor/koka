@@ -47,11 +47,12 @@
 
     - Variables of a trivial type are unrestricted: they may be weakened and contracted at either
       mode, and used owned or borrowed. They need no `dup` or `drop`. (Not in the paper.)
-      Those in the contents of a box `z` (on a path with a `contents` step) are read from its
-      block, so only `[dup]`, which loads them, and a case on them (such as one on the
-      immediate side of a split) read them, borrowing the block `z.credit`, until
-      `[unbox-ru]` of `z` takes the contents out of the block. A projection or unpack binds
-      a part of them without reading it, and descriptions do not read them.
+      Those in the contents of a box `z` (on a path whose last `contents` or `taken` step is
+      a `contents` step, `Common.boxOf`) are read from its block, so only `[dup]`, which
+      loads them, and a case on them (such as one on the immediate side of a split) read
+      them, borrowing the block `z.credit`. `[unbox-ru]` of `z` takes the contents out of the
+      block and renames them to `z.taken`. A projection or unpack binds a part of them
+      without reading it, and descriptions do not read them.
     - A unique variable `x :! t` is owned and holds the only reference to its block. It may be used
       as an owned one. Any borrowed use of `x`, or of a variable on its path, may duplicate the
       reference and demotes it to `x : t`; branches agree on the weaker status.
@@ -62,8 +63,8 @@
       particular a borrowed argument of a call cannot be one that is passed owned.
     - The parts of an owned variable are owned: consuming a part takes it out of its parent, and
       the parent is consumed once all of its parts are: both components of a pair, the contents
-      `z.contents` and the block `z.credit` of a box (which is not a binder, see `[unbox-ru]`),
-      or the binder of any other destructuring. The binder of `[case-a]`,
+      `z.contents` (or `z.taken`) and the block `z.credit` of a box (neither of the latter
+      is a binder, see `[unbox-ru]`), or the binder of any other destructuring. The binder of `[case-a]`,
       `[split-a]`, `[deref]` or `[unroll]` at a boxed type is the parent's pointer, and that of
       `[unpack]` (a no-op) is the parent itself: consuming it, or testing it with `[if-unique]`, consumes or tests the parent (so it is unique
       where the parent is). Hence an owned destructuring of a variable is a borrowed one whose
@@ -71,13 +72,14 @@
       scrutinee.
     - `[dup]` binds its copy as a new root, so a variable holds at most one owned reference.
       For example, after `val y = dup z.fst; drop z` the context holds `y : V`.
-    - After `Loads`, the contents of a box are a *place* (`Layout.placeBinders`): `z.contents`
-      of a product, and the binder of `[unpack]` of a place, stay in the block of `z`. Every use
-      of a place reads the block and needs a reference to it: to the block `z.credit` of `z`,
-      which consuming `z` consumes, or after `[unbox-ru]` to its credit. A `[proj]`
-      of a place copies its field out of the block, so the binder holds only its own
-      references. Code generation may also load a place at once (`--feager-loads`), which is
-      sound as the box is live at `[bunbox]`.
+    - Code generation reads the contents of a box in place (`Layout.placeBinders`): `z.contents`
+      of a product, and the binders of `[proj]` and `[unpack]` of a place, stay in the block of
+      `z`, and a use reads the block. It loads them (copies them out of the block) only at
+      `[dup]` and at `[unbox-ru]` of `z`, which may free or write the block. These rules
+      make that sound: a non-trivial part of `z.contents` is used only before `z` is
+      consumed (after `[unbox-ru]` it is out of scope, and its loaded copy is a part of
+      `z.taken`), and a trivial part only by `[dup]`. Code generation may also load
+      a place at once (`--feager-loads`), which is sound as the box is live at `[bunbox]`.
 
   Constructor contexts
 
@@ -238,6 +240,7 @@ data Step = SFst | SSnd            -- [proj]
           | SInjA Int | SRest      -- [case-a]: an alternative or the default
           | SLo | SHi              -- [split-a]
           | SContents | SCredit    -- [bunbox]: the contents, and the rest of the block (not a binder)
+          | STaken                 -- [unbox-ru]: the contents, taken out of the block (not a binder)
           | SOpen Name             -- [case-open]
           deriving (Eq,Ord)
 
@@ -258,6 +261,7 @@ instance Show Step where
              SHi       -> "hi"
              SContents -> "contents"
              SCredit   -> "credit"
+             STaken    -> "taken"
              SOpen c   -> show c
 
 root :: Name -> Path
@@ -598,8 +602,8 @@ data VExpr
   --   Γ₁, Γ₂ ⊢ let^ box x = v in e : W
   --
   -- Reading the contents of a box is always borrowed. The paper's owned `[unbox]`, which keeps
-  -- the block as a credit, is `[unbox-ru]` and requires the box to be unique. After `Loads`,
-  -- `x` is a place in the block of `v`, which a read of `x` needs (see "Structural rules").
+  -- the block as a credit, is `[unbox-ru]` and requires the box to be unique. Code generation
+  -- reads `x` in place, in the block of `v` (see "Structural rules").
   | Unbox Mode Path Path VExpr
 
   --   Γ₁ ⊢ v :q Scalar raw    Γ₂, x : raw ⊢ e : W
@@ -662,7 +666,7 @@ data VExpr
   -- from `[if-unique]` and `[unbox-ru]` (`Reuse.dropReuse`):
   --
   --   let r = drop-reuse x in e  ≜  let^ box x.contents = x in
-  --                                 let r = (if-unique x then (let @ r' = x in discard x.contents; ret r')
+  --                                 let r = (if-unique x then (let @ r' = x in discard x.taken; ret r')
   --                                          else (drop x; ret no-reuse n)) in e
   | Drop Path VExpr
 
@@ -702,16 +706,19 @@ data VExpr
   -- and empty in the second, where nothing is left to consume.
   | IfFull Path VExpr VExpr
 
-  --   Γ, z.contents : V, r : ◆n[tag(z); z.contents : V] ⊢ e : W    |V| = n
-  --  ──────────────────────────────────────────────────────────── [unbox-ru]
-  --   Γ, z :! Box V, z.contents :^ V ⊢ let @ r = z in e : W
+  --   Γ[z.taken / z.contents], r : ◆n[tag(z); z.contents : V] ⊢ e : W    |V| = n
+  --  ──────────────────────────────────────────────────────────────── [unbox-ru]
+  --   Γ, z :! Box V ⊢ let @ r = z in e : W                  (z.contents :^ V ∈ Γ)
   --
   -- A unique `Box V` whose contents were read (`[bunbox]`) splits into its contents and its
   -- block, the inverse of `[box-at]`: the contents are taken out of the block without
-  -- reference counting, and the block becomes the credit `r`, a new root. The contents keep
-  -- their name and their parts in scope: they are the part of `z` that is left (the credit
-  -- consumes the block `z.credit`). With `[if-unique]` it makes `drop-reuse` of a box
-  -- derivable. The block of `z` has tag tag(z).
+  -- reference counting, and the block becomes the credit `r`, a new root. The contents are
+  -- the part of `z` that is left (the credit consumes the block `z.credit`), renamed to
+  -- `z.taken`: `Γ[z.taken / z.contents]` replaces the prefix `z.contents` of every variable
+  -- of Γ and keeps the rest of its path (`Common.rebase`), so the parts in scope stay in
+  -- scope, but are no longer in the block. The description of `r` still names the old
+  -- contents. With `[if-unique]` it makes `drop-reuse` of a box derivable. The block of `z`
+  -- has tag tag(z).
   | UnboxRu Path Path VExpr
 
   --   Γ_c, x̄ :q̄ V̄ | J ⊢ e₁ : W    Γ, Γ_c | J, j : Γ_c; (q̄ V̄) -> W ⊢ e₂ : W

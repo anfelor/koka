@@ -39,7 +39,7 @@ import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, altTypes, unboxRuBinds )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, altTypes, unboxRuGamma )
 
 -- the structural values bound by lets
 type Values = M.Map Path VVal
@@ -158,9 +158,10 @@ reuseE expr
       Let x t e1 e2 -> Let x t <$> reuseE e1 <*> bindReuse [(x,V t)] (reuseE e2)
       LetYield x t e1 e2 e3 -> LetYield x t <$> reuseE e1 <*> bindReuse [(x,V t)] (reuseE e2) <*> reuseE e3
       Join j ps e1 e2 -> Join j ps <$> bindReuse [(x,V t) | (x,_,t) <- ps] (reuseE e1) <*> reuseE e2
-      UnboxRu z r e -> do (_,g,_,_) <- ask
-                          bs <- liftE (unboxRuBinds g z r)
-                          UnboxRu z r <$> bindReuse bs (reuseE e)
+      -- the facts follow the contents to `z.taken`
+      UnboxRu z r e -> do (env,g,facts,src) <- ask
+                          g' <- liftE (unboxRuGamma g z r)
+                          UnboxRu z r <$> local (const (env,g',M.mapKeys (rebase z) facts,src)) (reuseE e)
       Dup x y e -> do (_,g,_,_) <- ask
                       t <- liftE (inferVar g x)
                       Dup x y <$> bindReuse [(y,t)] (reuseE e)

@@ -10,7 +10,7 @@
 -- Type inference and environment queries shared by typed IR consumers.
 -- Keep inference in sync with the typing rules in Syntax.
 module Backend.Typed.Query( Env(..), Gamma, noJoins, yieldJoins, envOf, bindAll, checkE, inferE, inferA, inferV
-                          , inferVar, inferAVar, altTypes, unboxRuBinds, boxContents, reuseSize, unrollT, trivialTy, openFields
+                          , inferVar, inferAVar, altTypes, unboxRuGamma, boxContents, reuseSize, unrollT, trivialTy, openFields
                           , funSig, paramModes, altPattern ) where
 
 import qualified Data.Map as M
@@ -26,9 +26,10 @@ import Backend.Typed.Layout( layout, blockSize, isBlock )
 
 type Gamma = M.Map Path Ty
 
--- J: the join points that can be jumped to (their parameter types and result type), and
--- whether the result may be the dummy value of an effect yield (`⊢ʸ`)
-data Joins = Joins{ jsPoints :: M.Map Name ([VType],VType), jsYield :: Bool }
+-- J: the join points that can be jumped to (the variables they capture, including those of
+-- the join points they jump to, their parameter types and their result type), and whether
+-- the result may be the dummy value of an effect yield (`⊢ʸ`)
+data Joins = Joins{ jsPoints :: M.Map Name (S.Set Path,[VType],VType), jsYield :: Bool }
 
 -- ∅, and ∅ where the result may be a dummy (`⊢ʸ`)
 noJoins, yieldJoins :: Joins
@@ -150,18 +151,23 @@ inferExpr env g js expr
                            case t of
                              VReuse _ n p -> branches [inferE env (M.insert r (V (VReuse Full n p)) g) js e1, inferE env (M.delete r g) js e2]
                              _ -> Left ("test of a non-credit: " ++ ppr t)
-      UnboxRu v r e -> do bs <- unboxRuBinds g v r
-                          inferE env (bindAll bs g) js e
+      UnboxRu v r e -> do g' <- unboxRuGamma g v r
+                          inferE env g' js e
       Join j ps e1 e2 -> do let xs = [x | (x,_,_) <- ps]
                             unless (S.disjoint (fvE e1 `S.difference` S.fromList xs) (S.fromList (bindersE e2)))
                               (Left ("join point " ++ show j ++ " captures a variable that is bound again in its scope"))
                             unless (S.disjoint (S.fromList xs) (S.fromList [root n | (_,_,p) <- ps, Contents _ v _ <- descriptions p, Path n _ <- S.toList (fvV v)]))
                               (Left ("a description in the parameters of join point " ++ show j ++ " names a parameter"))
                             t <- inferE env (bindAll [(x,V p) | (x,_,p) <- ps] g) js e1
-                            checkE env g js{ jsPoints = M.insert j ([p | (_,_,p) <- ps],t) (jsPoints js) } e2 t
+                            let caps = S.unions (S.difference (fvE e1) (S.fromList xs) : [cs | (k,(cs,_,_)) <- M.toList (jsPoints js), not (null (jumpArgs k e1))])
+                            checkE env g js{ jsPoints = M.insert j (caps,[p | (_,_,p) <- ps],t) (jsPoints js) } e2 t
                             return t
+      -- the captured variables must still be in scope (`[unbox-ru]` renames the contents of a box)
       Jump j vs -> case M.lookup j (jsPoints js) of
-                     Just (ps,t) -> checkArgs env g ps vs >> return t
+                     Just (caps,ps,t) -> do forM_ (S.toList caps) $ \x ->
+                                              unless (M.member x g) (Left ("jump to " ++ show j ++ ", which captures " ++ show x ++ ", out of its scope"))
+                                            checkArgs env g ps vs
+                                            return t
                      Nothing -> Left ("jump to " ++ show j ++ " outside of its scope or not in tail position")
       Gen tvs e -> do unbound tvs (ftvCtx g e)
                       t <- inferE env g noJoins e
@@ -230,17 +236,18 @@ altTypes env t expr
                                        return (map (map V) fss ++ [[]])
       _ -> Left ("cannot destructure a value of type " ++ ppr t)
 
--- the binder of `[unbox-ru]`: the credit of the block of a unique box, a new root, whose tag
--- follows from the path of the box, and whose contents `z.contents` must have been read
-unboxRuBinds :: Gamma -> Path -> Path -> Q [(Path,Ty)]
-unboxRuBinds g z r
+-- The context of the body of `[unbox-ru]`: the contents `z.contents` of the box, which must
+-- have been read, and their parts are renamed to `z.taken` (`rebase`), and the binder is the
+-- credit of the block, a new root, whose tag follows from the path of the box.
+unboxRuGamma :: Gamma -> Path -> Path -> Q Gamma
+unboxRuGamma g z r
   = do s <- inferAVar g z >>= boxContents
        n <- reuseSize s
        let x = child z SContents
        case M.lookup x g of
          Just (V s') | alphaEq s s' -> return ()
          _ -> Left ("taking the block of " ++ show z ++ " whose contents are not read")
-       return [(r,V (VReuse Full n (Just (Contents (Just (boxTag z)) (Var x) s))))]
+       return (M.insert r (V (VReuse Full n (Just (Contents (Just (boxTag z)) (Var x) s)))) (M.mapKeys (rebase z) g))
 
 branches :: [Q VType] -> Q VType
 branches cs = do ts <- sequence cs

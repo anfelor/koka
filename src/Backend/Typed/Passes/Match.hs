@@ -23,7 +23,7 @@ import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuBinds )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma )
 import Backend.Typed.Layout( shapeIsHeap )
 
 type Match a = M (Env,Gamma) () a
@@ -68,9 +68,9 @@ matchE expr
       LetYield x t e1 e2 e3 -> LetYield x t <$> matchE e1 <*> bind [(x,V t)] (matchE e2) <*> matchE e3
       Join j ps e1 e2 -> Join j ps <$> bind [(x,V t) | (x,_,t) <- ps] (matchE e1) <*> matchE e2
       UnboxRu v r e
-        -> do (_,g) <- ask
-              bs <- liftE (unboxRuBinds g v r)
-              UnboxRu v r <$> bind bs (matchE e)
+        -> do (env,g) <- ask
+              g' <- liftE (unboxRuGamma g v r)
+              UnboxRu v r <$> local (const (env,g')) (matchE e)
       Dup x y e
         -> do (_,g) <- ask
               t <- liftE (inferVar g x)

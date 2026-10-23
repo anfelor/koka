@@ -14,8 +14,9 @@
   credit keeps its description in the join body, so code generation can omit the stores
   of unchanged fields when it reuses the credit.
 
-  The variable must not be bound in the join point's body or scope: it is then bound
-  outside, and every jump passes the same one.
+  The variable must be in scope at the join point and not be bound in its body or scope:
+  every jump then passes the same one. (`[unbox-ru]` renames the contents of a box, so a jump
+  after it may pass a variable that is not in scope at the join point.)
 -}
 module Backend.Typed.Passes.JoinArgs( joinArgsProgram ) where
 
@@ -37,7 +38,7 @@ jaE scope expr
                e2' = jaE scope e2
                bound = S.fromList (bindersE e1' ++ bindersE e2')
                -- for each parameter, the variable that every jump passes to it
-               invariant (_,Owned,_) vs@(Var y : _) | all (== Var y) vs, S.notMember y bound = Just y
+               invariant (_,Owned,_) vs@(Var y : _) | all (== Var y) vs, M.member y scope, S.notMember y bound = Just y
                invariant _ _ = Nothing
                ys = zipWith invariant ps (transpose (jumpArgs j e2') ++ repeat [])
                sub = M.fromList [(x,Var y) | ((x,_,_),Just y) <- zip ps ys]

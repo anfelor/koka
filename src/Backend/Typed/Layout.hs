@@ -63,7 +63,7 @@ shapeIsHeap (ASum ((_,t):ts))
 shapeIsHeap _ = Nothing
 
 -- A product in a box is read in place: code generation binds the contents of the box as a
--- pointer into its block, and each projection reads one field (`Passes.Loads`).
+-- pointer into its block, and each projection binds a place of one field.
 readInPlace :: VType -> Bool
 readInPlace t
   = case t of

@@ -54,7 +54,7 @@ import Backend.Typed.Monad
 import Backend.Typed.Names( nameUnreachable, nameLazyFree )
 import Backend.Typed.Layout( layout, isBlock )
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuBinds, trivialTy )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, trivialTy )
 
 -- The allocations of the most allocating path; whether there are allocations, calls to the
 -- recursive group, and both in sequence; and the types of the values boxed for polymorphism.
@@ -289,8 +289,8 @@ fipE expr
               if full then fipE e1 else branches ([withFull [r] (fipE e1) | alive e1] ++ [fipE e2 | alive e2])
       UnboxRu z r e
         -> do g <- asks fGamma
-              bs <- liftE (unboxRuBinds g z r)
-              bind bs (fipE e)
+              g' <- liftE (unboxRuGamma g z r)
+              local (\fe -> fe{ fGamma = g' }) (fipE e)
       Join j ps e1 e2
         -> do i <- state (\s -> (fsUniq s, s{ fsUniq = fsUniq s + 1 }))
               failing <- asks fFailing

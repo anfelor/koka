@@ -29,7 +29,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuBinds, boxContents, reuseSize, inferE, noJoins, unrollT, trivialTy )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, boxContents, reuseSize, inferE, noJoins, unrollT, trivialTy )
 
 -- credits with the size of their block
 type Credits = [(Path,Int)]
@@ -97,6 +97,9 @@ reuseProgram prog
 
 bind :: [(Path,Ty)] -> R a -> R a
 bind bs = local (\re -> re{ reGamma = bindAll bs (reGamma re) })
+
+withGamma :: Gamma -> R a -> R a
+withGamma g = local (\re -> re{ reGamma = g })
 
 typeOfV :: VVal -> R VType
 typeOfV v = do re <- ask
@@ -182,8 +185,8 @@ ruE expr
               return (IfFull r (es !! 0) (es !! 1))
       UnboxRu v r e
         -> do g <- asks reGamma
-              bs <- liftE (unboxRuBinds g v r)
-              UnboxRu v r <$> bind bs (ruE e)
+              g' <- liftE (unboxRuGamma g v r)
+              UnboxRu v r <$> withGamma g' (ruE e)
       Ret _ -> plain
       Yielded _ -> plain
       Call _ _ _ -> plain
@@ -229,7 +232,8 @@ dropReuse x r n e
        let y = child x SContents
            -- the contents are read once
            readY = if M.member y g then id else Unbox Borrowed x y
-       body <- dropValue (trivialTy env) fresh (scopeOf (M.keys g)) y (V s) (Ret (Var r'))
+       -- `[unbox-ru]` renames the contents to `x.taken`
+       body <- dropValue (trivialTy env) fresh (scopeOf (map (rebase x) (M.keys g))) (child x STaken) (V s) (Ret (Var r'))
        return (readY (Let r (VReuse MaybeEmpty n Nothing) (IsUnique x (UnboxRu x r' body)
                                                   (Drop x (Ret (NoReuse n Nothing))))
                         e))

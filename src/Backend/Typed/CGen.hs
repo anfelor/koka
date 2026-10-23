@@ -23,7 +23,6 @@ import qualified Data.Set as S
 import Data.Char( isAlphaNum, ord, isDigit )
 import Data.List( isInfixOf, zip4 )
 import Data.Maybe( fromMaybe )
-import Data.Functor.Const( Const(..) )
 import qualified Numeric
 import Control.Monad( forM, when )
 import Lib.PPrint( Doc, text, string, int, integer, empty, isEmptyDoc, line, nest, align, vcat, hcat, hsep, (<.>), (<+>), (<->) )
@@ -36,7 +35,7 @@ import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types( inst, collapse, Types(..) )
-import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuBinds, unrollT, openFields, boxContents, reuseSize )
+import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, unrollT, openFields, boxContents, reuseSize )
 import Backend.Typed.Names( nameLazyFree )
 import Backend.Typed.Layout hiding( dupExpr, dropStmt )
 import Backend.Typed.Product( productOrder )
@@ -448,11 +447,13 @@ genBox cx tag at v
                                  -- a credit that may be empty, which `ExpandReuse` did not test
                                  _ -> return (stmtExpr [check, bt <.> "*" <+> x <+> "=" <+> allocAt (localName r) <.> ";", x <.> "->p =" <+> e <.> ";"] box)
                    In y  -> do v <- fresh "v"
-                               let clear = "kt_block_clear(kk_datatype_as_ptr(kk_datatype_unbox(" <.> localName y <.> "),_ctx)," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
+                               ye <- genVar cx y
+                               let clear = "kt_block_clear(kk_datatype_as_ptr(kk_datatype_unbox(" <.> ye <.> "),_ctx)," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
                                return (stmtExpr [cty ct <+> v <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> clear <.> ";",
                                                  setPath, x <.> "->p =" <+> v <.> ";"] box)
 
--- A projection reads exactly the selected field (`[proj]`), where it is.
+-- A projection reads exactly the selected field (`[proj]`), where it is: that of a place
+-- binds a place (a sub-place, read at its uses), and that of any other value copies it.
 genProjection :: Ctx -> Dest -> VVal -> [Step] -> Path -> VExpr -> G [Doc]
 genProjection cx dest v ss x e = do
   t <- tyOf cx v
@@ -464,10 +465,12 @@ genProjection cx dest v ss x e = do
             ct <- ctype t
             return (z,[cty ct <+> z <+> "=" <+> ve <.> ";"])
   (start,u) <- liftC (fieldRange t ss)
-  ct <- ctype u
   p <- projLeaves t base start u
-  body <- genE (bindVar cx x (V u)) dest e
-  return (pre ++ [declare (cty ct) x p] ++ body)
+  case v of
+    Var z | M.member z (cxPlaces cx) -> genE (bindPlace cx x u p) dest e
+    _ -> do ct <- ctype u
+            body <- genE (bindVar cx x (V u)) dest e
+            return (pre ++ [declare (cty ct) x p] ++ body)
 
 -- the first leaf and the type of the part at the steps of a projection
 fieldRange :: VType -> [Step] -> Either String (Int,VType)
@@ -515,8 +518,8 @@ genAlias cx dest ve x t e
   = do s <- genE (bindVar cx x t) dest e
        return ([declare "kk_box_t" x ve] ++ s)
 
--- A place stays in its box: its fields are read where they are projected, while the box is
--- still alive (`Passes.Loads`).
+-- A place stays in its box: it is read at its uses, while the box is alive (Linear), and loaded
+-- at `[dup]` and at `[unbox-ru]` (`genUnboxRu`).
 genUnbox :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
 genUnbox cx dest v x e
   = do A a <- tyOfName cx v
@@ -546,6 +549,23 @@ genRead cx dest x t ue e
 -- load with `--feager-loads`, so that both semantics can be tested.
 isPlace :: Ctx -> VExpr -> Path -> Ty -> Bool
 isPlace cx e x t = not (ceEagerLoads (cxCEnv cx)) && not (null (placeBinders (`M.member` cxPlaces cx) e [x] [t]))
+
+-- `[unbox-ru]` of `z` takes its block, which may then be freed or written, and renames its
+-- contents to `z.taken`. Each part of `z.taken` that the body uses is declared as a local:
+-- a place in the block of `z` is loaded, and a local is copied from its old name. The places
+-- in the blocks of inner boxes stay places under their new names.
+genUnboxRu :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
+genUnboxRu cx dest z r e
+  = do g' <- liftC (unboxRuGamma (cxGamma cx) z r)
+       let taken = child z STaken
+           places = M.fromList [(rebase z p,d) | (p,d) <- M.toList (cxPlaces cx), boxOf p /= Just z]
+       locals <- forM [q | q <- S.toList (fvE e), q `within` taken, M.notMember q places] $ \q ->
+                   do ct <- liftC (inferVar g' q) >>= ctOf
+                      d <- genVar cx (unrebase z q)
+                      return (q,declare (cty ct) q d)
+       let cx' = cx{ cxGamma = g', cxPlaces = places, cxShared = S.map (rebase z) (cxShared cx) }
+       s <- genE cx' dest e
+       return (map snd locals ++ [declare "kk_reuse_t" r ("kk_datatype_as_ptr(kk_datatype_unbox(" <.> localName z <.> "),_ctx)")] ++ s)
 
 genVar :: Ctx -> Path -> G Doc
 genVar cx x = return (M.findWithDefault (localName x) x (cxPlaces cx))
@@ -811,7 +831,8 @@ genE cx dest expr
       IsUnique x e1 e2
         -> do t <- liftC (inferVar (cxGamma cx) x)
               s1 <- genE cx dest e1
-              let d = "kk_datatype_unbox(" <.> localName x <.> ")"
+              xe <- genVar cx x
+              let d = "kk_datatype_unbox(" <.> xe <.> ")"
                   (test,shared) = case t of
                     V _ -> ("kk_datatype_is_unique(" <.> d <.> ",_ctx)", cxShared cx)   -- a lazy value may be immediate
                     A _ -> ("kk_block_is_unique(kk_datatype_as_ptr(" <.> d <.> ",_ctx))", S.insert x (cxShared cx))
@@ -825,10 +846,7 @@ genE cx dest expr
               s1 <- genE (bindVar cx r full) dest e1
               s2 <- genE cx dest e2
               return ["if kk_likely(" <.> localName r <+> "!= kk_reuse_null)" <+> block s1 <+> "else" <+> block s2]
-      UnboxRu v r e
-        -> do bs <- liftC (unboxRuBinds (cxGamma cx) v r)
-              s <- genE (foldl (\c (y,ty) -> bindVar c y ty) cx bs) dest e
-              return ([declare "kk_reuse_t" r ("kk_datatype_as_ptr(kk_datatype_unbox(" <.> localName v <.> "),_ctx)")] ++ s)
+      UnboxRu v r e -> genUnboxRu cx dest v r e
       Gen _ e -> genE cx dest e
       Join j ps e1 e2
         -> do lbl <- fresh "join"

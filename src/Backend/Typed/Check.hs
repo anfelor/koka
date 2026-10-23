@@ -42,8 +42,9 @@ checkPaths def
                DefVal{} -> S.empty
 
 -- the binders of paths that are already in scope: a path denotes one value, so it is bound
--- at most once in a scope
+-- at most once in a scope (`[unbox-ru]` renames the contents of its box)
 scopeE :: S.Set Path -> VExpr -> [Path]
+scopeE bound (UnboxRu z r e) = filter (== r) (S.toList bound) ++ scopeE (S.insert r (S.map (rebase z) bound)) e
 scopeE bound expr = getConst (descendB (const (Const [])) (Const . scopeV bound) alt expr)
   where
     alt bs e = let xs = map fst bs

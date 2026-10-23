@@ -43,7 +43,6 @@ library
       Backend.Typed.Layout
       Backend.Typed.ValidateLayout
       Backend.Typed.Passes.Hoist
-      Backend.Typed.Passes.Loads
       Backend.Typed.Product
       Backend.Typed.Linear
       Backend.Typed.Monad
