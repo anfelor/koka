@@ -56,9 +56,9 @@ expr e = case e of
   LetYield x t a b c -> LetYield x t <$> expr a <*> bind [(x,V t)] (expr b) <*> expr c
   Join j ps a b -> Join j ps <$> bind [(x,V t) | (x,_,t) <- ps] (expr a) <*> expr b
   UnboxRu z r b -> do
-    (_,g) <- ask
-    bs <- liftE (unboxRuBinds g z r)
-    UnboxRu z r <$> bind bs (expr b)
+    (env,g) <- ask
+    g' <- liftE (unboxRuGamma g z r)
+    UnboxRu z r <$> local (const (env,g')) (expr b)
   Dup x y b -> do
     (_,g) <- ask
     t <- liftE (inferVar g x)
