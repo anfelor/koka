@@ -57,7 +57,8 @@
       particular a borrowed argument of a call cannot be one that is passed owned.
     - The parts of an owned variable are owned: consuming a part takes it out of its parent, and
       the parent is consumed once all of its parts are: both components of a pair, the contents
-      and the credit of a box, or the binder of any other destructuring. The binder of `[case-a]`,
+      `z.contents` and the block `z.credit` of a box (which is not a binder, see `[unbox-ru]`),
+      or the binder of any other destructuring. The binder of `[case-a]`,
       `[split-a]`, `[deref]` or `[unroll]` at a boxed type is the parent's pointer, and that of
       `[unpack]` (a no-op) is the parent itself: consuming it, or testing it with `[if-unique]`, consumes or tests the parent (so it is unique
       where the parent is). Hence an owned destructuring of a variable is a borrowed one whose
@@ -66,8 +67,9 @@
     - `[dup]` binds its copy as a new root, so a variable holds at most one owned reference.
       For example, after `val y = dup z.fst; drop z` the context holds `y : V`.
     - After `Loads`, the contents of a box are a *place* (`Layout.placeBinders`): `z.contents`
-      of a product, and the binder of `[unpack]` of a place, stay in the block of `z`. Every use of a place reads the block and needs a reference to the credit
-      `z.credit`, which consuming `z`, or the credit after `[unbox-ru]`, consumes. A `[proj]`
+      of a product, and the binder of `[unpack]` of a place, stay in the block of `z`. Every use
+      of a place reads the block and needs a reference to it: to the block `z.credit` of `z`,
+      which consuming `z` consumes, or after `[unbox-ru]` to its credit. A `[proj]`
       of a place copies its field out of the block, so the binder holds only its own
       references. Code generation may also load a place at once (`--feager-loads`), which is
       sound as the box is live at `[bunbox]`.
@@ -230,7 +232,7 @@ data Step = SFst | SSnd            -- [proj]
           | SRoll                  -- [unroll]
           | SInjA Int | SRest      -- [case-a]: an alternative or the default
           | SLo | SHi              -- [split-a]
-          | SContents | SCredit    -- [bunbox] and [unbox-ru]
+          | SContents | SCredit    -- [bunbox]: the contents, and the rest of the block (not a binder)
           | SOpen Name             -- [case-open]
           deriving (Eq,Ord)
 
@@ -700,8 +702,10 @@ data VExpr
   --
   -- A unique `Box V` whose contents were read (`[bunbox]`) splits into its contents and its
   -- block, the inverse of `[box-at]`: the contents are taken out of the block without
-  -- reference counting, and the block becomes the credit `r` (named `z.credit`). With
-  -- `[if-unique]` it makes `drop-reuse` of a box derivable. The block of `z` has tag tag(z).
+  -- reference counting, and the block becomes the credit `r`, a new root. The contents keep
+  -- their name and their parts in scope: they are the part of `z` that is left (the credit
+  -- consumes the block `z.credit`). With `[if-unique]` it makes `drop-reuse` of a box
+  -- derivable. The block of `z` has tag tag(z).
   | UnboxRu Path Path VExpr
 
   --   Γ_c, x̄ :q̄ V̄ | J ⊢ e₁ : W    Γ, Γ_c | J, j : Γ_c; (q̄ V̄) -> W ⊢ e₂ : W
@@ -712,8 +716,7 @@ data VExpr
   -- not parts of other free variables, see "Structural rules"), and is not
   -- recursive (`j` is not in scope in its body). Its body may jump to outer joins. As it runs
   -- at most once, in the scope of its definition, it may also capture unique and borrowed
-  -- variables (with their modes in Γ_c). Γ_c is a multiset: it holds an owned variable once
-  -- for each reference that e₁ consumes.
+  -- variables (with their modes in Γ_c).
   -- Since J is reset outside of tail positions, a jump cannot escape
   -- and is always a tail call. Join points only have owned parameters, except for contexts
   -- that are plugged in place (unique, see `[plug]`). Perceus only produces closed join
