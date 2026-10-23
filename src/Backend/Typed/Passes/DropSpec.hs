@@ -127,13 +127,13 @@ specialize parts z s n e
            copies b = [Dup (tk x) c | (((x,_),Under _ b'),c) <- zip parts uniqueCopies, tk b' == b]
        g' <- liftE (unboxRuGamma g z r')
        taken <- withGamma g' (dropExcept (moved ++ nub (map fst unders)) (tk p) s
-                  (compose covered (compose [compose (copies b) . Drop b | b <- nub (map snd unders)] (Jump j (map Var uniqueCopies ++ [Var r'])))))
+                  (compose covered (compose [compose (copies b) . Drop b | b <- nub (map snd unders)] (Jump j [] (map Var uniqueCopies ++ [Var r'])))))
        unique <- dsE (UnboxRu z r' taken)
        sharedCopies <- mapM (const (fresh "u")) parts
        let shared = compose [Dup x c | (((x,_),_),c) <- zip parts sharedCopies]
-                      (Drop z (Jump j (map Var sharedCopies ++ [NoReuse n payload])))
+                      (Drop z (Jump j [] (map Var sharedCopies ++ [NoReuse n payload])))
        body <- bind [(y,V ty) | (y,_,ty) <- ps] (dsE (Free r e))
-       return (Join j ps body (IsUnique z unique shared))
+       return (Join j [] ps body (IsUnique z unique shared))
 
 -- Drop `v : t` except for its parts `xs`, which the unique branch passes on.
 dropExcept :: [Path] -> Path -> VType -> VExpr -> D VExpr
@@ -172,7 +172,7 @@ dsPlain expr
   = case expr of
       Let x t e1 e2 -> Let x t <$> dsE e1 <*> bind [(x,V t)] (dsE e2)
       LetYield x t e1 e2 e3 -> LetYield x t <$> dsE e1 <*> bind [(x,V t)] (dsE e2) <*> dsE e3
-      Join j ps e1 e2 -> Join j ps <$> bind [(x,V t) | (x,_,t) <- ps] (dsE e1) <*> dsE e2
+      Join j tvs ps e1 e2 -> Join j tvs ps <$> bind [(x,V t) | (x,_,t) <- ps] (dsE e1) <*> dsE e2
       UnboxRu v r e -> do (_,g) <- ask
                           g' <- liftE (unboxRuGamma g v r)
                           UnboxRu v r <$> withGamma g' (dsE e)

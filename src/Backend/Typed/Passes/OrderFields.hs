@@ -271,9 +271,11 @@ ne e = expression (go e)
                         return (Let x t' a' b')
       LetYield x t a b c -> do t' <- nt t; a' <- ne a; b' <- bindVars [(x,V t)] (ne b); c' <- ne c
                                return (LetYield x t' a' b' c')
-      Join j ps a b -> do ps' <- mapM (\(x,m,t) -> (,,) x m <$> nt t) ps
-                          a' <- bindVars [(x,V t) | (x,_,t) <- ps] (ne a)
-                          Join j ps' a' <$> ne b
+      Join j tvs ps a b -> do ps' <- mapM (\(x,m,t) -> (,,) x m <$> nt t) ps
+                              a' <- bindVars [(x,V t) | (x,_,t) <- ps] (ne a)
+                              Join j tvs ps' a' <$> ne b
+      Jump j ts vs -> do ts' <- mapM na ts
+                         descendE name nv (\_ -> ne) (Jump j ts' vs)
       Yielded t -> Yielded <$> nt t
       Call f ts vs -> do env <- asks sourceEnv
                          Call f <$> mapM na ts <*> sequence (zipWith nvAt (paramModes env f (length vs)) vs)

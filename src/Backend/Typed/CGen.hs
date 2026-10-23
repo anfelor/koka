@@ -848,7 +848,7 @@ genE cx dest expr
               return ["if kk_likely(" <.> localName r <+> "!= kk_reuse_null)" <+> block s1 <+> "else" <+> block s2]
       UnboxRu v r e -> genUnboxRu cx dest v r e
       Gen _ e -> genE cx dest e
-      Join j ps e1 e2
+      Join j _ ps e1 e2
         -> do lbl <- fresh "join"
               decls <- mapM (\(x,_,t) -> do ct <- ctype t
                                             return (cty ct <+> localName x <.> ";")) ps
@@ -858,7 +858,7 @@ genE cx dest expr
                                  DReturn -> ([],[])
                                  _ -> (["goto" <+> lbl <.> "_end;"], [lbl <.> "_end: ;"])
               return [block (decls ++ s2 ++ skip ++ [lbl <.> ":" <+> block s1] ++ end)]
-      Jump j vs
+      Jump j _ vs
         -> do (lbl,xs) <- maybe (failG ("jump to unknown join point " ++ show j)) return (M.lookup j (cxJoins cx))
               args <- mapM (genV cx) vs
               return ([localName x <+> "=" <+> a <.> ";" | (x,a) <- zip xs args] ++ ["goto" <+> lbl <.> ";"])

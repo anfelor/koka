@@ -55,10 +55,10 @@ contifyE env g expr
                                   closed = renameE sub body
                               body' <- contifyE env (M.fromList [(x,V v) | (x,_,v) <- params]) closed
                               rest' <- contifyE env g (redirect f j (map Var captures) rest)
-                              return (Join j params body' rest')
+                              return (Join j [] params body' rest')
                 Nothing -> Let f t <$> contifyE env g (Ret (Ptr a lam)) <*> contifyE env (M.insert f (V t) g) rest
       Let x t e1 e2 -> Let x t <$> contifyE env g e1 <*> contifyE env (M.insert x (V t) g) e2
-      Join j ps e1 e2 -> Join j ps <$> contifyE env (M.fromList [(x,V t) | (x,_,t) <- ps]) e1 <*> contifyE env g e2
+      Join j tvs ps e1 e2 -> Join j tvs ps <$> contifyE env (M.fromList [(x,V t) | (x,_,t) <- ps]) e1 <*> contifyE env g e2
       _ | Just ds <- destructAOf expr
         -> do t <- liftE (inferVar g (dsScrut ds))
               destruct t (dsAlts ds) (dsBuild ds (dsMode ds) (dsScrut ds))
@@ -97,12 +97,12 @@ tailOnly f e = occurs e && tails e
       | otherwise = case b of
           Let x _ e1 e2 -> not (occurs e1) && (x == f || tails e2)
           Gen{} -> not (occurs b)
-          Join _ ps e1 e2 -> (f `elem` [x | (x,_,_) <- ps] || not (occurs e1)) && tails e2
+          Join _ _ ps e1 e2 -> (f `elem` [x | (x,_,_) <- ps] || not (occurs e1)) && tails e2
           _ -> getAll (getConst (descendE (Const . All . (/= f)) (Const . All . S.notMember f . fvV)
                              (\xs body -> Const (All (f `elem` xs || tails body))) b))
 
 redirect :: Path -> Name -> [VVal] -> VExpr -> VExpr
 redirect f j captures expr
-  | Just vs <- callOf f expr = Jump j (vs ++ captures)
+  | Just vs <- callOf f expr = Jump j [] (vs ++ captures)
   | otherwise = runIdentity (descendE Identity Identity
                    (\xs e -> Identity (if f `elem` xs then e else redirect f j captures e)) expr)

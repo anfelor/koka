@@ -94,6 +94,10 @@ commaSep ds = hcat (punctuate (text ", ") ds)
 tyArgs :: [AType] -> Doc
 tyArgs ts = brackets (commaSep (map prettyA ts))
 
+tyParams :: [TVar] -> Doc
+tyParams [] = empty
+tyParams vs = angles (commaSep (map tv vs))
+
 args :: [VVal] -> Doc
 args vs = parens (commaSep (map prettyVal vs))
 
@@ -193,9 +197,10 @@ prettyExpr expr
       IsUnique x e1 e2 -> ifThen (text "if-unique" <+> pv x) e1 e2
       IfFull r e1 e2 -> ifThen (text "if-full" <+> pv r) e1 e2
       UnboxRu v r e -> letIn empty (text "@" <+> pv r) (pv v) e
-      Join j ps e1 e2 -> text "join" <+> nm j <.> params ps <+> text "="
+      Join j tvs ps e1 e2 -> text "join" <+> nm j <.> tyParams tvs <.> params ps <+> text "="
                          <-> indent 2 (prettyExpr e1) <-> text "in" <+> align (prettyExpr e2)
-      Jump j vs -> text "jump" <+> nm j <.> args vs
+      Jump j [] vs -> text "jump" <+> nm j <.> args vs
+      Jump j ts vs -> text "jump" <+> nm j <.> tyArgs ts <.> args vs
       Gen vs e -> text "gen" <+> hsep (map tv vs) <.> text "." <+> align (prettyExpr e)
       CaseOpen m v alts def -> caseOf (text "case" <.> mode m) (pv v) ([(nm c <.> parens (commaSep (map pv xs)), e) | (c,xs,e) <- alts] ++ [(text "_", def)])
 
@@ -213,11 +218,8 @@ ifThen test e1 e2 = test <-> indent 2 (vcat [text "then" <+> align (prettyExpr e
 prettyDef :: Def -> Doc
 prettyDef def
   = case def of
-      DefFun f vs ps r e -> text "fun" <+> nm f <.> tparams vs <.> params ps <+> colon <+> prettyV r <+> text "=" <-> indent 2 (prettyExpr e)
-      DefVal x vs t e    -> text "val" <+> nm x <.> tparams vs <+> colon <+> prettyV t <+> text "=" <-> indent 2 (prettyExpr e)
-  where
-    tparams [] = empty
-    tparams vs = angles (commaSep (map tv vs))
+      DefFun f vs ps r e -> text "fun" <+> nm f <.> tyParams vs <.> params ps <+> colon <+> prettyV r <+> text "=" <-> indent 2 (prettyExpr e)
+      DefVal x vs t e    -> text "val" <+> nm x <.> tyParams vs <+> colon <+> prettyV t <+> text "=" <-> indent 2 (prettyExpr e)
 
 prettyProgram :: Program -> Doc
 prettyProgram prog

@@ -17,11 +17,13 @@ import Data.Functor.Const( Const(..) )
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
+import Backend.Typed.Types( Types(..) )
+import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Query( Env, envOf, checkE, yieldJoins )
 
 checkProgram :: Program -> [String]
 checkProgram prog
-  = [show (defName d) ++ ": " ++ err | d <- progDefs prog, Left err <- [checkPaths d >> checkDef (envOf prog) d]]
+  = [show (defName d) ++ ": " ++ err | d <- progDefs prog, Left err <- [checkPaths d >> checkTypeVars d >> checkDef (envOf prog) d]]
 
 -- The variables are named by their paths (see `Syntax.Path`): the binder of a destructuring
 -- of a variable is the variable followed by the step of the form, every other binder is a
@@ -80,6 +82,65 @@ pathsA val
 rootBinder :: Path -> [Either String Name]
 rootBinder (Path x []) = [Right x]
 rootBinder x = [Left ("binder " ++ show x ++ " is not a root")]
+
+-- Type variables are bound by a definition, `gen`, `unpack` and join points, and the
+-- annotations only mention those in scope.
+checkTypeVars :: Def -> Either String ()
+checkTypeVars def
+  = case outside bound sig ++ tvarsE bound (defBody def) of
+      (v:_) -> Left ("type variable out of scope: " ++ ppr (AVar v))
+      [] -> Right ()
+  where
+    bound = S.fromList (defParams def)
+    sig = case def of
+            DefFun{ defArgs = ps, defRes = r } -> concat [ftv t | (_,_,t) <- ps] ++ ftv r
+            DefVal{ defType = t } -> ftv t
+
+outside :: S.Set TVar -> [TVar] -> [TVar]
+outside bound = filter (`S.notMember` bound)
+
+tvarsE :: S.Set TVar -> VExpr -> [TVar]
+tvarsE bound expr
+  = case expr of
+      Unpack _ v tvs _ e  -> tvarsV bound v ++ tvarsE (with tvs) e
+      Gen tvs e           -> tvarsE (with tvs) e
+      Join _ tvs ps e1 e2 -> outside (with tvs) (concat [ftv t | (_,_,t) <- ps]) ++ tvarsE (with tvs) e1 ++ tvarsE bound e2
+      _ -> outside bound annotations ++ getConst (descendE (const (Const [])) (Const . tvarsV bound) (\_ e -> Const (tvarsE bound e)) expr)
+  where
+    with tvs = S.union bound (S.fromList tvs)
+    annotations = case expr of
+      Let _ t _ _        -> ftv t
+      LetYield _ t _ _ _ -> ftv t
+      Yielded t          -> ftv t
+      Call _ ts _        -> concatMap ftv ts
+      Jump _ ts _        -> concatMap ftv ts
+      _                  -> []
+
+tvarsV :: S.Set TVar -> VVal -> [TVar]
+tvarsV bound val
+  = outside bound annotations ++ getConst (descendV (Const . tvarsA bound) (Const . tvarsV bound) val)
+  where
+    annotations = case val of
+      Glob _ ts   -> concatMap ftv ts
+      Inj _ t _   -> ftv t
+      Ptr a _     -> ftv a
+      Pack t ts _ -> ftv t ++ concatMap ftv ts
+      TyApp _ ts  -> concatMap ftv ts
+      Context b _ -> ftv b
+      NoReuse _ c -> maybe [] (\(Contents _ p t) -> tvarsV bound p ++ ftv t) c
+      _           -> []
+
+tvarsA :: S.Set TVar -> AVal -> [TVar]
+tvarsA bound val
+  = case val of
+      Lam ps r e -> outside bound (concat [ftv t | (_,_,t) <- ps] ++ ftv r) ++ tvarsE bound e
+      _ -> outside bound annotations ++ getConst (descendA (const (Const [])) (Const . tvarsA bound) (Const . tvarsV bound) val)
+  where
+    annotations = case val of
+      InjA _ a _      -> ftv a
+      Roll a _        -> ftv a
+      OpenCon _ ts _  -> concatMap ftv ts
+      _               -> []
 
 checkDef :: Env -> Def -> Either String ()
 checkDef env def

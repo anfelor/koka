@@ -21,7 +21,7 @@ import Control.Monad( foldM )
 import Common.Name
 import Common.NamePrim( nameTpReuse )
 import Backend.Typed.Syntax
-import Backend.Typed.Types( Types(..), inst, sumAlts, sumOf, mapReuseContents, traverseReuseContents )
+import Backend.Typed.Types( Sub, Types(..), inst, sumAlts, sumOf, mapReuseContents, traverseReuseContents )
 
 -- A continuation that wraps an expression.
 type K = VExpr -> VExpr
@@ -61,7 +61,8 @@ mentionedE e = annotations ++ getConst (descendE (Const . (:[])) (Const . mentio
           LetYield _ t _ _ _ -> mentionedT t
           Yielded t -> mentionedT t
           Call _ ts _ -> concatMap (mentionedT . VPtr) ts
-          Join _ ps _ _ -> concatMap (mentionedT . (\(_,_,t) -> t)) ps
+          Jump _ ts _ -> concatMap (mentionedT . VPtr) ts
+          Join _ _ ps _ _ -> concatMap (mentionedT . (\(_,_,t) -> t)) ps
           _ -> []
 
 mentionedV :: VVal -> [Path]
@@ -374,9 +375,9 @@ descendB fn fv fb expr
       IsUnique x e1 e2      -> IsUnique <$> fn x <*> plain e1 <*> plain e2
       IfFull r e1 e2        -> IfFull <$> fn r <*> plain e1 <*> plain e2
       UnboxRu v r e         -> (\v' (r',e') -> UnboxRu v' r' e') <$> fn v <*> one r [] e
-      Join j ps e1 e2       -> (\(xs,e1') e2' -> Join j [(x',m,t) | (x',(_,m,t)) <- zip xs ps] e1' e2')
+      Join j tvs ps e1 e2   -> (\(xs,e1') e2' -> Join j tvs [(x',m,t) | (x',(_,m,t)) <- zip xs ps] e1' e2')
                                  <$> fb [(x,[]) | (x,_,_) <- ps] e1 <*> plain e2
-      Jump j vs             -> Jump j <$> traverse fv vs
+      Jump j ts vs          -> Jump j ts <$> traverse fv vs
   where
     plain e = snd <$> fb [] e
     one x s e = (\(xs,e') -> (single xs,e')) <$> fb [(x,s)] e
@@ -491,17 +492,54 @@ pathOf z ss = (\x -> foldl child x ss) <$> z
 jumpArgs :: Name -> VExpr -> [[VVal]]
 jumpArgs j expr
   = case expr of
-      Jump k vs | k == j -> [vs]
-      Join k _ e1 _ | k == j -> jumpArgs j e1
+      Jump k _ vs | k == j -> [vs]
+      Join k _ _ e1 _ | k == j -> jumpArgs j e1
       _ -> getConst (descendE (const (Const [])) (const (Const [])) (\_ e -> Const (jumpArgs j e)) expr)
 
 -- replace each jump to a join point
-substJump :: Name -> ([VVal] -> VExpr) -> VExpr -> VExpr
+substJump :: Name -> ([AType] -> [VVal] -> VExpr) -> VExpr -> VExpr
 substJump j f expr
   = case expr of
-      Jump k vs | k == j -> f vs
-      Join k ps e1 e2 | k == j -> Join k ps (substJump j f e1) e2
+      Jump k ts vs | k == j -> f ts vs
+      Join k tvs ps e1 e2 | k == j -> Join k tvs ps (substJump j f e1) e2
       _ -> runIdentity (descendE Identity Identity (\_ e -> Identity (substJump j f e)) expr)
+
+-- substitute types for type variables, which the expression does not bind again
+substTypesE :: Sub -> VExpr -> VExpr
+substTypesE sub expr
+  = runIdentity (descendE Identity (Identity . substTypesV sub) (\_ e -> Identity (substTypesE sub e)) annotated)
+  where
+    annotated = case expr of
+      Let x t e1 e2         -> Let x (subst sub t) e1 e2
+      LetYield x t e1 e2 e3 -> LetYield x (subst sub t) e1 e2 e3
+      Yielded t             -> Yielded (subst sub t)
+      Call f ts vs          -> Call f (map (subst sub) ts) vs
+      Join j tvs ps e1 e2   -> Join j tvs [(x,m,subst sub t) | (x,m,t) <- ps] e1 e2
+      Jump j ts vs          -> Jump j (map (subst sub) ts) vs
+      _                     -> expr
+
+substTypesV :: Sub -> VVal -> VVal
+substTypesV sub val
+  = mapV (substTypesA sub) (substTypesV sub) annotated
+  where
+    annotated = case val of
+      Glob x ts   -> Glob x (map (subst sub) ts)
+      Inj i t v   -> Inj i (subst sub t) v
+      Ptr a v     -> Ptr (subst sub a) v
+      Pack t ts v -> Pack (subst sub t) (map (subst sub) ts) v
+      TyApp v ts  -> TyApp v (map (subst sub) ts)
+      Context b v -> Context (subst sub b) v
+      NoReuse n c -> NoReuse n ((\(Contents k p t) -> Contents k (substTypesV sub p) (subst sub t)) <$> c)
+      _           -> val
+
+substTypesA :: Sub -> AVal -> AVal
+substTypesA sub val
+  = case val of
+      Lam ps r e      -> Lam [(x,m,subst sub t) | (x,m,t) <- ps] (subst sub r) (substTypesE sub e)
+      InjA i a v      -> InjA i (subst sub a) (substTypesA sub v)
+      Roll a v        -> Roll (subst sub a) (substTypesA sub v)
+      OpenCon c ts vs -> OpenCon c (map (subst sub) ts) (map (substTypesV sub) vs)
+      _               -> mapA id (substTypesA sub) (substTypesV sub) val
 
 varOf :: VVal -> Path
 varOf (Var y) = y
@@ -703,8 +741,9 @@ substStepWith renameRoot recur scope sub expr
       LetYield x t e1 e2 e3 -> LetYield x (substVType sub t) e1 e2 e3
       Yielded t -> Yielded (substVType sub t)
       Call f ts vs -> Call f (map (substAType sub) ts) vs
-      Join j ps e1 e2 -> let sub' = hide [x | (x,_,_) <- ps] sub
-                        in Join j [(x,m,substVType sub' t) | (x,m,t) <- ps] e1 e2
+      Jump j ts vs -> Jump j (map (substAType sub) ts) vs
+      Join j tvs ps e1 e2 -> let sub' = hide [x | (x,_,_) <- ps] sub
+                            in Join j tvs [(x,m,substVType sub' t) | (x,m,t) <- ps] e1 e2
       _ -> expr
     operands = runIdentity (descendB (Identity . substName sub) (Identity . substVWith renameRoot recur scope sub)
                              (\bs e -> Identity (map fst bs,e)) annotated)
@@ -920,7 +959,7 @@ sources expr = M.union here (getConst (descendE (const (Const M.empty)) (Const .
     here = case expr of
              Dup x y _ -> M.singleton y (Copy x)
              UnboxRu z _ _ -> M.singleton (child z STaken) (Copy (child z SContents))
-             Join j ps _ e2 -> M.fromList [(y,Param [vs !! i | vs <- jumpArgs j e2]) | (i,(y,_,_)) <- zip [0..] ps]
+             Join j _ ps _ e2 -> M.fromList [(y,Param [vs !! i | vs <- jumpArgs j e2]) | (i,(y,_,_)) <- zip [0..] ps]
              _ -> M.empty
     sourcesV = getConst . descendV (Const . sourcesA) (Const . sourcesV)
     sourcesA a = case a of

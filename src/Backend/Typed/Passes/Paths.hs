@@ -135,7 +135,8 @@ renE global ren expr
       LetYield x t e1 e2 e3 -> LetYield x (replaceVType sub t) e1 e2 e3
       Yielded t -> Yielded (replaceVType sub t)
       Call f ts vs -> Call f (map (replaceAType sub) ts) vs
-      Join j ps e1 e2 -> Join j [(x,m,replaceVType sub t) | (x,m,t) <- ps] e1 e2
+      Join j tvs ps e1 e2 -> Join j tvs [(x,m,replaceVType sub t) | (x,m,t) <- ps] e1 e2
+      Jump j ts vs -> Jump j (map (replaceAType sub) ts) vs
       _ -> expr
 
 renV :: Global -> Ren -> VVal -> R VVal

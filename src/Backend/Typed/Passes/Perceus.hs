@@ -207,7 +207,7 @@ consumedWith expr z x
       Ret _      -> True
       Call _ _ _ -> True
       App f _    -> x /= f
-      Jump _ _   -> True
+      Jump{}     -> True
       Let _ _ _ e2 -> not (S.member z (needs (fvE e2))) && S.member x (fvE e2)
       LetYield _ _ _ e2 e3 -> let live = fvE e2 `S.union` fvE e3 in not (S.member z (needs live)) && S.member x live
       _ | Just ds <- destructAOf expr
@@ -327,14 +327,14 @@ percE' pe owned expr
                                 percE' pe owned (k (Call f tys (take i vs ++ [Var s] ++ drop (i+1) vs)))
                 [] -> do (k,vs') <- useVals pe owned (zip ms vs)
                          postCall pe owned (zip ms vs) k (Call f tys vs') (resultOfCall pe f tys)
-      Jump j vs
+      Jump j ts vs
         -> do ms <- maybe (fail ("unknown join point " ++ show j)) return (M.lookup j (peJoins pe))
               (k,vs') <- useVals pe owned (zip ms vs)
-              return (k (Jump j vs'))
-      Join j ps e1 e2
+              return (k (Jump j ts vs'))
+      Join j tvs ps e1 e2
         -> do e1' <- percE (paramEnv (peEnv pe) ps Nothing (peJoins pe)) (ownedParams (peEnv pe) ps) e1
               e2' <- percE' pe{ peJoins = M.insert j [m | (_,m,_) <- ps] (peJoins pe) } owned e2
-              return (Join j ps e1' e2')
+              return (Join j tvs ps e1' e2')
       App f vs
         -> do let move = S.member f owned && all (S.notMember f . fvV) vs
               (kf,f') <- if move then return (id,f) else (\(d,_,y,_) -> (d,y)) <$> copy pe f

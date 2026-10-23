@@ -104,9 +104,9 @@ exE full expr
                                   e3' <- exE full e3
                                   t' <- untagged x t
                                   return (LetYield x t' e1' e2' e3')
-      Join j ps e1 e2 -> do e1' <- exE (S.union full (fullOf [(x,t) | (x,_,t) <- ps])) e1
-                            ps' <- mapM (\(x,m,t) -> (,,) x m <$> untagged x t) ps
-                            Join j ps' e1' <$> exE full e2
+      Join j tvs ps e1 e2 -> do e1' <- exE (S.union full (fullOf [(x,t) | (x,_,t) <- ps])) e1
+                                ps' <- mapM (\(x,m,t) -> (,,) x m <$> untagged x t) ps
+                                Join j tvs ps' e1' <$> exE full e2
       UnboxRu z r e -> UnboxRu z r <$> exE (S.insert r full) e
       IfFull r e1 e2 -> IfFull r <$> exE (S.insert r full) e1 <*> exE full e2
       CaseV{} -> alternatives
@@ -151,15 +151,15 @@ allocate full stmt
       Just (u,_,_) | Let x t (Ret v) e <- stmt, v == u
         -> do j <- fresh "reusejp"
               (u',bs) <- hoist u
-              body <- test full (Jump j [u'])
-              return (lets bs (Join j [(x,modeOf u,t)] e body))
+              body <- test full (Jump j [] [u'])
+              return (lets bs (Join j [] [(x,modeOf u,t)] e body))
       Just (u,m,t)
         -> do j <- fresh "reusejp"
               x <- root <$> fresh "alloc"
               e <- allocate full (replace u (Var x) stmt)
               (u',bs) <- hoist u
-              body <- test full (Jump j [u'])
-              return (lets bs (Join j [(x,m,t)] e body))
+              body <- test full (Jump j [] [u'])
+              return (lets bs (Join j [] [(x,m,t)] e body))
   where
     modeOf u = case u of
                  Context{} -> Unique
@@ -173,10 +173,10 @@ merge full expr (r,m,t,stmt,us)
        x <- root <$> fresh "alloc"
        e <- allocate full (stmt (Var x))
        hs <- mapM hoist us
-       let jumps f = withArms expr [lets bs (f (Jump j [u'])) | (u',bs) <- hs]
+       let jumps f = withArms expr [lets bs (f (Jump j [] [u'])) | (u',bs) <- hs]
        when (length (nub (map tagOf us)) > 1) (modify (\(n,u) -> (n,S.insert r u)))
        slow <- cloneE (root <$> fresh "reusecopy") (jumps (allocFresh r))
-       return (Join j [(x,m,t)] e (IfFull r (jumps id) slow))
+       return (Join j [] [(x,m,t)] e (IfFull r (jumps id) slow))
   where
     tagOf v = case v of
                 Context _ k -> tagOf k

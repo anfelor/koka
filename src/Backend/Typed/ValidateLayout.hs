@@ -74,7 +74,8 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
                      Let _ t _ _ -> [t]
                      LetYield _ t _ _ _ -> [t]
                      Yielded t -> [t]
-                     Join _ ps _ _ -> map (\(_,_,t) -> t) ps
+                     Join _ _ ps _ _ -> map (\(_,_,t) -> t) ps
+                     Jump _ ts _ -> concatMap at ts
                      Call _ ts _ -> concatMap at ts
                      Gen vs _ -> map (VPtr . AVar) vs
                      Unpack _ _ vs _ _ -> map (VPtr . AVar) vs

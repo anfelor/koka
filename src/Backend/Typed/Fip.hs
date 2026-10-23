@@ -291,13 +291,13 @@ fipE expr
         -> do g <- asks fGamma
               g' <- liftE (unboxRuGamma g z r)
               local (\fe -> fe{ fGamma = g' }) (fipE e)
-      Join j ps e1 e2
+      Join j _ ps e1 e2
         -> do i <- state (\s -> (fsUniq s, s{ fsUniq = fsUniq s + 1 }))
               failing <- asks fFailing
               let enter fe = fe{ fJoins = M.insert j (JoinPt i ps e1 fe) (fJoins fe)
                                , fFailing = if fails failing e1 then S.insert j failing else failing }
               local enter (fipE e2)
-      Jump j vs
+      Jump j _ vs
         -> do cs <- mapM fipV vs
               (c,full) <- jump j vs
               return (mconcat cs <> c,full)
@@ -322,10 +322,10 @@ fails :: S.Set Name -> VExpr -> Bool
 fails failing expr
   = case expr of
       Call f _ _ -> f == namePatternMatchError || f == nameUnreachable
-      Jump j _ -> S.member j failing
+      Jump j _ _ -> S.member j failing
       Let _ _ e1 e2 -> fails failing e1 || fails failing e2
       LetYield _ _ e1 e2 e3 -> fails failing e1 || (fails failing e2 && fails failing e3)
-      Join j _ e1 e2 -> fails (if fails failing e1 then S.insert j failing else failing) e2
+      Join j _ _ e1 e2 -> fails (if fails failing e1 then S.insert j failing else failing) e2
       _ -> let es = subexprs expr in not (null es) && all (fails failing) es
 
 -- the continuation of a call only destructures values and builds its result from values, given
@@ -337,10 +337,10 @@ modProduct joins expr
       Call f _ _ -> isEvidence f
       App _ _ -> False
       CaseLit{} -> False
-      Jump j _ -> S.member j joins
+      Jump j _ _ -> S.member j joins
       LetYield x t e1 e2 _ -> modProduct joins (Let x t e1 e2)
       Let _ _ e1 e2 -> modProduct S.empty e1 && modProduct joins e2
-      Join j _ e1 e2 -> modProduct (if modProduct joins e1 then S.insert j joins else joins) e2
+      Join j _ _ e1 e2 -> modProduct (if modProduct joins e1 then S.insert j joins else joins) e2
       _ | Just ds <- destructAOf expr -> single (dsAlts ds)
         | Just ds <- destructVOf expr -> single (dsAlts ds)
         | otherwise -> all (modProduct joins) (subexprs expr)
