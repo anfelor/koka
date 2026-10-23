@@ -446,19 +446,19 @@ checkE env g js expr
               andThen u1 =<< branches [u2, u3]
       Yielded _ -> return noUse
       Call f _ vs -> args [] (paramModes env f (length vs)) vs
-      Jump j vs -> case M.lookup j js of
+      Jump j _ vs -> case M.lookup j js of
                      Just (ms,caps) -> args caps ms vs
                      Nothing -> fail ("jump to unknown join point " ++ show j)
       -- the captured variables that are not parts of other captured variables, including those
       -- of the join points that the body jumps to
-      Join j ps e1 e2 -> do let fvs = S.toList (S.union (fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps])
-                                                         (S.fromList [x | (k,(_,cs)) <- M.toList js, not (null (jumpArgs k e1)), (x,_) <- cs]))
-                            let xs = [x | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
-                            u <- local (const (M.fromList (params env ps ++ [(x,Unique) | x <- xs])))
-                                       (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) js e1)
-                            caps <- mapM (captured u) xs
-                            _ <- leave (params env ps ++ caps) u
-                            checkE env g (M.insert j ([m | (_,m,_) <- ps],caps) js) e2
+      Join j _ ps e1 e2 -> do let fvs = S.toList (S.union (fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps])
+                                                           (S.fromList [x | (k,(_,cs)) <- M.toList js, not (null (jumpArgs k e1)), (x,_) <- cs]))
+                              let xs = [x | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
+                              u <- local (const (M.fromList (params env ps ++ [(x,Unique) | x <- xs])))
+                                         (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) js e1)
+                              caps <- mapM (captured u) xs
+                              _ <- leave (params env ps ++ caps) u
+                              checkE env g (M.insert j ([m | (_,m,_) <- ps],caps) js) e2
       App f vs -> do ft <- liftE (inferVar g f)
                      case ft of
                        A a -> ownedParams a

@@ -54,7 +54,7 @@ expr e
 expr e = case e of
   Let x t a b -> Let x t <$> expr a <*> bind [(x,V t)] (expr b)
   LetYield x t a b c -> LetYield x t <$> expr a <*> bind [(x,V t)] (expr b) <*> expr c
-  Join j ps a b -> Join j ps <$> bind [(x,V t) | (x,_,t) <- ps] (expr a) <*> expr b
+  Join j tvs ps a b -> Join j tvs ps <$> bind [(x,V t) | (x,_,t) <- ps] (expr a) <*> expr b
   UnboxRu z r b -> do
     (env,g) <- ask
     g' <- liftE (unboxRuGamma g z r)

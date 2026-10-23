@@ -29,7 +29,7 @@ type Gamma = M.Map Path Ty
 -- J: the join points that can be jumped to (the variables they capture, including those of
 -- the join points they jump to, their parameter types and their result type), and whether
 -- the result may be the dummy value of an effect yield (`⊢ʸ`)
-data Joins = Joins{ jsPoints :: M.Map Name (S.Set Path,[VType],VType), jsYield :: Bool }
+data Joins = Joins{ jsPoints :: M.Map Name (S.Set Path,[TVar],[VType],VType), jsYield :: Bool }
 
 -- ∅, and ∅ where the result may be a dummy (`⊢ʸ`)
 noJoins, yieldJoins :: Joins
@@ -153,21 +153,23 @@ inferExpr env g js expr
                              _ -> Left ("test of a non-credit: " ++ ppr t)
       UnboxRu v r e -> do g' <- unboxRuGamma g v r
                           inferE env g' js e
-      Join j ps e1 e2 -> do let xs = [x | (x,_,_) <- ps]
-                            unless (S.disjoint (fvE e1 `S.difference` S.fromList xs) (S.fromList (bindersE e2)))
-                              (Left ("join point " ++ show j ++ " captures a variable that is bound again in its scope"))
-                            unless (S.disjoint (S.fromList xs) (S.fromList [root n | (_,_,p) <- ps, Contents _ v _ <- descriptions p, Path n _ <- S.toList (fvV v)]))
-                              (Left ("a description in the parameters of join point " ++ show j ++ " names a parameter"))
-                            t <- inferE env (bindAll [(x,V p) | (x,_,p) <- ps] g) js e1
-                            let caps = S.unions (S.difference (fvE e1) (S.fromList xs) : [cs | (k,(cs,_,_)) <- M.toList (jsPoints js), not (null (jumpArgs k e1))])
-                            checkE env g js{ jsPoints = M.insert j (caps,[p | (_,_,p) <- ps],t) (jsPoints js) } e2 t
-                            return t
+      Join j tvs ps e1 e2 -> do let xs = [x | (x,_,_) <- ps]
+                                unless (S.disjoint (fvE e1 `S.difference` S.fromList xs) (S.fromList (bindersE e2)))
+                                  (Left ("join point " ++ show j ++ " captures a variable that is bound again in its scope"))
+                                unless (S.disjoint (S.fromList xs) (S.fromList [root n | (_,_,p) <- ps, Contents _ v _ <- descriptions p, Path n _ <- S.toList (fvV v)]))
+                                  (Left ("a description in the parameters of join point " ++ show j ++ " names a parameter"))
+                                t <- inferE env (bindAll [(x,V p) | (x,_,p) <- ps] g) js e1
+                                unbound tvs (ftv t ++ ftvCtx g e1)
+                                let caps = S.unions (S.difference (fvE e1) (S.fromList xs) : [cs | (k,(cs,_,_,_)) <- M.toList (jsPoints js), not (null (jumpArgs k e1))])
+                                checkE env g js{ jsPoints = M.insert j (caps,tvs,[p | (_,_,p) <- ps],t) (jsPoints js) } e2 t
+                                return t
       -- the captured variables must still be in scope (`[unbox-ru]` renames the contents of a box)
-      Jump j vs -> case M.lookup j (jsPoints js) of
-                     Just (caps,ps,t) -> do forM_ (S.toList caps) $ \x ->
-                                              unless (M.member x g) (Left ("jump to " ++ show j ++ ", which captures " ++ show x ++ ", out of its scope"))
-                                            checkArgs env g ps vs
-                                            return t
+      Jump j ts vs -> case M.lookup j (jsPoints js) of
+                     Just (caps,tvs,ps,t) -> do forM_ (S.toList caps) $ \x ->
+                                                  unless (M.member x g) (Left ("jump to " ++ show j ++ ", which captures " ++ show x ++ ", out of its scope"))
+                                                unless (length ts == length tvs) (Left ("jump to " ++ show j ++ " with " ++ show (length ts) ++ " type arguments"))
+                                                checkArgs env g (map (inst tvs ts) ps) vs
+                                                return t
                      Nothing -> Left ("jump to " ++ show j ++ " outside of its scope or not in tail position")
       Gen tvs e -> do unbound tvs (ftvCtx g e)
                       t <- inferE env g noJoins e

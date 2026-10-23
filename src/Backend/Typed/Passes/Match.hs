@@ -66,7 +66,7 @@ matchE expr
   = case expr of
       Let x t e1 e2 -> Let x t <$> matchE e1 <*> bind [(x,V t)] (matchE e2)
       LetYield x t e1 e2 e3 -> LetYield x t <$> matchE e1 <*> bind [(x,V t)] (matchE e2) <*> matchE e3
-      Join j ps e1 e2 -> Join j ps <$> bind [(x,V t) | (x,_,t) <- ps] (matchE e1) <*> matchE e2
+      Join j tvs ps e1 e2 -> Join j tvs ps <$> bind [(x,V t) | (x,_,t) <- ps] (matchE e1) <*> matchE e2
       UnboxRu v r e
         -> do (env,g) <- ask
               g' <- liftE (unboxRuGamma g v r)

@@ -15,7 +15,8 @@
   and descriptions too, and reuses destructured parts already in scope.
 
   Before that, join points with at most one jump are inlined: the jump becomes a binding
-  of the parameters to the arguments (aliases that copy propagation then removes).
+  of the parameters to the arguments (aliases that copy propagation then removes), and
+  instantiates the type parameters.
 
   Afterwards, a fresh context that is only appended is inlined: elaboration binds the
   argument of `c ++ ctx K` (Koka's `cctx/(++)`) and copies it as if it may be shared,
@@ -34,6 +35,7 @@ import qualified Data.Set as S
 import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
+import Backend.Typed.Types( Types(..) )
 
 simplifyProgram :: Program -> Program
 simplifyProgram prog = prog{ progDefs = map simplifyDef (progDefs prog) }
@@ -46,14 +48,15 @@ simplifyDef def = def{ defBody = knownE M.empty (freshE (copyE (defScope def) (c
 inlineE :: VExpr -> VExpr
 inlineE expr
   = case expr of
-      Join j ps e1 e2
+      Join j tvs ps e1 e2
         -> let e1' = inlineE e1
                e2' = inlineE e2
-               bindArgs vs = foldr (\((x,_,t),v) e -> Let x t (Ret v) e) e1' (zip ps vs)
+               bindArgs ts vs = let sub = M.fromList (zip tvs ts)
+                                in foldr (\((x,_,t),v) e -> Let x (subst sub t) (Ret v) e) (substTypesE sub e1') (zip ps vs)
            in case length (jumpArgs j e2') of
                 0 -> e2'
                 1 -> substJump j bindArgs e2'
-                _ -> Join j ps e1' e2'
+                _ -> Join j tvs ps e1' e2'
       _ -> runIdentity (descendE Identity (Identity . inlineV) (\_ e -> Identity (inlineE e)) expr)
 
 inlineV :: VVal -> VVal

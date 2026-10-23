@@ -169,7 +169,7 @@ yielded w expr
       Let z t (Let r u e c) k -> yielded w (Let r u e (Let z t c k))
       Let y s a b -> Let y s a (yielded w b)
       LetYield x t e1 e2 e3 -> LetYield x t e1 (yielded w e2) (yielded w e3)
-      Join j ps e1 e2 -> Join j ps (yielded w e1) (yielded w e2)
+      Join j tvs ps e1 e2 -> Join j tvs ps (yielded w e1) (yielded w e2)
       Gen{} -> expr
       _ -> runIdentity (descendE Identity Identity (\_ e -> Identity (yielded w e)) expr)
 

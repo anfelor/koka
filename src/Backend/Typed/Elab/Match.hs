@@ -12,8 +12,9 @@
   Rows without a refutable pattern in the column that is matched are copied into
   every branch, so the body of each guard becomes a join point: a closed local
   function (its free variables are passed as arguments, its parameters are fresh)
-  that is only called in tail position. Elaboration turns these into `Join` and
-  `Jump`; `Simplify` inlines those with a single jump.
+  that is only called in tail position. It is polymorphic in the existentials of
+  the patterns of its row, which are only unpacked before the jumps. Elaboration
+  turns these into `Join` and `Jump`; `Simplify` inlines those with a single jump.
 
   The rows after a guard that can fail are matched again wherever the guard ends
   up. If that duplicates tests, they become a join point of their own instead
@@ -28,8 +29,10 @@ import Backend.Typed.Names
 import Common.Unique
 import Kind.Newtypes( Newtypes, newtypesLookupAny )
 import Type.Type
+import Type.TypeVar( ftv, tvsMember, subNew, (|->) )
 import Core.Core
 import Core.CoreVar( freeLocals, (|~>) )
+import Core.Pretty()
 
 type Bind = (TName,TName)
 type Row  = ([Bind],[Pattern],[Guard])
@@ -83,7 +86,7 @@ matchRows env xs rows
        case findIndex (canFail . snd) (init rows) of
          Nothing -> return tree
          Just k  -> do let (pre,post) = splitAt (k+1) rows
-                       (jdef,jump) <- closeJoin =<< matchRows env xs post
+                       (jdef,jump) <- closeJoin [] =<< matchRows env xs post
                        shared <- withJoins pre . makeLet [jdef] <$> compile env{ envFailure = jump } xs (map snd pre)
                        return (if tests shared < tests tree then shared else tree)
   where
@@ -110,13 +113,13 @@ isUnreachable _         = False
 
 joinBranch :: Branch -> Unique ([DefGroup],Row)
 joinBranch (Branch pats guards)
-  = do (joins,guards') <- unzip <$> mapM joinGuard guards
+  = do (joins,guards') <- unzip <$> mapM (joinGuard (concatMap patExistentials pats)) guards
        return (concat joins, ([],pats,guards'))
 
-joinGuard :: Guard -> Unique ([DefGroup],Guard)
-joinGuard (Guard test body)
+joinGuard :: [TypeVar] -> Guard -> Unique ([DefGroup],Guard)
+joinGuard exists (Guard test body)
   | isAtom body = return ([],Guard test body)
-  | otherwise   = do (jdef,jump) <- closeJoin body
+  | otherwise   = do (jdef,jump) <- closeJoin exists body
                      return ([jdef],Guard test jump)
   where
     isAtom e = case e of
@@ -126,13 +129,22 @@ joinGuard (Guard test body)
                  TypeApp e' _ -> isAtom e'
                  _           -> False
 
-closeJoin :: Expr -> Unique (DefGroup,Expr)
-closeJoin body
+-- abstracts over the existentials `exists` that are free in the body
+closeJoin :: [TypeVar] -> Expr -> Unique (DefGroup,Expr)
+closeJoin exists body
   = do j  <- uniqueName "join"
-       let xs = filter (not . isJoinName . getName) (tnamesList (freeLocals body))
+       let tvs = filter (`tvsMember` ftv body) exists
+           xs  = filter (not . isJoinName . getName) (tnamesList (freeLocals body))
        ps <- mapM (freshVar . typeOf) xs
-       let lam = Lam ps typeTotal ([(x,Var p InfoNone) | (x,p) <- zip xs ps] |~> body)
-       return (DefNonRec (makeDef j lam), App (Var (TName j (typeOf lam)) InfoNone) [Var x InfoNone | x <- xs])
+       let lam = addTypeLambdas tvs (Lam ps typeTotal ([(x,Var p InfoNone) | (x,p) <- zip xs ps] |~> body))
+       return (DefNonRec (makeDef j lam), App (makeTypeApp (Var (TName j (typeOf lam)) InfoNone) (map TVar tvs)) [Var x InfoNone | x <- xs])
+
+patExistentials :: Pattern -> [TypeVar]
+patExistentials pat
+  = case pat of
+      PatCon{ patConPatterns = ps, patExists = exists } -> exists ++ concatMap patExistentials ps
+      PatVar _ p -> patExistentials p
+      _          -> []
 
 scrutVar :: Expr -> Unique ([DefGroup],TName)
 scrutVar (Var x _) = return ([],x)
@@ -203,8 +215,12 @@ specialize env xs i rows p@(PatCon c _ repr targs exists tres info skip)
     specRow n (bs,ps,gs)
       = case ps !! i of
           PatWild -> Just (bs, take i ps ++ replicate n PatWild ++ drop (i+1) ps, gs)
-          q | sameHead p q -> Just (bs, take i ps ++ patConPatterns q ++ drop (i+1) ps, gs)
+          q | sameHead p q -> Just (renameExists q (bs, take i ps ++ patConPatterns q ++ drop (i+1) ps, gs))
           _ -> Nothing
+    -- the branch binds the existentials of p
+    renameExists q (bs,ps,gs)
+      = let sub = subNew [(a,TVar b) | (a,b) <- zip (patExists q) (patExists p), a /= b]
+        in ([(sub |-> y,sub |-> x) | (y,x) <- bs], sub |-> ps, sub |-> gs)
 specialize env xs i rows p@(PatLit _)
   = do body <- compile env (dropAt i xs) [(bs,dropAt i ps,gs) | (bs,ps,gs) <- rows, let q = ps !! i, not (isRefutable q) || sameHead p q]
        return (Branch [p] [Guard exprTrue body])
