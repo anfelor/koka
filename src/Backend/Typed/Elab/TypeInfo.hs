@@ -7,14 +7,14 @@
 -----------------------------------------------------------------------------
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
--- Koka-to-IR type translation and constructor metadata shared by elaboration and code generation.
-module Backend.Typed.TypeInfo( Tr
-                             , elabType, elabFunType, elabScheme
-                             , isValueInfo, elabArgs
-                             , conIndex, conFieldTypes, schemeFieldTypes, conCount, conShape, conExists
-                             , dataInfoOf, valueBody
-                             , tvarStar
-                             ) where
+-- Koka-to-IR type translation and constructor metadata.
+module Backend.Typed.Elab.TypeInfo( Tr
+                                  , elabType, elabFunType, elabScheme
+                                  , isValueInfo, elabArgs
+                                  , conIndex, conFieldTypes, schemeFieldTypes, conCount, conShape, conExists
+                                  , dataInfoOf, valueBody
+                                  , tvarStar
+                                  ) where
 
 import qualified Data.Map as M
 import Data.List( elemIndex )
