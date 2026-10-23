@@ -382,6 +382,8 @@ precompileBackend options backend
            -- precompile specbox-lib so test/cgen/specbox.kk loads it from the .kki
            -- (both carry a -O2 .flags file so they share one build directory)
          , precompile stdcfg "test/cgen/specbox-lib.kk"
+           -- precompile tail so the parallel tail and tail2 tests do not both write its C file
+         , precompile stdcfg "test/cgen/tail.kk"
            -- precompile the syn-nested chain so syn-nested1 emits only its own core
          , precompile stdcfg{flags = flags stdcfg ++ ["-l"]} "test/parc/syn-nested1c.kk"
          ]
