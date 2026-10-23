@@ -8,7 +8,7 @@
 -- logical tree lives only in this pass; every emitted Pair and projection refers to
 -- the normalized type. Moving fields apart is expressed by ordinary IR terms,
 -- so Check and Linear validate the resulting program before C generation.
-module Backend.Typed.Passes.OrderFields( orderFieldsProgram, checkOrdered ) where
+module Backend.Typed.Passes.OrderFields( orderFieldsProgram ) where
 
 import qualified Data.Map as M
 import Backend.Typed.Syntax
@@ -17,8 +17,7 @@ import Backend.Typed.Types( Types(..), inst )
 import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, altTypes, paramModes )
 import Backend.Typed.Monad
 import Backend.Typed.Product
-import Backend.Typed.ValidateLayout( programTypes, checkLayoutProgram )
-import Backend.Typed.Passes.Paths( pathsProgram )
+import Backend.Typed.ValidateLayout( programTypes )
 
 data Tree = Tree VType Form
 data Form = Atom VVal | Projected VVal [Step] | Product Tree Tree | Package [AType] Tree | Empty
@@ -38,9 +37,9 @@ orderFieldsProgram prog
                   Left err -> (d,[show (defName d) ++ ": " ++ err])
                   Right (d',_) -> (d',[])
         (ds,errs) = unzip (map run (progDefs prog))
-        result = pathsProgram prog{ progTypes = M.map normDef (progTypes prog)
-                                  , progSigs = M.map normSig (progSigs prog), progDefs = ds }
-    in (result,concat errs ++ checkOrdered result)
+        result = prog{ progTypes = M.map normDef (progTypes prog)
+                     , progSigs = M.map normSig (progSigs prog), progDefs = ds }
+    in (result,concat errs)
   where
     -- Normalized existential schemas use negative names. Runtime witnesses
     -- use fresh positive names, so instantiating a named type cannot capture
@@ -308,8 +307,3 @@ ne e = expression (go e)
       case t' of
         Tree _ (Product l r) -> select mode ss (if s == SFst then l else r)
         _ -> fail "projection of a non-product"
-
--- Normal-form validation is separate from type checking: well-typed products
--- can still be in the wrong physical order.
-checkOrdered :: Program -> [String]
-checkOrdered = checkLayoutProgram

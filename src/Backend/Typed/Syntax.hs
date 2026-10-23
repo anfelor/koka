@@ -225,9 +225,8 @@ data Lit = LitInt Integer
 -- `let_q ptr x = z.snd` where `z.snd` is the binder of `let_q x = z.snd`. A projection
 -- (`[proj]`), and a field of `[case-open]`, contributes all of its steps. The binders
 -- of other forms are roots, and a root is bound only once in a definition. `Paths`
--- establishes these invariants after elaboration and after `OrderFields` changes
--- the product representation. The other passes preserve them; `Check` validates
--- each pass's output directly.
+-- establishes these invariants after elaboration, which ends with `OrderFields`.
+-- The other passes preserve them; `Check` validates each pass's output directly.
 data Path = Path Name [Step]
           deriving (Eq,Ord)
 

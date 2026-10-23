@@ -9,7 +9,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 -- Whole-program type validation; Query implements the typing rules.
-module Backend.Typed.Check( checkProgram ) where
+module Backend.Typed.Check( checkProgram, checkTypes ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -20,10 +20,18 @@ import Backend.Typed.Common
 import Backend.Typed.Types( Types(..) )
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Query( Env, envOf, checkE, yieldJoins )
+import Backend.Typed.ValidateLayout( checkLayoutProgram )
 
+-- After OrderFields the types are also in layout normal form.
 checkProgram :: Program -> [String]
 checkProgram prog
-  = [show (defName d) ++ ": " ++ err | d <- progDefs prog, Left err <- [checkPaths d >> checkTypeVars d >> checkDef (envOf prog) d]]
+  = checkLayoutProgram prog ++ [show (defName d) ++ ": " ++ err | d <- progDefs prog, Left err <- [checkPaths d >> checkTypeVars d >> checkDef (envOf prog) d]]
+
+-- The typing rules hold before the variables are named by their paths, so the
+-- elaborated program is checked for types only.
+checkTypes :: Program -> [String]
+checkTypes prog
+  = [show (defName d) ++ ": " ++ err | d <- progDefs prog, Left err <- [checkDef (envOf prog) d]]
 
 -- The variables are named by their paths (see `Syntax.Path`): the binder of a destructuring
 -- of a variable is the variable followed by the step of the form, every other binder is a
