@@ -265,7 +265,7 @@ tyOfVar pe x = maybe (fail ("unknown variable " ++ show x)) return (M.lookup x (
 percE' :: PEnv -> VarSet -> VExpr -> P VExpr
 percE' pe owned expr
   | xs@(_:_) <- loadsOf pe expr
-  = withCopies pe owned xs return expr
+  = withCopiesThen percE' pe owned xs return expr
 percE' pe owned (Unbox m z x e)
   | Just lz <- peLazy pe, z `within` lz, S.member lz owned, S.member lz (fvE e)
   = do t <- tyOfVar pe z
@@ -391,16 +391,33 @@ loadsOf pe expr = [x | x <- S.toList here, Just t <- [M.lookup x (peGamma pe)], 
 -- Copy the variables `xs` for an expression, which takes the copies as owned; `k` comes
 -- between the copies and the expression.
 withCopies :: PEnv -> VarSet -> [Path] -> (VExpr -> P VExpr) -> VExpr -> P VExpr
-withCopies pe owned xs k expr
-  = do cs <- mapM (copy pe) xs
-       let ren = [(x,y) | (_,x,y,_) <- cs, x /= y]
+withCopies = withCopiesThen percE
+
+-- Only the outermost products among `xs` are copied: a copy of a product owns its fields,
+-- so a part of it in `xs` is bound as a borrowed projection of the copy instead of getting
+-- another owned reference (the expression copies it again if it needs one).
+-- Loading trivial fields must not restart the owner check before this expression.
+-- The copied scrutinee no longer names its box, so that would settle the box before
+-- the case instead of letting each alternative take its parts for reuse.
+withCopiesThen :: (PEnv -> VarSet -> VExpr -> P VExpr) -> PEnv -> VarSet -> [Path] -> (VExpr -> P VExpr) -> VExpr -> P VExpr
+withCopiesThen cont pe owned xs k expr
+  = do let covered x z = x /= z && x `within` z &&
+                         case M.lookup z (peGamma pe) of
+                           Just (V t) -> isJust (partAt t (stepsFrom z x))
+                           _ -> False
+           roots = [x | x <- xs, not (any (covered x) xs)]
+       cs <- mapM (copy pe) roots
+       let parts = [(x,renamePrefix z y x,y,stepsFrom z x)
+                   | (_,z,y,_) <- cs, z /= y, x <- xs, covered x z]
+           ren = [(x,y) | (_,x,y,_) <- cs, x /= y] ++ [(x,y) | (x,y,_,_) <- parts]
            bs  = concat [bs' | (_,_,_,bs') <- cs]
-       body <- percE (bind pe bs) (S.union owned (ownedOf pe [b | b@(y,_) <- bs, y `elem` map snd ren]))
-                     (renameCopies (peGamma pe) ren expr)
+           projections = [Proj Borrowed (Var z) ss y | (_,y,z,ss) <- parts]
+       body <- cont (bind pe bs) (S.union owned (ownedOf pe [b | b@(y,_) <- bs, y `elem` map snd ren]))
+                     (compose projections (renameCopies (peGamma pe) ren expr))
        compose [d | (d,_,_,_) <- cs] <$> k body
 
 -- The copies replace their variables: a part of a variable that is bound later is a part of
--- its copy, while the parts in scope keep their names (they are copied separately).
+-- its copy, while the parts in scope keep their names unless explicitly renamed too.
 renameCopies :: Gamma -> [(Path,Path)] -> VExpr -> VExpr
 renameCopies g ren
   = renameE (M.union (M.fromList ren) (M.fromList [(y,y) | y <- M.keys g, any (\(x,_) -> y /= x && y `within` x) ren]))

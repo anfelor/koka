@@ -439,6 +439,11 @@ boxOf (Path x ss)
       (_,SContents : rest) -> Just (Path x (reverse rest))
       _ -> Nothing
 
+renamePrefix :: Path -> Path -> Path -> Path
+renamePrefix p q x
+  | x `within` p = foldl child q (stepsFrom p x)
+  | otherwise = x
+
 -- the variable that a destructuring form destructures
 scrutVar :: VExpr -> Maybe Path
 scrutVar expr
