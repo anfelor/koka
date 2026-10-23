@@ -39,7 +39,6 @@ import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, 
 import Backend.Typed.Names( nameLazyFree )
 import Backend.Typed.Layout hiding( dupExpr, dropStmt )
 import Backend.Typed.Product( productOrder )
-import Backend.Typed.ValidateLayout( checkLayoutProgram )
 import Backend.Typed.Monad
 
 data External = External{ extFormat :: String, extType :: Type }
@@ -1253,8 +1252,6 @@ genWrapper env cenv f
 
 cgenModule :: CEnv -> Program -> (String,String,[String])
 cgenModule cenv prog
-  | errs@(_:_) <- checkLayoutProgram prog = ("","",errs)
-  | otherwise
   = let env = envOf prog
         -- (prototype, definition in the header, definition in the C file, initialization)
         genDefE :: Def -> G (Either String (Doc,Doc,Doc,Doc))
