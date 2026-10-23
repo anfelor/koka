@@ -14,7 +14,7 @@ import qualified Data.Map as M
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types( Types(..), inst )
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, altTypes, unboxRuBinds, paramModes )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, altTypes, paramModes )
 import Backend.Typed.Monad
 import Backend.Typed.Product
 import Backend.Typed.ValidateLayout( programTypes, checkLayoutProgram )
@@ -278,10 +278,8 @@ ne e = expression (go e)
       Call f ts vs -> do env <- asks sourceEnv
                          Call f <$> mapM na ts <*> sequence (zipWith nvAt (paramModes env f (length vs)) vs)
       CaseLit v alts def -> CaseLit <$> nvAt Borrowed v <*> mapM (\(l,b) -> (,) l <$> ne b) alts <*> ne def
-      UnboxRu z r body -> do cx <- ask
-                             bs <- liftE (unboxRuBinds (sourceGamma cx) z r)
-                             z' <- name z
-                             UnboxRu z' r <$> bindVars bs (ne body)
+      -- produced by `DropSpec` and `Reuse`, which run later
+      UnboxRu{} -> fail "[unbox-ru] before Perceus"
       _ | Just ds <- destructVOf expr -> do cx <- ask
                                             t <- liftE (inferV (sourceEnv cx) (sourceGamma cx) (dsScrut ds))
                                             ts <- liftE (altTypes (sourceEnv cx) (V t) expr)
