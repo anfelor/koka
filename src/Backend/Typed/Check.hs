@@ -20,12 +20,47 @@ import Backend.Typed.Common
 import Backend.Typed.Types( Types(..) )
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Query( Env, envOf, checkE, yieldJoins )
-import Backend.Typed.ValidateLayout( checkLayoutProgram )
+import Backend.Typed.Layout( layout, leaves, checkLayout, memoryOrder )
 
 -- After OrderFields the types are also in layout normal form.
 checkProgram :: Program -> [String]
 checkProgram prog
   = checkLayoutProgram prog ++ [show (defName d) ++ ": " ++ err | d <- progDefs prog, Left err <- [checkPaths d >> checkTypeVars d >> checkDef (envOf prog) d]]
+
+-- The types of a program are in layout normal form and have valid layouts.
+checkLayoutProgram :: Program -> [String]
+checkLayoutProgram p = concatMap check (programTypes p)
+  where
+    check t = normal t ++ checkLayout (layout t)
+    normal t = case t of
+      VProd a b -> ["product is not in layout normal form" | compound a || empty b || ordered /= [0..length fs-1]]
+                   ++ normal a ++ normal b
+        where fs = leaves t
+              ordered = memoryOrder fs
+      VExists _ b -> ["nested existential in layout normal form" | exists b] ++ normal b
+      VPtr a -> atomic a
+      VSum ts -> concatMap normal ts
+      VCtx _ a b -> atomic a ++ atomic b
+      VReuse _ _ d -> maybe [] (\(Contents _ _ s) -> normal s) d
+      _ -> []
+    compound VProd{} = True
+    compound VExists{} = True
+    compound VUnit = True
+    compound _ = False
+    empty VUnit = True
+    empty VExists{} = True
+    empty _ = False
+    exists VExists{} = True
+    exists _ = False
+    atomic a = case a of
+      ABox t -> check t
+      ASum ts -> concatMap (atomic . snd) ts
+      AFun ps r -> concatMap check (r : map snd ps)
+      AForall _ b -> atomic b
+      ALam _ b -> atomic b
+      ACon _ ts -> concatMap atomic ts
+      AApp _ ts -> concatMap atomic ts
+      _ -> []
 
 -- The typing rules hold before the variables are named by their paths, so the
 -- elaborated program is checked for types only.

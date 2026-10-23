@@ -38,7 +38,6 @@ import Backend.Typed.Types( inst, collapse, Types(..) )
 import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, unrollT, openFields, boxContents, reuseSize )
 import Backend.Typed.Names( nameLazyFree )
 import Backend.Typed.Layout hiding( dupExpr, dropStmt )
-import Backend.Typed.Product( productOrder )
 import Backend.Typed.Monad
 
 data External = External{ extFormat :: String, extType :: Type }
@@ -662,7 +661,7 @@ genLam cx ps r e
                                Nothing -> failG ("unbound captured variable " ++ show x)) caps
        capCts <- mapM (ctOf . snd) capTys
        -- the captures in memory order, like the fields of a product
-       let fields = [(i,capCts !! i) | i <- productOrder (map (capType . snd) capTys)]
+       let fields = [(i,capCts !! i) | i <- memoryOrder (map (capType . snd) capTys)]
            capType (V t) = t
            capType (A a) = VPtr a
            scan   = 1 + sum (map (scanOf . snd) fields)

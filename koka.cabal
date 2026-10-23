@@ -42,9 +42,7 @@ library
       Backend.Typed.Elab.Types
       Backend.Typed.Fip
       Backend.Typed.Layout
-      Backend.Typed.ValidateLayout
       Backend.Typed.Passes.Hoist
-      Backend.Typed.Product
       Backend.Typed.Linear
       Backend.Typed.Monad
       Backend.Typed.Names

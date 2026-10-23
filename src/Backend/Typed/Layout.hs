@@ -18,7 +18,7 @@
   Structs are named by a hash of their layout so modules agree on them.
 -}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Layout( CT(..), EnumSize(..), layout, readInPlace, placeBinders, leaves, leafSlots, isEnum, orderFields, shapeIsHeap
+module Backend.Typed.Layout( CT(..), EnumSize(..), layout, readInPlace, placeBinders, leaves, leafSlots, isEnum, orderFields, memoryOrder, shapeIsHeap
                            , checkLayout, ctName, scanOf, rawOf, needsRC
                            , structDefs, blockName, blockDef, blockSize, isBlock, scalarField
                            , dupExpr, dropStmt, dupFun, dropFun, primBox, scalarHeapSize, fnv
@@ -149,6 +149,10 @@ orderFields fs
   where
     notUnit CUnit = False
     notUnit _ = True
+
+-- The memory order of the fields of a product in layout normal form (`orderFields`).
+memoryOrder :: [VType] -> [Int]
+memoryOrder ts = map fst (orderFields (zip [0..] (map layout ts)))
 
 ctName :: CT -> String
 ctName ct
