@@ -22,7 +22,7 @@ import Backend.Typed.Passes.Contify( contifyProgram )
 import Backend.Typed.Elab.Match( matchCore )
 import Backend.Typed.Passes.Anf( anfProgram )
 import Backend.Typed.Elab.FromCore( elabProgram )
-import Backend.Typed.Check( checkProgram )
+import Backend.Typed.Check( checkProgram, checkTypes )
 import Backend.Typed.Passes.Simplify( simplifyProgram )
 import Backend.Typed.Passes.Yields( yieldsProgram )
 import Backend.Typed.Passes.Perceus( perceusProgram )
@@ -37,7 +37,7 @@ import Backend.Typed.Passes.JoinArgs( joinArgsProgram )
 import Backend.Typed.Passes.Inline( inlineProgram )
 import Backend.Typed.Passes.Paths( pathsProgram )
 import Backend.Typed.Passes.Hoist( hoistProgram )
-import Backend.Typed.Passes.OrderFields( orderFieldsProgram, checkOrdered )
+import Backend.Typed.Passes.OrderFields( orderFieldsProgram )
 import Backend.Typed.Linear( checkLinear )
 import Backend.Typed.Fip( checkFip )
 
@@ -46,18 +46,19 @@ typedFromCore :: Platform -> Bool -> Newtypes -> [C.Core] -> Int -> C.Core -> (P
 typedFromCore platform enableReuse nt imports uniq core
   = let (acore,_)              = runUnique uniq (matchCore nt core)
         (eprog,elabErrs,notes) = elabProgram platform nt imports acore
-        prog                   = pathsProgram eprog
-        passes                 = [("anf",Unchecked,pure' anfProgram), ("contify",Unchecked,contifyProgram), ("simplify",Unchecked,pure' simplifyProgram), ("yields",Unchecked,pure' yieldsProgram), ("orderfields",Unchecked,orderFieldsProgram), ("perceus",Linear,perceusProgram), ("lazy",Linear,lazyProgram)
+        passes                 = [("orderfields",Unchecked,named orderFieldsProgram), ("anf",Unchecked,pure' anfProgram), ("contify",Unchecked,contifyProgram), ("simplify",Unchecked,pure' simplifyProgram), ("yields",Unchecked,pure' yieldsProgram), ("perceus",Linear,perceusProgram), ("lazy",Linear,lazyProgram)
                                    ,("dropspec",Linear,dropSpecProgram)] ++ [("reuse",Linear,reuseProgram) | enableReuse]
                                    ++ [("match",Linear,matchProgram), ("sinkjoins",Linear,pure' sinkJoinsProgram), ("joinargs",Linear,pure' joinArgsProgram)]
                                    ++ concat [[("copyreset",Linear,pure' copyResetProgram),("expandreuse",Linear,pure' expandReuseProgram)] | enableReuse] ++ [("inline",Linear,inlineProgram)]
-        (dsprog,msgs)          = runPasses prog (label "check" (checkProgram prog)) passes
+        (dsprog,msgs)          = runPasses eprog (label "check" (checkTypes eprog)) passes
         -- without reuse every constructor allocates
         fipMsgs                = if enableReuse && null msgs then label "fip" (checkFip (fipsOf (core:imports)) (groupsOf core) dsprog) else []
-        (ordered,orderMsgs)    = if null elabErrs && null msgs then runPasses dsprog [] [("layout",Linear,\p -> (p,checkOrdered p)),("hoist",Linear,hoistProgram)] else (dsprog,[])
-    in (ordered, label "elab" elabErrs ++ msgs ++ fipMsgs ++ orderMsgs ++ label "note" notes)
+        (hoisted,hoistMsgs)    = if null elabErrs && null msgs then runPasses dsprog [] [("hoist",Linear,hoistProgram)] else (dsprog,[])
+    in (hoisted, label "elab" elabErrs ++ msgs ++ fipMsgs ++ hoistMsgs ++ label "note" notes)
   where
     pure' f prog = (f prog,[])
+    -- OrderFields completes elaboration; the paths are named once, after it
+    named f prog = let (prog',errs) = f prog in (pathsProgram prog',errs)
 
 -- the FIP annotations of the functions
 fipsOf :: [C.Core] -> M.Map Name Fip

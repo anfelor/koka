@@ -7,8 +7,7 @@
 -----------------------------------------------------------------------------
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
-{- Establish path names at the Core-to-typed-IR boundary, and again when
-  OrderFields changes the representation of products.
+{- Establish path names at the Core-to-typed-IR boundary, after OrderFields.
 
   The binder of a destructuring of a variable `z` becomes `z` followed by the step of the
   destructuring form (`descendB`), so that its name says where it comes from. Every other
