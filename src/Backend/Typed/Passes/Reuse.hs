@@ -178,7 +178,7 @@ ruE expr
                 V (VReuse _ n _) -> offer r n return (Free r) e
                 _ -> fail ("free of a non-credit: " ++ show r)
       IsUnique x e1 e2
-        -> do es <- branches [([],e1),([],e2)]
+        -> do es <- branchActions [ruE e1, sharedDrop x e2]
               return (IsUnique x (es !! 0) (es !! 1))
       IfFull r e1 e2
         -> do es <- branches [([],e1),([],e2)]
@@ -241,17 +241,30 @@ dropReuse x r n e
 -- every branch starts with the same credits, plus those that earlier branches asked for;
 -- credits used in some branch are freed in the others
 branches :: [([(Path,Ty)],VExpr)] -> R [VExpr]
-branches alts
+branches alts = branchActions [bind bs (ruE e) | (bs,e) <- alts]
+
+-- DropSpec's shared arm only duplicates fields before releasing the tested box.
+-- Duplication cannot make that box unique, so do not offer its block for reuse.
+-- Stop at any other operation: a release or call could change its reference count.
+sharedDrop :: Path -> VExpr -> R VExpr
+sharedDrop z (Dup x y e)
+  = do t <- typeOfName x
+       Dup x y <$> bind [(y,t)] (sharedDrop z e)
+sharedDrop z (Drop x e) | x == z = Drop x <$> ruE e
+sharedDrop _ e = ruE e
+
+branchActions :: [R VExpr] -> R [VExpr]
+branchActions alts
   = do cs <- credits
        as0 <- asked
        rs <- sequence [do as <- asked
                           let avail = cs ++ (as \\ as0)
                           setCredits avail
-                          e' <- bind bs (ruE e)
+                          e' <- action
                           left <- credits
                           as' <- asked
                           return (e', [r | (r,_) <- avail ++ (as' \\ as), r `notElem` map fst left])
-                      | (bs,e) <- alts]
+                      | action <- alts]
        let usedAny = nub (concatMap snd rs)
        setCredits [c | c <- cs, fst c `notElem` usedAny]
        return [foldr Free e [r | r <- usedAny, r `notElem` used] | (e,used) <- rs]
