@@ -11,7 +11,7 @@
 -- Keep inference in sync with the typing rules in Syntax.
 module Backend.Typed.Query( Env(..), Gamma, noJoins, yieldJoins, envOf, bindAll, checkE, inferE, inferA, inferV
                           , inferVar, inferAVar, altTypes, unboxRuGamma, boxContents, reuseSize, unrollT, trivialTy, openFields
-                          , funSig, paramModes, altPattern ) where
+                          , funSig, paramModes, altPattern, pointerShape ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -297,6 +297,23 @@ unrollT env t
 -- values of these types need no references, also through named types
 trivialTy :: Env -> Ty -> Bool
 trivialTy env = isTrivialWith (either (const Nothing) Just . unrollT env)
+
+-- The constructor shape of a pointer, unfolding named types but not their
+-- payloads. Opaque and lazy representations supply no such evidence. Guard
+-- alias unfolding as well: a recursive name alone has no known representation.
+pointerShape :: Env -> Ty -> Maybe AType
+pointerShape env t
+  = case t of
+      V (VPtr a) -> shape S.empty a
+      A a -> shape S.empty a
+      _ -> Nothing
+  where
+    shape _ a | isShape a = Just a
+    shape seen a = case a of
+      ACon n _ | not (S.member n seen)
+               , Just (TypeDef _ _ _ Nothing) <- M.lookup n (envTypes env)
+               , Right b <- unrollT env a -> shape (S.insert n seen) b
+      _ -> Nothing
 
 -- the fields of an open constructor at an instance `T⟨B̄⟩` of its type
 openFields :: Env -> Name -> AType -> Q [VType]
