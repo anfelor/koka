@@ -188,15 +188,18 @@ percE pe owned expr
 percE pe owned expr
   = do let live = fvE expr
            deps = [(x,z) | x <- S.toList live, Just z <- [ownerOf pe owned x]]
-       case [z | (_,z) <- deps, not (S.member z live)] of
+           -- Release unrelated dead owners before settling the live borrowed parts:
+           -- dropping one can make another box unique when its fields are taken.
+           dead = owned `S.difference` (live `S.union` S.fromList (map snd deps))
+           retained = owned `S.difference` dead
+       body <- case [z | (_,z) <- deps, not (S.member z live)] of
          -- each branch of a destructuring of a part of `z` settles `z` with what it uses
-         (z:_) | Just x <- scrutVar expr, x /= z, x `within` z -> percE' pe owned expr
-               | otherwise -> settle pe owned expr z [x | (x,z') <- deps, z' == z]
+         (z:_) | Just x <- scrutVar expr, x /= z, x `within` z -> percE' pe retained expr
+               | otherwise -> settle pe retained expr z [x | (x,z') <- deps, z' == z]
          [] -> case [x | (x,z) <- deps, consumedWith expr z x] of
-                 xs@(_:_) -> withCopies pe owned xs return expr
-                 [] -> do let dead = S.toList (owned `S.difference` live)
-                          expr' <- percE' pe (owned `S.intersection` live) expr
-                          dropNames pe dead expr'
+                 xs@(_:_) -> withCopies pe retained xs return expr
+                 [] -> percE' pe retained expr
+       dropNames pe (S.toList dead) body
 
 -- does `expr` consume the live owned `z` while `x`, borrowed from it, is still needed? (The
 -- function of `[app]` is duplicated by `[app]`.)
