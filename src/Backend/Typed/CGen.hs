@@ -35,7 +35,7 @@ import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types( inst, collapse, Types(..) )
-import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, unrollT, openFields, boxContents, reuseSize )
+import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, unrollT, openFields, boxContents, reuseSize, pointerShape )
 import Backend.Typed.Names( nameLazyFree )
 import Backend.Typed.Layout hiding( dupExpr, dropStmt )
 import Backend.Typed.Monad
@@ -137,10 +137,21 @@ dupExpr ct e = maybe e (\f -> text f <.> "(" <.> e <.> ",_ctx)") (dupFun ct)
 -- Like aggregate dup helpers, keep field dups inline: a call can spill another
 -- live field and enlarge even the unique path's stack frame. Root dups may be
 -- tail calls, so leave their inlining to the C compiler.
-dupAt :: Path -> CT -> Doc -> Doc
-dupAt x CBox ve | Path _ (_:_) <- canonical x
-  = "kt_box_dup_inline(" <.> ve <.> ",_ctx)"
-dupAt _ ct ve = dupExpr ct ve
+dupAt :: Ctx -> Path -> Ty -> CT -> Doc -> Doc
+dupAt cx x t CBox ve
+  | Just a <- pointerShape (cxEnv cx) t
+  = case shapeIsHeap a of
+      Just False -> ve
+      heap -> let f = case heap of
+                        Just True -> "kk_datatype_ptr_dup"
+                        _ -> "kk_datatype_dup"
+              in if field
+                   then (if heap == Just True then "kt_datatype_ptr_dup_inline" else "kt_datatype_dup_inline")
+                          <.> "(" <.> ve <.> ",_ctx)"
+                   else "kk_datatype_box(" <.> f <.> "(kk_datatype_unbox(" <.> ve <.> "),_ctx))"
+  | field = "kt_box_dup_inline(" <.> ve <.> ",_ctx)"
+  where field = case canonical x of { Path _ (_:_) -> True; _ -> False }
+dupAt _ _ _ ct ve = dupExpr ct ve
 
 dropStmt :: CT -> Doc -> Doc
 dropStmt ct e = maybe empty (\f -> text f <.> "(" <.> e <.> ",_ctx);") (dropFun ct)
@@ -807,8 +818,13 @@ genE cx dest expr
               return (assignTo dest ct e)
       Drop x e
         | S.member x (cxShared cx)   -- like Koka's C backend: a shared block only needs a decrement
-        -> do s <- genE cx dest e
-              return (["kk_block_decref(kk_datatype_as_ptr(kk_datatype_unbox(" <.> localName x <.> "),_ctx),_ctx);"] ++ s)
+        -> do t <- tyOfName cx x
+              ve <- genVar cx x
+              s <- genE cx dest e
+              let f = case pointerShape (cxEnv cx) t of
+                        Just a | shapeIsSmall a -> "kk_datatype_ptr_decref_small"
+                        _ -> "kk_datatype_ptr_decref"
+              return ([f <.> "(kk_datatype_unbox(" <.> ve <.> "),_ctx);"] ++ s)
         | otherwise
         -> do t <- tyOfName cx x
               ve <- genVar cx x
@@ -829,7 +845,7 @@ genE cx dest expr
               ct <- ctOf t
               ve <- genVar cx x
               s <- genE (bindVar cx y t) dest e
-              return (declare (cty ct) y (dupAt x ct ve) : s)
+              return (declare (cty ct) y (dupAt cx x t ct ve) : s)
       IsUnique x e1 e2
         -> do t <- liftC (inferVar (cxGamma cx) x)
               s1 <- genE cx dest e1
@@ -1324,6 +1340,12 @@ runtimeHeader = vcat
   , "#define kt_unreachable_value(ctx) (kt_unreachable(), kk_box_null())"
   , "static inline __attribute__((always_inline)) kk_box_t kt_box_dup_inline(kk_box_t b, kk_context_t* ctx) {"
   , "  return kk_box_dup(b,ctx);"
+  , "}"
+  , "static inline __attribute__((always_inline)) kk_box_t kt_datatype_dup_inline(kk_box_t b, kk_context_t* ctx) {"
+  , "  return kk_datatype_box(kk_datatype_dup(kk_datatype_unbox(b),ctx));"
+  , "}"
+  , "static inline __attribute__((always_inline)) kk_box_t kt_datatype_ptr_dup_inline(kk_box_t b, kk_context_t* ctx) {"
+  , "  return kk_datatype_box(kk_datatype_ptr_dup(kk_datatype_unbox(b),ctx));"
   , "}"
   , "// plug the hole of a unique context (`kk_cctx_apply_linear`); an empty context has no hole"
   , "static inline kk_box_t kt_ctx_plug(kk_box_t res, kk_box_t hole, kk_box_t child, kk_context_t* _ctx) {"
