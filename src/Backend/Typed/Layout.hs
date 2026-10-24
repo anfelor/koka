@@ -18,7 +18,7 @@
   Structs are named by a hash of their layout so modules agree on them.
 -}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Layout( CT(..), EnumSize(..), layout, readInPlace, placeBinders, leaves, leafSlots, isEnum, orderFields, memoryOrder, shapeIsHeap
+module Backend.Typed.Layout( CT(..), EnumSize(..), layout, readInPlace, placeBinders, leaves, leafSlots, isEnum, orderFields, memoryOrder, shapeIsHeap, shapeIsSmall
                            , checkLayout, ctName, scanOf, rawOf, needsRC
                            , structDefs, blockName, blockDef, blockSize, isBlock, scalarField
                            , dupExpr, dropStmt, dupFun, dropFun, primBox, scalarHeapSize, fnv
@@ -61,6 +61,16 @@ shapeIsHeap (ASum ((_,t):ts))
        bs <- mapM (shapeIsHeap . snd) ts
        if all (== b) bs then Just b else Nothing
 shapeIsHeap _ = Nothing
+
+-- The small free path requires a fixed allocation of at most 128 words,
+-- excluding runtime objects such as strings, vectors and arbitrary opaque boxes.
+-- Like the rest of the layout calculations, sizes here use 64-bit words.
+shapeIsSmall :: AType -> Bool
+shapeIsSmall a = case a of
+  AUnit -> True
+  ABox v -> blockSize (layout v) <= 128 * 8
+  ASum ts -> not (null ts) && all (\(i,b) -> i > 0 && i <= 0xFFC0 && shapeIsSmall b) ts
+  _ -> False
 
 -- A product in a box is read in place: code generation binds the contents of the box as a
 -- pointer into its block, and a projection of a place reads the field into a local, unless
