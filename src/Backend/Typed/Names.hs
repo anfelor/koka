@@ -8,7 +8,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 -- Internal names shared by the Core and typed IR passes.
-module Backend.Typed.Names( nameUnreachable, nameLazyFree, isJoinName ) where
+module Backend.Typed.Names( nameUnreachable, isJoinName ) where
 
 import Common.Name
 
@@ -17,6 +17,3 @@ nameUnreachable = newHiddenName "typed-unreachable"
 
 isJoinName :: Name -> Bool
 isJoinName x = hiddenNameStartsWith x "join"
-
-nameLazyFree :: Name
-nameLazyFree = newHiddenName "typed-lazy-free"

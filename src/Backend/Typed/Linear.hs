@@ -32,10 +32,7 @@
   the scrutinee (`Nothing`), the scrutinee needs no references. The mode of a
   destructuring of a variable is therefore irrelevant (an owned destructuring is a borrowed one
   whose parts are consumed), except that a unique destructuring consumes a unique scrutinee:
-  its alternatives must consume it, and it is then a unique use of the scrutinee. `UnboxLazy`
-  takes the contents of a box of the lazy value in `lazy-eval-locked`: the binder is a new
-  owned root and the box is left as it is (its block is then written over without dropping
-  its old fields, see `Lazy`). `Unscalar` copies the trivial contents of a scalar into a root,
+  its alternatives must consume it, and it is then a unique use of the scrutinee. `Unscalar` copies the trivial contents of a scalar into a root,
   so its mode matters: an owned read consumes the scalar.
 
   `val y = dup x` borrows `x` and binds its copy `y` as a new owned root, so a variable holds
@@ -368,7 +365,6 @@ ownedA env g val
       OpenCon _ _ vs -> uses (map (ownedV env g) vs)
       -- the value is evaluated before the block is written
       BoxAt r v -> uses [ownedV env g v, consume env g r]
-      BoxIn x v -> uses [ownedV env g v, consume env g x]
 
 -- a unique value is a unique variable, a fresh context, or a structural value of unique values
 uniqueV :: Env -> Gamma -> VVal -> L Use
@@ -411,11 +407,6 @@ ownedParams a = unless (all (== Owned) (modes a)) (fail ("closure with parameter
 -- expressions
 
 checkE :: Env -> Gamma -> Joins -> VExpr -> L Use
-checkE env g js (UnboxLazy v x e)
-  = do t   <- liftE (inferVar g v)
-       [[tx]] <- liftE (altTypes env t (UnboxLazy v x e))
-       let bs = [(x,tx)]
-       before (inspect env g v) (roots env Owned bs (checkE env (bindAll bs g) js e))
 -- the binder is a copy of trivial contents, and an owned read consumes the scalar
 checkE env g js expr@(Unscalar m z x e)
   = do t <- liftE (inferVar g z)

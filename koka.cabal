@@ -36,6 +36,7 @@ library
       Backend.Typed.Elab.Coerce
       Backend.Typed.Elab.Common
       Backend.Typed.Elab.FromCore
+      Backend.Typed.Elab.Lazy
       Backend.Typed.Elab.Match
       Backend.Typed.Elab.Monad
       Backend.Typed.Elab.TypeInfo
@@ -54,7 +55,6 @@ library
       Backend.Typed.Passes.OrderFields
       Backend.Typed.Passes.DropSpec
       Backend.Typed.Passes.ExpandReuse
-      Backend.Typed.Passes.Lazy
       Backend.Typed.Passes.Match
       Backend.Typed.Passes.Paths
       Backend.Typed.Passes.Perceus

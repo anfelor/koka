@@ -209,7 +209,6 @@ ruE expr
       Deref{} -> plain
       Unroll{} -> plain
       Unbox{} -> plain
-      UnboxLazy{} -> plain
       Unscalar{} -> plain
       Unpack{} -> plain
       CaseOpen{} -> plain

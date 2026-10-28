@@ -15,7 +15,7 @@ import Data.List( find )
 import Control.Monad( foldM, unless )
 import Common.Name
 import Common.NamePrim( nameFieldAddrOf, nameCCtxHoleCreate, nameCCtxCreate, nameCCtxExtend, nameCCtxApply, nameCCtxEmpty, nameCCtxCompose, nameCCtxComposeExtend )
-import Common.Syntax( isDefFun, ParamInfo(..), Platform )
+import Common.Syntax( isDefFun, ParamInfo(..) )
 import qualified Common.Syntax as Syntax
 import Kind.Newtypes
 import Type.Type
@@ -37,18 +37,18 @@ import Backend.Typed.Pretty( ppr )
 
 -- programs
 
-elabProgram :: Platform -> Newtypes -> [C.Core] -> C.Core -> (Program,[String],[String])
-elabProgram platform nt imports core
+elabProgram :: Newtypes -> [C.Core] -> C.Core -> (Program,[String],[String])
+elabProgram nt imports core
   = let defs    = map closeDef (filter (not . isContextAccessor) (C.flattenDefGroups (C.coreProgDefs core)))
         isigs   = M.fromList [(n,withModes modes sig) | (n,(tp,isFun,modes)) <- M.toList (importSigs (core:imports)), Right sig <- [typeSig nt tp isFun]]
         env0    = Env nt S.empty S.empty isigs M.empty S.empty M.empty
-        tdefs   = typeDefs platform nt
+        (tdefs,tdefErrs) = typeDefs nt
         run (sigs,ds,errs,notes) def
           = let label msg = show (C.defName def) ++ ": " ++ msg
             in case runE (elabDef def) env0 (St 0 sigs []) of
                  Right ((d,sig),st) -> (M.insert (C.defName def) sig (stSigs st), ds ++ [d], errs, notes ++ map label (stNotes st))
                  Left err -> (sigs, ds, errs ++ [label err], notes)
-        (sigs,ds,errs,notes) = foldl run (M.empty,[],[],[]) defs
+        (sigs,ds,errs,notes) = foldl run (M.empty,[],tdefErrs,[]) defs
     in (Program (C.coreProgName core) tdefs sigs ds, errs, notes)
 
 -- Koka leaves the type variables that nothing constrains free: they become `any`
@@ -604,11 +604,6 @@ fieldTypes :: [AType] -> ConInfo -> E [VType]
 fieldTypes vargs con
   = do e <- env
        tr (conFieldTypes (envNT e) vargs con)
-
-prodVal :: [VVal] -> VVal
-prodVal []     = UnitV
-prodVal [v]    = v
-prodVal (v:vs) = Pair v (prodVal vs)
 
 conValue :: DataInfo -> [AType] -> Int -> Sub -> VVal -> E VVal
 conValue info vargs idx exSub v

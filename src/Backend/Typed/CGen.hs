@@ -36,7 +36,6 @@ import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types( inst, collapse, Types(..) )
 import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, unrollT, lazyTags, openFields, boxContents, reuseSize, pointerShape )
-import Backend.Typed.Names( nameLazyFree )
 import Backend.Typed.Layout hiding( dupExpr, dropStmt )
 import Backend.Typed.Monad
 
@@ -349,7 +348,6 @@ genAIn cx tag val
       InjA _ _ _ -> failG "injection into a non-sum"
       Box v -> genBox cx tag Fresh v
       BoxAt r v -> genBox cx tag (At r) v
-      BoxIn x v -> genBox cx tag (In (Var x)) v
       Scalar v -> genScalar cx v
       OpenCon c tys vs -> genOpenCon cx c tys vs
       Lam ps r e -> genLam cx ps r e
@@ -408,9 +406,8 @@ projLeaves whole e start part
 data Alloc = Fresh | Padded | At Path | In VVal
 
 -- a box: freshly allocated (with the padded size of a lazy alternative), in the block of a
--- reuse credit, or over the block of a lazy value or cell (whose old fields were taken, see
--- `[lock]`, and whose reference count is kept). A box on the
--- path of a one-hole value records the context path with its header (see `genHolePath`).
+-- reuse credit, or over the block of a cell (whose old fields were taken, see `[lock]`, and
+-- whose reference count is kept). A box on the path of a one-hole value records the context path with its header (see `genHolePath`).
 genBox :: Ctx -> Int -> Alloc -> VVal -> G Doc
 genBox cx tag at v
   = do t <- tyOf cx v
@@ -868,12 +865,12 @@ genE cx dest expr
         -> do t <- liftC (inferVar (cxGamma cx) x)
               s1 <- genE cx{ cxGamma = uniqueGamma (cxGamma cx) x } dest e1
               xe <- genVar cx x
-              let d = "kk_datatype_unbox(" <.> xe <.> ")"
-                  blockOf = "kk_datatype_as_ptr(" <.> d <.> ",_ctx)"
-                  (test,shared) = case t of
-                    V (VCell _ _) -> ("kk_block_is_unique(" <.> blockOf <.> ")", cxShared cx)
-                    V _ -> ("kk_datatype_is_unique(" <.> d <.> ",_ctx)", cxShared cx)   -- a lazy value may be immediate
-                    A _ -> ("kk_block_is_unique(" <.> blockOf <.> ")", S.insert x (cxShared cx))
+              let blockOf = "kk_datatype_as_ptr(kk_datatype_unbox(" <.> xe <.> "),_ctx)"
+              shared <- case t of
+                          V (VCell _ _) -> return (cxShared cx)
+                          V _ -> failG ("uniqueness test of an unboxed value: " ++ show x)
+                          A _ -> return (S.insert x (cxShared cx))
+              let test = "kk_block_is_unique(" <.> blockOf <.> ")"
               -- a unique cell is a credit, its block, under the same name in the first branch
               s1' <- case t of
                        V (VCell _ _) -> do b <- fresh "block"
@@ -936,13 +933,6 @@ genE cx dest expr
               a <- liftC (unrollT (cxEnv cx) t)
               genAlias cx dest (localName v) x (A a) e
       Unbox _ v x e -> genUnbox cx dest v x e
-      -- Lazy contents are taken as owned roots; they must survive freeing the
-      -- lazy block even though their paths no longer name parts of that block.
-      UnboxLazy v x e
-        -> do A a <- tyOfName cx v
-              t <- liftC (boxContents a)
-              ue <- unboxBlock t (localName v)
-              genRead cx dest x t ue e
       Unscalar m v x e -> genUnscalar cx dest m v x e
       SplitA _ v k (x,e1) (y,e2)
         -> do t <- tyOfName cx v
@@ -1093,9 +1083,6 @@ cReserved = ["bool","toString","arguments","eval","char","int","intptr_t","long"
 
 genCall :: Ctx -> Dest -> Name -> [AType] -> [VVal] -> G [Doc]
 genCall cx dest f tys vs
-  | f == nameLazyFree, [v] <- vs
-  = do e <- genV cx v
-       return (("kk_block_free(kk_datatype_as_ptr(kk_datatype_unbox(" <.> e <.> "),_ctx),_ctx);") : assignTo dest CUnit "kk_Unit")
   | [Lit (LitInt i)] <- vs, Just (kt,lit) <- fixedWidthLit f i
   = do (_,r) <- callSig cx f tys
        rct <- ctype r
@@ -1213,7 +1200,7 @@ genExtern cx dest f tys vs ext
 
 unboxedInternals :: [Name]
 unboxedInternals
-  = [nameLazyMemoizeTarget, nameLazyMemoize, nameLazyEnter, nameLazyLeave, nameLazyIsWhnf, nameLazyPtrIsWhnf
+  = [nameLazyEnter, nameLazyLeave, nameLazyIsWhnf, nameLazyPtrIsWhnf
     ,nameDataTypePtrIsThreadShared, nameDataTypePtrIsUnique, nameLazyIndirectCompress]
 
 kokaFunType :: Type -> ([Type],Type)
@@ -1405,6 +1392,11 @@ runtimeHeader = vcat
   , "}"
   , "static inline kk_block_t* kt_block_clear(kk_block_t* b, kk_ssize_t scan_fsize, kk_tag_t tag, kk_context_t* _ctx) {"
   , "  b->header.scan_fsize = (uint8_t)scan_fsize; b->header.tag = tag;"
+  , "  // hide that the result is `b`: otherwise clang infers that a `lazy-C` function returns its"
+  , "  // cell, and `lazy-eval-locked` returns the cell itself instead of tail calling `lazy-C`"
+  , "  #if defined(__GNUC__) || defined(__clang__)"
+  , "  __asm__(\"\" : \"+r\"(b));"
+  , "  #endif"
   , "  return b;"
   , "}"
   , "// credits come from box blocks, which are always allocated with `kk_malloc_small`"

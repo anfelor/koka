@@ -117,7 +117,6 @@ prettyAVal val
       OpenCon c ts vs -> nm c <.> tyArgs ts <.> args vs
       Lam ps r e -> text "fn" <.> params ps <+> colon <+> prettyV r <+> text "->" <-> indent 2 (prettyExpr e)
       BoxAt r v   -> text "box@" <.> pv r <+> atomVal v
-      BoxIn x v   -> text "box-in@" <.> pv x <+> atomVal v
 
 prettyContents :: Maybe Contents -> Doc
 prettyContents = maybe empty (\(Contents k p t) -> brackets (text (maybe "_" show k) <.> semi <+> prettyVal p <+> text ":" <+> prettyV t))
@@ -191,7 +190,6 @@ prettyExpr expr
       Unroll m v x e -> letIn (mode m) (text "roll" <+> pv x) (pv v) e
       Unbox m v x e -> letIn (mode m) (text "box" <+> pv x) (pv v) e
       Unscalar m v x e -> letIn (mode m) (text "scalar" <+> pv x) (pv v) e
-      UnboxLazy v x e -> letIn (text "-lazy") (text "box" <+> pv x) (pv v) e
       Unpack m v vs x e -> letIn (mode m) (text "pack" <.> brackets (commaSep (map tv vs)) <+> pv x) (prettyVal v) e
       CaseLit v alts def -> caseOf (text "case") (prettyVal v) ([(prettyLit l, e) | (l,e) <- alts] ++ [(text "_", def)])
       Dup x y e -> text "val" <+> pv y <+> text "= dup" <+> pv x <.> semi <-> prettyExpr e

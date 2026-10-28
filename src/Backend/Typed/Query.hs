@@ -143,8 +143,6 @@ inferExpr env g js expr
                       inferE env (bindAll [(y,t)] g) js e
       IsUnique x e1 e2 -> do t <- inferVar g x
                              case t of
-                               V (VPtr (ACon n _)) | Just TypeDef{ tdefLazy = Just _ } <- M.lookup n (envTypes env)
-                                 -> return ()
                                V (VCell _ _) -> return ()
                                _ -> () <$ (inferAVar g x >>= boxContents >>= reuseSize)
                              branches [inferE env (uniqueGamma g x) js e1, inferE env g js e2]
@@ -235,7 +233,6 @@ altTypes env t expr
       (Unroll{}, A a) -> do b <- unrollT env a
                             return [[A b]]
       (Unbox{}, A (ABox s)) -> return [[V s]]
-      (UnboxLazy{}, A (ABox s)) -> return [[V s]]
       (Unscalar{}, A (AScalar r)) -> return [[V (VRaw r)]]
       (Unpack _ _ tvs _ _, V (VExists bs s)) | length bs == length tvs -> return [[V (inst bs (map AVar tvs) s)]]
       (CaseOpen _ _ alts _, A a) -> do fss <- mapM (\(c,_,_) -> openFields env c a) alts
@@ -328,8 +325,7 @@ unrollT env t
 lazyTags :: Env -> AType -> [Int]
 lazyTags env t
   = case t of
-      ACon n _ | Just TypeDef{ tdefLazy = Just info } <- M.lookup n (envTypes env)
-        -> [i | (i,(True,_)) <- zip [1..] (lazyCons info)]   -- tags start at 1
+      ACon n _ | Just TypeDef{ tdefLazy = Just lz } <- M.lookup n (envTypes env) -> lazyAlts lz
       _ -> []
 
 -- values of these types need no references, also through named types
@@ -494,15 +490,6 @@ inferA env g val
                          (Left "cannot capture reuse credits or cells in a closure")
                        checkE env (bindAll [(x,V t) | (x,_,t) <- ps] (M.delete nameHole g)) yieldJoins e r
                        return (AFun [(m,t) | (_,m,t) <- ps] r)
-      BoxIn x v -> do tx <- inferV env g (Var x)
-                      tv <- inferV env g v
-                      noHeapCredit tv
-                      case tx of
-                        VPtr (ACon n args)
-                          | Just (TypeDef _ tvs (Just body) (Just _)) <- M.lookup n (envTypes env)
-                          , any (alphaEq (ABox tv)) (sumTypes (inst tvs args body))
-                          -> return (ABox tv)
-                        _ -> Left ("writing " ++ ppr tv ++ " into " ++ ppr tx)
       BoxAt r v -> do tr <- inferV env g (Var r)
                       checkReuseTy (V tr)
                       tv <- inferV env g v

@@ -46,14 +46,9 @@
   therefore copied (a load) where it is first read (`loadsOf`) or before its owner is given
   up while it is still needed, whichever comes first, and the later uses read the copy.
 
-  Exception (as Koka's Parc): `lazy-eval-locked` *takes* the fields of the lazy value
-  `@lazy` in every branch that passes `@lazy` on. The parts of `@lazy` are borrowed
-  without duplication and the contents of its box are taken as owned (`UnboxLazy`), so that
-  the fields stay unique during evaluation; memoization then writes over the block of
-  `@lazy` without dropping its old fields (see `Lazy`).
-
   `[lock]` consumes an owned box like any consumer: its contents become owned under their new
-  name `z.taken`, and its cell is a new owned root. A cell is linear: it is never copied, and a
+  name `z.taken`, and its cell is a new owned root. So `lazy-eval-locked` takes the fields of
+  the lazy value under evaluation without duplicating them, as Koka's Parc does. A cell is linear: it is never copied, and a
   dead cell is an error (it must be filled by `memoize`, or freed in the unique branch of a
   test, where it is a credit). The branches of `if-unique` own the same variables.
 
@@ -66,8 +61,7 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad( foldM, unless )
 import Data.Functor.Const( Const(..) )
-import Data.List( isSuffixOf, partition )
-import Data.Maybe( isJust, isNothing )
+import Data.Maybe( isJust, isNothing, listToMaybe )
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
@@ -77,9 +71,8 @@ import Backend.Typed.Types( inst, isPtr )
 
 type VarSet = S.Set Path
 
--- `peLazy`: in `lazy-eval-locked`, the lazy value, whose parts are borrowed from it;
 -- `peJoins`: the parameter modes of the join points in scope
-data PEnv = PEnv{ peEnv :: Env, peGamma :: Gamma, peBorrowed :: VarSet, peLazy :: Maybe Path, peJoins :: M.Map Name [Mode] }
+data PEnv = PEnv{ peEnv :: Env, peGamma :: Gamma, peBorrowed :: VarSet, peJoins :: M.Map Name [Mode] }
 
 type P a = M () NameSupply a
 
@@ -101,17 +94,14 @@ perceusDef :: Env -> Def -> P Def
 perceusDef env def
   = case def of
       DefFun f tvs args res body
-        -> do let lz = case args of
-                         ((x,m,_):_) | owning m, "lazy-eval-locked" `isSuffixOf` nameLocal f -> Just x
-                         _ -> Nothing
-              body' <- percE (paramEnv env args lz M.empty) (ownedParams env args) body
+        -> do body' <- percE (paramEnv env args M.empty) (ownedParams env args) body
               return (DefFun f tvs args res body')
       DefVal x tvs t body
-        -> DefVal x tvs t <$> percE (PEnv env M.empty S.empty Nothing M.empty) S.empty body
+        -> DefVal x tvs t <$> percE (PEnv env M.empty S.empty M.empty) S.empty body
 
 -- the environment of the body of a function or join point
-paramEnv :: Env -> [(Path,Mode,VType)] -> Maybe Path -> M.Map Name [Mode] -> PEnv
-paramEnv env ps lz js = PEnv env (M.fromList [(x,V t) | (x,_,t) <- ps]) (S.fromList [x | (x,Borrowed,_) <- ps]) lz js
+paramEnv :: Env -> [(Path,Mode,VType)] -> M.Map Name [Mode] -> PEnv
+paramEnv env ps js = PEnv env (M.fromList [(x,V t) | (x,_,t) <- ps]) (S.fromList [x | (x,Borrowed,_) <- ps]) js
 
 ownedParams :: Env -> [(Path,Mode,VType)] -> VarSet
 ownedParams env ps = S.fromList [x | (x,m,t) <- ps, owning m, not (trivialTy env (V t))]
@@ -141,14 +131,11 @@ partsOf pe z
   = [x | (x,t) <- takeWhile ((`within` z) . fst) (M.toAscList (M.dropWhileAntitone (<= z) (peGamma pe)))
        , length (stepsFrom z x) == 1, not (trivialTy (peEnv pe) t)]
 
--- the owner of a borrowed variable (see the top); the parts of the lazy value under
--- evaluation have none
+-- the owner of a borrowed variable (see the top)
 ownerOf :: PEnv -> VarSet -> Path -> Maybe Path
 ownerOf pe owned x
   | S.member x owned || maybe True (unrestricted pe x) (M.lookup x (peGamma pe)) = Nothing
-  | otherwise = case [z | z <- reverse (prefixes x), S.member z owned] of
-                  (z:_) | Just z /= peLazy pe -> Just z
-                  _ -> Nothing
+  | otherwise = listToMaybe [z | z <- reverse (prefixes x), S.member z owned]
 
 -- A variable of a trivial type needs no references, unless it is in the contents of a box,
 -- where it is read from the block (see `copy`).
@@ -201,8 +188,9 @@ percE pe owned expr
            dead = owned `S.difference` (live `S.union` S.fromList (map snd deps))
            retained = owned `S.difference` dead
        body <- case [z | (_,z) <- deps, not (S.member z live)] of
-         -- each branch of a destructuring of a part of `z` settles `z` with what it uses
-         (z:_) | Just x <- scrutVar expr, x /= z, x `within` z -> percE' pe retained expr
+         -- each branch of a destructuring of a part of `z` settles `z` with what it uses (a
+         -- lock has no branches)
+         (z:_) | Just x <- scrutVar expr, isNothing (takesContents expr), x /= z, x `within` z -> percE' pe retained expr
                | otherwise -> settle pe retained expr z [x | (x,z') <- deps, z' == z]
          [] -> case [x | (x,z) <- deps, consumedWith expr z x] of
                  xs@(_:_) -> withCopies pe retained xs return expr
@@ -277,13 +265,6 @@ percE' :: PEnv -> VarSet -> VExpr -> P VExpr
 percE' pe owned expr
   | xs@(_:_) <- loadsOf pe expr
   = withCopiesThen percE' pe owned xs return expr
-percE' pe owned (Unbox m z x e)
-  | Just lz <- peLazy pe, z `within` lz, S.member lz owned, S.member lz (fvE e)
-  = do t <- tyOfVar pe z
-       [[tx]] <- liftE (altTypes (peEnv pe) t (Unbox m z x e))
-       -- the taken contents are a root (see `[unbox-lazy]`)
-       y <- fresh "l"
-       UnboxLazy z y <$> percE (bind pe [(y,tx)]) (owned `S.union` ownedOf pe [(y,tx)]) (renamePath x y e)
 -- the binder is a copy of trivial contents, so a dead owned scalar is consumed by the read
 percE' pe owned expr@(Unscalar _ z x e)
   = do t <- tyOfVar pe z
@@ -343,7 +324,7 @@ percE' pe owned expr
               (k,vs') <- useVals pe owned (zip ms vs)
               return (k (Jump j ts vs'))
       Join j tvs ps e1 e2
-        -> do e1' <- percE (paramEnv (peEnv pe) ps Nothing (peJoins pe)) (ownedParams (peEnv pe) ps) e1
+        -> do e1' <- percE (paramEnv (peEnv pe) ps (peJoins pe)) (ownedParams (peEnv pe) ps) e1
               e2' <- percE' pe{ peJoins = M.insert j [m | (_,m,_) <- ps] (peJoins pe) } owned e2
               return (Join j tvs ps e1' e2')
       App f vs
@@ -474,14 +455,6 @@ restFv :: Destruct v -> VarSet
 restFv ds = S.unions [fvE e `S.difference` S.fromList xs | (xs,e) <- dsAlts ds]
 
 destruct :: PEnv -> VarSet -> Maybe Path -> VExpr -> [[(Path,Ty)]] -> [VExpr] -> P (Mode,[VExpr])
-destruct pe owned (Just z) _ binderss bodies
-  | Just lz <- peLazy pe, z `within` lz, S.member lz owned
-  = do es <- mapM (lazyBody lz) (zip binderss bodies)
-       return (Borrowed,es)
-  where
-    lazyBody lz (bs,e)
-      | not (S.member lz (fvE e)) = eagerBody pe owned [lz] (bs,e)
-      | otherwise = percE (bind pe{ peBorrowed = peBorrowed pe `S.union` ownedOf pe bs } bs) owned e
 destruct pe owned z expr binderss bodies
   = do let zOwned = case z of
                       Just x -> S.member x owned
@@ -501,19 +474,6 @@ destruct pe owned z expr binderss bodies
 -- the binders are borrowed from the scrutinee (and from its owner)
 borrowedBody :: PEnv -> VarSet -> ([(Path,Ty)],VExpr) -> P VExpr
 borrowedBody pe owned (bs,e) = percE (bind pe{ peBorrowed = peBorrowed pe `S.union` ownedOf pe bs } bs) owned e
-
--- the live binders of an owned scrutinee of the lazy value are copied at the start of the
--- body, and the scrutinee is dropped after that if it is dead; a binder that is an alias of
--- the dead scrutinee takes over its ownership instead
-eagerBody :: PEnv -> VarSet -> [Path] -> ([(Path,Ty)],VExpr) -> P VExpr
-eagerBody pe owned zName (bs,e)
-  = do let live    = fvE e
-           zDead   = not (any (`S.member` live) zName)
-           alias x = zDead && any (\z -> x `within` z && all keepsPtr (stepsFrom z x)) zName
-           (moved,copied) = partition alias [x | (x,t) <- bs, not (trivialTy (peEnv pe) t), S.member x live]
-           own     = (if zDead then owned `S.difference` S.fromList zName else owned)
-                     `S.union` S.fromList moved
-       withCopies (bind pe bs) own copied (if zDead && null moved then dropNames pe zName else return) e
 
 -- values
 
@@ -561,7 +521,7 @@ useA pe lastOcc i val
               cs <- mapM (copy pe) dups
               let e1   = renameCopies (peGamma pe) [(x,y) | (_,x,y,_) <- cs, x /= y] e
                   g    = M.unions [M.fromList [(x,V t) | (x,_,t) <- ps], M.fromList (concat [bs | (_,_,_,bs) <- cs]), peGamma pe]
-                  inner = PEnv (peEnv pe) g S.empty Nothing M.empty
+                  inner = PEnv (peEnv pe) g S.empty M.empty
                   own  = S.fromList ([x | x <- S.toList (fvA (Lam ps r e1)), maybe False (not . trivialTy (peEnv pe)) (M.lookup x g)] ++ [x | (x,_,t) <- ps, not (trivialTy (peEnv pe) (V t))])
               e' <- percE inner own e1
               return (compose [d | (d,_,_,_) <- cs], i + length caps, Lam ps r e')
