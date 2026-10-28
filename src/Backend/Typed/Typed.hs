@@ -13,7 +13,7 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Common.Unique
 import Common.Name
-import Common.Syntax( Platform, Fip )
+import Common.Syntax( Fip )
 import qualified Common.Syntax as Syntax
 import Kind.Newtypes
 import qualified Core.Core as C
@@ -22,11 +22,11 @@ import Backend.Typed.Passes.Contify( contifyProgram )
 import Backend.Typed.Elab.Match( matchCore )
 import Backend.Typed.Passes.Anf( anfProgram )
 import Backend.Typed.Elab.FromCore( elabProgram )
+import Backend.Typed.Elab.Lazy( lazyProgram )
 import Backend.Typed.Check( checkProgram, checkTypes )
 import Backend.Typed.Passes.Simplify( simplifyProgram )
 import Backend.Typed.Passes.Yields( yieldsProgram )
 import Backend.Typed.Passes.Perceus( perceusProgram )
-import Backend.Typed.Passes.Lazy( lazyProgram )
 import Backend.Typed.Passes.Reuse( reuseProgram )
 import Backend.Typed.Passes.ExpandReuse( expandReuseProgram )
 import Backend.Typed.Passes.CopyReset( copyResetProgram )
@@ -42,11 +42,11 @@ import Backend.Typed.Linear( checkLinear )
 import Backend.Typed.Fip( checkFip )
 
 -- returns the program after Perceus (and reuse) and messages labeled by the phase that produced them
-typedFromCore :: Platform -> Bool -> Newtypes -> [C.Core] -> Int -> C.Core -> (Program,[(String,String)])
-typedFromCore platform enableReuse nt imports uniq core
+typedFromCore :: Bool -> Newtypes -> [C.Core] -> Int -> C.Core -> (Program,[(String,String)])
+typedFromCore enableReuse nt imports uniq core
   = let (acore,_)              = runUnique uniq (matchCore nt core)
-        (eprog,elabErrs,notes) = elabProgram platform nt imports acore
-        passes                 = [("orderfields",Unchecked,named orderFieldsProgram), ("anf",Unchecked,pure' anfProgram), ("contify",Unchecked,contifyProgram), ("simplify",Unchecked,pure' simplifyProgram), ("yields",Unchecked,pure' yieldsProgram), ("perceus",Linear,perceusProgram), ("lazy",Linear,lazyProgram)
+        (eprog,elabErrs,notes) = elabProgram nt imports acore
+        passes                 = [("lazy",Elaborated,lazyProgram nt), ("orderfields",Unchecked,named orderFieldsProgram), ("anf",Unchecked,pure' anfProgram), ("contify",Unchecked,contifyProgram), ("simplify",Unchecked,pure' simplifyProgram), ("yields",Unchecked,pure' yieldsProgram), ("perceus",Linear,perceusProgram)
                                    ,("dropspec",Linear,dropSpecProgram)] ++ [("reuse",Linear,reuseProgram) | enableReuse]
                                    ++ [("match",Linear,matchProgram), ("sinkjoins",Linear,pure' sinkJoinsProgram), ("joinargs",Linear,pure' joinArgsProgram)]
                                    ++ concat [[("copyreset",Linear,pure' copyResetProgram),("expandreuse",Linear,pure' expandReuseProgram)] | enableReuse] ++ [("inline",Linear,inlineProgram)]
@@ -74,8 +74,9 @@ groupsOf core
 -- a pass on the typed IR: its name, what its result must satisfy, and the pass
 type Pass = (String, Checks, Program -> (Program,[String]))
 
--- Beyond the types, the result of a pass may need to be linear.
-data Checks = Unchecked | Linear
+-- Beyond the types, the result of a pass may need to be linear. Before the paths are named
+-- (`Elaborated`), only the types are checked.
+data Checks = Elaborated | Unchecked | Linear
 
 -- Each pass preserves path naming; validate its result directly, and check linearity
 -- if the pass produces linear code. Stop at the first error so that later passes
@@ -85,8 +86,9 @@ runPasses prog msgs _ | not (null msgs) = (prog,msgs)
 runPasses prog msgs [] = (prog,msgs)
 runPasses prog msgs ((name,checks,pass):passes)
   = let (prog',errs) = pass prog
-        checkErrs    = label ("check after " ++ name) (checkProgram prog')
+        checkErrs    = label ("check after " ++ name) ((case checks of Elaborated -> checkTypes; _ -> checkProgram) prog')
         linErrs      = case checks of
+                         Elaborated -> []
                          Unchecked -> []
                          _ | not (null checkErrs) -> []
                          Linear -> label ("linear after " ++ name) (checkLinear prog')
