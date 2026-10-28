@@ -54,7 +54,7 @@ import Backend.Typed.Monad
 import Backend.Typed.Names( nameUnreachable, nameLazyFree )
 import Backend.Typed.Layout( layout, isBlock )
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, trivialTy )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, lockGamma, uniqueGamma, trivialTy )
 
 -- The allocations of the most allocating path; whether there are allocations, calls to the
 -- recursive group, and both in sequence; and the types of the values boxed for polymorphism.
@@ -282,7 +282,7 @@ fipE expr
               -- the copy of a borrowed function is only called
               let borrowCopy fe = if b && isFun t then fe{ fInfo = (fInfo fe){ iBorrowed = y : iBorrowed (fInfo fe) } } else fe
               local borrowCopy (bind [(y,t)] (fipE e))
-      IsUnique _ e1 _ -> fipE e1
+      IsUnique x e1 _ -> local (\fe -> fe{ fGamma = uniqueGamma (fGamma fe) x }) (fipE e1)
       IfFull r e1 e2
         -> do full <- isFull r
               alive <- alivePaths
@@ -291,6 +291,10 @@ fipE expr
         -> do g <- asks fGamma
               g' <- liftE (unboxRuGamma g z r)
               local (\fe -> fe{ fGamma = g' }) (fipE e)
+      Lock z c e
+        -> do fe <- ask
+              g' <- liftE (lockGamma (fEnv fe) (fGamma fe) z c)
+              local (\fe' -> fe'{ fGamma = g' }) (fipE e)
       Join j _ ps e1 e2
         -> do i <- state (\s -> (fsUniq s, s{ fsUniq = fsUniq s + 1 }))
               failing <- asks fFailing
@@ -401,6 +405,8 @@ fipV :: VVal -> F Cost
 fipV v
   = case v of
       Ptr t a -> fipA (Just t) a
+      -- memoization writes over the block of its cell: it neither allocates nor frees
+      Memoize _ _ w -> fipV w
       Context b k -> bind [(nameHole,V (VPtr b))] (fipV k)
       _ -> mconcat <$> sequence (getConst (descendV (\a -> Const [fipA Nothing a]) (\w -> Const [fipV w]) v))
 

@@ -10,8 +10,8 @@
 -- Type inference and environment queries shared by typed IR consumers.
 -- Keep inference in sync with the typing rules in Syntax.
 module Backend.Typed.Query( Env(..), Gamma, noJoins, yieldJoins, envOf, bindAll, checkE, inferE, inferA, inferV
-                          , inferVar, inferAVar, altTypes, unboxRuGamma, boxContents, reuseSize, unrollT, trivialTy, openFields
-                          , funSig, paramModes, altPattern, pointerShape ) where
+                          , inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize, lazySize
+                          , unrollT, lazyTags, trivialTy, openFields, funSig, paramModes, altPattern, pointerShape ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -22,7 +22,7 @@ import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Layout( layout, blockSize, isBlock )
+import Backend.Typed.Layout( layout, blockSize, lazyBlockSize, isBlock )
 
 type Gamma = M.Map Path Ty
 
@@ -63,13 +63,14 @@ inferE env g js e = do mapM_ checkReuseTy (M.elems g)
                        inferExpr env g js e
 
 -- Forgetting a description, its tag, or that a credit is full or a context nonempty is allowed;
--- inventing any is not.
+-- inventing any is not. A cell can be used as a smaller one.
 expectV :: VType -> VType -> Q ()
 expectV expected actual
   = expect expected (forget expected actual)
   where
     forget (VReuse f _ p) (VReuse g n q) = VReuse (if f == MaybeEmpty then f else g) n (forgetDesc p q)
     forget (VCtx f _ _) (VCtx g a b) = VCtx (if f == MaybeEmpty then f else g) a b
+    forget (VCell m _) (VCell n a) | m <= n = VCell m a
     forget (VProd a b) (VProd c d) = VProd (forget a c) (forget b d)
     forget (VSum ts) (VSum us) | length ts == length us = VSum (zipWith forget ts us)
     forget (VExists as a) (VExists bs b) | length as == length bs
@@ -144,8 +145,9 @@ inferExpr env g js expr
                              case t of
                                V (VPtr (ACon n _)) | Just TypeDef{ tdefLazy = Just _ } <- M.lookup n (envTypes env)
                                  -> return ()
+                               V (VCell _ _) -> return ()
                                _ -> () <$ (inferAVar g x >>= boxContents >>= reuseSize)
-                             branches [inferE env g js e1, inferE env g js e2]
+                             branches [inferE env (uniqueGamma g x) js e1, inferE env g js e2]
       -- the credit is full in the first branch and empty in the second
       IfFull r e1 e2 -> do t <- inferV env g (Var r)
                            case t of
@@ -153,6 +155,8 @@ inferExpr env g js expr
                              _ -> Left ("test of a non-credit: " ++ ppr t)
       UnboxRu v r e -> do g' <- unboxRuGamma g v r
                           inferE env g' js e
+      Lock z c e -> do g' <- lockGamma env g z c
+                       inferE env g' js e
       Join j tvs ps e1 e2 -> do let xs = [x | (x,_,_) <- ps]
                                 unless (S.disjoint (fvE e1 `S.difference` S.fromList xs) (S.fromList (bindersE e2)))
                                   (Left ("join point " ++ show j ++ " captures a variable that is bound again in its scope"))
@@ -251,6 +255,32 @@ unboxRuGamma g z r
          _ -> Left ("taking the block of " ++ show z ++ " whose contents are not read")
        return (M.insert r (V (VReuse Full n (Just (Contents (Just (boxTag z)) (Var x) s)))) (M.mapKeys (rebase z) g))
 
+-- The context of the body of `[lock]`: as for `[unbox-ru]`, the contents `z.contents` of the
+-- box must have been read and are renamed to `z.taken`, and the binder is the cell of the
+-- block, a new root. The box is a lazy alternative of a value `y` of a lazy type.
+lockGamma :: Env -> Gamma -> Path -> Path -> Q Gamma
+lockGamma env g z c
+  = do s <- inferAVar g z >>= boxContents
+       t <- case z of
+              Path r ss | (SInjA j : SRoll : rest) <- reverse ss
+                -> do let y = Path r (reverse rest)
+                      t <- inferAVar g y
+                      unless (j `elem` lazyTags env t) (Left ("locking " ++ show z ++ ", a strict alternative of " ++ ppr (A t)))
+                      return t
+              _ -> Left ("locking " ++ show z ++ ", which is not an alternative of a lazy value")
+       n <- lazySize s
+       case M.lookup (child z SContents) g of
+         Just (V s') | alphaEq s s' -> return ()
+         _ -> Left ("locking " ++ show z ++ " whose contents are not read")
+       return (M.insert c (V (VCell n t)) (M.mapKeys (rebase z) g))
+
+-- The context of the first branch of `[if-unique]`: a unique cell is a full credit.
+uniqueGamma :: Gamma -> Path -> Gamma
+uniqueGamma g x
+  = case M.lookup x g of
+      Just (V (VCell n _)) -> M.insert x (V (VReuse Full n Nothing)) g
+      _ -> g
+
 branches :: [Q VType] -> Q VType
 branches cs = do ts <- sequence cs
                  case ts of
@@ -294,6 +324,14 @@ unrollT env t
                        Nothing -> Left ("unknown type " ++ show n)
       _ -> Left ("unroll of " ++ ppr (A t))
 
+-- `lazy(T⟨B̄⟩)`: the tags of the lazy alternatives of a lazy type (none for another type)
+lazyTags :: Env -> AType -> [Int]
+lazyTags env t
+  = case t of
+      ACon n _ | Just TypeDef{ tdefLazy = Just info } <- M.lookup n (envTypes env)
+        -> [i | (i,(True,_)) <- zip [1..] (lazyCons info)]   -- tags start at 1
+      _ -> []
+
 -- values of these types need no references, also through named types
 trivialTy :: Env -> Ty -> Bool
 trivialTy env = isTrivialWith (either (const Nothing) Just . unrollT env)
@@ -336,6 +374,12 @@ reuseSize v
   | isBlock (layout v) = return (blockSize (layout v))
   | otherwise          = Left ("no reusable block: " ++ ppr (A (ABox v)))
 
+-- the size `‖V‖` of the block of a lazy alternative `Box V`, which an indirection fits
+lazySize :: VType -> Q Int
+lazySize v
+  | isBlock (layout v) = return (lazyBlockSize (layout v))
+  | otherwise          = Left ("a lazy alternative without fields: " ++ ppr (A (ABox v)))
+
 litType :: Lit -> VType
 litType lit
   = case lit of
@@ -368,14 +412,16 @@ checkReuseTy ty = case ty of
                                                      m <- reuseSize s
                                                      unless (n == m) (Left "reuse contents do not match the block size")
     VPtr a -> checkReuseTy (A a)
-    VProd a b -> checkReuseTy (V a) >> checkReuseTy (V b)
-    VSum ts -> mapM_ (checkReuseTy . V) ts
-    VExists _ b -> checkReuseTy (V b)
+    VProd a b -> mapM_ inner [a,b]
+    VSum ts -> mapM_ inner ts
+    VExists _ b -> inner b
     VCtx _ a b -> checkReuseTy (A a) >> checkReuseTy (A b)
+    VCell n a -> do when (n < 0) (Left "negative cell size")
+                    checkReuseTy (A a)
     VUnit -> return ()
     VRaw _ -> return ()
   A a -> case a of
-    ABox t -> checkReuseTy (V t)
+    ABox t -> inner t
     AScalar _ -> return ()
     ASum ts -> mapM_ (checkReuseTy . A . snd) ts
     AFun ps r -> mapM_ (checkReuseTy . V) (map snd ps ++ [r])
@@ -386,6 +432,10 @@ checkReuseTy ty = case ty of
     AVar _ -> return ()
     AUnit -> return ()
   where
+    -- a cell only occurs on its own
+    inner t = case t of
+      VCell _ _ -> Left ("a cell inside another type: " ++ ppr ty)
+      _ -> checkReuseTy (V t)
     structural v = case v of
       Var _ -> return ()
       UnitV -> return ()
@@ -410,7 +460,7 @@ checkShape :: AType -> Q ()
 checkShape a = unless (isShape a) (Left ("sum alternatives must be shapes: " ++ ppr a))
 
 noHeapCredit :: VType -> Q ()
-noHeapCredit t = when (containsReuse (V t)) (Left "cannot store reuse credits in a heap block")
+noHeapCredit t = when (containsLinear (V t)) (Left "cannot store reuse credits or cells in a heap block")
 
 inferA :: Env -> Gamma -> AVal -> Q AType
 inferA env g val
@@ -440,8 +490,8 @@ inferA env g val
                           checkV env g v (inst tvs tys f)
                      return (ACon n tys)
              _ -> Left ("unknown open constructor " ++ show c)
-      Lam ps r e -> do when (any containsReuse [t | x <- S.toList (fvA val), Just t <- [M.lookup x g]])
-                         (Left "cannot capture reuse credits in a closure")
+      Lam ps r e -> do when (any containsLinear [t | x <- S.toList (fvA val), Just t <- [M.lookup x g]])
+                         (Left "cannot capture reuse credits or cells in a closure")
                        checkE env (bindAll [(x,V t) | (x,_,t) <- ps] (M.delete nameHole g)) yieldJoins e r
                        return (AFun [(m,t) | (_,m,t) <- ps] r)
       BoxIn x v -> do tx <- inferV env g (Var x)
@@ -509,6 +559,18 @@ inferV env g val
                       case t of
                         VCtx _ _ _ -> return t
                         _ -> Left ("unsharing a non-context: " ++ ppr t)
+      Memoize c k v -> do tc <- inferV env g c
+                          case tc of
+                            VCell n a -> do b <- unrollT env a
+                                            s <- case b of
+                                                   ASum ts | Just (ABox s) <- lookup k ts -> return s
+                                                   _ -> Left ("memoizing alternative " ++ show k ++ " of " ++ ppr (A a) ++ ", which is not a box")
+                                            checkV env g v s
+                                            noHeapCredit s
+                                            m <- reuseSize s
+                                            unless (m <= n) (Left ("memoizing " ++ show m ++ " bytes in a cell of " ++ show n ++ " bytes"))
+                                            return (VPtr a)
+                            _ -> Left ("memoizing into a non-cell: " ++ ppr tc)
       DupV v -> do unless (isGlob v) (Left ("dup of a value that is not a global: " ++ ppr val))
                    inferV env g v
       TyApp v tys -> do tv <- inferV env g v

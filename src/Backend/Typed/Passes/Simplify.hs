@@ -26,13 +26,15 @@
   Finally, a boxed case on a known value (one that the definition binds with `let x = ret v`,
   through the pointers and rolls of `v`) is replaced by its alternative if that does not use
   its binder. Inlining leaves such cases, mostly on constructors without fields. The
-  bindings of values, pointers and rolls that are then unused are removed.
+  bindings of values, pointers and rolls that are then unused are removed, except for values
+  that memoize, which write over their cell.
 -}
 module Backend.Typed.Passes.Simplify( simplifyProgram ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Functor.Identity( Identity(..) )
+import Data.Functor.Const( Const(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types( Types(..) )
@@ -158,8 +160,19 @@ knownE known expr
     -- the taken alternative, unless it uses its binder
     taken x e = let e' = knownE (shadow [x] known) e
                 in if used x e' then descend else e'
-    isRet (Ret _) = True
+    isRet (Ret v) = not (memoizes v)
     isRet _ = False
+
+-- a value that writes over a cell (`[memoize]`); closures cannot capture cells
+memoizes :: VVal -> Bool
+memoizes val
+  = case val of
+      Memoize{} -> True
+      _ -> or (getConst (descendV (\a -> Const [memoizesA a]) (\v -> Const [memoizes v]) val))
+  where
+    memoizesA a = case a of
+      Lam{} -> False
+      _ -> or (getConst (descendA (const (Const [])) (\b -> Const [memoizesA b]) (\v -> Const [memoizes v]) a))
 
 -- keep a destructuring with the binder `x` around `e` if `e` uses it
 ifUsed :: Path -> (VExpr -> VExpr) -> VExpr -> VExpr

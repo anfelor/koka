@@ -29,7 +29,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, boxContents, reuseSize, inferE, noJoins, unrollT, trivialTy )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize, lazySize, lazyTags, inferE, noJoins, unrollT, trivialTy )
 
 -- credits with the size of their block
 type Credits = [(Path,Int)]
@@ -178,7 +178,8 @@ ruE expr
                 V (VReuse _ n _) -> offer r n return (Free r) e
                 _ -> fail ("free of a non-credit: " ++ show r)
       IsUnique x e1 e2
-        -> do es <- branchActions [ruE e1, sharedDrop x e2]
+        -> do g <- asks reGamma
+              es <- branchActions [withGamma (uniqueGamma g x) (ruE e1), sharedDrop x e2]
               return (IsUnique x (es !! 0) (es !! 1))
       IfFull r e1 e2
         -> do es <- branches [([],e1),([],e2)]
@@ -187,6 +188,10 @@ ruE expr
         -> do g <- asks reGamma
               g' <- liftE (unboxRuGamma g v r)
               UnboxRu v r <$> withGamma g' (ruE e)
+      Lock z c e
+        -> do re <- ask
+              g' <- liftE (lockGamma (reEnv re) (reGamma re) z c)
+              Lock z c <$> withGamma g' (ruE e)
       Ret _ -> plain
       Yielded _ -> plain
       Call _ _ _ -> plain
@@ -279,6 +284,13 @@ ruA :: AVal -> R AVal
 ruA val
   = case val of
       Lam ps r e -> Lam ps r . fst <$> scope Nothing (bind [(x,V t) | (x,_,t) <- ps] (ruE e))
+      -- the block of a lazy alternative is padded (`‖V‖`), so it is larger than a credit of `|V|`
+      Roll t (InjA i s (Box w))
+        -> do env <- asks reEnv
+              tw <- typeOfV w
+              if i `elem` lazyTags env t && lazySize tw /= reuseSize tw
+                then Roll t . InjA i s . Box <$> ruV w
+                else descendA pure ruA ruV val
       Box w -> do tw <- typeOfV w
                   w' <- ruV w
                   case reuseSize tw of

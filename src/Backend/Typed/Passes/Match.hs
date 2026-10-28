@@ -23,7 +23,7 @@ import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, lockGamma, uniqueGamma )
 import Backend.Typed.Layout( shapeIsHeap )
 
 type Match a = M (Env,Gamma) () a
@@ -71,6 +71,13 @@ matchE expr
         -> do (env,g) <- ask
               g' <- liftE (unboxRuGamma g v r)
               UnboxRu v r <$> local (const (env,g')) (matchE e)
+      Lock z c e
+        -> do (env,g) <- ask
+              g' <- liftE (lockGamma env g z c)
+              Lock z c <$> local (const (env,g')) (matchE e)
+      IsUnique x e1 e2
+        -> do (env,g) <- ask
+              IsUnique x <$> local (const (env,uniqueGamma g x)) (matchE e1) <*> matchE e2
       Dup x y e
         -> do (_,g) <- ask
               t <- liftE (inferVar g x)

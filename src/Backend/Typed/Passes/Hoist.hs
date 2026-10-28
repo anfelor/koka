@@ -59,6 +59,13 @@ expr e = case e of
     (env,g) <- ask
     g' <- liftE (unboxRuGamma g z r)
     UnboxRu z r <$> local (const (env,g')) (expr b)
+  Lock z c b -> do
+    (env,g) <- ask
+    g' <- liftE (lockGamma env g z c)
+    Lock z c <$> local (const (env,g')) (expr b)
+  IsUnique x a b -> do
+    (env,g) <- ask
+    IsUnique x <$> local (const (env,uniqueGamma g x)) (expr a) <*> expr b
   Dup x y b -> do
     (_,g) <- ask
     t <- liftE (inferVar g x)
@@ -116,6 +123,7 @@ childrenV v = case v of
   Pack t ts w -> [(w,Pack t ts)]
   TyApp w ts -> [(w,\x -> TyApp x ts)]
   DupV w -> [(w,DupV)]
+  Memoize c k w -> [(w,Memoize c k)]
   _ -> []
 
 childrenA :: AVal -> [(VVal, VVal -> AVal)]

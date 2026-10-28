@@ -126,6 +126,8 @@ dropValue trivial fresh scope x t e
                 return (Let u VUnit (reuseParts scope (Unpack Owned (Var x) bs y body)) e)
         VReuse _ _ _ -> return (Free x e)
         VCtx _ _ _ -> return (Drop x e)
+        -- a cell is linear and never dropped, which `Check` rejects
+        VCell _ _ -> return (Drop x e)
         VUnit -> return e
         VRaw _ -> return e
 
@@ -168,6 +170,7 @@ checkDupType :: Ty -> Either String ()
 checkDupType t
   = case t of
       V (VReuse _ _ _) -> Left "dup of a reuse credit"
+      V (VCell _ _) -> Left "dup of a cell"
       V _ -> Right ()
       A _ -> Left "dup of a boxed value"
 
@@ -188,6 +191,7 @@ isTrivialWith unroll t
                    VPtr a       -> trivialA a
                    VReuse _ _ _   -> False
                    VCtx _ _ _   -> False
+                   VCell _ _    -> False
     trivialA a = case a of
                    AUnit     -> True
                    ASum ts   -> all (trivialA . snd) ts
@@ -213,25 +217,27 @@ isShape a = case a of
                 ABox _ -> True
                 _ -> False
 
--- Credits have ownership but no reference count: duplication cannot create another owner.
-containsReuse :: Ty -> Bool
-containsReuse (V v) = case v of
-  VPtr a -> containsReuse (A a)
-  VProd a b -> containsReuse (V a) || containsReuse (V b)
-  VSum ts -> any (containsReuse . V) ts
-  VExists _ b -> containsReuse (V b)
+-- Credits and cells have ownership but no reference count: duplication cannot create another
+-- owner, so they are not stored in a heap block or captured by a closure.
+containsLinear :: Ty -> Bool
+containsLinear (V v) = case v of
+  VPtr a -> containsLinear (A a)
+  VProd a b -> containsLinear (V a) || containsLinear (V b)
+  VSum ts -> any (containsLinear . V) ts
+  VExists _ b -> containsLinear (V b)
   VUnit -> False
   VRaw _ -> False
   VReuse _ _ _ -> True
   VCtx _ _ _ -> False
-containsReuse (A a) = case a of
-  ABox v -> containsReuse (V v)
+  VCell _ _ -> True
+containsLinear (A a) = case a of
+  ABox v -> containsLinear (V v)
   AScalar _ -> False
-  ASum ts -> any (containsReuse . A . snd) ts
-  AForall _ b -> containsReuse (A b)
-  ALam _ b -> containsReuse (A b)
-  ACon _ ts -> any (containsReuse . A) ts
-  AApp _ ts -> any (containsReuse . A) ts
+  ASum ts -> any (containsLinear . A . snd) ts
+  AForall _ b -> containsLinear (A b)
+  ALam _ b -> containsLinear (A b)
+  ACon _ ts -> any (containsLinear . A) ts
+  AApp _ ts -> any (containsLinear . A) ts
   AVar _ -> False
   AFun _ _ -> False
   AUnit -> False
@@ -324,6 +330,7 @@ descendV fa fv val
       Plug c v       -> Plug <$> fv c <*> fv v
       CtxCopy v      -> CtxCopy <$> fv v
       Append c d     -> Append <$> fv c <*> fv d
+      Memoize c k v  -> Memoize <$> fv c <*> pure k <*> fv v
       Hole           -> pure val
       Var _          -> pure val
       Glob _ _       -> pure val
@@ -342,8 +349,8 @@ descendE :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([Path] -> 
 descendE fn fv fe = descendB fn fv (\bs e -> let xs = map fst bs in (,) xs <$> fe xs e)
 
 -- Like `descendE`, but each binder comes with its steps from the scrutinee, and `fb` gives new
--- binders for a subexpression. The binders of a `let`, a dup, a join point and the credit of
--- `[unbox-ru]` have no steps, and neither has that of `[unbox-lazy]`, which takes the contents
+-- binders for a subexpression. The binders of a `let`, a dup, a join point, the credit of
+-- `[unbox-ru]` and the cell of `[lock]` have no steps, and neither has that of `[unbox-lazy]`, which takes the contents
 -- out of the box, or that of `[unscalar]`, which copies them.
 descendB :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([(Path,[Step])] -> VExpr -> f ([Path],VExpr)) -> VExpr -> f VExpr
 descendB fn fv fb expr
@@ -375,6 +382,7 @@ descendB fn fv fb expr
       IsUnique x e1 e2      -> IsUnique <$> fn x <*> plain e1 <*> plain e2
       IfFull r e1 e2        -> IfFull <$> fn r <*> plain e1 <*> plain e2
       UnboxRu v r e         -> (\v' (r',e') -> UnboxRu v' r' e') <$> fn v <*> one r [] e
+      Lock z c e            -> (\z' (c',e') -> Lock z' c' e') <$> fn z <*> one c [] e
       Join j tvs ps e1 e2   -> (\(xs,e1') e2' -> Join j tvs [(x',m,t) | (x',(_,m,t)) <- zip xs ps] e1' e2')
                                  <$> fb [(x,[]) | (x,_,_) <- ps] e1 <*> plain e2
       Jump j ts vs          -> Jump j ts <$> traverse fv vs
@@ -453,12 +461,21 @@ renamePrefix p q x
   | x `within` p = foldl child q (stepsFrom p x)
   | otherwise = x
 
+-- `[unbox-ru]` and `[lock]` of a box `z` take its contents out of its block, rename them to
+-- `z.taken`, and bind its block as a new root: the box, the root and the body
+takesContents :: VExpr -> Maybe (Path,Path,VExpr)
+takesContents expr
+  = case expr of
+      UnboxRu z r e -> Just (z,r,e)
+      Lock z c e -> Just (z,c,e)
+      _ -> Nothing
+
 -- the variable that a destructuring form destructures
 scrutVar :: VExpr -> Maybe Path
 scrutVar expr
   = case expr of
-      UnboxRu z _ _ -> Just z
-      _ | Just ds <- destructAOf expr -> Just (dsScrut ds)
+      _ | Just (z,_,_) <- takesContents expr -> Just z
+        | Just ds <- destructAOf expr -> Just (dsScrut ds)
         | Just ds <- destructVOf expr, Var z <- dsScrut ds -> Just z
         | otherwise -> Nothing
 
@@ -567,12 +584,13 @@ fvV val
       Var x -> S.singleton x
       _ -> getConst (descendV (Const . fvA) (Const . fvV) val)
 
--- the free variables of the body of `[unbox-ru]` of `z` under `z.taken` are those under `z.contents`
+-- the free variables of the body of `[unbox-ru]` or `[lock]` of `z` under `z.taken` are those
+-- under `z.contents`
 fvE :: VExpr -> S.Set Path
 fvE expr
-  = case expr of
-      UnboxRu z r e -> S.insert z (S.map (unrebase z) (S.delete r (fvE e)))
-      _ -> getConst (descendE (Const . S.singleton) (Const . fvV) (\xs e -> Const (fvE e `S.difference` S.fromList xs)) expr)
+  = case takesContents expr of
+      Just (z,r,e) -> S.insert z (S.map (unrebase z) (S.delete r (fvE e)))
+      Nothing -> getConst (descendE (Const . S.singleton) (Const . fvV) (\xs e -> Const (fvE e `S.difference` S.fromList xs)) expr)
 
 -- substitution of unboxed values (their free variables must not be bound in the scope).
 -- A substitution at a named operand must itself be a variable; use a let for other values.
@@ -671,14 +689,14 @@ defScope d = case d of
   DefFun{ defArgs = ps } -> scopeOf [x | (x,_,_) <- ps]
   DefVal{} -> M.empty
 
--- the scope of a subexpression of `expr` that binds `xs`, where `[unbox-ru]` also renames
--- the contents of its box
+-- the scope of a subexpression of `expr` that binds `xs`, where `[unbox-ru]` and `[lock]` also
+-- rename the contents of their box
 bindScope :: VExpr -> [Path] -> Scope -> Scope
 bindScope expr xs scope = M.union (M.fromList [(x,rest x) | x <- xs]) outer
   where
-    outer = case expr of
-      UnboxRu z _ _ -> M.mapKeys (rebase z) scope
-      _ -> scope
+    outer = case takesContents expr of
+      Just (z,_,_) -> M.mapKeys (rebase z) scope
+      Nothing -> scope
     rest x = case expr of
       CaseA _ z as _ | x == child z SRest -> Just [i | (i,_,_) <- as]
       _ -> Nothing
@@ -749,9 +767,9 @@ substStepWith renameRoot recur scope sub expr
                              (\bs e -> Identity (map fst bs,e)) annotated)
     named bs = [(x,fromMaybe (renameRoot x) (pathOf (scrutVar operands) step)) | (x,step) <- bs]
     under bs = bindSub bs (taken sub)
-    -- `[unbox-ru]` renames the contents of its box: substitute its parts as the contents
-    taken = case (expr,operands) of
-      (UnboxRu z _ _,UnboxRu z' _ _)
+    -- `[unbox-ru]` and `[lock]` rename the contents of their box: substitute its parts as the contents
+    taken = case (takesContents expr,takesContents operands) of
+      (Just (z,_,_),Just (z',_,_))
         -> \s p -> if p `within` child z STaken
                      then substV (Just . Var . rebase z') <$> s (unrebase z p)
                      else s p
@@ -847,6 +865,7 @@ destructAOf expr
       IsUnique{} -> Nothing
       IfFull{} -> Nothing
       UnboxRu{} -> Nothing
+      Lock{} -> Nothing
       Join{} -> Nothing
       Jump{} -> Nothing
 
@@ -878,6 +897,7 @@ destructVOf expr
       IsUnique{} -> Nothing
       IfFull{} -> Nothing
       UnboxRu{} -> Nothing
+      Lock{} -> Nothing
       Join{} -> Nothing
       Jump{} -> Nothing
 
@@ -910,6 +930,7 @@ isRead expr
       IsUnique{}  -> False
       IfFull{}    -> False
       UnboxRu{}   -> False
+      Lock{}      -> False
       Join{}      -> False
       Jump{}      -> False
 
@@ -943,11 +964,12 @@ keepsPointer expr
       IsUnique{}  -> False
       IfFull{}    -> False
       UnboxRu{}   -> False
+      Lock{}      -> False
       Join{}      -> False
       Jump{}      -> False
 
 -- Where a variable gets the bits of another variable: a copy (`[dup]`) gets those of its
--- variable, the contents taken by `[unbox-ru]` those of the old contents, and a parameter of
+-- variable, the contents taken by `[unbox-ru]` or `[lock]` those of the old contents, and a parameter of
 -- a join point those of its arguments.
 data Source = Copy Path | Param [VVal]
 
@@ -958,7 +980,7 @@ sources expr = M.union here (getConst (descendE (const (Const M.empty)) (Const .
   where
     here = case expr of
              Dup x y _ -> M.singleton y (Copy x)
-             UnboxRu z _ _ -> M.singleton (child z STaken) (Copy (child z SContents))
+             _ | Just (z,_,_) <- takesContents expr -> M.singleton (child z STaken) (Copy (child z SContents))
              Join j _ ps _ e2 -> M.fromList [(y,Param [vs !! i | vs <- jumpArgs j e2]) | (i,(y,_,_)) <- zip [0..] ps]
              _ -> M.empty
     sourcesV = getConst . descendV (Const . sourcesA) (Const . sourcesV)

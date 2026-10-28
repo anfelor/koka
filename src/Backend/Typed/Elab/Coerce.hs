@@ -110,6 +110,7 @@ boxLeaf t v
       VExists _ _ -> Box v
       VReuse _ _ _  -> Box v
       VCtx _ _ _  -> Box v
+      VCell _ _   -> Box v
 
 isMultiSum :: VType -> Bool
 isMultiSum (VSum ts) = length ts > 1
@@ -140,6 +141,7 @@ unboxAV t a
       VExists _ _ -> unbox Unbox
       VReuse _ _ _  -> unbox Unbox
       VCtx _ _ _  -> unbox Unbox
+      VCell _ _   -> unbox Unbox
   where
     unbox form = do x <- fresh "x"
                     return (form Owned a x, Var x)

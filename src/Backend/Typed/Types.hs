@@ -72,6 +72,7 @@ traverseReuseContents f = goV
       VExists vs b -> VExists vs <$> goV b
       VReuse fl n p -> VReuse fl n <$> f p
       VCtx fl a b -> VCtx fl <$> goA a <*> goA b
+      VCell n a -> VCell n <$> goA a
       VUnit -> pure t
       VRaw _ -> pure t
     goA a = case a of
@@ -135,6 +136,7 @@ substV sub t
       VRaw _    -> t
       VReuse f n p -> VReuse f n (fmap (substContents sub) p)
       VCtx f a b -> VCtx f (substA sub a) (substA sub b)
+      VCell n a -> VCell n (substA sub a)
 
 substA :: Sub -> AType -> AType
 substA sub a
@@ -173,6 +175,7 @@ ftvV t
       VRaw _        -> []
       VReuse _ _ p  -> maybe [] ftvContents p
       VCtx _ a b    -> ftvA a ++ ftvA b
+      VCell _ a     -> ftvA a
 
 ftvA :: AType -> [TVar]
 ftvA a
@@ -199,6 +202,7 @@ isPtr t
       VExists _ _ -> False
       VReuse _ _ _  -> False
       VCtx _ _ _  -> False
+      VCell _ _   -> False
 
 -- the boxed type that instantiates a type variable for a Koka type argument of type `V` (Koka's
 -- `box`); a closure there takes and returns `boxrep`s of its types (Koka's `boxedFunType`).
@@ -256,6 +260,7 @@ shapeLeaves t
       VExists _ _ -> [ABox t]
       VReuse _ _ _  -> [ABox t]
       VCtx _ _ _  -> [ABox t]
+      VCell _ _   -> [ABox t]
 
 eqV :: VType -> VType -> Bool
 eqV s t
@@ -267,6 +272,7 @@ eqV s t
         -> eqV a (inst bs (map AVar as) b)
       (VReuse f n p, VReuse g m q) -> f == g && n == m && eqContentsMaybe p q
       (VCtx f a b, VCtx g c d) -> f == g && eqA a c && eqA b d
+      (VCell n a, VCell m b) -> n == m && eqA a b
       _                      -> s == t
 
 -- Contents are descriptions, so only their structural forms need type substitution.
@@ -353,6 +359,7 @@ matchVWith tvs sub pat t
         -> foldM (\sb (p,s) -> matchVWith tvs sb p s) sub (zip ps ts)
       (VProd p q, VProd s u) -> matchVWith tvs sub p s >>= \sub' -> matchVWith tvs sub' q u
       (VCtx f p q, VCtx g s u) | f == g -> matchAWith tvs sub p s >>= \sub' -> matchAWith tvs sub' q u
+      (VCell n p, VCell m s) | n == m -> matchAWith tvs sub p s
       (VExists as p, VExists bs s) | length as == length bs
         -> matchVWith tvs sub p (inst bs (map AVar as) s)
       _ -> if pat == t then Just sub else Nothing
