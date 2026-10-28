@@ -23,9 +23,10 @@
   but the literal is unique, and appended in place it extends `c` without testing
   whether it is empty (see `genAppend` in `CGen`).
 
-  Finally, a boxed case on a known value (one that the definition binds with `let x = ret v`,
-  through the pointers and rolls of `v`) is replaced by its alternative if that does not use
-  its binder. Inlining leaves such cases, mostly on constructors without fields. The
+  Finally, a case on a known value (an injection, or a value that the definition binds with
+  `let x = ret v`, through the pointers and rolls of `v`) is replaced by its alternative if
+  that does not use its binder. Inlining leaves such cases, mostly on constructors without
+  fields, and so does the specialisation of lazy evaluation to `recurse` (`Elab.Lazy`). The
   bindings of values, pointers and rolls that are then unused are removed, except for values
   that memoize, which write over their cell.
 -}
@@ -147,6 +148,10 @@ knownE known expr
            in if isRet e1' && not (used x e2') then e2' else Let x t e1' e2'
       Deref m v x e -> ifUsed x (Deref m v x) (knownE (shadow [x] known) e)
       Unroll m v x e -> ifUsed x (Unroll m v x) (knownE (shadow [x] known) e)
+      CaseV _ v alts
+        | Just (Inj i _ _) <- case v of { Var x -> valueAt known x; _ -> Just v }
+        , ((x,e):_) <- drop i alts
+        -> taken x e
       CaseA _ v alts def
         | Just (InjA i _ _) <- knownAt known v
         , ((x,e):_) <- [(x,e) | (j,x,e) <- alts, j == i] ++ maybe [] pure def

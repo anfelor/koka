@@ -31,11 +31,18 @@
   - a branch without the cell is a lazy constructor in a match on a forced value, which ends
     in `unreachable` (`[unreachable]` consumes the cell).
   Any other use of a cell, and any other use of `memoize`, is an error. The functions are
-  found by `Kind.Infer`'s naming (`lazyName`). The binders of a lock have the names that
+  found by `Kind.Infer`'s naming (`lazyName`).
+
+  Afterwards, `lazy-eval`, `lazy-eval-locked` and the `lazy-C` functions are specialised to
+  their parameter `recurse`: each gets a WHNF copy (`recurse = True`) and a step copy
+  (`False`) without the parameter, and a call with a literal `recurse` goes to its copy. In a
+  copy, `recurse` is a literal, also in the parameters of join points to which Koka's match
+  passes it, and the tests of it are cases of a known value (`Simplify`).
+  Only `lazy-eval`, which other modules may call, remains, and dispatches to its copies. The binders of a lock have the names that
   `[lock]` requires before `Paths`: the box `y.roll.injⱼ` of the lazy value `y`, and its
   contents `y.roll.injⱼ.contents`, which the lock renames to `y.roll.injⱼ.taken`.
 -}
-module Backend.Typed.Elab.Lazy( lazyProgram ) where
+module Backend.Typed.Elab.Lazy( lazyProgram, lazyCopies ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -52,9 +59,9 @@ import Backend.Typed.Monad
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Query( Env(..), envOf, unrollT, reuseSize, lazySize )
 
--- The `lazy-C` functions with the tag of their constructor and the size of its cell, and the
--- `lazy-eval-locked` functions.
-data Lazies = Lazies{ lzCons :: M.Map Name (Int,Int), lzLocked :: S.Set Name }
+-- The `lazy-C` functions with the tag of their constructor and the size of its cell, the
+-- `lazy-eval-locked` functions, and the `lazy-eval` functions.
+data Lazies = Lazies{ lzCons :: M.Map Name (Int,Int), lzLocked :: S.Set Name, lzEval :: S.Set Name }
 
 -- the lazy value of `lazy-eval-locked` and its type
 data LEnv = LEnv{ leEnv :: Env, leLazies :: Lazies, leLocked :: Maybe (Path,AType) }
@@ -77,7 +84,7 @@ lazyProgram nt prog
                    Left err -> (d, [show (defName d) ++ ": " ++ err])
         (defs,errs) = unzip (map run (progDefs prog))
         cells  = M.fromList [(f,c) | DefFun f _ ((_,_,c@VCell{}):_) _ _ <- defs]
-    in (prog{ progDefs = defs, progSigs = M.mapWithKey (withCell cells) (progSigs prog) }, concat errs)
+    in (specialise lazies prog{ progDefs = defs, progSigs = M.mapWithKey (withCell cells) (progSigs prog) }, concat errs)
   where
     withCell cells f sig
       = case (M.lookup f cells, sig) of
@@ -91,10 +98,24 @@ lazyFuns nt tdefs
                        , tag `elem` lazyAlts lz, tag /= lazyIndirect lz
                        , Just (ABox s) <- [lookup tag alts], Right n <- [lazySize s]])
            (S.fromList [funName info "eval-locked" | (info,_,_) <- infos])
+           (S.fromList [funName info "eval" | (info,_,_) <- infos])
   where
     infos = [(info,lz,alts) | (_,info) <- NM.toList (newtypesTypeDefs nt)
                             , Just TypeDef{ tdefLazy = Just lz, tdefBody = Just (ASum alts) } <- [M.lookup (dataInfoName info) tdefs]]
     funName info stem = qualify (qualifier (dataInfoName info)) (lazyName info stem)
+
+-- the functions with a parameter `recurse`
+recursing :: Lazies -> [Name]
+recursing lazies = M.keys (lzCons lazies) ++ S.toList (lzLocked lazies) ++ S.toList (lzEval lazies)
+
+-- the copy of a function for a value of `recurse`
+copyName :: Bool -> Name -> Name
+copyName recurse = makeHiddenName (if recurse then "whnf" else "step")
+
+-- the copies of the functions with a parameter `recurse`, with their original and the value
+-- of `recurse`
+lazyCopies :: Newtypes -> TypeDefs -> [(Name,(Name,Bool))]
+lazyCopies nt tdefs = [(copyName b f,(f,b)) | f <- recursing (lazyFuns nt tdefs), b <- [False,True]]
 
 -- the first parameter of a `lazy-C` function is the cell of its constructor, and the first
 -- parameter of `lazy-eval-locked` is the lazy value that it locks
@@ -242,6 +263,49 @@ lazyOf a
        case a of
          ACon n _ | Just TypeDef{ tdefLazy = Just lz } <- M.lookup n (envTypes env) -> return lz
          _ -> fail ("not a lazy type: " ++ ppr (A a))
+
+-- Specialise the functions of this module with a parameter `recurse` (the second, a `bool`)
+-- to its value (see the top).
+specialise :: Lazies -> Program -> Program
+specialise lazies prog
+  = prog{ progDefs = concatMap copies (progDefs prog), progSigs = M.foldrWithKey sigs (progSigs prog) (progSigs prog) }
+  where
+    funs = S.fromList (recursing lazies) `S.intersection` S.fromList [f | DefFun{ defName = f } <- progDefs prog]
+    copies def
+      = case def of
+          DefFun f tvs (x:(r,m,t):ps) res body | S.member f funs
+            -> [DefFun (copyName b f) tvs (x:ps) res (callsE (knownJoins (replaceE (M.singleton r (boolV t b)) body))) | b <- [False,True]]
+               ++ [DefFun f tvs (x:(r,m,t):ps) res (dispatch f tvs r (x:ps)) | S.member f (lzEval lazies)]
+          _ -> [def{ defBody = callsE (defBody def) }]
+    sigs f sig ss
+      = case sig of
+          SigFun tvs (p:_:ps) res | S.member f funs
+            -> (if S.member f (lzEval lazies) then id else M.delete f)
+               (foldr (\b -> M.insert (copyName b f) (SigFun tvs (p:ps) res)) ss [False,True])
+          _ -> ss
+    boolV t b = Inj (if b then 1 else 0) t UnitV
+    dispatch f tvs r ps
+      = CaseV Owned (Var r) [(child r (SInjV i), Call (copyName b f) (map AVar tvs) [Var x | (x,_,_) <- ps]) | (i,b) <- [(0,False),(1,True)]]
+    callsE expr
+      = case expr of
+          Call f ts (v : Inj i _ UnitV : vs) | S.member f funs -> Call (copyName (i == 1) f) ts (v:vs)
+          _ -> runIdentity (descendE Identity (Identity . callsV) (\_ -> Identity . callsE) expr)
+    callsV = mapV callsA callsV
+    callsA a = case a of
+                 Lam ps r e -> Lam ps r (callsE e)
+                 _ -> mapA id callsA callsV a
+
+-- substitute the parameters of join points to which every jump passes the same constant of a
+-- sum of units (such as `recurse`)
+knownJoins :: VExpr -> VExpr
+knownJoins expr
+  = case expr of
+      Join j tvs ps e1 e2
+        -> let e2' = knownJoins e2
+               args = jumpArgs j e2'
+               known = M.fromList [(x,v) | (i,(x,_,_)) <- zip [0..] ps, (v@(Inj _ _ UnitV):vs) <- [map (!! i) args], all (== v) vs]
+           in Join j tvs ps (knownJoins (replaceE known e1)) e2'
+      _ -> runIdentity (descendE Identity Identity (\_ -> Identity . knownJoins) expr)
 
 -- Rename the uses of roots and their parts. The binders of elaborated code are roots, and the
 -- renamed ones are not bound again.
