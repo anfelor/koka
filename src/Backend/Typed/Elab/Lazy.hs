@@ -29,7 +29,7 @@
   - a jump passes the cell on, and the parameter of the join point becomes a cell of the
     smallest size passed (Koka inlines `lazy-C` into `lazy-eval-locked` as a join point);
   - a branch without the cell is a lazy constructor in a match on a forced value, which ends
-    in `unreachable`: it fills the cell with an indirection to its result.
+    in `unreachable` (`[unreachable]` consumes the cell).
   Any other use of a cell, and any other use of `memoize`, is an error. The functions are
   found by `Kind.Infer`'s naming (`lazyName`). The binders of a lock have the names that
   `[lock]` requires before `Paths`: the box `y.roll.injⱼ` of the lazy value `y`, and its
@@ -49,7 +49,6 @@ import Type.Type( lazyName, conInfoName )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Names( nameUnreachable )
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Query( Env(..), envOf, unrollT, reuseSize, lazySize )
 
@@ -118,13 +117,11 @@ lazyDef def
 
 -- An expression that consumes the cells `cs` (see the top).
 cellE :: Cells -> VExpr -> L VExpr
+cellE _ expr@Unreachable{}
+  = return expr
 cellE cs expr
   | (c:_) <- [c | c <- M.keys cs, S.notMember c (fvE expr)]
-  = case expr of
-      Let x t e@(Call f _ []) _ | f == nameUnreachable, M.size cs == 1
-        -> do i <- lazyIndirect <$> lazyOf (snd (cs M.! c))
-              return (Let x t e (Ret (Memoize (Var c) i (Var x))))
-      _ -> fail ("the cell " ++ show c ++ " is not filled")
+  = fail ("the cell " ++ show c ++ " is not filled")
 cellE cs expr
   = do locked <- asks leLocked
        cons <- asks (lzCons . leLazies)

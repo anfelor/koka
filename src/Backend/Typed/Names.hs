@@ -12,6 +12,7 @@ module Backend.Typed.Names( nameUnreachable, isJoinName ) where
 
 import Common.Name
 
+-- marks an impossible alternative in Core; elaboration turns it into `[unreachable]`
 nameUnreachable :: Name
 nameUnreachable = newHiddenName "typed-unreachable"
 

@@ -178,6 +178,7 @@ prettyExpr expr
       LetYield x t e1 e2 e3 -> text "let" <+> pv x <+> colon <+> prettyV t <+> text "=" <+> align (prettyExpr e1)
                                <-> indent 2 (text "yielding" <+> align (prettyExpr e3)) <-> text "in" <+> align (prettyExpr e2)
       Yielded _ -> text "yielded"
+      Unreachable _ -> text "unreachable"
       Call f [] vs -> nm f <.> args vs
       Call f ts vs -> nm f <.> tyArgs ts <.> args vs
       App f vs -> pv f <.> args vs
