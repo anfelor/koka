@@ -59,7 +59,8 @@
   Sequencing (`andThen`) rejects a use of a consumed variable and a unique use after a
   borrowed one. Branches must consume the same references. A root must be consumed in its
   scope (a borrowed one not at all), and only a unique one may be consumed as unique
-  (`leave`).
+  (`leave`). A term whose every path ends in `unreachable` diverges: it counts as consuming
+  every reference it does not use, so it is exempt from both requirements on consumption.
 
   The body of a join point is checked like the body of a function whose parameters include
   the variables it captures, including those of the join points it jumps to: unique if the
@@ -101,9 +102,10 @@ type Trivial = S.Set Path
 type Keys = S.Set Path
 
 -- How a term uses variables: the references it consumes, the variables it needs (a consumed
--- or inspected variable needs a reference), and the variables that it borrows and that it
--- consumes as unique.
-data Use = Use{ uConsumed :: Keys, uNeeded :: Keys, uBorrowed :: S.Set Path, uUnique :: S.Set Path }
+-- or inspected variable needs a reference), the variables that it borrows and that it
+-- consumes as unique, and whether every path ends in `unreachable`, which consumes all
+-- other references (`uDiverges`).
+data Use = Use{ uConsumed :: Keys, uNeeded :: Keys, uBorrowed :: S.Set Path, uUnique :: S.Set Path, uDiverges :: Bool }
 
 type L a = M Owners Trivial a
 
@@ -195,10 +197,10 @@ overlapping a b = [p | p <- S.toList a, any (\q -> p `within` q || q `within` p)
 -- uses
 
 noUse :: Use
-noUse = Use S.empty S.empty S.empty S.empty
+noUse = Use S.empty S.empty S.empty S.empty False
 
 mapUse :: (Path -> Path) -> Use -> Use
-mapUse f (Use c n b u) = Use (S.map f c) (S.map f n) (S.map f b) (S.map f u)
+mapUse f (Use c n b u d) = Use (S.map f c) (S.map f n) (S.map f b) (S.map f u) d
 
 -- `u1` is evaluated before `u2`
 andThen :: Use -> Use -> L Use
@@ -211,7 +213,8 @@ andThen u1 u2
          [] -> return ()
        tr <- get
        return (Use (rollUp tr (S.union (uConsumed u1) (uConsumed u2))) (S.union (uNeeded u1) (uNeeded u2))
-                   (S.union (uBorrowed u1) (uBorrowed u2)) (S.union (uUnique u1) (uUnique u2)))
+                   (S.union (uBorrowed u1) (uBorrowed u2)) (S.union (uUnique u1) (uUnique u2))
+                   (uDiverges u1 || uDiverges u2))
 
 -- the uses of terms that are evaluated in order
 uses :: [L Use] -> L Use
@@ -221,19 +224,21 @@ uses = foldM (\u c -> c >>= andThen u) noUse
 before :: L Use -> L Use -> L Use
 before c1 c2 = uses [c1,c2]
 
--- every branch must consume the same references
+-- every branch must consume the same references, except one that diverges
 branches :: [Use] -> L Use
 branches us
-  = case us of
+  = case filter (not . uDiverges) us of
       (u:rest) -> do tr <- get
                      forM_ rest $ \u' ->
                        unless (rollUp tr (uConsumed u) == rollUp tr (uConsumed u'))
                          (fail ("branches consume different variables: " ++ show (S.toList (uConsumed u)) ++ " vs. " ++ show (S.toList (uConsumed u'))))
-                     return (Use (uConsumed u) (S.unions (map uNeeded us)) (S.unions (map uBorrowed us)) (S.unions (map uUnique us)))
-      [] -> return noUse
+                     return (joined (uConsumed u) False)
+      [] -> return (joined S.empty (not (null us)))
+  where
+    joined c d = Use c (S.unions (map uNeeded us)) (S.unions (map uBorrowed us)) (S.unions (map uUnique us)) d
 
 -- Leaving the scope of owners with their mode: an owned one must be consumed (as unique only
--- if it is unique) and a borrowed one not at all.
+-- if it is unique), unless the use diverges, and a borrowed one not at all.
 leave :: [(Path,Mode)] -> Use -> L Use
 leave xs u
   = do tr <- get
@@ -242,14 +247,14 @@ leave xs u
            consumed = refine tr (map fst zs) (uConsumed u)
        forM_ zs $ \(z,m) ->
          case (owning m,filter (`within` z) (S.toList consumed)) of
-           (True,ps) | ps /= [z] -> fail ("owned variable is not consumed: " ++ show z)
+           (True,ps) | ps /= [z], not (uDiverges u) -> fail ("owned variable is not consumed: " ++ show z)
            (False,p:_) -> fail ("borrowed variable is consumed: " ++ show p)
            _ -> return ()
        forM_ (S.toList (uUnique u)) $ \p -> forM_ zs $ \(z,m) ->
          when (p `within` z && (p /= z || m /= Unique))
            (fail ("unique use of a variable that is not unique: " ++ show p))
        return (Use (S.filter (not . mine) consumed) (S.filter (not . mine) (refine tr (map fst zs) (uNeeded u)))
-                   (S.filter (not . mine) (uBorrowed u)) (S.filter (not . mine) (uUnique u)))
+                   (S.filter (not . mine) (uBorrowed u)) (S.filter (not . mine) (uUnique u)) (uDiverges u))
 
 withOwners :: [(Path,Mode)] -> L a -> L a
 withOwners xs = local (M.union (M.fromList xs))
@@ -290,7 +295,7 @@ useVar env g m b x
        when (m == Unique && o == Borrowed) (fail ("unique use of a variable that is not unique: " ++ show x))
        p <- keyOf x
        return (Use (if owning m then S.singleton p else S.empty) (S.singleton p) (if b then S.singleton p else S.empty)
-                   (if m == Unique then S.singleton p else S.empty))
+                   (if m == Unique then S.singleton p else S.empty) False)
 
 -- A variable of a trivial type in the contents of a box is read from the block of the box, so
 -- only a dup or a case may read it (`loadOf`).
@@ -445,6 +450,8 @@ checkE env g js expr
               u1 <- checkE env g M.empty e1
               andThen u1 =<< branches [u2, u3]
       Yielded _ -> return noUse
+      -- control never gets here, so every reference counts as consumed
+      Unreachable _ -> return noUse{ uDiverges = True }
       Call f _ vs -> args [] (paramModes env f (length vs)) vs
       Jump j _ vs -> case M.lookup j js of
                      Just (ms,caps) -> args caps ms vs
@@ -541,7 +548,7 @@ destruct env g js m part v alts
                   tr <- get
                   -- where `z` is trivial, it has as many references as in the other alternatives
                   -- where `z` is trivial, it is consumed as in the other alternatives
-                  u <- case [u | (False,u) <- rs] of
+                  u <- case [u | (False,u) <- rs, not (uDiverges u)] of
                          (u0:_) -> let inside = S.filter (`within` zc) . refine tr [zc]
                                        outside = S.filter (not . (`within` zc)) . refine tr [zc]
                                        adopt u = u{ uConsumed = rollUp tr (S.union (outside (uConsumed u)) (inside (uConsumed u0)))
@@ -550,7 +557,7 @@ destruct env g js m part v alts
                          [] -> branches (map snd rs)
                   if m /= Unique || trivialVar env g z
                     then before scrutinee (return u)
-                    else do unless (S.filter (`within` zc) (refine tr [zc] (uConsumed u)) == S.singleton zc)
+                    else do unless (uDiverges u || S.filter (`within` zc) (refine tr [zc] (uConsumed u)) == S.singleton zc)
                               (fail ("unique destructuring does not consume its scrutinee: " ++ show z))
                             use <- uniqueName env g z
                             return u{ uNeeded = S.union (uNeeded use) (uNeeded u), uUnique = S.union (uUnique use) (uUnique u) }

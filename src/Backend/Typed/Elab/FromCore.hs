@@ -168,6 +168,7 @@ elabExpr expr
       C.TypeLam tvs e | not (any tvarStar tvs) -> elabExpr e
       C.TypeLam tvs e | not (isValue expr) -> elabGen [typevarId tv | tv <- tvs, tvarStar tv] e (typeOf expr)
       C.Case [scrut] brs -> elabCase scrut brs
+      C.Var (TName x tp) _ | x == nameUnreachable -> Unreachable <$> vt tp
       C.Case _ _ -> failE "case with multiple scrutinees after matching"
       C.App f args | not (isConApp f) -> elabApp f args (typeOf expr)
       _ -> do (k,v) <- elabVal expr
@@ -212,8 +213,10 @@ elabExprAt :: VType -> C.Expr -> E VExpr
 elabExprAt t e
   = do e' <- elabExpr e
        t0 <- vt (typeOf e)
-       if alphaEq t0 t then return e'
-         else do r <- fresh "g"
+       case e' of
+         _ | alphaEq t0 t -> return e'
+         Unreachable _ -> return (Unreachable t)
+         _ -> do r <- fresh "g"
                  (k,v) <- coerce t0 t (Var r)
                  return (Let r t0 e' (k (Ret v)))
 
@@ -416,14 +419,12 @@ generalize tvs elab tp
        (k2,v') <- genPtr target v
        return (k . k2, v')
 
+-- the rest of an expression with `unreachable` in a value is dead
 unreachable :: Type -> E (K,VVal)
 unreachable tp
   = do t <- vt tp
-       let a = -2
-       recordSig nameUnreachable (SigFun [a] [] (varV a))
        x <- fresh "u"
-       (k,v) <- coerce (boxrep t) t (Var x)
-       return (Let x (boxrep t) (Call nameUnreachable [rep t] []) . k, v)
+       return (Let x t (Unreachable t), Var x)
 
 etaCon :: C.Expr -> [(Name,Type)] -> Type -> E (K,VVal)
 etaCon con pars eff
