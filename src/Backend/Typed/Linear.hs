@@ -46,7 +46,11 @@
   A unique variable is owned and holds the only reference to its block, so `UnboxRu` may
   take its contents and keep its block as a credit, a new root that consumes the block
   `z.credit` of `z` (the part of `z` beside its contents). Its body is checked with the
-  contents renamed (`rebase`), and its uses of `z.taken` are uses of `z.contents`. An owned variable is unique in the
+  contents renamed (`rebase`), and its uses of `z.taken` are uses of `z.contents`. `Lock` is
+  checked in the same way, but consumes an owned box, and its new root is a cell. A cell is
+  linear: it is owned and not trivial, so it must be consumed (as `Check` rejects a dup or a
+  drop of it, by `memoize`, a uniqueness test or a call or jump), and it must not be live
+  across a `[let-yield]`, whose yielding branch could not consume it. An owned variable is unique in the
   first branch of `IsUnique`; unique parameters and a `let` of a unique value (a unique
   variable, a fresh context, an append or `ctx-copy c`) are unique too, and so are the
   pointers of the scrutinee of a unique destructuring. A context is plugged or appended only
@@ -86,7 +90,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, paramModes, trivialTy )
+import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, paramModes, trivialTy )
 
 -- the mode of the variables at and below each owner: the roots in scope, and in the body of a
 -- join point the variables it captures
@@ -340,6 +344,8 @@ ownedV env g val
       Plug c v -> uses [uniqueV env g c, ownedV env g v]
       Append c d -> uses [uniqueV env g c, uniqueV env g d]
       CtxCopy c -> ownedV env g c
+      -- the value is evaluated before the block is written
+      Memoize c _ v -> uses [ownedV env g v, ownedV env g c]
   where
     children = uses (getConst (descendV (\a -> Const [ownedA env g a]) (\v -> Const [ownedV env g v]) val))
 
@@ -439,7 +445,10 @@ checkE env g js expr
                           andThen u1 =<< leave [(x,m) | not (trivialTy env (V t))] u2
       -- the binder is not in scope where an effect yields
       LetYield x t e1 e2 e3
-        -> do u2 <- withOwners [(x,Owned)] (checkE env (M.insert x (V t) g) js e2)
+        -> do case [y | y <- S.toList (S.union (fvE e2) (fvE e3)), Just (V (VCell _ _)) <- [M.lookup y g]] of
+                (y:_) -> fail ("cell live across a yield: " ++ show y)
+                [] -> return ()
+              u2 <- withOwners [(x,Owned)] (checkE env (M.insert x (V t) g) js e2)
                     >>= leave [(x,Owned) | not (trivialTy env (V t))]
               u3 <- checkE env g js e3
               u1 <- checkE env g M.empty e1
@@ -475,7 +484,7 @@ checkE env g js expr
       IsUnique x e1 e2 -> do m <- ownerMode x
                              when (m == Borrowed) (fail ("uniqueness test of a variable that is not owned: " ++ show x))
                              z <- keyOf x
-                             u1 <- checkE env g js e1
+                             u1 <- checkE env (uniqueGamma g x) js e1
                              u2 <- checkE env g js e2
                              before (readVar env g x) (branches [u1{ uUnique = S.delete z (uUnique u1) }, u2])
       -- the test reads the credit, which is empty in the second branch: the test consumes it there
@@ -491,6 +500,14 @@ checkE env g js expr
               modify (\tr -> S.union tr (S.map (rebase z) tr))
               body <- local (M.mapKeys (rebase z)) (roots env Owned [(r,g' M.! r)] (checkE env g' js e))
               before (return u{ uConsumed = S.singleton c }) (return (mapUse (unrebase z) body))
+      -- the same for an owned box, whose block becomes a cell
+      Lock z c e
+        -> do g' <- liftE (lockGamma env g z c)
+              u <- consume env g z
+              k <- keyOf (child z SCredit)
+              modify (\tr -> S.union tr (S.map (rebase z) tr))
+              body <- local (M.mapKeys (rebase z)) (roots env Owned [(c,g' M.! c)] (checkE env g' js e))
+              before (return u{ uConsumed = S.singleton k }) (return (mapUse (unrebase z) body))
       CaseLit v alts def -> before (borrowedV env g v) (branches =<< mapM (checkE env g js) (def : map snd alts))
       _ -> fail "unexpected destructuring form"
   where

@@ -35,7 +35,7 @@ import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types( inst, collapse, Types(..) )
-import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, unrollT, openFields, boxContents, reuseSize, pointerShape )
+import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, unrollT, lazyTags, openFields, boxContents, reuseSize, pointerShape )
 import Backend.Typed.Names( nameLazyFree )
 import Backend.Typed.Layout hiding( dupExpr, dropStmt )
 import Backend.Typed.Monad
@@ -236,6 +236,7 @@ genV cx val
                       ce <- genV cx c
                       x <- fresh "c"
                       return (stmtExpr [cty ct <+> x <+> "=" <+> ce <.> ";", "kt_ctx_copy(&" <.> x <.> ".f0,&" <.> x <.> ".f1,_ctx);"] x)
+      Memoize c k v -> genBox cx k (In c) v
 
 -- a context is `res` and the address of its hole; the empty context has neither
 genCtx :: Ctx -> AType -> VVal -> G Doc
@@ -341,12 +342,14 @@ genAIn cx tag val
   = case val of
       Fun f -> staticFun f
       UnitA -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" <.> int tag <.> "))")
+      -- a lazy alternative is allocated with the padded size `‖V‖`
+      Roll t (InjA i _ (Box v)) | i `elem` lazyTags (cxEnv cx) t -> genBox cx i Padded v
       Roll _ v -> genAIn cx tag v
       InjA i (ASum _) v -> genAIn cx i v
       InjA _ _ _ -> failG "injection into a non-sum"
       Box v -> genBox cx tag Fresh v
       BoxAt r v -> genBox cx tag (At r) v
-      BoxIn x v -> genBox cx tag (In x) v
+      BoxIn x v -> genBox cx tag (In (Var x)) v
       Scalar v -> genScalar cx v
       OpenCon c tys vs -> genOpenCon cx c tys vs
       Lam ps r e -> genLam cx ps r e
@@ -402,10 +405,11 @@ projLeaves whole e start part
          _ -> return e
 
 -- where the block of a box comes from
-data Alloc = Fresh | At Path | In Path
+data Alloc = Fresh | Padded | At Path | In VVal
 
--- a box: freshly allocated, in the block of a reuse credit, or over the block of a lazy value
--- (whose old fields were taken, see `Lazy`, and whose reference count is kept). A box on the
+-- a box: freshly allocated (with the padded size of a lazy alternative), in the block of a
+-- reuse credit, or over the block of a lazy value or cell (whose old fields were taken, see
+-- `[lock]`, and whose reference count is kept). A box on the
 -- path of a one-hole value records the context path with its header (see `genHolePath`).
 genBox :: Ctx -> Int -> Alloc -> VVal -> G Doc
 genBox cx tag at v
@@ -427,9 +431,11 @@ genBox cx tag at v
                      allocFresh = case cpath of
                                     Nothing -> "kk_block_alloc_as(" <.> bt <.> "," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
                                     Just _ -> allocAt "kk_reuse_null"
+                     allocPadded = "(" <.> bt <.> "*)kk_block_alloc_at(kk_reuse_null," <.> int (lazyBlockSize ct) <.> "," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
                      setPath = maybe empty (\i -> x <.> "->_block.header._field_idx =" <+> i <.> ";") cpath
                  case at of
                    Fresh -> return (stmtExpr [bt <.> "*" <+> x <+> "=" <+> allocFresh <.> ";", x <.> "->p =" <+> e <.> ";"] box)
+                   Padded -> return (stmtExpr [bt <.> "*" <+> x <+> "=" <+> allocPadded <.> ";", x <.> "->p =" <+> e <.> ";"] box)
                    At r  -> do rt <- tyOfName cx r
                                let check = "_Static_assert(sizeof(" <.> bt <.> ") ==" <+> int (blockSize ct) <.> ",\"kt_reuse\");"
                                case rt of
@@ -456,7 +462,7 @@ genBox cx tag at v
                                  -- a credit that may be empty, which `ExpandReuse` did not test
                                  _ -> return (stmtExpr [check, bt <.> "*" <+> x <+> "=" <+> allocAt (localName r) <.> ";", x <.> "->p =" <+> e <.> ";"] box)
                    In y  -> do v <- fresh "v"
-                               ye <- genVar cx y
+                               ye <- genV cx y
                                let clear = "kt_block_clear(kk_datatype_as_ptr(kk_datatype_unbox(" <.> ye <.> "),_ctx)," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
                                return (stmtExpr [cty ct <+> v <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> clear <.> ";",
                                                  setPath, x <.> "->p =" <+> v <.> ";"] box)
@@ -563,14 +569,26 @@ genRead cx dest x t ue e
 isPlace :: Ctx -> VExpr -> Path -> Ty -> Bool
 isPlace cx e x t = not (ceEagerLoads (cxCEnv cx)) && not (null (placeBinders (`M.member` cxPlaces cx) e [x] [t]))
 
--- `[unbox-ru]` of `z` takes its block, which may then be freed or written, and renames its
--- contents to `z.taken`. Each part of `z.taken` that the body uses is declared as a local:
--- a place in the block of `z` is loaded, and a local is copied from its old name. The places
--- in the blocks of inner boxes stay places under their new names.
+-- `[unbox-ru]` of `z` takes its block as a credit, which may then be freed or written, and
+-- renames its contents to `z.taken`.
 genUnboxRu :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
 genUnboxRu cx dest z r e
   = do g' <- liftC (unboxRuGamma (cxGamma cx) z r)
-       let taken = child z STaken
+       genTaken cx dest g' z e (declare "kk_reuse_t" r ("kk_datatype_as_ptr(kk_datatype_unbox(" <.> localName z <.> "),_ctx)"))
+
+-- `[lock]` of `z` takes its block as a cell, the pointer to the block, which is then written.
+genLock :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
+genLock cx dest z c e
+  = do g' <- liftC (lockGamma (cxEnv cx) (cxGamma cx) z c)
+       genTaken cx dest g' z e (declare "kk_box_t" c (localName z))
+
+-- The contents of `z` that are taken out of its block, with the declaration of the root that
+-- holds the block (in the context `g'` of the body). Each part of `z.taken` that the body uses
+-- is declared as a local: a place in the block of `z` is loaded, and a local is copied from
+-- its old name. The places in the blocks of inner boxes stay places under their new names.
+genTaken :: Ctx -> Dest -> Gamma -> Path -> VExpr -> Doc -> G [Doc]
+genTaken cx dest g' z e root
+  = do let taken = child z STaken
            places = M.fromList [(rebase z p,d) | (p,d) <- M.toList (cxPlaces cx), boxOf p /= Just z]
        locals <- forM [q | q <- S.toList (fvE e), q `within` taken, M.notMember q places] $ \q ->
                    do ct <- liftC (inferVar g' q) >>= ctOf
@@ -578,7 +596,7 @@ genUnboxRu cx dest z r e
                       return (q,declare (cty ct) q d)
        let cx' = cx{ cxGamma = g', cxPlaces = places, cxShared = S.map (rebase z) (cxShared cx) }
        s <- genE cx' dest e
-       return (map snd locals ++ [declare "kk_reuse_t" r ("kk_datatype_as_ptr(kk_datatype_unbox(" <.> localName z <.> "),_ctx)")] ++ s)
+       return (map snd locals ++ [root] ++ s)
 
 genVar :: Ctx -> Path -> G Doc
 genVar cx x = return (M.findWithDefault (localName x) x (cxPlaces cx))
@@ -848,14 +866,21 @@ genE cx dest expr
               return (declare (cty ct) y (dupAt cx x t ct ve) : s)
       IsUnique x e1 e2
         -> do t <- liftC (inferVar (cxGamma cx) x)
-              s1 <- genE cx dest e1
+              s1 <- genE cx{ cxGamma = uniqueGamma (cxGamma cx) x } dest e1
               xe <- genVar cx x
               let d = "kk_datatype_unbox(" <.> xe <.> ")"
+                  blockOf = "kk_datatype_as_ptr(" <.> d <.> ",_ctx)"
                   (test,shared) = case t of
+                    V (VCell _ _) -> ("kk_block_is_unique(" <.> blockOf <.> ")", cxShared cx)
                     V _ -> ("kk_datatype_is_unique(" <.> d <.> ",_ctx)", cxShared cx)   -- a lazy value may be immediate
-                    A _ -> ("kk_block_is_unique(kk_datatype_as_ptr(" <.> d <.> ",_ctx))", S.insert x (cxShared cx))
+                    A _ -> ("kk_block_is_unique(" <.> blockOf <.> ")", S.insert x (cxShared cx))
+              -- a unique cell is a credit, its block, under the same name in the first branch
+              s1' <- case t of
+                       V (VCell _ _) -> do b <- fresh "block"
+                                           return ["kk_reuse_t" <+> b <+> "=" <+> blockOf <.> ";", block (declare "kk_reuse_t" x b : s1)]
+                       _ -> return s1
               s2 <- genE cx{ cxShared = shared } dest e2
-              return ["if kk_likely(" <.> test <.> ")" <+> block s1 <+> "else" <+> block s2]
+              return ["if kk_likely(" <.> test <.> ")" <+> block s1' <+> "else" <+> block s2]
       IfFull r e1 e2
         -> do t <- liftC (inferVar (cxGamma cx) r)
               full <- case t of
@@ -865,6 +890,7 @@ genE cx dest expr
               s2 <- genE cx dest e2
               return ["if kk_likely(" <.> localName r <+> "!= kk_reuse_null)" <+> block s1 <+> "else" <+> block s2]
       UnboxRu v r e -> genUnboxRu cx dest v r e
+      Lock z c e -> genLock cx dest z c e
       Gen _ e -> genE cx dest e
       Join j _ ps e1 e2
         -> do lbl <- fresh "join"

@@ -52,6 +52,11 @@
   the fields stay unique during evaluation; memoization then writes over the block of
   `@lazy` without dropping its old fields (see `Lazy`).
 
+  `[lock]` consumes an owned box like any consumer: its contents become owned under their new
+  name `z.taken`, and its cell is a new owned root. A cell is linear: it is never copied, and a
+  dead cell is an error (it must be filled by `memoize`, or freed in the unique branch of a
+  test, where it is a credit). The branches of `if-unique` own the same variables.
+
   The body of a join point is closed and processed like the body of a function; a jump
   is like a call, but nothing follows it, so owned variables are only dropped before it.
 -}
@@ -59,7 +64,7 @@ module Backend.Typed.Passes.Perceus( perceusProgram ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Control.Monad( foldM )
+import Control.Monad( foldM, unless )
 import Data.Functor.Const( Const(..) )
 import Data.List( isSuffixOf, partition )
 import Data.Maybe( isJust, isNothing )
@@ -67,7 +72,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, altTypes, paramModes, trivialTy )
+import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, altTypes, lockGamma, uniqueGamma, paramModes, trivialTy )
 import Backend.Typed.Types( inst, isPtr )
 
 type VarSet = S.Set Path
@@ -121,6 +126,9 @@ dropNames :: PEnv -> [Path] -> VExpr -> P VExpr
 dropNames pe xs e = foldM step e (reverse xs)
   where
     step body x = do t <- tyOfVar pe x
+                     case t of
+                       V (VCell _ _) -> fail ("a cell that is not filled: " ++ show x)
+                       _ -> return ()
                      let discard = dropValue (trivialTy (peEnv pe)) (fresh "d") (scopeOf (M.keys (peGamma pe))) x t body
                      case (t,partsOf pe x) of
                        (V VProd{},_) -> discard
@@ -346,6 +354,14 @@ percE' pe owned expr
       Gen tvs e -> Gen tvs <$> percE' pe owned e
       Drop x e -> Drop x <$> percE' pe owned e
       Free r e -> Free r <$> percE' pe owned e
+      IsUnique x e1 e2 -> IsUnique x <$> percE pe{ peGamma = uniqueGamma (peGamma pe) x } owned e1 <*> percE pe owned e2
+      -- the contents are taken under their new names, and the cell is a new root
+      Lock z c e
+        -> do unless (S.member z owned) (fail ("lock of a box that is not owned: " ++ show z))
+              g' <- liftE (lockGamma (peEnv pe) (peGamma pe) z c)
+              let taken = [b | b@(x,_) <- M.toList g', x == child z STaken]
+                  owned' = S.map (rebase z) (S.delete z owned) `S.union` ownedOf pe ((c,g' M.! c) : taken)
+              Lock z c <$> percE pe{ peGamma = g', peBorrowed = S.map (rebase z) (peBorrowed pe) } owned' e
       Dup x y e -> do t <- tyOfVar pe x
                       Dup x y <$> percE (bind pe [(y,t)]) (S.union owned (ownedOf pe [(y,t)])) e
       CaseLit v alts def
@@ -366,6 +382,7 @@ copy pe x
   = do t <- tyOfVar pe x
        case (t,x) of
          _ | unrestricted pe x t -> return (id,x,x,[])
+         (V (VCell _ _),_) -> fail ("duplication of a cell: " ++ show x)
          (V _,_) -> do y <- fresh "u"
                        return (Dup x y,x,y,[(y,t)])
          (A _,Path r ss) | (SDeref : rest) <- reverse ss

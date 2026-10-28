@@ -14,7 +14,7 @@ import qualified Data.Map as M
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types( Types(..), inst, prodV )
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, altTypes, paramModes )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, altTypes, lockGamma, paramModes )
 import Backend.Typed.Monad
 import Backend.Typed.Layout( memoryOrder )
 
@@ -70,6 +70,7 @@ normalizeVType t = case t of
   VPtr a -> VPtr (normalizeAType a)
   VSum ts -> VSum (map normalizeVType ts)
   VCtx f a b -> VCtx f (normalizeAType a) (normalizeAType b)
+  VCell n a -> VCell n (normalizeAType a)
   _ -> t
   where
     productType s = let { (vs,fs) = productParts s
@@ -102,6 +103,7 @@ variablesV t = case t of
   VSum ts -> concatMap variablesV ts
   VPtr a -> variablesA a
   VCtx _ a b -> variablesA a ++ variablesA b
+  VCell _ a -> variablesA a
   VReuse _ _ p -> maybe [] (\(Contents _ _ s) -> variablesV s) p
   _ -> []
 
@@ -348,6 +350,12 @@ ne e = expression (go e)
       CaseLit v alts def -> CaseLit <$> nvAt Borrowed v <*> mapM (\(l,b) -> (,) l <$> ne b) alts <*> ne def
       -- produced by `DropSpec` and `Reuse`, which run later
       UnboxRu{} -> fail "[unbox-ru] before Perceus"
+      -- The contents are renamed to `z.taken`, whose fields are found by its type: the lock
+      -- directly follows the read of the contents, so none of their parts has a logical tree.
+      Lock z c body -> do cx <- ask
+                          g' <- liftE (lockGamma (sourceEnv cx) (sourceGamma cx) z c)
+                          z' <- name z
+                          Lock z' c <$> local (\c' -> c'{ sourceGamma = g' }) (ne body)
       _ | Just ds <- destructVOf expr -> do cx <- ask
                                             t <- liftE (inferV (sourceEnv cx) (sourceGamma cx) (dsScrut ds))
                                             ts <- liftE (altTypes (sourceEnv cx) (V t) expr)
