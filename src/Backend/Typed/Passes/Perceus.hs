@@ -67,7 +67,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, altTypes, lockGamma, uniqueGamma, paramModes, trivialTy )
+import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, altTypes, lockGamma, uniqueGamma, whnfGamma, paramModes, trivialTy )
 import Backend.Typed.Types( inst, isPtr )
 
 type VarSet = S.Set Path
@@ -341,6 +341,7 @@ percE' pe owned expr
       Drop x e -> Drop x <$> percE' pe owned e
       Free r e -> Free r <$> percE' pe owned e
       IsUnique x e1 e2 -> IsUnique x <$> percE pe{ peGamma = uniqueGamma (peGamma pe) x } owned e1 <*> percE pe owned e2
+      IfWhnf x e1 e2 -> IfWhnf x <$> percE pe{ peGamma = whnfGamma (peEnv pe) (peGamma pe) x } owned e1 <*> percE pe owned e2
       -- the contents are taken under their new names, and the cell is a new root
       Lock z c e
         -> do unless (S.member z owned) (fail ("lock of a box that is not owned: " ++ show z))

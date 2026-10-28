@@ -13,7 +13,7 @@ module Backend.Typed.Elab.Types( typeDefs ) where
 import qualified Data.Map as M
 import qualified Common.NameMap as NM
 import Control.Monad( forM_, unless )
-import Common.Name( isLazyIndirectConName )
+import Common.Name( isLazyIndirectConName, makeHiddenName )
 import Common.Syntax( dataDefIsOpen )
 import Kind.Newtypes
 import Type.Type( typevarId, conInfoName, conInfoIsLazy, dataInfoIsLazy )
@@ -33,19 +33,26 @@ paramArgs info = map (AVar . typevarId) (filter tvarStar (dataInfoParams info))
 -- the definitions, and the errors in those of lazy types
 typeDefs :: Newtypes -> (TypeDefs,[String])
 typeDefs nt
-  = (M.fromList [(dataInfoName info, d) | (info,Right d) <- defs],
+  = (M.fromList [(tdefName d, d) | (_,Right ds) <- defs, d <- ds],
      [show (dataInfoName info) ++ ": " ++ err | (info,Left err) <- defs, dataInfoIsLazy info])
   where
     defs = [(info, typeDef nt info) | (_,info) <- NM.toList (newtypesTypeDefs nt), not (isValueInfo info)]
 
-typeDef :: Newtypes -> DataInfo -> Tr TypeDef
+-- the definition of a type, and that of `whnf(T)` for a lazy type T
+typeDef :: Newtypes -> DataInfo -> Tr [TypeDef]
 typeDef nt info
   = do body <- refBody nt info
        lz <- lazyDef nt info
-       return (TypeDef (dataInfoName info) (map typevarId (filter tvarStar (dataInfoParams info))) body lz)
+       let name = dataInfoName info
+           params = map typevarId (filter tvarStar (dataInfoParams info))
+           whnf = case (lz,body) of
+                    (Just Lazy{ lazyAlts = lazies, lazyWhnf = Just w }, Just (ASum alts))
+                      -> [TypeDef w params (Just (ASum [alt | alt@(tag,_) <- alts, tag `notElem` lazies])) Nothing (Just name)]
+                    _ -> []
+       return (TypeDef name params body lz Nothing : whnf)
 
 -- A lazy type `T⟨ā⟩ := A ~> B` has the indirection among its lazy constructors. Its strict
--- tags come before its lazy ones (`datatype-ptr-is-whnf` relies on it), and every lazy
+-- tags come before its lazy ones (`[if-whnf]` relies on it), and every lazy
 -- alternative is a box with a block, which evaluation locks.
 lazyDef :: Newtypes -> DataInfo -> Tr (Maybe Lazy)
 lazyDef nt info
@@ -60,6 +67,7 @@ lazyDef nt info
                    case shape of
                      ABox s | Right _ <- lazySize s -> return ()
                      _ -> Left ("the lazy constructor " ++ show (conInfoName con) ++ " has no fields")
-              return (Just (Lazy lazies ind))
+              let whnf = if length lazies < length cons then Just (makeHiddenName "whnf" (dataInfoName info)) else Nothing
+              return (Just (Lazy lazies ind whnf))
   where
     cons = zip [1..] (dataInfoConstrs info)   -- tags start at 1

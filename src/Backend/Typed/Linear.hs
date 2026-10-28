@@ -88,7 +88,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, paramModes, trivialTy )
+import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, whnfGamma, paramModes, trivialTy )
 
 -- the mode of the variables at and below each owner: the roots in scope, and in the body of a
 -- join point the variables it captures
@@ -485,6 +485,10 @@ checkE env g js expr
                              u1 <- checkE env (uniqueGamma g x) js e1
                              u2 <- checkE env g js e2
                              before (readVar env g x) (branches [u1{ uUnique = S.delete z (uUnique u1) }, u2])
+      -- the test reads the variable at any mode
+      IfWhnf x e1 e2 -> do u1 <- checkE env (whnfGamma env g x) js e1
+                           u2 <- checkE env g js e2
+                           before (readVar env g x) (branches [u1, u2])
       -- the test reads the credit, which is empty in the second branch: the test consumes it there
       IfFull r e1 e2 -> do u1 <- checkE env g js e1
                            u2 <- before (consume env g r) (checkE env g js e2)

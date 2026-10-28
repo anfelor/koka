@@ -197,6 +197,7 @@ prettyExpr expr
       Drop x e -> text "drop" <+> pv x <.> semi <-> prettyExpr e
       Free r e -> text "free" <+> pv r <.> semi <-> prettyExpr e
       IsUnique x e1 e2 -> ifThen (text "if-unique" <+> pv x) e1 e2
+      IfWhnf x e1 e2 -> ifThen (text "if-whnf" <+> pv x) e1 e2
       IfFull r e1 e2 -> ifThen (text "if-full" <+> pv r) e1 e2
       UnboxRu v r e -> letIn empty (text "@" <+> pv r) (pv v) e
       Lock z c e -> letIn empty (text "lock" <+> pv c) (pv z) e

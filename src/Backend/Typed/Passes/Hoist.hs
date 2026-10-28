@@ -66,6 +66,9 @@ expr e = case e of
   IsUnique x a b -> do
     (env,g) <- ask
     IsUnique x <$> local (const (env,uniqueGamma g x)) (expr a) <*> expr b
+  IfWhnf x a b -> do
+    (env,g) <- ask
+    IfWhnf x <$> local (const (env,whnfGamma env g x)) (expr a) <*> expr b
   Dup x y b -> do
     (_,g) <- ask
     t <- liftE (inferVar g x)

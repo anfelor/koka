@@ -41,27 +41,32 @@
   Only `lazy-eval`, which other modules may call, remains, and dispatches to its copies. The binders of a lock have the names that
   `[lock]` requires before `Paths`: the box `y.roll.injⱼ` of the lazy value `y`, and its
   contents `y.roll.injⱼ.contents`, which the lock renames to `y.roll.injⱼ.taken`.
+
+  Finally, forced values get the type `whnf(T⟨B̄⟩)*` (`whnfProgram`), so that their matches
+  have no lazy alternatives.
 -}
 module Backend.Typed.Elab.Lazy( lazyProgram, lazyCopies ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
 import qualified Common.NameMap as NM
+import Data.Maybe( isJust )
 import Data.Functor.Const( Const(..) )
 import Data.Functor.Identity( Identity(..) )
 import Common.Name
-import Common.NamePrim( nameLazyMemoize, nameLazyMemoizeTarget )
+import Common.NamePrim( nameLazyMemoize, nameLazyMemoizeTarget, nameLazyIsWhnf, nameLazyPtrIsWhnf )
 import Kind.Newtypes
 import Type.Type( lazyName, conInfoName )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Query( Env(..), envOf, unrollT, reuseSize, lazySize )
+import Backend.Typed.Query( Env(..), envOf, unrollT, reuseSize, lazySize, whnfName )
 
 -- The `lazy-C` functions with the tag of their constructor and the size of its cell, the
--- `lazy-eval-locked` functions, and the `lazy-eval` functions.
-data Lazies = Lazies{ lzCons :: M.Map Name (Int,Int), lzLocked :: S.Set Name, lzEval :: S.Set Name }
+-- `lazy-eval-locked` functions, the `lazy-eval` functions, and the `lazy-whnf` and
+-- `lazy-force` functions.
+data Lazies = Lazies{ lzCons :: M.Map Name (Int,Int), lzLocked :: S.Set Name, lzEval :: S.Set Name, lzForce :: S.Set Name }
 
 -- the lazy value of `lazy-eval-locked` and its type
 data LEnv = LEnv{ leEnv :: Env, leLazies :: Lazies, leLocked :: Maybe (Path,AType) }
@@ -84,7 +89,7 @@ lazyProgram nt prog
                    Left err -> (d, [show (defName d) ++ ": " ++ err])
         (defs,errs) = unzip (map run (progDefs prog))
         cells  = M.fromList [(f,c) | DefFun f _ ((_,_,c@VCell{}):_) _ _ <- defs]
-    in (specialise lazies prog{ progDefs = defs, progSigs = M.mapWithKey (withCell cells) (progSigs prog) }, concat errs)
+    in (whnfProgram lazies (specialise lazies prog{ progDefs = defs, progSigs = M.mapWithKey (withCell cells) (progSigs prog) }), concat errs)
   where
     withCell cells f sig
       = case (M.lookup f cells, sig) of
@@ -99,6 +104,7 @@ lazyFuns nt tdefs
                        , Just (ABox s) <- [lookup tag alts], Right n <- [lazySize s]])
            (S.fromList [funName info "eval-locked" | (info,_,_) <- infos])
            (S.fromList [funName info "eval" | (info,_,_) <- infos])
+           (S.fromList [funName info stem | (info,_,_) <- infos, stem <- ["whnf","force"]])
   where
     infos = [(info,lz,alts) | (_,info) <- NM.toList (newtypesTypeDefs nt)
                             , Just TypeDef{ tdefLazy = Just lz, tdefBody = Just (ASum alts) } <- [M.lookup (dataInfoName info) tdefs]]
@@ -294,6 +300,92 @@ specialise lazies prog
     callsA a = case a of
                  Lam ps r e -> Lam ps r (callsE e)
                  _ -> mapA id callsA callsV a
+
+-- Values in WHNF (`[if-whnf]`). A test of WHNF on a lazy value, `datatype-(ptr-)is-whnf`
+-- followed by a case on its result, narrows the value in its first branch. `lazy-whnf` and
+-- `lazy-force` (also those of other modules) return `whnf(T)*`, and so does a `let` whose bound
+-- expression does: it is a forced value, and its matches lose their lazy alternatives, which are
+-- `unreachable`. A shape that is not recognised is not narrowed.
+whnfProgram :: Lazies -> Program -> Program
+whnfProgram lazies prog
+  = prog{ progDefs = map def (progDefs prog), progSigs = sigs }
+  where
+    env = envOf prog
+    narrow t = case t of
+                 VPtr (ACon n as) | Just w <- whnfName env n -> Just (VPtr (ACon w as))
+                 _ -> Nothing
+    sigs = M.mapWithKey (\f sig -> case sig of
+                                     SigFun tvs ps r | S.member f (lzForce lazies), Just r' <- narrow r -> SigFun tvs ps r'
+                                     _ -> sig)
+                        (progSigs prog)
+    def d = case d of
+              DefFun f tvs ps r body | S.member f (lzForce lazies), Just r' <- narrow r -> DefFun f tvs ps r' (whnfE S.empty body)
+              _ -> d{ defBody = whnfE S.empty (defBody d) }
+    -- Koka's match puts join points between the test and the case on its result. The test
+    -- of a value `ws` that is known to be in WHNF is its first branch.
+    whnfE ws expr
+      = case expr of
+          Let b _ e body
+            | Just (x,a,pre) <- whnfTest e, Just _ <- narrow (VPtr a)
+            , Just (joins,CaseV _ (Var b') [(_,e0),(_,e1)]) <- joinsTo ws body, b == b'
+            , let expr' = pre (joins (if S.member x ws then whnfE ws e1
+                                      else IfWhnf x (whnfE (S.insert x ws) e1) (whnfE ws e0)))
+            , S.notMember b (fvE expr')
+            -> expr'
+          Let m t e1 e2
+            | Just t'@(VPtr w) <- narrow t, let e1' = whnfE ws e1, forced ws S.empty e1'
+            , Right (ASum alts) <- unrollT env w
+            -> Let m t' e1' (strictMatches (map fst alts) m (whnfE (S.insert m ws) e2))
+          _ -> deepE (whnfE ws) expr
+    -- the test of `x`, after the lets of its tag argument
+    whnfTest e
+      = case e of
+          Call f [a] [Var x, _] | f == nameLazyIsWhnf || f == nameLazyPtrIsWhnf -> Just (x,a,id)
+          Let y t e1 e2 -> (\(x,a,pre) -> (x,a,Let y t e1 . pre)) <$> whnfTest e2
+          _ -> Nothing
+    joinsTo ws e
+      = case e of
+          Join j tvs ps e1 e2 -> (\(js,c) -> (Join j tvs ps (whnfE ws e1) . js,c)) <$> joinsTo ws e2
+          CaseV{} -> Just (id,e)
+          _ -> Nothing
+    -- whether an expression returns a value in WHNF, given the values narrowed by a test and
+    -- the join points that do
+    forced xs js expr
+      = case expr of
+          Ret (Var x) -> S.member x xs
+          Call f _ _ | Just (SigFun _ _ (VPtr (ACon w _))) <- M.lookup f sigs -> isJust (M.lookup w (envTypes env) >>= tdefWhnfOf)
+          Jump j _ _ -> S.member j js
+          IfWhnf x e1 e2 -> forced (S.insert x xs) js e1 && forced xs js e2
+          Unreachable _ -> True
+          Let _ _ _ e -> forced xs js e
+          Join j _ _ e1 e2 -> forced xs (if forced xs js e1 then S.insert j js else js) e2
+          CaseV _ _ alts -> all (forced xs js . snd) alts
+          _ -> False
+
+-- The matches on a value `m` in WHNF, whose sum has the tags `strict`, keep the alternatives
+-- of those tags, and a default only if it has any.
+strictMatches :: [Int] -> Path -> VExpr -> VExpr
+strictMatches strict m = go S.empty S.empty
+  where
+    go ds rs expr
+      = case expr of
+          Deref q (Var y) d e | y == m -> Deref q (Var y) d (go (S.insert d ds) rs e)
+          Unroll q y r e | S.member y ds -> Unroll q y r (go ds (S.insert r rs) e)
+          CaseA q r alts def | S.member r rs
+            -> let alts' = [(i,x,go ds rs e) | (i,x,e) <- alts, i `elem` strict]
+                   def' = if all (`elem` [i | (i,_,_) <- alts']) strict then Nothing
+                          else fmap (\(d,e) -> (d,go ds rs e)) def
+               in CaseA q r alts' def'
+          _ -> deepE (go ds rs) expr
+
+-- apply a function to the subexpressions of an expression, also in lambdas
+deepE :: (VExpr -> VExpr) -> VExpr -> VExpr
+deepE f = runIdentity . descendE Identity (Identity . deepV) (\_ -> Identity . f)
+  where
+    deepV = mapV deepA deepV
+    deepA a = case a of
+                Lam ps r e -> Lam ps r (f e)
+                _ -> mapA id deepA deepV a
 
 -- substitute the parameters of join points to which every jump passes the same constant of a
 -- sum of units (such as `recurse`)
