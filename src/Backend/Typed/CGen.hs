@@ -61,7 +61,7 @@ data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [Strin
 data Ctx = Ctx{ cxEnv :: Env, cxCEnv :: CEnv, cxGamma :: Gamma, cxSelf :: Maybe (Name,[Path])
               , cxJoins :: M.Map Name (Doc,[Path])
               , cxPlaces :: M.Map Path Doc  -- places, read through the pointer to their box (`genUnbox`)
-              , cxShared :: S.Set Path     -- boxes known to be shared (the else branch of `IsUnique`)
+              , cxShared :: S.Set Path     -- blocks known to be shared (the else branch of `IsUnique`, and its aliases)
               , cxSources :: Sources }     -- the copies and join parameters of the definition (`sameBits`)
 
 type G a = M () St a
@@ -528,6 +528,12 @@ leafValues t v
       _ -> [(collapse v,i) | i <- [0 .. length (leaves t) - 1]]
 
 -- `[deref]` and `[unroll]` keep the pointer
+-- `x` is the same block as `y`, so it is shared if `y` is
+shareAlias :: Ctx -> Path -> Path -> Ctx
+shareAlias cx y x
+  | S.member y (cxShared cx) = cx{ cxShared = S.insert x (cxShared cx) }
+  | otherwise = cx
+
 genAlias :: Ctx -> Dest -> Doc -> Path -> Ty -> VExpr -> G [Doc]
 genAlias cx dest ve x t e
   = do s <- genE (bindVar cx x t) dest e
@@ -820,7 +826,11 @@ genE cx dest expr
                   return (assignTo dest ct e)
       Let x t e1 e2
         -> do s1 <- genBound cx x t e1
-              s2 <- genE (bindVar cx x (V t)) dest e2
+              -- a shared cell stays shared once memoized
+              let cx' = case e1 of
+                          Ret (Memoize (Var c) _ _) -> shareAlias cx c x
+                          _ -> cx
+              s2 <- genE (bindVar cx' x (V t)) dest e2
               return (s1 ++ s2)
       LetYield x t e1 e2 e3
         -> do s1 <- genBound cx x t e1
@@ -868,7 +878,7 @@ genE cx dest expr
               xe <- genVar cx x
               let blockOf = "kk_datatype_as_ptr(kk_datatype_unbox(" <.> xe <.> "),_ctx)"
               shared <- case t of
-                          V (VCell _ _) -> return (cxShared cx)
+                          V (VCell _ _) -> return (S.insert x (cxShared cx))
                           V _ -> failG ("uniqueness test of an unboxed value: " ++ show x)
                           A _ -> return (S.insert x (cxShared cx))
               let test = "kk_block_is_unique(" <.> blockOf <.> ")"
@@ -928,11 +938,14 @@ genE cx dest expr
       Deref _ v x e
         -> do VPtr a <- tyOf cx v
               ve <- genV cx v
-              genAlias cx dest ve x (A a) e
+              let cx' = case v of
+                          Var y -> shareAlias cx y x
+                          _ -> cx
+              genAlias cx' dest ve x (A a) e
       Unroll _ v x e
         -> do A t <- tyOfName cx v
               a <- liftC (unrollT (cxEnv cx) t)
-              genAlias cx dest (localName v) x (A a) e
+              genAlias (shareAlias cx v x) dest (localName v) x (A a) e
       Unbox _ v x e -> genUnbox cx dest v x e
       Unscalar m v x e -> genUnscalar cx dest m v x e
       SplitA _ v k (x,e1) (y,e2)

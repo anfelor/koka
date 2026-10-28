@@ -334,8 +334,8 @@ trivialTy :: Env -> Ty -> Bool
 trivialTy env = isTrivialWith (either (const Nothing) Just . unrollT env)
 
 -- The constructor shape of a pointer, unfolding named types but not their
--- payloads. Opaque and lazy representations supply no such evidence. Guard
--- alias unfolding as well: a recursive name alone has no known representation.
+-- payloads. Opaque representations supply no such evidence. Guard alias
+-- unfolding as well: a recursive name alone has no known representation.
 pointerShape :: Env -> Ty -> Maybe AType
 pointerShape env t
   = case t of
@@ -346,7 +346,7 @@ pointerShape env t
     shape _ a | isShape a = Just a
     shape seen a = case a of
       ACon n _ | not (S.member n seen)
-               , Just (TypeDef _ _ _ Nothing) <- M.lookup n (envTypes env)
+               , Just TypeDef{} <- M.lookup n (envTypes env)
                , Right b <- unrollT env a -> shape (S.insert n seen) b
       _ -> Nothing
 
