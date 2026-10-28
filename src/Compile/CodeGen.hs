@@ -280,7 +280,7 @@ codeGenJS term flags sequential entry outBase core
 codeGenTyped :: Terminal -> Flags -> [Module] -> Module -> IO ()
 codeGenTyped term flags imports mod
   = do let newtypes = defsNewtypes (defsFromModules (mod:imports))
-           (tprog,msgs) = typedFromCore (platformFromFlags flags) (parcReuse flags) newtypes (mapMaybe modCore imports) 1000000 (fromJust (modCore mod))
+           (tprog,msgs) = typedFromCore (parcReuse flags) newtypes (mapMaybe modCore imports) 1000000 (fromJust (modCore mod))
        when (showTyped flags) $ termInfo term (pretty tprog)
        mapM_ (\(phase,msg) -> termInfo term (text ("typed " ++ phase ++ ": " ++ msg))) msgs
        -- FIP diagnostics are advisory, like the frontend's FIP warnings.

@@ -217,14 +217,14 @@ data Fill = Full | MaybeEmpty
 data Ty = A AType | V VType
           deriving (Eq,Show)
 
--- a named type `T⟨ā⟩ := A`; without a body (`int`, `string`, ...) it cannot be unrolled
-data TypeDef = TypeDef{ tdefName :: Name, tdefParams :: [TVar], tdefBody :: Maybe AType, tdefLazy :: Maybe LazyInfo }
+-- a named type `T⟨ā⟩ := A`, or a lazy one `T⟨ā⟩ := A ~> B` (see `AType`); without a body
+-- (`int`, `string`, ...) it cannot be unrolled
+data TypeDef = TypeDef{ tdefName :: Name, tdefParams :: [TVar], tdefBody :: Maybe AType, tdefLazy :: Maybe Lazy }
              deriving (Show)
 
--- lazy datatypes: the index of the indirection constructor, and for each constructor
--- whether it is lazy and Koka's allocation size (Koka decides by these sizes when to memoize in place)
-data LazyInfo = LazyInfo{ lazyIndirect :: Int, lazyCons :: [(Bool,Int)] }
-              deriving (Show)
+-- the lazy tags `lazy(T)` of a lazy definition, and the tag of the indirection ι among them
+data Lazy = Lazy{ lazyAlts :: [Int], lazyIndirect :: Int }
+          deriving (Show)
 
 type TypeDefs = M.Map Name TypeDef
 
@@ -355,14 +355,6 @@ data AVal
   -- written in place without a test.
   | BoxAt Path VVal
 
-  --   Γ ⊢ v : V    T⟨ā⟩ := A is lazy    Box V is an alternative of A[B̄/ā]
-  --  ────────────────────────────────────────────────────────────────────── [box-in]
-  --   Γ, x : T⟨B̄⟩* ⊢ box-in@x v : Box V
-  --
-  -- A box written over the block of the lazy value `x` under evaluation, keeping its reference
-  -- count (`Lazy`). It is an update through a shared reference and only sound because `x` is
-  -- locked and its old fields (taken by `[unbox-lazy]`) are not used again.
-  | BoxIn Path VVal
   deriving (Eq,Show)
 
 -- Unboxed values `Γ ⊢ v :q V`.
@@ -642,15 +634,6 @@ data VExpr
   -- does a unique one.
   | Unscalar Mode Path Path VExpr
 
-  --   Γ₁ ⊢ v :^ Box V    Γ₂, x : V ⊢ e : W
-  --  ─────────────────────────────────────────── [unbox-lazy]
-  --   Γ₁, Γ₂ ⊢ let-lazy box x = v in e : W
-  --
-  -- Takes the contents of a box of the lazy value under evaluation without duplicating them
-  -- (`Perceus`); the box is left *hollow* until `[box-in]` writes over it or it is freed. In the
-  -- calculus this needs a hollow box type (a shared `◇n`). Trusted by `Linear`.
-  | UnboxLazy Path Path VExpr
-
   --   Γ₁ ⊢ v :q ∃ā. V    Γ₂, x :q V[b̄/ā] ⊢ e : W    b̄ ∉ ftv(Γ₂, W)
   --  ────────────────────────────────────────────────────────────────── [unpack]
   --   Γ₁, Γ₂ ⊢ let_q pack[b̄] x = v in e : W
@@ -716,13 +699,11 @@ data VExpr
   -- contents of a box (*loads* them out of its block) before they are read.
   | Dup Path Path VExpr
 
-  --   Γ, x :! t ⊢ e₁ : W    Γ, x : t ⊢ e₂ : W    t = Box V with |V| defined, or t = T⟨B̄⟩* with T lazy
-  --  ───────────────────────────────────────────────────────────────────────────────────── [if-unique]
-  --   Γ, x : t ⊢ if-unique x then e₁ else e₂ : W
+  --   Γ, x :! Box V ⊢ e₁ : W    Γ, x : Box V ⊢ e₂ : W    |V| defined
+  --  ────────────────────────────────────────────────────────────────── [if-unique]
+  --   Γ, x : Box V ⊢ if-unique x then e₁ else e₂ : W
   --
-  -- Branches on whether a box (`DropSpec`) or a lazy value (`Lazy`) is unique. A lazy value
-  -- may be immediate, and then it is not unique. `Lazy` frees a unique lazy value under
-  -- evaluation with `typed-lazy-free : ∀a. (!a) -> 1`, which does not drop its (taken) fields.
+  -- Branches on whether a box is unique (`DropSpec`).
   --
   --   Γ, c : ◆n | J ⊢ e₁ : W    Γ, c : cell_n⟨T⟨B̄⟩⟩ | J ⊢ e₂ : W
   --  ───────────────────────────────────────────────────────────── [if-unique-cell]

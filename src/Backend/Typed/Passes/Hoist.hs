@@ -133,6 +133,5 @@ childrenA v = case v of
   Box w -> [(w,Box)]
   OpenCon c ts ws -> [(w,\x -> OpenCon c ts (take i ws ++ [x] ++ drop (i+1) ws)) | (i,w) <- zip [0..] ws]
   BoxAt r w -> [(w,BoxAt r)]
-  BoxIn x w -> [(w,BoxIn x)]
   _ -> []
 

@@ -51,7 +51,7 @@ import Common.Syntax( Fip(..), FipAlloc(..), fipAlloc, isFipTop )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Names( nameUnreachable, nameLazyFree )
+import Backend.Typed.Names( nameUnreachable )
 import Backend.Typed.Layout( layout, isBlock )
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, lockGamma, uniqueGamma, trivialTy )
@@ -387,8 +387,6 @@ call f
        let self = S.member f (iGroup info)
        when (self && not tl) (require mayRecurse ("non-tail call to a (mutually) recursive function: " ++ show f))
        if f == nameUnreachable || f == nameYielding || isEvidence f then return mempty
-       else if f == nameLazyFree then do require mayDealloc "freeing a lazy value causes deallocation"
-                                         return mempty
        else case M.lookup f (iFips info) of
               Nothing -> do warn ("no fip information for the function " ++ show f)
                             return mempty
