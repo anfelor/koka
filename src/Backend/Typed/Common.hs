@@ -386,6 +386,7 @@ descendB fn fv fb expr
       Free r e              -> Free <$> fn r <*> plain e
       Dup x y e             -> (\x' (y',e') -> Dup x' y' e') <$> fn x <*> one y [] e
       IsUnique x e1 e2      -> IsUnique <$> fn x <*> plain e1 <*> plain e2
+      IfWhnf x e1 e2        -> IfWhnf <$> fn x <*> plain e1 <*> plain e2
       IfFull r e1 e2        -> IfFull <$> fn r <*> plain e1 <*> plain e2
       UnboxRu v r e         -> (\v' (r',e') -> UnboxRu v' r' e') <$> fn v <*> one r [] e
       Lock z c e            -> (\z' (c',e') -> Lock z' c' e') <$> fn z <*> one c [] e
@@ -871,6 +872,7 @@ destructAOf expr
       Drop{} -> Nothing
       Free{} -> Nothing
       IsUnique{} -> Nothing
+      IfWhnf{} -> Nothing
       IfFull{} -> Nothing
       UnboxRu{} -> Nothing
       Lock{} -> Nothing
@@ -903,6 +905,7 @@ destructVOf expr
       Drop{} -> Nothing
       Free{} -> Nothing
       IsUnique{} -> Nothing
+      IfWhnf{} -> Nothing
       IfFull{} -> Nothing
       UnboxRu{} -> Nothing
       Lock{} -> Nothing
@@ -936,6 +939,7 @@ isRead expr
       Drop{}      -> False
       Free{}      -> False
       IsUnique{}  -> False
+      IfWhnf{}    -> False
       IfFull{}    -> False
       UnboxRu{}   -> False
       Lock{}      -> False
@@ -970,6 +974,7 @@ keepsPointer expr
       Drop{}      -> False
       Free{}      -> False
       IsUnique{}  -> False
+      IfWhnf{}    -> False
       IfFull{}    -> False
       UnboxRu{}   -> False
       Lock{}      -> False

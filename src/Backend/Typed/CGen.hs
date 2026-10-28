@@ -35,7 +35,7 @@ import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types( inst, collapse, Types(..) )
-import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, unrollT, lazyTags, openFields, boxContents, reuseSize, pointerShape )
+import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, whnfGamma, unrollT, lazyTags, openFields, boxContents, reuseSize, pointerShape )
 import Backend.Typed.Layout hiding( dupExpr, dropStmt )
 import Backend.Typed.Monad
 
@@ -889,6 +889,23 @@ genE cx dest expr
                        _ -> return s1
               s2 <- genE cx{ cxShared = shared } dest e2
               return ["if kk_likely(" <.> test <.> ")" <+> block s1' <+> "else" <+> block s2]
+      -- the strict tags come before the lazy ones, and only strict alternatives are immediate
+      IfWhnf x e1 e2
+        -> do t <- liftC (inferVar (cxGamma cx) x)
+              a <- case t of
+                     V (VPtr a) -> return a
+                     _ -> failG ("WHNF test of a non-pointer: " ++ show x)
+              alts <- liftC (unrollT (cxEnv cx) a)
+              xe <- genVar cx x
+              let lazies = lazyTags (cxEnv cx) a
+                  immediate = case alts of
+                                ASum as -> or [True | (_,AUnit) <- as]
+                                _ -> False
+                  test = (if immediate then "kk_datatype_is_whnf" else "kk_datatype_ptr_is_whnf")
+                         <.> "(kk_datatype_unbox(" <.> xe <.> ")," <.> text (show (minimum lazies)) <.> ",_ctx)"
+              s1 <- genE cx{ cxGamma = whnfGamma (cxEnv cx) (cxGamma cx) x } dest e1
+              s2 <- genE cx dest e2
+              return ["if kk_likely(" <.> test <.> ")" <+> block s1 <+> "else" <+> block s2]
       IfFull r e1 e2
         -> do t <- liftC (inferVar (cxGamma cx) r)
               full <- case t of

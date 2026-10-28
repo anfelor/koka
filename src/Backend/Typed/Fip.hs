@@ -53,7 +53,7 @@ import Backend.Typed.Common
 import Backend.Typed.Monad
 import Backend.Typed.Layout( layout, isBlock )
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, lockGamma, uniqueGamma, trivialTy )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, lockGamma, uniqueGamma, whnfGamma, trivialTy )
 
 -- The allocations of the most allocating path; whether there are allocations, calls to the
 -- recursive group, and both in sequence; and the types of the values boxed for polymorphism.
@@ -282,6 +282,9 @@ fipE expr
               let borrowCopy fe = if b && isFun t then fe{ fInfo = (fInfo fe){ iBorrowed = y : iBorrowed (fInfo fe) } } else fe
               local borrowCopy (bind [(y,t)] (fipE e))
       IsUnique x e1 _ -> local (\fe -> fe{ fGamma = uniqueGamma (fGamma fe) x }) (fipE e1)
+      IfWhnf x e1 e2
+        -> do alive <- alivePaths
+              branches ([local (\fe -> fe{ fGamma = whnfGamma (fEnv fe) (fGamma fe) x }) (fipE e1) | alive e1] ++ [fipE e2 | alive e2])
       IfFull r e1 e2
         -> do full <- isFull r
               alive <- alivePaths
