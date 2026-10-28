@@ -146,6 +146,12 @@ owning m
 --   ones (B): `unroll(T⟨B̄⟩) = (A ⊕ B)[B̄/ā]` and `lazy(T⟨B̄⟩)` is the set of lazy tags
 --   (`Query.lazyTags`). No rule refers to ι. The block of a lazy alternative `Box V` has
 --   `‖V‖ = max(|V|, |T⟨ā⟩*|)` bytes (`Layout.lazyBlockSize`), so that an indirection always fits.
+-- - A lazy definition with strict alternatives has a named type of its values in WHNF,
+--   `whnf(T)⟨ā⟩ := B` (`lazyWhnf`), an ordinary definition with the strict alternatives of T at
+--   their tags. A `whnf(T⟨B̄⟩)` can be used where a `T⟨B̄⟩` is expected, also behind pointers
+--   and in boxes (`Query.expectV`, `Query.checkA`), and
+--   branches that disagree on it agree on `T⟨B̄⟩*`: its blocks are blocks of T, and a value in
+--   WHNF is never a thunk again. `[if-whnf]` narrows a `T⟨B̄⟩*` to it.
 data AType = ABox VType                 -- Box V
            | AScalar Raw                -- Scalar raw
            | AUnit                      -- 1
@@ -218,12 +224,14 @@ data Ty = A AType | V VType
           deriving (Eq,Show)
 
 -- a named type `T⟨ā⟩ := A`, or a lazy one `T⟨ā⟩ := A ~> B` (see `AType`); without a body
--- (`int`, `string`, ...) it cannot be unrolled
-data TypeDef = TypeDef{ tdefName :: Name, tdefParams :: [TVar], tdefBody :: Maybe AType, tdefLazy :: Maybe Lazy }
+-- (`int`, `string`, ...) it cannot be unrolled. The definition of `whnf(T)` names the lazy
+-- type T that it refines.
+data TypeDef = TypeDef{ tdefName :: Name, tdefParams :: [TVar], tdefBody :: Maybe AType, tdefLazy :: Maybe Lazy, tdefWhnfOf :: Maybe Name }
              deriving (Show)
 
--- the lazy tags `lazy(T)` of a lazy definition, and the tag of the indirection ι among them
-data Lazy = Lazy{ lazyAlts :: [Int], lazyIndirect :: Int }
+-- the lazy tags `lazy(T)` of a lazy definition, the tag of the indirection ι among them, and
+-- the name of `whnf(T)` if T has strict alternatives
+data Lazy = Lazy{ lazyAlts :: [Int], lazyIndirect :: Int, lazyWhnf :: Maybe Name }
           deriving (Show)
 
 type TypeDefs = M.Map Name TypeDef
@@ -720,6 +728,15 @@ data VExpr
   -- Nobody else sees a unique cell, so it is just an empty block, a full credit
   -- (`Query.uniqueGamma`), which `[free]` frees without touching the taken contents.
   | IsUnique Path VExpr VExpr
+
+  --   Γ, x :q whnf(T⟨B̄⟩)* | J ⊢ e₁ : W    Γ, x :q T⟨B̄⟩* | J ⊢ e₂ : W
+  --  ─────────────────────────────────────────────────────────────── [if-whnf]
+  --   Γ, x :q T⟨B̄⟩* | J ⊢ if-whnf x then e₁ else e₂ : W
+  --
+  -- Branches on whether a lazy value is in WHNF, by its tag (the strict tags come before the
+  -- lazy ones), and narrows its type in the first branch (`Query.whnfGamma`). The test reads
+  -- `x` at any mode, and consumes nothing.
+  | IfWhnf Path VExpr VExpr
 
   --   Γ, r : ◆n[k; p : V] ⊢ e₁ : W    Γ ⊢ e₂ : W
   --  ─────────────────────────────────────────────── [if-full]
