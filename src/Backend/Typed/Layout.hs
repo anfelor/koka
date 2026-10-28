@@ -20,7 +20,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Layout( CT(..), EnumSize(..), layout, readInPlace, placeBinders, leaves, leafSlots, isEnum, orderFields, memoryOrder, shapeIsHeap, shapeIsSmall
                            , checkLayout, ctName, scanOf, rawOf, needsRC
-                           , structDefs, blockName, blockDef, blockSize, isBlock, scalarField
+                           , structDefs, blockName, blockDef, blockSize, lazyBlockSize, isBlock, scalarField
                            , dupExpr, dropStmt, dupFun, dropFun, primBox, scalarHeapSize, fnv
                            ) where
 
@@ -117,6 +117,8 @@ layout t
       -- Koka's `cctx`: `res` and the address of the hole, which is boxed as a value
       -- (`kk_field_addr_t`), so duplicating and dropping it does nothing
       VCtx _ a b  -> layout (VProd (VPtr a) (VPtr b))
+      -- a cell is the pointer to its block
+      VCell _ _   -> CBox
   where
     altLayout s = case layout s of
                     CUnit -> Nothing
@@ -134,6 +136,7 @@ leaves t
       VRaw _ -> [t]
       VReuse _ _ _ -> [t]
       VCtx _ a b -> [VPtr a, VPtr b]
+      VCell _ _ -> [t]
 
 enumSize :: Int -> EnumSize
 enumSize n
@@ -298,9 +301,21 @@ blockDef ct
   = let name = blockName ct
     in (name, guarded name ("struct " ++ name ++ " { kk_block_t _block; " ++ ctName ct ++ " p; };\n"))
 
--- the size in bytes of the block of a box (checked by the C compiler where it is reused)
+-- The size in bytes of the block of a box (checked by the C compiler where it is reused), with
+-- the fields of its products in memory order (`orderFields`), so that it does not depend on
+-- the order of the fields before `OrderFields` (where the order is already the memory order).
 blockSize :: CT -> Int
-blockSize ct = fst (structSize [(8,4), sizeAlign ct])
+blockSize ct = fst (structSize [(8,4), sizeAlign (inMemoryOrder ct)])
+  where
+    inMemoryOrder c = case c of
+      CProd n fs -> CProd n (orderFields [(i,inMemoryOrder f) | (i,f) <- fs])
+      CSum n alts -> CSum n (map (fmap inMemoryOrder) alts)
+      _ -> c
+
+-- `‖V‖`: the size of the block of a lazy alternative, padded so that an indirection, a box of a
+-- pointer, always fits
+lazyBlockSize :: CT -> Int
+lazyBlockSize ct = max (blockSize ct) (blockSize CBox)
 
 -- the offset and layout of each leaf of a payload, in the order of `leaves`
 leafSlots :: CT -> [(Int,CT)]

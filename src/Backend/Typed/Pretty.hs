@@ -69,6 +69,7 @@ prettyV t
       VRaw r     -> prettyRaw r
       VExists vs t -> parens (text "exists" <+> hsep (map tv vs) <.> text "." <+> prettyV t)
       VCtx f a b -> text ("ctx" ++ (if f == Full then "+" else "")) <.> angles (commaSep [prettyA a, prettyA b])
+      VCell n a -> text ("cell" ++ show n) <.> angles (prettyA a)
 
 prettyRaw :: Raw -> Doc
 prettyRaw r
@@ -141,6 +142,7 @@ prettyVal val
       Plug c v    -> atomVal c <.> brackets (prettyVal v)
       CtxCopy v   -> text "ctx-copy" <+> atomVal v
       Append c d  -> atomVal c <+> text "++" <+> atomVal d
+      Memoize c k v -> text "memoize" <+> atomVal c <+> parens (text "inj" <.> int k <+> atomVal v)
 
 atomAVal :: AVal -> Doc
 atomAVal v
@@ -158,6 +160,7 @@ atomVal v
       Context _ _ -> parens (prettyVal v)
       CtxCopy _ -> parens (prettyVal v)
       Append _ _ -> parens (prettyVal v)
+      Memoize _ _ _ -> parens (prettyVal v)
       _         -> prettyVal v
 
 prettyLit :: Lit -> Doc
@@ -197,6 +200,7 @@ prettyExpr expr
       IsUnique x e1 e2 -> ifThen (text "if-unique" <+> pv x) e1 e2
       IfFull r e1 e2 -> ifThen (text "if-full" <+> pv r) e1 e2
       UnboxRu v r e -> letIn empty (text "@" <+> pv r) (pv v) e
+      Lock z c e -> letIn empty (text "lock" <+> pv c) (pv z) e
       Join j tvs ps e1 e2 -> text "join" <+> nm j <.> tyParams tvs <.> params ps <+> text "="
                          <-> indent 2 (prettyExpr e1) <-> text "in" <+> align (prettyExpr e2)
       Jump j [] vs -> text "jump" <+> nm j <.> args vs

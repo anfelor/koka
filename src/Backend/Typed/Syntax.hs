@@ -50,7 +50,7 @@
       Those in the contents of a box `z` (on a path whose last `contents` or `taken` step is
       a `contents` step, `Common.boxOf`) are read from its block, so only `[dup]`, which
       loads them, and a case on them (such as one on the immediate side of a split) read
-      them, borrowing the block `z.credit`. `[unbox-ru]` of `z` takes the contents out of the
+      them, borrowing the block `z.credit`. `[unbox-ru]` (or `[lock]`) of `z` takes the contents out of the
       block and renames them to `z.taken`. A projection or unpack binds a part of them
       without reading it, and descriptions do not read them.
     - A unique variable `x :! t` is owned and holds the only reference to its block. It may be used
@@ -75,7 +75,7 @@
     - Code generation reads the contents of a box in place (`Layout.placeBinders`): `z.contents`
       of a product, and the binders of `[proj]` and `[unpack]` of a place that are products
       themselves, stay in the block of `z`, and a use reads the block. It loads them (copies
-      them out of the block) at `[proj]` of any other field, at `[dup]`, and at `[unbox-ru]`
+      them out of the block) at `[proj]` of any other field, at `[dup]`, and at `[unbox-ru]` and `[lock]`
       of `z`, which may free or write the block. These rules make that sound: a non-trivial
       part of `z.contents` is used only before `z` is consumed (after `[unbox-ru]` it is out
       of scope, and its loaded copy is a part of `z.taken`), and a trivial part only by
@@ -141,6 +141,11 @@ owning m
 --   β-reduction: `a⟨B̄⟩[λb̄.A / a] = A[B̄/b̄]`. A partial application `T⟨B̄⟩` is also allowed there.
 -- - `unroll(T⟨B̄⟩) = A[B̄/ā]` for a definition `T⟨ā⟩ := A` (`TypeDef`); in the paper `T⟨B̄⟩` is
 --   `μt.A[B̄/ā]` with the recursive occurrences replaced by `t`.
+-- - A lazy definition `T⟨ā⟩ := A ~> B` divides the tags of its sum into lazy ones (the
+--   thunks A, each a `Box V`, among them the indirection ι with `Aι = Box(T⟨ā⟩*)`) and strict
+--   ones (B): `unroll(T⟨B̄⟩) = (A ⊕ B)[B̄/ā]` and `lazy(T⟨B̄⟩)` is the set of lazy tags
+--   (`Query.lazyTags`). No rule refers to ι. The block of a lazy alternative `Box V` has
+--   `‖V‖ = max(|V|, |T⟨ā⟩*|)` bytes (`Layout.lazyBlockSize`), so that an indirection always fits.
 data AType = ABox VType                 -- Box V
            | AScalar Raw                -- Scalar raw
            | AUnit                      -- 1
@@ -165,7 +170,16 @@ data AType = ABox VType                 -- Box V
 --   contexts" above). It is not trivial and has the layout of `A* ⊗ B*`. A nonempty context
 --   `ctx⁺⟨A,B⟩` is also a context `ctx⟨A,B⟩`, as a full credit is also a credit.
 -- - `|V|` is the size of the heap block of a `Box V` (`Layout.blockSize`); it is only defined when
---   V has contents (`Layout.isBlock`).
+--   V has contents (`Layout.isBlock`). It is the size with the fields in memory order, so it
+--   does not depend on the order in which a product is written (before `OrderFields`).
+-- - A cell `cell_n⟨T⟨B̄⟩⟩` is the n-byte block of a lazy value under evaluation (the paper's
+--   locked location): its contents were taken out (`[lock]`), it holds one reference to the
+--   block, and other references to the block must see a `T⟨B̄⟩` once it is filled. It is not
+--   trivial and it is linear: it is never duplicated or dropped, but consumed by `[memoize]`,
+--   `[if-unique-cell]` or a call or jump with a parameter of a cell type. It never occurs
+--   inside another type (a product, sum, existential or box), is never captured by a closure,
+--   and is never live across `[let-yield]`. A cell `cell_n` can be used where `cell_m` is
+--   expected if m ≤ n (`Query.expectV`). Its representation is the block pointer.
 -- - A full credit `◆n[k; p : V]` is also a credit `◇n[k; p : V]` that may be empty: a value of
 --   the former can be used where the latter is expected (`Query.expectV`), and branches that
 --   disagree on it agree on the latter.
@@ -177,6 +191,7 @@ data VType = VPtr AType                 -- A*
            | VExists [TVar] VType       -- ∃ā. V
            | VReuse Fill Int (Maybe Contents) -- ◇n[k; p : V] or ◆n[k; p : V]: if nonempty, an n-byte block with tag k containing p
            | VCtx Fill AType AType      -- ctx⟨A,B⟩ or ctx⁺⟨A,B⟩: an A with a hole of type B*, nonempty if full
+           | VCell Int AType            -- cell_n⟨T⟨B̄⟩⟩: the n-byte block of a lazy value under evaluation
            deriving (Eq,Show)
 
 -- raw types: the primitive value types of Koka (`TypeInfo.rawType`), named by their C type
@@ -241,7 +256,7 @@ data Step = SFst | SSnd            -- [proj]
           | SInjA Int | SRest      -- [case-a]: an alternative or the default
           | SLo | SHi              -- [split-a]
           | SContents | SCredit    -- [bunbox]: the contents, and the rest of the block (not a binder)
-          | STaken                 -- [unbox-ru]: the contents, taken out of the block (not a binder)
+          | STaken                 -- [unbox-ru], [lock]: the contents, taken out of the block (not a binder)
           | SOpen Name             -- [case-open]
           deriving (Eq,Ord)
 
@@ -482,6 +497,17 @@ data VVal
   -- continuation of an effect that may resume more than once) passes a captured context to a
   -- unique parameter.
   | CtxCopy VVal
+
+  --   Γ ⊢ v : V    unroll(T⟨B̄⟩) = ⊕ᵢ Aᵢ    Aₖ = Box V    |V| ≤ n
+  --  ─────────────────────────────────────────────────────────── [memoize]
+  --   Γ, c : cell_n⟨T⟨B̄⟩⟩ ⊢ memoize c (injₖ v) : T⟨B̄⟩*
+  --
+  -- Writes the alternative k over the block of the cell in place, keeping its reference count,
+  -- and releases the cell: the result is its reference, now a value. A strict k is the paper's
+  -- `memoize l w`; a lazy k replaces the thunk by another one (Koka's step mode), and k = ι is
+  -- the paper's `indirect l w`, which always fits as lazy blocks are padded. The cell is an
+  -- ordinary operand (it is unboxed), and the value is evaluated before the block is written.
+  | Memoize VVal Int VVal
   deriving (Eq,Show)
 
 -- Expressions `Γ | J ⊢ e : W` (always unboxed).
@@ -697,6 +723,13 @@ data VExpr
   -- Branches on whether a box (`DropSpec`) or a lazy value (`Lazy`) is unique. A lazy value
   -- may be immediate, and then it is not unique. `Lazy` frees a unique lazy value under
   -- evaluation with `typed-lazy-free : ∀a. (!a) -> 1`, which does not drop its (taken) fields.
+  --
+  --   Γ, c : ◆n | J ⊢ e₁ : W    Γ, c : cell_n⟨T⟨B̄⟩⟩ | J ⊢ e₂ : W
+  --  ───────────────────────────────────────────────────────────── [if-unique-cell]
+  --   Γ, c : cell_n⟨T⟨B̄⟩⟩ | J ⊢ if-unique c then e₁ else e₂ : W
+  --
+  -- Nobody else sees a unique cell, so it is just an empty block, a full credit
+  -- (`Query.uniqueGamma`), which `[free]` frees without touching the taken contents.
   | IsUnique Path VExpr VExpr
 
   --   Γ, r : ◆n[k; p : V] ⊢ e₁ : W    Γ ⊢ e₂ : W
@@ -721,6 +754,18 @@ data VExpr
   -- contents. With `[if-unique]` it makes `drop-reuse` of a box derivable. The block of `z`
   -- has tag tag(z).
   | UnboxRu Path Path VExpr
+
+  --   Γ[z.taken / z.contents], c : cell_‖V‖⟨T⟨B̄⟩⟩ | J ⊢ e : W
+  --  ──────────────────────────────────────────────────────── [lock]
+  --   Γ, z : Box V | J ⊢ let lock c = z in e : W
+  --                 (z = y.roll.injⱼ with y : T⟨B̄⟩ and j ∈ lazy(T⟨B̄⟩); z.contents :^ V ∈ Γ)
+  --
+  -- The counterpart of `[unbox-ru]` for an owned, possibly shared, thunk: its contents are taken
+  -- out of the block without reference counting and renamed to `z.taken`, as there, and its
+  -- block becomes the cell `c`, a new root, which must be filled by `[memoize]` (or freed if it
+  -- turns out to be unique, `[if-unique-cell]`). Consuming `z` consumes the pointer it was
+  -- matched from (see "Structural rules").
+  | Lock Path Path VExpr
 
   --   Γ_c, x̄ :q̄ V̄ | J ⊢ e₁ : W    Γ, Γ_c | J, j : Γ_c; ∀ā. (q̄ V̄) -> W ⊢ e₂ : W    ā ∉ ftv(Γ_c, W)
   --  ────────────────────────────────────────────────────────────────────────────────── [join]
