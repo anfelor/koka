@@ -157,6 +157,7 @@ tvarsE bound expr
       Let _ t _ _        -> ftv t
       LetYield _ t _ _ _ -> ftv t
       Yielded t          -> ftv t
+      Unreachable t      -> ftv t
       Call _ ts _        -> concatMap ftv ts
       Jump _ ts _        -> concatMap ftv ts
       _                  -> []

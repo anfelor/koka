@@ -51,7 +51,6 @@ import Common.Syntax( Fip(..), FipAlloc(..), fipAlloc, isFipTop )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Names( nameUnreachable )
 import Backend.Typed.Layout( layout, isBlock )
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, lockGamma, uniqueGamma, trivialTy )
@@ -305,6 +304,7 @@ fipE expr
         -> do cs <- mapM fipV vs
               (c,full) <- jump j vs
               return (mconcat cs <> c,full)
+      Unreachable _ -> return (mempty,False)
       _ -> fail ("unexpected expression: " ++ ppr expr)
   where
     isFun t = case t of
@@ -325,7 +325,8 @@ alivePaths = asks (\fe -> not . fails (fFailing fe))
 fails :: S.Set Name -> VExpr -> Bool
 fails failing expr
   = case expr of
-      Call f _ _ -> f == namePatternMatchError || f == nameUnreachable
+      Call f _ _ -> f == namePatternMatchError
+      Unreachable _ -> True
       Jump j _ _ -> S.member j failing
       Let _ _ e1 e2 -> fails failing e1 || fails failing e2
       LetYield _ _ e1 e2 e3 -> fails failing e1 || (fails failing e2 && fails failing e3)
@@ -386,7 +387,7 @@ call f
        tl <- asks fTail
        let self = S.member f (iGroup info)
        when (self && not tl) (require mayRecurse ("non-tail call to a (mutually) recursive function: " ++ show f))
-       if f == nameUnreachable || f == nameYielding || isEvidence f then return mempty
+       if f == nameYielding || isEvidence f then return mempty
        else case M.lookup f (iFips info) of
               Nothing -> do warn ("no fip information for the function " ++ show f)
                             return mempty

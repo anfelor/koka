@@ -194,6 +194,7 @@ ruE expr
               Lock z c <$> withGamma g' (ruE e)
       Ret _ -> plain
       Yielded _ -> plain
+      Unreachable _ -> plain
       Call _ _ _ -> plain
       App _ _ -> plain
       Gen _ _ -> plain
@@ -271,7 +272,10 @@ branchActions alts
                       | action <- alts]
        let usedAny = nub (concatMap snd rs)
        setCredits [c | c <- cs, fst c `notElem` usedAny]
-       return [foldr Free e [r | r <- usedAny, r `notElem` used] | (e,used) <- rs]
+       return [freeAll e [r | r <- usedAny, r `notElem` used] | (e,used) <- rs]
+  where
+    freeAll e@Unreachable{} _ = e
+    freeAll e rs = foldr Free e rs
 
 -- values: inner boxes are allocated first
 

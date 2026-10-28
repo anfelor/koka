@@ -60,6 +60,7 @@ mentionedE e = annotations ++ getConst (descendE (Const . (:[])) (Const . mentio
           Let _ t _ _ -> mentionedT t
           LetYield _ t _ _ _ -> mentionedT t
           Yielded t -> mentionedT t
+          Unreachable t -> mentionedT t
           Call _ ts _ -> concatMap (mentionedT . VPtr) ts
           Jump _ ts _ -> concatMap (mentionedT . VPtr) ts
           Join _ _ ps _ _ -> concatMap (mentionedT . (\(_,_,t) -> t)) ps
@@ -364,6 +365,7 @@ descendB fn fv fb expr
       Let x t e1 e2         -> (\e1' (x',e2') -> Let x' t e1' e2') <$> plain e1 <*> one x [] e2
       LetYield x t e1 e2 e3 -> (\e1' (x',e2') e3' -> LetYield x' t e1' e2' e3') <$> plain e1 <*> one x [] e2 <*> plain e3
       Yielded _             -> pure expr
+      Unreachable _         -> pure expr
       Call f ts vs          -> Call f ts <$> traverse fv vs
       App f vs              -> App <$> fn f <*> traverse fv vs
       Proj m v ss x e       -> (\v' (x',e') -> Proj m v' ss x' e') <$> fv v <*> one x ss e
@@ -534,6 +536,7 @@ substTypesE sub expr
       Let x t e1 e2         -> Let x (subst sub t) e1 e2
       LetYield x t e1 e2 e3 -> LetYield x (subst sub t) e1 e2 e3
       Yielded t             -> Yielded (subst sub t)
+      Unreachable t         -> Unreachable (subst sub t)
       Call f ts vs          -> Call f (map (subst sub) ts) vs
       Join j tvs ps e1 e2   -> Join j tvs [(x,m,subst sub t) | (x,m,t) <- ps] e1 e2
       Jump j ts vs          -> Jump j (map (subst sub) ts) vs
@@ -762,6 +765,7 @@ substStepWith renameRoot recur scope sub expr
       Let x t e1 e2 -> Let x (substVType sub t) e1 e2
       LetYield x t e1 e2 e3 -> LetYield x (substVType sub t) e1 e2 e3
       Yielded t -> Yielded (substVType sub t)
+      Unreachable t -> Unreachable (substVType sub t)
       Call f ts vs -> Call f (map (substAType sub) ts) vs
       Jump j ts vs -> Jump j (map (substAType sub) ts) vs
       Join j tvs ps e1 e2 -> let sub' = hide [x | (x,_,_) <- ps] sub
@@ -858,6 +862,7 @@ destructAOf expr
       Let{} -> Nothing
       LetYield{} -> Nothing
       Yielded{} -> Nothing
+      Unreachable{} -> Nothing
       Call{} -> Nothing
       App{} -> Nothing
       CaseLit{} -> Nothing
@@ -889,6 +894,7 @@ destructVOf expr
       Let{} -> Nothing
       LetYield{} -> Nothing
       Yielded{} -> Nothing
+      Unreachable{} -> Nothing
       Call{} -> Nothing
       App{} -> Nothing
       CaseLit{} -> Nothing
@@ -921,6 +927,7 @@ isRead expr
       Let{}       -> False
       LetYield{}  -> False
       Yielded{}   -> False
+      Unreachable{} -> False
       Call{}      -> False
       App{}       -> False
       CaseLit{}   -> False
@@ -954,6 +961,7 @@ keepsPointer expr
       Let{}       -> False
       LetYield{}  -> False
       Yielded{}   -> False
+      Unreachable{} -> False
       Call{}      -> False
       App{}       -> False
       CaseLit{}   -> False
@@ -1036,6 +1044,7 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
                      Let _ t _ _ -> [t]
                      LetYield _ t _ _ _ -> [t]
                      Yielded t -> [t]
+                     Unreachable t -> [t]
                      Join _ _ ps _ _ -> map (\(_,_,t) -> t) ps
                      Jump _ ts _ -> concatMap at ts
                      Call _ ts _ -> concatMap at ts

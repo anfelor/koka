@@ -345,6 +345,7 @@ ne e = expression (go e)
       Jump j ts vs -> do ts' <- mapM na ts
                          descendE name nv (\_ -> ne) (Jump j ts' vs)
       Yielded t -> Yielded <$> nt t
+      Unreachable t -> Unreachable <$> nt t
       Call f ts vs -> do env <- asks sourceEnv
                          Call f <$> mapM na ts <*> sequence (zipWith nvAt (paramModes env f (length vs)) vs)
       CaseLit v alts def -> CaseLit <$> nvAt Borrowed v <*> mapM (\(l,b) -> (,) l <$> ne b) alts <*> ne def

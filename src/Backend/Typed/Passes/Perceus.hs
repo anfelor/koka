@@ -54,6 +54,7 @@
 
   The body of a join point is closed and processed like the body of a function; a jump
   is like a call, but nothing follows it, so owned variables are only dropped before it.
+  Nothing is dropped before `unreachable`, which consumes everything.
 -}
 module Backend.Typed.Passes.Perceus( perceusProgram ) where
 
@@ -163,6 +164,9 @@ keepsPtr s
 -- expressions
 
 percE :: PEnv -> VarSet -> VExpr -> P VExpr
+-- control never gets here, so nothing needs to be dropped
+percE _ _ expr@Unreachable{}
+  = return expr
 -- Materialize a scheduled borrowed selection before settling its owner. The
 -- selected binding can then survive the transfer, rather than being read back
 -- from a backing snapshot afterward. A scalar read similarly copies trivial
@@ -310,6 +314,7 @@ percE' pe owned expr
               e3' <- percE pe own2 e3
               return (hoistdupAll (\e1'' -> LetYield x t e1'' e2' e3') e1')
       Yielded _ -> return expr
+      Unreachable _ -> return expr
       Call f tys vs
         -> do let ms = paramModes (peEnv pe) f (length vs)
               case [(i,v) | (i,(Borrowed,v)) <- zip [0..] (zip ms vs), not (isAtom v)] of

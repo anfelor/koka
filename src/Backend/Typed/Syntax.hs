@@ -547,6 +547,14 @@ data VExpr
   -- its pointers with Koka's shared `box-any`, which the runtime may drop.
   | Yielded VType
 
+  --  ───────────────────────── [unreachable]
+  --   Γ | J ⊢ unreachable : W
+  --
+  -- Control never gets here (an impossible alternative of a match, such as a lazy one on a
+  -- forced value), so Γ is arbitrary: it may hold owned references, credits and cells, which
+  -- no other form can discharge without filling them. Code generation aborts.
+  | Unreachable VType
+
   --   f : ∀ā. (q̄ V̄) -> W ∈ Σ    Γᵢ ⊢ vᵢ :qᵢ Vᵢ[B̄/ā]
   --  ───────────────────────────────────────────────── [call]
   --   Γ₁, ..., Γₙ ⊢ f[B̄](v₁, ..., vₙ) : W[B̄/ā]

@@ -117,6 +117,7 @@ inferExpr env g js expr
                                   branches [inferE env (M.insert x (V t) g) js e2, inferE env g js e3]
       Yielded t | jsYield js -> return t
                 | otherwise -> Left "the dummy value of a yield where the result is inspected"
+      Unreachable t -> return t
       Call f tys vs -> do (ps,r) <- funSig env f tys
                           checkArgs env g ps vs
                           return r

@@ -831,6 +831,7 @@ genE cx dest expr
         -> do ct <- ctype t
               e <- yieldedValue ct
               return (assignTo dest ct e)
+      Unreachable _ -> return ["kt_unreachable();"]
       Drop x e
         | S.member x (cxShared cx)   -- like Koka's C backend: a shared block only needs a decrement
         -> do t <- tyOfName cx x
@@ -1116,7 +1117,7 @@ genCall cx dest f tys vs
                  return [block ([cty ct <+> t <+> "=" <+> a <.> ";" | (t,a,ct) <- zip3 tmps args pcts]
                                 ++ [localName p <+> "=" <+> t <.> ";" | (p,t) <- zip params tmps]
                                 ++ ["goto kt_tailcall;"])]
-         _ -> return (assignTo dest rct (callName f <.> "(" <.> hcat [a <.> ", " | a <- args] <.> "_ctx)"))
+         _ -> return (assignTo dest rct (text (cName f) <.> "(" <.> hcat [a <.> ", " | a <- args] <.> "_ctx)"))
 
 -- A small constant cannot equal a bigint. Put it first for the general equality
 -- helper, whose fast rejection tests its first operand; common values have predicates.
@@ -1160,11 +1161,6 @@ fixedWidthLit f i
   | otherwise = Nothing
   where
     within bits = abs i < 2^bits   -- excludes the minimum, which is not a valid C literal
-
-callName :: Name -> Doc
-callName f
-  | f == newHiddenName "typed-unreachable" = "kt_unreachable_value"
-  | otherwise = text (cName f)
 
 callSig :: Ctx -> Name -> [AType] -> G ([VType],VType)
 callSig cx f tys
@@ -1350,7 +1346,6 @@ runtimeHeader = vcat
   , "#define kt_box_datatype(d) kk_datatype_box(d)"
   , "#define kt_unbox_datatype(b) kk_datatype_unbox(b)"
   , "#define kt_unreachable() kk_fatal_error(EFAULT,\"typed backend: unreachable\")"
-  , "#define kt_unreachable_value(ctx) (kt_unreachable(), kk_box_null())"
   , "static inline __attribute__((always_inline)) kk_box_t kt_box_dup_inline(kk_box_t b, kk_context_t* ctx) {"
   , "  return kk_box_dup(b,ctx);"
   , "}"
