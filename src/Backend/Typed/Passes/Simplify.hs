@@ -159,6 +159,9 @@ knownE known expr
       SplitA _ v k (x,e1) (y,e2)
         | Just (InjA i _ _) <- knownAt known v
         -> if i < k then taken x e1 else taken y e2
+      IfWhnf _ v (x,e1) (y,e2)
+        | Just (InjLazy d _ _) <- knownAt known v
+        -> if d == Whnf then taken x e1 else taken y e2
       _ -> descend
   where
     descend = runIdentity (descendE Identity (Identity . knownV known) (\xs e -> Identity (knownE (shadow xs known) e)) expr)
@@ -202,6 +205,8 @@ knownAt known (Path x ss)
           (Roll _ b, SRoll:as) -> insideA b as
           (InjA i _ _, SInjA j:as) | i == j -> insideA a as
           (InjA _ _ _, s:as) | s `elem` [SRest,SLo,SHi] -> insideA a as
+          (InjLazy Whnf _ b, SWhnf:as) -> insideA b as
+          (InjLazy Delay _ b, SDelay:as) -> insideA b as
           _ -> Nothing
 
 knownV :: M.Map Path VVal -> VVal -> VVal

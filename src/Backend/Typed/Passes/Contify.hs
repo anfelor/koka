@@ -59,7 +59,7 @@ contifyE env g expr
                 Nothing -> Let f t <$> contifyE env g (Ret (Ptr a lam)) <*> contifyE env (M.insert f (V t) g) rest
       Let x t e1 e2 -> Let x t <$> contifyE env g e1 <*> contifyE env (M.insert x (V t) g) e2
       Join j tvs ps e1 e2 -> Join j tvs ps <$> contifyE env (M.fromList [(x,V t) | (x,_,t) <- ps]) e1 <*> contifyE env g e2
-      Lock z c e -> do g' <- liftE (lockGamma env g z c)
+      Lock z c e -> do g' <- liftE (lockGamma g z c)
                        Lock z c <$> contifyE env g' e
       _ | Just ds <- destructAOf expr
         -> do t <- liftE (inferVar g (dsScrut ds))

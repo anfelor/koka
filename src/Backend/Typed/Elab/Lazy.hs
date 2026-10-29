@@ -17,10 +17,12 @@
     ends every branch in `memoize(@lazy, v)` or, where Koka's sizes allow it, in a call
     `T/lazy-C'(@lazy, recurse, fields')`.
   Here the lazy value becomes a cell (`[lock]`): `lazy-eval-locked` locks it in the branch
-  of each such constructor, and every `lazy-C` takes it as a cell `cell_|V_C|⟨T⟨ā⟩⟩`. An
+  of each such constructor (on the `delay` side of its match, see `FromCore.lazyCase`), and
+  every `lazy-C` takes it as a cell `cell_|V_C|⟨T⟨ā⟩⟩`. An
   expression in the scope of a cell `c : cell_n⟨T⟨B̄⟩⟩` must consume it:
   - `memoize-target(c, …)` is deleted;
-  - `memoize(c, K(v))` writes K over the cell (`[memoize]`) if K is a box with `|V_K| ≤ n`,
+  - `memoize(c, K(v))` writes K over the cell (`[memoize]`, on its side of the lazy sum) if K
+    is a box with `|V_K| ≤ n`,
     and otherwise, like `memoize(c, v)` of any other value, it becomes an indirection to the
     value (`indirect`);
   - a call `lazy-C'(c, recurse, v̄)` passes the cell on if `|V_C'| ≤ n` (by our sizes, which
@@ -28,8 +30,8 @@
     which `lazy-whnf` goes on to evaluate;
   - a jump passes the cell on, and the parameter of the join point becomes a cell of the
     smallest size passed (Koka inlines `lazy-C` into `lazy-eval-locked` as a join point);
-  - a branch without the cell is a lazy constructor in a match on a forced value, which ends
-    in `unreachable` (`[unreachable]` consumes the cell).
+  - a branch without the cell is the thunks of a match on a forced value, which are
+    `unreachable` (`[unreachable]` consumes the cell).
   Any other use of a cell, and any other use of `memoize`, is an error. The functions are
   found by `Kind.Infer`'s naming (`lazyName`).
 
@@ -39,11 +41,10 @@
   copy, `recurse` is a literal, also in the parameters of join points to which Koka's match
   passes it, and the tests of it are cases of a known value (`Simplify`).
   Only `lazy-eval`, which other modules may call, remains, and dispatches to its copies. The binders of a lock have the names that
-  `[lock]` requires before `Paths`: the box `y.roll.injⱼ` of the lazy value `y`, and its
-  contents `y.roll.injⱼ.contents`, which the lock renames to `y.roll.injⱼ.taken`.
+  `[lock]` requires before `Paths`: the box `y.roll.delay.injⱼ` of the lazy value `y`, and its
+  contents `y.roll.delay.injⱼ.contents`, which the lock renames to `y.roll.delay.injⱼ.taken`.
 
-  Finally, forced values get the type `whnf(τ)*` (`whnfProgram`), so that their matches
-  have no lazy alternatives.
+  Before all of this, Koka's tests of WHNF become `[if-whnf]` (`whnfE`).
 -}
 module Backend.Typed.Elab.Lazy( lazyProgram, lazyCopies ) where
 
@@ -60,14 +61,14 @@ import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Query( Env(..), envOf, unrollT, reuseSize, lazyTags, hasWhnf )
+import Backend.Typed.Query( Env(..), envOf, unrollT, reuseSize, lazySides )
 import Backend.Typed.Elab.TypeInfo( conFieldTypes, padFields )
 
 -- The `lazy-C` functions with the tag of their constructor, the size of its cell and its
 -- fields (with the padding, see `TypeInfo.conFieldTypes`), the
--- `lazy-eval-locked` functions, the `lazy-eval` functions, the `lazy-whnf` and `lazy-force`
--- functions, and the tag of the indirection ι of each lazy type.
-data Lazies = Lazies{ lzCons :: M.Map Name (Int,Int,[VType]), lzLocked :: S.Set Name, lzEval :: S.Set Name, lzForce :: S.Set Name
+-- `lazy-eval-locked` functions, the `lazy-eval` functions, and the tag of the indirection ι
+-- of each lazy type.
+data Lazies = Lazies{ lzCons :: M.Map Name (Int,Int,[VType]), lzLocked :: S.Set Name, lzEval :: S.Set Name
                     , lzIndirect :: M.Map Name Int }
 
 -- the lazy value of `lazy-eval-locked` and its type
@@ -86,12 +87,12 @@ lazyProgram :: Newtypes -> Program -> (Program,[String])
 lazyProgram nt prog
   = let lazies = lazyFuns nt (progTypes prog)
         env    = envOf prog
-        run d  = case evalM (lazyDef d) (LEnv env lazies Nothing) (freshFor d, M.empty) of
+        run d  = case evalM (whnfDef d >>= lazyDef) (LEnv env lazies Nothing) (freshFor d, M.empty) of
                    Right d' -> (d', [])
                    Left err -> (d, [show (defName d) ++ ": " ++ err])
         (defs,errs) = unzip (map run (progDefs prog))
         cells  = M.fromList [(f,c) | DefFun f _ ((_,_,c@VCell{}):_) _ _ <- defs]
-    in (whnfProgram lazies (specialise lazies prog{ progDefs = defs, progSigs = M.mapWithKey (withCell cells) (progSigs prog) }), concat errs)
+    in (specialise lazies prog{ progDefs = defs, progSigs = M.mapWithKey (withCell cells) (progSigs prog) }, concat errs)
   where
     withCell cells f sig
       = case (M.lookup f cells, sig) of
@@ -101,22 +102,19 @@ lazyProgram nt prog
 lazyFuns :: Newtypes -> TypeDefs -> Lazies
 lazyFuns nt tdefs
   = Lazies (M.fromList [(funName info (show (unqualify (conInfoName con))), (tag,n,fs))
-                       | (info,tvs,lz,alts) <- infos, (tag,con) <- cons info
-                       , tag `elem` lz, not (isLazyIndirectConName (conInfoName con))
-                       , Just (ABox s) <- [lookup tag alts], Right n <- [reuseSize s]
+                       | (info,tvs,thunks) <- infos, (tag,con) <- cons info
+                       , not (isLazyIndirectConName (conInfoName con))
+                       , Just (ABox s) <- [lookup tag thunks], Right n <- [reuseSize s]
                        , Right fs <- [conFieldTypes nt (map AVar tvs) con]])
-           (S.fromList [funName info "eval-locked" | (info,_,_,_) <- infos])
-           (S.fromList [funName info "eval" | (info,_,_,_) <- infos])
-           (S.fromList [funName info stem | (info,_,_,_) <- infos, stem <- ["whnf","force"]])
-           (M.fromList [(dataInfoName info, tag) | (info,_,_,_) <- infos, (tag,con) <- cons info, isLazyIndirectConName (conInfoName con)])
+           (S.fromList [funName info "eval-locked" | (info,_,_) <- infos])
+           (S.fromList [funName info "eval" | (info,_,_) <- infos])
+           (M.fromList [(dataInfoName info, tag) | (info,_,_) <- infos, (tag,con) <- cons info, isLazyIndirectConName (conInfoName con)])
   where
     env = Env tdefs M.empty
     cons info = zip [1..] (dataInfoConstrs info)   -- tags start at 1
-    infos = [(info,tvs,lz,alts) | (_,info) <- NM.toList (newtypesTypeDefs nt)
-                            , Just TypeDef{ tdefParams = tvs } <- [M.lookup (dataInfoName info) tdefs]
-                            , let t = ACon (dataInfoName info) (map AVar tvs)
-                            , let lz = lazyTags env t, not (null lz)
-                            , Right (ASum alts) <- [unrollT env t]]
+    infos = [(info,tvs,thunks) | (_,info) <- NM.toList (newtypesTypeDefs nt)
+                               , Just TypeDef{ tdefParams = tvs } <- [M.lookup (dataInfoName info) tdefs]
+                               , Right (thunks,_) <- [lazySides env (ACon (dataInfoName info) (map AVar tvs))]]
     funName info stem = qualify (qualifier (dataInfoName info)) (lazyName info stem)
 
 -- the functions with a parameter `recurse`
@@ -162,20 +160,22 @@ cellE cs expr
   = do locked <- asks leLocked
        cons <- asks (lzCons . leLazies)
        case expr of
-         Deref m (Var x) y (Unroll m' y' z (CaseA m'' z' alts def))
-           | Just (x',a) <- locked, x == x', y' == y, z' == z, M.null cs
-           -> do (lz,ind) <- lazyOf a
-                 shapes <- altsOf a
+         Deref m (Var x) y (Unroll m' y' z (IfWhnf m1 z' (s,e1) (l,CaseA m'' l' alts def)))
+           | Just (x',a) <- locked, x == x', y' == y, z' == z, l' == l, M.null cs
+           -> do ind <- indirectOf a
+                 (thunks,_) <- sidesOf a
                  let r = child y SRoll
+                     d = child r SDelay
                      lockAlt (i,b,e)
-                       | i `elem` lz, i /= ind, Just (ABox s) <- lookup i shapes
-                       = do n <- liftE (reuseSize s)
+                       | i /= ind, Just (ABox w) <- lookup i thunks
+                       = do n <- liftE (reuseSize w)
                             c <- fresh "cell"
-                            (,,) i (child r (SInjA i)) <$> lock (x,c,n,a) (child r (SInjA i)) b e
+                            (,,) i (child d (SInjA i)) <$> lock (x,c,n,a) (child d (SInjA i)) b e
                        | otherwise = (,,) i b <$> cellE cs e
+                 e1' <- cellE cs e1
                  alts' <- mapM lockAlt alts
-                 def' <- traverse (\(d,e) -> (,) d <$> cellE cs e) def
-                 return (Deref m (Var x) y (Unroll m' y r (CaseA m'' r alts' def')))
+                 def' <- traverse (\(u,e) -> (,) u <$> cellE cs e) def
+                 return (Deref m (Var x) y (Unroll m' y r (IfWhnf m1 r (s,e1') (d,CaseA m'' d alts' def'))))
          Let _ _ (Call f _ (Var c : _)) e
            | f == nameLazyMemoizeTarget, M.member c cs -> cellE cs e
          Call f _ [Var c, v]
@@ -239,46 +239,46 @@ cellA val
 -- `memoize(c, v)`: write the constructor of `v` over the cell if it fits
 memoize :: Path -> Int -> AType -> VVal -> L VExpr
 memoize c n a v
-  = do shapes <- altsOf a
+  = do (thunks,strict) <- sidesOf a
        case v of
-         Ptr _ (Roll _ (InjA k _ (Box w))) | Just (ABox s) <- lookup k shapes, Right m <- reuseSize s, m <= n
-           -> return (Ret (Memoize (Var c) k w))
+         Ptr _ (Roll _ (InjLazy d _ (InjA k _ (Box w))))
+           | Just (ABox s) <- lookup k (case d of Whnf -> strict; Delay -> thunks), Right m <- reuseSize s, m <= n
+           -> return (Ret (Memoize (Var c) d k w))
          _ -> indirect c a v
 
 -- `indirect c v`: free the cell if it is unique, and otherwise write an indirection to `v` over it
 indirect :: Path -> AType -> VVal -> L VExpr
 indirect c a v
-  = do i <- snd <$> lazyOf a
+  = do i <- indirectOf a
        r <- fresh "r"
        p <- fresh "p"
        return (Let r (VPtr a) (Ret v)
                 (IsUnique c (Free c (Ret (Var r)))
-                            (Let p (VPtr a) (Ret (Memoize (Var c) i (Var r))) (Ret (Var r)))))
+                            (Let p (VPtr a) (Ret (Memoize (Var c) Delay i (Var r))) (Ret (Var r)))))
 
 -- the lazy constructor with tag k and fields v̄ at the type of a cell
 conValue :: AType -> Int -> [VVal] -> L VVal
 conValue a k vs
-  = do shapes <- altsOf a
-       case lookup k shapes of
-         Just (ABox VExists{}) -> fail ("a lazy constructor with existential fields: " ++ ppr (A a))
-         Just (ABox _) -> return (Ptr a (Roll a (InjA k (ASum shapes) (Box (prodVal vs)))))
-         _ -> fail ("no lazy constructor " ++ show k ++ " in " ++ ppr (A a))
-
-altsOf :: AType -> L [(Int,AType)]
-altsOf a
   = do env <- asks leEnv
        b <- liftE (unrollT env a)
-       case b of
-         ASum shapes -> return shapes
-         _ -> fail ("a lazy type that is not a sum: " ++ ppr (A a))
+       (thunks,_) <- sidesOf a
+       case lookup k thunks of
+         Just (ABox VExists{}) -> fail ("a lazy constructor with existential fields: " ++ ppr (A a))
+         Just (ABox _) -> return (Ptr a (Roll a (InjLazy Delay b (InjA k (ASum thunks) (Box (prodVal vs))))))
+         _ -> fail ("no lazy constructor " ++ show k ++ " in " ++ ppr (A a))
 
--- the lazy tags of a lazy type, and the tag of its indirection
-lazyOf :: AType -> L ([Int],Int)
-lazyOf a
+-- the thunks and the strict alternatives of a lazy type
+sidesOf :: AType -> L ([(Int,AType)],[(Int,AType)])
+sidesOf a
   = do env <- asks leEnv
-       inds <- asks (lzIndirect . leLazies)
+       liftE (lazySides env a)
+
+-- the tag of the indirection of a lazy type
+indirectOf :: AType -> L Int
+indirectOf a
+  = do inds <- asks (lzIndirect . leLazies)
        case a of
-         ACon n _ | Just i <- M.lookup n inds -> return (lazyTags env a, i)
+         ACon n _ | Just i <- M.lookup n inds -> return i
          _ -> fail ("not a lazy type: " ++ ppr (A a))
 
 -- Specialise the functions of this module with a parameter `recurse` (the second, a `bool`)
@@ -312,91 +312,54 @@ specialise lazies prog
                  Lam ps r e -> Lam ps r (callsE e)
                  _ -> mapA id callsA callsV a
 
--- Values in WHNF (`[if-whnf]`). A test of WHNF on a lazy value, `datatype-(ptr-)is-whnf`
--- followed by a case on its result, narrows the value in its first branch. `lazy-whnf` and
--- `lazy-force` (also those of other modules) return `whnf(T)*`, and so does a `let` whose bound
--- expression does: it is a forced value, and its matches lose their lazy alternatives, which are
--- `unreachable`. A shape that is not recognised is not narrowed.
-whnfProgram :: Lazies -> Program -> Program
-whnfProgram lazies prog
-  = prog{ progDefs = map def (progDefs prog), progSigs = sigs }
+-- Tests of WHNF (`[if-whnf]`). Koka tests a lazy value `x` with `datatype-(ptr-)is-whnf(x, tag)`,
+-- after the lets of its tag argument, and a case on the result, with the join points of its
+-- match in between. The test becomes `[if-whnf]` on `x`. In its first branch, `x` is in WHNF
+-- with the strict alternatives `s` (`ws`): a match on `x` there is a match on `s`, and another
+-- test of `x` is its first branch.
+whnfDef :: Def -> L Def
+whnfDef def = (\body -> def{ defBody = body }) <$> whnfE M.empty (defBody def)
+
+whnfE :: M.Map Path Path -> VExpr -> L VExpr
+whnfE ws expr
+  = case expr of
+      Let b _ e body
+        | Just (x,pre) <- whnfTest e
+        , Just (joins,b',alts) <- joinsTo body, b == b', [e0,e1] <- altBodies alts
+        -> do test <- case M.lookup x ws of
+                        Just _ -> whnfE ws e1
+                        Nothing -> do d <- fresh "d"
+                                      r <- fresh "r"
+                                      s <- fresh "whnf"
+                                      l <- fresh "delay"
+                                      e1' <- whnfE (M.insert x s ws) e1
+                                      e0' <- whnfE ws e0
+                                      return (Deref Owned (Var x) d (Unroll Owned d r (IfWhnf Owned r (s,e1') (l,e0'))))
+              joins' <- mapM (\(j,tvs,ps,e2) -> Join j tvs ps <$> whnfE ws e2) joins
+              let expr' = pre (foldr ($) test joins')
+              if S.member b (fvE expr') then descend else return expr'
+      Deref _ (Var x) d (Unroll _ d' r (IfWhnf _ r' (s',e1) _))
+        | Just s <- M.lookup x ws, d == d', r == r'
+        -> whnfE ws (renameUses (M.singleton s' s) e1)
+      _ -> descend
   where
-    env = envOf prog
-    narrow t = case t of
-                 VPtr a | hasWhnf env a -> Just (VPtr (AWhnf a))
-                 _ -> Nothing
-    sigs = M.mapWithKey (\f sig -> case sig of
-                                     SigFun tvs ps r | S.member f (lzForce lazies), Just r' <- narrow r -> SigFun tvs ps r'
-                                     _ -> sig)
-                        (progSigs prog)
-    def d = case d of
-              DefFun f tvs ps r body | S.member f (lzForce lazies), Just r' <- narrow r -> DefFun f tvs ps r' (whnfE S.empty body)
-              _ -> d{ defBody = whnfE S.empty (defBody d) }
-    -- Koka's match puts join points between the test and the case on its result. The test
-    -- of a value `ws` that is known to be in WHNF is its first branch.
-    whnfE ws expr
-      = case expr of
-          Let b _ e body
-            | Just (x,a,pre) <- whnfTest e, Just _ <- narrow (VPtr a)
-            , Just (joins,CaseV _ (Var b') alts) <- joinsTo ws body, b == b', [e0,e1] <- altBodies alts
-            , let expr' = pre (joins (if S.member x ws then whnfE ws e1
-                                      else IfWhnf x (whnfE (S.insert x ws) e1) (whnfE ws e0)))
-            , S.notMember b (fvE expr')
-            -> expr'
-          Let m t e1 e2
-            | Just t'@(VPtr w) <- narrow t, let e1' = whnfE ws e1, forced ws S.empty e1'
-            , Right (ASum alts) <- unrollT env w
-            -> Let m t' e1' (strictMatches (map fst alts) m (whnfE (S.insert m ws) e2))
-          _ -> deepE (whnfE ws) expr
+    descend = descendE pure whnfV (\_ -> whnfE ws) expr
+    whnfV = descendV whnfA whnfV
+    whnfA a = case a of
+                Lam ps r e -> Lam ps r <$> whnfE ws e
+                _ -> descendA pure whnfA whnfV a
     -- the test of `x`, after the lets of its tag argument
     whnfTest e
       = case e of
-          Call f [a] [Var x, _] | f == nameLazyIsWhnf || f == nameLazyPtrIsWhnf -> Just (x,a,id)
-          Let y t e1 e2 -> (\(x,a,pre) -> (x,a,Let y t e1 . pre)) <$> whnfTest e2
+          Call f [_] [Var x, _] | f == nameLazyIsWhnf || f == nameLazyPtrIsWhnf -> Just (x,id)
+          Let y t e1 e2 -> (\(x,pre) -> (x,Let y t e1 . pre)) <$> whnfTest e2
           _ -> Nothing
-    joinsTo ws e
+    -- the join points before the case on the result of the test
+    joinsTo e
       = case e of
-          Join j tvs ps e1 e2 -> (\(js,c) -> (Join j tvs ps (whnfE ws e1) . js,c)) <$> joinsTo ws e2
-          CaseV{} -> Just (id,e)
+          Join j tvs ps e1 e2 -> (\(js,y,alts) -> ((j,tvs,ps,e1) : js,y,alts)) <$> joinsTo e2
+          CaseV _ (Var y) alts -> Just ([],y,alts)
           _ -> Nothing
-    -- whether an expression returns a value in WHNF, given the values narrowed by a test and
-    -- the join points that do
-    forced xs js expr
-      = case expr of
-          Ret (Var x) -> S.member x xs
-          Call f _ _ | Just (SigFun _ _ (VPtr (AWhnf _))) <- M.lookup f sigs -> True
-          Jump j _ _ -> S.member j js
-          IfWhnf x e1 e2 -> forced (S.insert x xs) js e1 && forced xs js e2
-          Unreachable _ -> True
-          Let _ _ _ e -> forced xs js e
-          Join j _ _ e1 e2 -> forced xs (if forced xs js e1 then S.insert j js else js) e2
-          CaseV _ _ alts -> all (forced xs js) (altBodies alts)
-          _ -> False
-
--- The matches on a value `m` in WHNF, whose sum has the tags `strict`, keep the alternatives
--- of those tags, and a default only if it has any.
-strictMatches :: [Int] -> Path -> VExpr -> VExpr
-strictMatches strict m = go S.empty S.empty
-  where
-    go ds rs expr
-      = case expr of
-          Deref q (Var y) d e | y == m -> Deref q (Var y) d (go (S.insert d ds) rs e)
-          Unroll q y r e | S.member y ds -> Unroll q y r (go ds (S.insert r rs) e)
-          CaseA q r alts def | S.member r rs
-            -> let alts' = [(i,x,go ds rs e) | (i,x,e) <- alts, i `elem` strict]
-                   def' = if all (`elem` [i | (i,_,_) <- alts']) strict then Nothing
-                          else fmap (\(d,e) -> (d,go ds rs e)) def
-               in CaseA q r alts' def'
-          _ -> deepE (go ds rs) expr
-
--- apply a function to the subexpressions of an expression, also in lambdas
-deepE :: (VExpr -> VExpr) -> VExpr -> VExpr
-deepE f = runIdentity . descendE Identity (Identity . deepV) (\_ -> Identity . f)
-  where
-    deepV = mapV deepA deepV
-    deepA a = case a of
-                Lam ps r e -> Lam ps r (f e)
-                _ -> mapA id deepA deepV a
 
 -- substitute the parameters of join points to which every jump passes the same constant of a
 -- sum of units (such as `recurse`)

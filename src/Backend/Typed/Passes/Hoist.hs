@@ -61,14 +61,11 @@ expr e = case e of
     UnboxRu z r <$> local (const (env,g')) (expr b)
   Lock z c b -> do
     (env,g) <- ask
-    g' <- liftE (lockGamma env g z c)
+    g' <- liftE (lockGamma g z c)
     Lock z c <$> local (const (env,g')) (expr b)
   IsUnique x a b -> do
     (env,g) <- ask
     IsUnique x <$> local (const (env,uniqueGamma g x)) (expr a) <*> expr b
-  IfWhnf x a b -> do
-    (env,g) <- ask
-    IfWhnf x <$> local (const (env,whnfGamma env g x)) (expr a) <*> expr b
   Dup x y b -> do
     (_,g) <- ask
     t <- liftE (inferVar g x >>= dupType x)
@@ -126,13 +123,14 @@ childrenV v = case v of
   Pack t ts w -> [(w,Pack t ts)]
   TyApp w ts -> [(w,\x -> TyApp x ts)]
   DupV w -> [(w,DupV)]
-  Memoize c k w -> [(w,Memoize c k)]
+  Memoize c d k w -> [(w,Memoize c d k)]
   _ -> []
 
 childrenA :: AVal -> [(VVal, VVal -> AVal)]
 childrenA v = case v of
   InjA i a w -> [(u,InjA i a . rebuild) | (u,rebuild) <- childrenA w]
   Roll a w -> [(u,Roll a . rebuild) | (u,rebuild) <- childrenA w]
+  InjLazy d a w -> [(u,InjLazy d a . rebuild) | (u,rebuild) <- childrenA w]
   Box w -> [(w,Box)]
   OpenCon c ts ws -> [(w,\x -> OpenCon c ts (take i ws ++ [x] ++ drop (i+1) ws)) | (i,w) <- zip [0..] ws]
   BoxAt r w -> [(w,BoxAt r)]

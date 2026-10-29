@@ -12,20 +12,21 @@ module Backend.Typed.Elab.Types( typeDefs ) where
 
 import qualified Data.Map as M
 import qualified Common.NameMap as NM
-import Control.Monad( forM_, unless )
-import Common.Name( Name, isLazyIndirectConName )
+import Control.Monad( forM_, unless, when )
+import Data.List( partition )
+import Common.Name( Name )
 import Common.Syntax( dataDefIsOpen )
 import Kind.Newtypes
 import Type.Type( typevarId, conInfoName, conInfoIsLazy, dataInfoIsLazy )
 import Backend.Typed.Syntax
-import Backend.Typed.Types( sumOf, applyA )
+import Backend.Typed.Types( applyA )
 import Backend.Typed.Query( reuseSize )
 import Backend.Typed.Elab.TypeInfo
 
 refBody :: Newtypes -> DataInfo -> Tr (Maybe AType)
 refBody nt info
   | dataDefIsOpen (dataInfoDef info) || null (dataInfoConstrs info) = Right Nothing
-  | otherwise = Just . sumOf <$> mapM (conShape nt (paramArgs info)) (dataInfoConstrs info)
+  | otherwise = Just . refShape info <$> mapM (conShape nt (paramArgs info)) (dataInfoConstrs info)
 
 paramArgs :: DataInfo -> [AType]
 paramArgs info = map (AVar . typevarId) (filter tvarStar (dataInfoParams info))
@@ -41,15 +42,15 @@ typeDefs nt
 typeDef :: Newtypes -> DataInfo -> Tr TypeDef
 typeDef nt info
   = do body <- refBody nt info
-       lz <- lazyDef nt info
+       when (isLazyInfo info) (lazyDef nt info)
        let params = map typevarId (filter tvarStar (dataInfoParams info))
-       return (TypeDef (dataInfoName info) params (recType (dataInfoName info) params lz <$> body))
+       return (TypeDef (dataInfoName info) params (recType (dataInfoName info) params <$> body))
 
--- The body `(μt⟨ā⟩. A[t/T])⟨ā⟩` of a datatype `T⟨ā⟩` whose constructors are `A`, or
--- `(μt⟨ā⟩. A[t/T] ~> B[t/T])⟨ā⟩` with the lazy tags of A. Koka's type variables are positive,
--- so the binder `t` is a negative one.
-recType :: Name -> [TVar] -> [Int] -> AType -> AType
-recType name params lz body = AMu lz t params (foldA body) (map AVar params)
+-- The body `(μt⟨ā⟩. A[t/T])⟨ā⟩` of a datatype `T⟨ā⟩` whose constructors are `A`, which is a
+-- lazy sum for a lazy datatype. Koka's type variables are positive, so the binder `t` is a
+-- negative one.
+recType :: Name -> [TVar] -> AType -> AType
+recType name params body = AMu t params (foldA body) (map AVar params)
   where
     t = -2
     foldA a = case a of
@@ -57,12 +58,12 @@ recType name params lz body = AMu lz t params (foldA body) (map AVar params)
       ACon n ts     -> ACon n (map foldA ts)
       ABox v        -> ABox (foldV v)
       ASum ts       -> ASum [(i,foldA b) | (i,b) <- ts]
+      ALazy l b     -> ALazy (foldA l) (foldA b)
       AFun ps r     -> AFun [(m,foldV p) | (m,p) <- ps] (foldV r)
       AForall vs b  -> AForall vs (foldA b)
       AApp v ts     -> AApp v (map foldA ts)
       ALam vs b     -> ALam vs (foldA b)
-      AMu l x vs b ts -> AMu l x vs (foldA b) (map foldA ts)
-      AWhnf b       -> AWhnf (foldA b)
+      AMu x vs b ts -> AMu x vs (foldA b) (map foldA ts)
       AScalar _     -> a
       AUnit         -> a
       AVar _        -> a
@@ -77,23 +78,18 @@ recType name params lz body = AMu lz t params (foldA body) (map AVar params)
       VUnit         -> v
       VRaw _        -> v
 
--- The lazy tags of a type (none for a strict one). A lazy type `μt⟨ā⟩. A ~> B` has the
--- indirection among its lazy constructors. Its strict tags come before its lazy ones
--- (`[if-whnf]` relies on it), and every lazy alternative is a box with a block, which
--- evaluation locks.
-lazyDef :: Newtypes -> DataInfo -> Tr [Int]
+-- A lazy type `L ~> S` has strict constructors, which come before its lazy ones (the thunks,
+-- among them the indirection), and every thunk is a box with a block, which evaluation locks.
+lazyDef :: Newtypes -> DataInfo -> Tr ()
 lazyDef nt info
-  = case [tag | (tag,con) <- cons, isLazyIndirectConName (conInfoName con)] of
-      [] -> Right []
-      _
-        -> do let lazies = [tag | (tag,con) <- cons, conInfoIsLazy con]
-              unless (and [tag < l | (tag,con) <- cons, not (conInfoIsLazy con), l <- lazies])
-                (Left "the strict constructors of a lazy type must come before its lazy ones")
-              forM_ [con | (_,con) <- cons, conInfoIsLazy con] $ \con ->
-                do shape <- conShape nt (paramArgs info) con
-                   case shape of
-                     ABox s | Right _ <- reuseSize s -> return ()
-                     _ -> Left ("the lazy constructor " ++ show (conInfoName con) ++ " has no fields")
-              return lazies
+  = do let (lazies,stricts) = partition (conInfoIsLazy . snd) cons
+       when (null stricts) (Left "a lazy type without strict constructors")
+       unless (maximum (map fst stricts) < minimum (map fst lazies))
+         (Left "the strict constructors of a lazy type must come before its lazy ones")
+       forM_ (map snd lazies) $ \con ->
+         do shape <- conShape nt (paramArgs info) con
+            case shape of
+              ABox s | Right _ <- reuseSize s -> return ()
+              _ -> Left ("the lazy constructor " ++ show (conInfoName con) ++ " has no fields")
   where
-    cons = zip [1..] (dataInfoConstrs info)   -- tags start at 1
+    cons = zip [1 :: Int ..] (dataInfoConstrs info)   -- tags start at 1
