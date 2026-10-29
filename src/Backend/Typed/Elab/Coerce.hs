@@ -87,12 +87,12 @@ withField t w
 -- every alternative
 leafAV :: VType -> VVal -> (Int -> AVal -> E VExpr) -> E VExpr
 leafAV t v k
-  | VSum ts <- t, isMultiSum t = CaseV Owned v <$> mapM alt (zip (leafStarts ts) ts)
+  | VSum ts <- t, isMultiSum t = CaseV Owned v <$> mapM alt (zip3 [0..] (leafStarts ts) ts)
   | otherwise                  = k 0 (boxLeaf t v)
   where
-    alt (start,ti) = do y <- fresh "y"
-                        body <- leafAV ti (Var y) (k . (+ start))
-                        return (y, body)
+    alt (i,start,ti) = do y <- fresh "y"
+                          body <- leafAV ti (Var y) (k . (+ start))
+                          return (i, y, body)
 
 -- the position of the first leaf of each alternative
 leafStarts :: [VType] -> [Int]

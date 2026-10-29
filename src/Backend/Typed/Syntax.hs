@@ -600,8 +600,10 @@ data VExpr
   --  ────────────────────────────────────────────────────────── [case]
   --   Γ₁, Γ₂ ⊢ case_q v of { injᵢ xᵢ -> eᵢ } : W
   --
-  -- For a variable scrutinee z, branch i substitutes injᵢ xᵢ in credit descriptions.
-  | CaseV Mode VVal [(Path,VExpr)]
+  -- Every alternative occurs exactly once, in any order; code generation tests them in the
+  -- given order, which elaboration takes from the source. For a variable scrutinee z,
+  -- branch i substitutes injᵢ xᵢ in credit descriptions.
+  | CaseV Mode VVal [(Int,Path,VExpr)]
 
   --   Γ₁ ⊢ v :q ⊕ⱼ∈J Aⱼ    Γ₂, xᵢ :q Aᵢ ⊢ eᵢ : W (i ∈ I)    Γ₂, d :q ⊕ⱼ∈J\I Aⱼ ⊢ e : W
   --  ──────────────────────────────────────────────────────────────────────────── [case-a]

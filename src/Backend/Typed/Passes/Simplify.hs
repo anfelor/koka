@@ -150,7 +150,7 @@ knownE known expr
       Unroll m v x e -> ifUsed x (Unroll m v x) (knownE (shadow [x] known) e)
       CaseV _ v alts
         | Just (Inj i _ _) <- case v of { Var x -> valueAt known x; _ -> Just v }
-        , ((x,e):_) <- drop i alts
+        , ((x,e):_) <- [(x,e) | (j,x,e) <- alts, j == i]
         -> taken x e
       CaseA _ v alts def
         | Just (InjA i _ _) <- knownAt known v

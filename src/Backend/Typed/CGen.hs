@@ -999,8 +999,9 @@ genE cx dest expr
               ct <- ctype t
               ve <- genV cx v
               z <- fresh "w"
-              brs <- forM (zip3 [0..] ts alts) $ \(i,ti,(x,e)) ->
-                       do cti <- ctype ti
+              brs <- forM alts $ \(i,x,e) ->
+                       do let ti = ts !! i
+                          cti <- ctype ti
                           let payload = case ct of
                                 CSum _ alts' | Just _ <- alts' !! i -> z <.> "._cons.c" <.> int i
                                 _ -> "kk_Unit"
@@ -1009,7 +1010,7 @@ genE cx dest expr
               let tag = case ct of { CEnum _ -> z; _ -> "kk_smallint_from_integer(" <.> z <.> "._tag) - 1" }
                   dispatch = case brs of
                     [(_,body)] -> body
-                    [(_,left),(_,right)] -> [ifChain [("(" <.> tag <.> ") == 0",left)] right]
+                    [([i],first),(_,second)] -> [ifChain [("(" <.> tag <.> ") ==" <+> int i,first)] second]
                     _ -> [switchCases tag brs (Just ["kt_unreachable();"])]
               return [block ((cty ct <+> z <+> "=" <+> ve <.> ";") : dispatch)]
       CaseLit v alts def

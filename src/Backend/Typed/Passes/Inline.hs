@@ -115,7 +115,7 @@ inlineE vals expr
   = case expr of
       Let x _ _ e | M.member x vals -> inlineE vals e
       Proj _ (Var z) ss _ e | Just w@Pair{} <- known vals z, Just _ <- project w ss -> inlineE vals e
-      CaseV _ (Var z) alts | Just (Inj i _ _) <- known vals z -> inlineE vals (snd (alts !! i))
+      CaseV _ (Var z) alts | Just (Inj i _ _) <- known vals z, (e:_) <- [e | (j,_,e) <- alts, j == i] -> inlineE vals e
       _ -> runIdentity (descendE Identity (Identity . inlineV vals) (\_ e -> Identity (inlineE vals e)) expr)
 
 inlineV :: Values -> VVal -> VVal
@@ -146,12 +146,11 @@ reuseE expr
   = do (env,g,_,_) <- ask
        t <- liftE (inferV env g (dsScrut ds))
        tss <- liftE (altTypes env (V t) expr)
-       let enumBranch :: Int -> Reuse a -> Reuse a
-           enumBranch i = case expr of
-             CaseV _ (Var z) _ | enumType t -> local (\(env,g,facts,src) -> (env,g,M.insert z (Inj i t UnitV) facts,src))
-             _ -> id
+       let enumBranches = case expr of
+             CaseV _ (Var z) alts | enumType t -> [local (\(env,g,facts,src) -> (env,g,M.insert z (Inj i t UnitV) facts,src)) | (i,_,_) <- alts]
+             _ -> repeat id
        v <- reuseV (dsScrut ds)
-       es <- sequence [bindReuse (zip xs ts) (enumBranch i (reuseE e)) | (i,((xs,e),ts)) <- zip [0..] (zip (dsAlts ds) tss)]
+       es <- sequence [bindReuse (zip xs ts) (enumBranch (reuseE e)) | (enumBranch,((xs,e),ts)) <- zip enumBranches (zip (dsAlts ds) tss)]
        return (dsBuild ds (dsMode ds) v es)
 reuseE expr
   = case expr of

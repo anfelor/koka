@@ -11,7 +11,7 @@ module Backend.Typed.Elab.FromCore( elabProgram ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Data.List( find )
+import Data.List( find, sortOn )
 import Control.Monad( foldM, unless )
 import Common.Name
 import Common.NamePrim( nameFieldAddrOf, nameCCtxHoleCreate, nameCCtxCreate, nameCCtxExtend, nameCCtxApply, nameCCtxEmpty, nameCCtxCompose, nameCCtxComposeExtend )
@@ -763,13 +763,14 @@ elabValueCase :: DataInfo -> [AType] -> VVal -> [C.Branch] -> E VExpr
 elabValueCase info vargs v brs
   = case dataInfoConstrs info of
       [con] -> conBranch vargs con (Right v) (findBranch con brs)
-      cons  -> CaseV Owned v <$> mapM (valueAlt vargs brs) cons
+      cons  -> CaseV Owned v . map snd . sortOn fst <$> mapM (valueAlt vargs brs) (zip [0..] cons)
 
-valueAlt :: [AType] -> [C.Branch] -> ConInfo -> E (Path,VExpr)
-valueAlt vargs brs con
+-- an alternative with the position of its branch in the source, to keep the order of the tests
+valueAlt :: [AType] -> [C.Branch] -> (Int,ConInfo) -> E (Int,(Int,Path,VExpr))
+valueAlt vargs brs (i,con)
   = do y <- fresh "y"
        b <- conBranch vargs con (Right (Var y)) (findBranch con brs)
-       return (y,b)
+       return (branchIndex con brs, (i,y,b))
 
 elabOpenCase :: DataInfo -> [AType] -> VVal -> [C.Branch] -> E VExpr
 elabOpenCase info vargs v brs
@@ -790,6 +791,12 @@ openAlt info vargs (con,br@(C.Branch [pat] _))
        body <- withFields getters (branchBody br)
        return (conInfoName con, xs, body)
 openAlt _ _ _ = failE "unexpected open branch after matching"
+
+-- the position of the branch that `findBranch` selects, after all branches if there is none
+branchIndex :: ConInfo -> [C.Branch] -> Int
+branchIndex con brs
+  = head ([i | (i,C.Branch [C.PatCon c _ _ _ _ _ _ _] _) <- zip [0..] brs, getName c == conInfoName con]
+          ++ [i | (i,C.Branch [C.PatWild] _) <- zip [0..] brs] ++ [length brs])
 
 findBranch :: ConInfo -> [C.Branch] -> Maybe C.Branch
 findBranch con brs

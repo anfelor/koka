@@ -15,7 +15,7 @@ import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
 import Data.Monoid( Sum(..) )
 import Data.Functor.Identity( Identity(..) )
-import Data.List( isPrefixOf )
+import Data.List( isPrefixOf, sortOn )
 import Data.Maybe( listToMaybe, fromMaybe )
 import Control.Monad( foldM )
 import Common.Name
@@ -114,7 +114,7 @@ dropValue trivial fresh scope x t e
           where
             dropAlt (i,s) = do let y = child x (SInjV i)
                                body <- dropValue trivial fresh (M.insert y Nothing scope) y (V s) (Ret UnitV)
-                               return (y,body)
+                               return (i,y,body)
         VExists tvs s
           -> do let y = child x SPack
                 u <- fresh
@@ -369,7 +369,7 @@ descendB fn fv fb expr
       Call f ts vs          -> Call f ts <$> traverse fv vs
       App f vs              -> App <$> fn f <*> traverse fv vs
       Proj m v ss x e       -> (\v' (x',e') -> Proj m v' ss x' e') <$> fv v <*> one x ss e
-      CaseV m v alts        -> CaseV m <$> fv v <*> traverse (\(i,(x,e)) -> one x [SInjV i] e) (zip [0..] alts)
+      CaseV m v alts        -> CaseV m <$> fv v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x [SInjV i] e) alts
       CaseA m v alts def    -> CaseA m <$> fn v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x [SInjA i] e) alts
                                        <*> traverse (\(x,e) -> one x [SRest] e) def
       SplitA m v k (x,e1) (y,e2) -> SplitA m <$> fn v <*> pure k <*> one x [SLo] e1 <*> one y [SHi] e2
@@ -476,6 +476,10 @@ takesContents expr
       UnboxRu z r e -> Just (z,r,e)
       Lock z c e -> Just (z,c,e)
       _ -> Nothing
+
+-- the bodies of the alternatives of a `CaseV`, by index
+altBodies :: [(Int,Path,VExpr)] -> [VExpr]
+altBodies alts = [e | (_,_,e) <- sortOn (\(i,_,_) -> i) alts]
 
 -- the variable that a destructuring form destructures
 scrutVar :: VExpr -> Maybe Path
@@ -884,7 +888,7 @@ destructVOf expr
   = case expr of
       SplitA{} -> Nothing
       Proj m v ss x e       -> Just (Destruct m v [([x],e)] (\m' v' es -> Proj m' v' ss x (head es)))
-      CaseV m v alts        -> Just (Destruct m v [([x],e) | (x,e) <- alts] (\m' v' es -> CaseV m' v' (zip (map fst alts) es)))
+      CaseV m v alts        -> Just (Destruct m v [([x],e) | (_,x,e) <- alts] (\m' v' es -> CaseV m' v' [(i,x,e) | ((i,x,_),e) <- zip alts es]))
       Deref m v x e         -> Just (Destruct m v [([x],e)] (\m' v' es -> Deref m' v' x (head es)))
       Unpack m v tvs x e    -> Just (Destruct m v [([x],e)] (\m' v' es -> Unpack m' v' tvs x (head es)))
       CaseA{} -> Nothing
