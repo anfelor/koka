@@ -430,9 +430,18 @@ genBox cx tag at v
                                     Just _ -> allocAt "kk_reuse_null"
                      allocPadded = "(" <.> bt <.> "*)kk_block_alloc_at(kk_reuse_null," <.> int (lazyBlockSize ct) <.> "," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
                      setPath = maybe empty (\i -> x <.> "->_block.header._field_idx =" <+> i <.> ";") cpath
+                     -- store a product field by field: a whole struct copy can also copy its
+                     -- padding, from a temporary on the stack
+                     storeFrom y = case ct of
+                                     CProd _ fs -> [x <.> "->p.f" <.> int i <+> "=" <+> y <.> ".f" <.> int i <.> ";" | (i,_) <- fs]
+                                     _ -> [x <.> "->p =" <+> y <.> ";"]
+                     store = do y <- fresh "p"
+                                return ((cty ct <+> y <+> "=" <+> e <.> ";") : storeFrom y)
                  case at of
-                   Fresh -> return (stmtExpr [bt <.> "*" <+> x <+> "=" <+> allocFresh <.> ";", x <.> "->p =" <+> e <.> ";"] box)
-                   Padded -> return (stmtExpr [bt <.> "*" <+> x <+> "=" <+> allocPadded <.> ";", x <.> "->p =" <+> e <.> ";"] box)
+                   Fresh -> do s <- store
+                               return (stmtExpr ((bt <.> "*" <+> x <+> "=" <+> allocFresh <.> ";") : s) box)
+                   Padded -> do s <- store
+                                return (stmtExpr ((bt <.> "*" <+> x <+> "=" <+> allocPadded <.> ";") : s) box)
                    At r  -> do rt <- tyOfName cx r
                                let check = "_Static_assert(sizeof(" <.> bt <.> ") ==" <+> int (blockSize ct) <.> ",\"kt_reuse\");"
                                case rt of
@@ -452,17 +461,18 @@ genBox cx tag at v
                                              -- and only the fields that change are stored. Dups still run, in `y`.
                                              update = case reuseMatches rt t (sameBitsV (cxSources cx) v) of
                                                         Just (k,oldScan,matches) -> [setTag k, setScan oldScan, setPath] ++ writes matches
-                                                        Nothing -> ["kk_block_init(&" <.> x <.> "->_block,sizeof(" <.> bt <.> ")," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ");",
-                                                                    x <.> "->p =" <+> y <.> ";"]
+                                                        Nothing -> ("kk_block_init(&" <.> x <.> "->_block,sizeof(" <.> bt <.> ")," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ");")
+                                                                   : storeFrom y
                                          return (stmtExpr ([check, cty ct <+> y <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> localName r <.> ";"]
                                                            ++ update) box)
                                  -- a credit that may be empty, which `ExpandReuse` did not test
-                                 _ -> return (stmtExpr [check, bt <.> "*" <+> x <+> "=" <+> allocAt (localName r) <.> ";", x <.> "->p =" <+> e <.> ";"] box)
+                                 _ -> do s <- store
+                                         return (stmtExpr ([check, bt <.> "*" <+> x <+> "=" <+> allocAt (localName r) <.> ";"] ++ s) box)
                    In y  -> do v <- fresh "v"
                                ye <- genV cx y
                                let clear = "kt_block_clear(kk_datatype_as_ptr(kk_datatype_unbox(" <.> ye <.> "),_ctx)," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
-                               return (stmtExpr [cty ct <+> v <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> clear <.> ";",
-                                                 setPath, x <.> "->p =" <+> v <.> ";"] box)
+                               return (stmtExpr ([cty ct <+> v <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> clear <.> ";",
+                                                  setPath] ++ storeFrom v) box)
 
 -- A projection reads exactly the selected field (`[proj]`), where it is, and copies it into a
 -- local. A product read in place stays a place (`isPlace`), read at its uses.
