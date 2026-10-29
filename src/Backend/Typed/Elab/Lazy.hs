@@ -17,13 +17,13 @@
     ends every branch in `memoize(@lazy, v)` or, where Koka's sizes allow it, in a call
     `T/lazy-C'(@lazy, recurse, fields')`.
   Here the lazy value becomes a cell (`[lock]`): `lazy-eval-locked` locks it in the branch
-  of each such constructor, and every `lazy-C` takes it as a cell `cell_‖V_C‖⟨T⟨ā⟩⟩`. An
+  of each such constructor, and every `lazy-C` takes it as a cell `cell_|V_C|⟨T⟨ā⟩⟩`. An
   expression in the scope of a cell `c : cell_n⟨T⟨B̄⟩⟩` must consume it:
   - `memoize-target(c, …)` is deleted;
   - `memoize(c, K(v))` writes K over the cell (`[memoize]`) if K is a box with `|V_K| ≤ n`,
     and otherwise, like `memoize(c, v)` of any other value, it becomes an indirection to the
     value (`indirect`);
-  - a call `lazy-C'(c, recurse, v̄)` passes the cell on if `‖V_C'‖ ≤ n` (by our sizes, which
+  - a call `lazy-C'(c, recurse, v̄)` passes the cell on if `|V_C'| ≤ n` (by our sizes, which
     may differ from Koka's), and otherwise becomes an indirection to a new thunk `C'(v̄)`,
     which `lazy-whnf` goes on to evaluate;
   - a jump passes the cell on, and the parameter of the join point becomes a cell of the
@@ -60,12 +60,14 @@ import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Query( Env(..), envOf, unrollT, reuseSize, lazySize, lazyTags, hasWhnf )
+import Backend.Typed.Query( Env(..), envOf, unrollT, reuseSize, lazyTags, hasWhnf )
+import Backend.Typed.Elab.TypeInfo( conFieldTypes, padFields )
 
--- The `lazy-C` functions with the tag of their constructor and the size of its cell, the
+-- The `lazy-C` functions with the tag of their constructor, the size of its cell and its
+-- fields (with the padding, see `TypeInfo.conFieldTypes`), the
 -- `lazy-eval-locked` functions, the `lazy-eval` functions, the `lazy-whnf` and `lazy-force`
 -- functions, and the tag of the indirection ι of each lazy type.
-data Lazies = Lazies{ lzCons :: M.Map Name (Int,Int), lzLocked :: S.Set Name, lzEval :: S.Set Name, lzForce :: S.Set Name
+data Lazies = Lazies{ lzCons :: M.Map Name (Int,Int,[VType]), lzLocked :: S.Set Name, lzEval :: S.Set Name, lzForce :: S.Set Name
                     , lzIndirect :: M.Map Name Int }
 
 -- the lazy value of `lazy-eval-locked` and its type
@@ -98,18 +100,19 @@ lazyProgram nt prog
 
 lazyFuns :: Newtypes -> TypeDefs -> Lazies
 lazyFuns nt tdefs
-  = Lazies (M.fromList [(funName info (show (unqualify (conInfoName con))), (tag,n))
-                       | (info,lz,alts) <- infos, (tag,con) <- cons info
+  = Lazies (M.fromList [(funName info (show (unqualify (conInfoName con))), (tag,n,fs))
+                       | (info,tvs,lz,alts) <- infos, (tag,con) <- cons info
                        , tag `elem` lz, not (isLazyIndirectConName (conInfoName con))
-                       , Just (ABox s) <- [lookup tag alts], Right n <- [lazySize s]])
-           (S.fromList [funName info "eval-locked" | (info,_,_) <- infos])
-           (S.fromList [funName info "eval" | (info,_,_) <- infos])
-           (S.fromList [funName info stem | (info,_,_) <- infos, stem <- ["whnf","force"]])
-           (M.fromList [(dataInfoName info, tag) | (info,_,_) <- infos, (tag,con) <- cons info, isLazyIndirectConName (conInfoName con)])
+                       , Just (ABox s) <- [lookup tag alts], Right n <- [reuseSize s]
+                       , Right fs <- [conFieldTypes nt (map AVar tvs) con]])
+           (S.fromList [funName info "eval-locked" | (info,_,_,_) <- infos])
+           (S.fromList [funName info "eval" | (info,_,_,_) <- infos])
+           (S.fromList [funName info stem | (info,_,_,_) <- infos, stem <- ["whnf","force"]])
+           (M.fromList [(dataInfoName info, tag) | (info,_,_,_) <- infos, (tag,con) <- cons info, isLazyIndirectConName (conInfoName con)])
   where
     env = Env tdefs M.empty
     cons info = zip [1..] (dataInfoConstrs info)   -- tags start at 1
-    infos = [(info,lz,alts) | (_,info) <- NM.toList (newtypesTypeDefs nt)
+    infos = [(info,tvs,lz,alts) | (_,info) <- NM.toList (newtypesTypeDefs nt)
                             , Just TypeDef{ tdefParams = tvs } <- [M.lookup (dataInfoName info) tdefs]
                             , let t = ACon (dataInfoName info) (map AVar tvs)
                             , let lz = lazyTags env t, not (null lz)
@@ -136,7 +139,7 @@ lazyDef def
   = do lazies <- asks leLazies
        case def of
          DefFun f tvs ((x,m,t):ps) res body
-           | Just (_,n) <- M.lookup f (lzCons lazies)
+           | Just (_,n,_) <- M.lookup f (lzCons lazies)
            -> case t of
                 VPtr a | targets x body -> DefFun f tvs ((x,m,VCell n a):ps) res <$> cellE (M.singleton x (n,a)) body
                 _ -> fail ("a lazy constructor function without a memoization target: " ++ show x)
@@ -166,7 +169,7 @@ cellE cs expr
                  let r = child y SRoll
                      lockAlt (i,b,e)
                        | i `elem` lz, i /= ind, Just (ABox s) <- lookup i shapes
-                       = do n <- liftE (lazySize s)
+                       = do n <- liftE (reuseSize s)
                             c <- fresh "cell"
                             (,,) i (child r (SInjA i)) <$> lock (x,c,n,a) (child r (SInjA i)) b e
                        | otherwise = (,,) i b <$> cellE cs e
@@ -179,10 +182,10 @@ cellE cs expr
            | f == nameLazyMemoize, Just (n,a) <- M.lookup c cs, M.size cs == 1, S.notMember c (fvV v)
            -> cellV v >>= memoize c n a
          Call f ts (Var c : vs)
-           | Just (k,m) <- M.lookup f cons, Just (n,a) <- M.lookup c cs, M.size cs == 1, S.notMember c (S.unions (map fvV vs))
+           | Just (k,m,fs) <- M.lookup f cons, Just (n,a) <- M.lookup c cs, M.size cs == 1, S.notMember c (S.unions (map fvV vs))
            -> do vs' <- mapM cellV vs
                  if m <= n then return (Call f ts (Var c : vs'))
-                   else do con <- conValue a k (drop 1 vs')   -- without `recurse`
+                   else do con <- conValue a k (padFields fs (drop 1 vs'))   -- without `recurse`
                            indirect c a con
          Call f _ _
            | f == nameLazyMemoize || f == nameLazyMemoizeTarget -> fail "memoization of a value that is not under evaluation"

@@ -10,7 +10,7 @@
 -- Type inference and environment queries shared by typed IR consumers.
 -- Keep inference in sync with the typing rules in Syntax.
 module Backend.Typed.Query( Env(..), Gamma, noJoins, yieldJoins, envOf, bindAll, checkE, inferE, inferA, inferV
-                          , inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, whnfGamma, hasWhnf, boxContents, reuseSize, lazySize
+                          , inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, whnfGamma, hasWhnf, boxContents, reuseSize
                           , unrollT, lazyTags, trivialTy, openFields, funSig, paramModes, altPattern, pointerShape ) where
 
 import qualified Data.Map as M
@@ -22,7 +22,7 @@ import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Layout( layout, blockSize, lazyBlockSize, isBlock )
+import Backend.Typed.Layout( layout, blockSize, isBlock )
 
 type Gamma = M.Map Path Ty
 
@@ -310,7 +310,7 @@ lockGamma env g z c
                       unless (j `elem` lazyTags env t) (Left ("locking " ++ show z ++ ", a strict alternative of " ++ ppr (A t)))
                       return t
               _ -> Left ("locking " ++ show z ++ ", which is not an alternative of a lazy value")
-       n <- lazySize s
+       n <- reuseSize s
        case M.lookup (child z SContents) g of
          Just (V s') | alphaEq s s' -> return ()
          _ -> Left ("locking " ++ show z ++ " whose contents are not read")
@@ -441,12 +441,6 @@ reuseSize :: VType -> Q Int
 reuseSize v
   | isBlock (layout v) = return (blockSize (layout v))
   | otherwise          = Left ("no reusable block: " ++ ppr (A (ABox v)))
-
--- the size `‖V‖` of the block of a lazy alternative `Box V`, which an indirection fits
-lazySize :: VType -> Q Int
-lazySize v
-  | isBlock (layout v) = return (lazyBlockSize (layout v))
-  | otherwise          = Left ("a lazy alternative without fields: " ++ ppr (A (ABox v)))
 
 litType :: Lit -> VType
 litType lit
