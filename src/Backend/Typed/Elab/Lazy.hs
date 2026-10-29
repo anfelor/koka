@@ -7,7 +7,7 @@
 -----------------------------------------------------------------------------
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
-{- Lazy values under evaluation as cells (right after elaboration, before `OrderFields`).
+{- Lazy values under evaluation as cells (right after elaboration, before `Paths`).
 
   Koka evaluates a lazy type `T` (`Kind.Infer`) with private functions that pass the lazy
   value under evaluation `@lazy : T⟨B̄⟩*` around:
