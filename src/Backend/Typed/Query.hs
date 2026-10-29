@@ -10,7 +10,7 @@
 -- Type inference and environment queries shared by typed IR consumers.
 -- Keep inference in sync with the typing rules in Syntax.
 module Backend.Typed.Query( Env(..), Gamma, noJoins, yieldJoins, envOf, bindAll, checkE, inferE, inferA, inferV
-                          , inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, whnfGamma, whnfName, boxContents, reuseSize, lazySize
+                          , inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, whnfGamma, hasWhnf, boxContents, reuseSize, lazySize
                           , unrollT, lazyTags, trivialTy, openFields, funSig, paramModes, altPattern, pointerShape ) where
 
 import qualified Data.Map as M
@@ -65,8 +65,8 @@ inferE env g js e = do mapM_ checkReuseTy (M.elems g)
 -- Forgetting a description, its tag, or that a credit is full or a context nonempty is allowed;
 -- inventing any is not. A cell can be used as a smaller one, and a value in WHNF as a lazy one.
 expectV :: Env -> VType -> VType -> Q ()
-expectV env expected actual
-  = expect expected (forget expected (forgetWhnfV env expected actual))
+expectV _ expected actual
+  = expect expected (forget expected (forgetWhnfV expected actual))
   where
     forget (VReuse f _ p) (VReuse g n q) = VReuse (if f == MaybeEmpty then f else g) n (forgetDesc p q)
     forget (VCtx f _ _) (VCtx g a b) = VCtx (if f == MaybeEmpty then f else g) a b
@@ -81,35 +81,31 @@ expectV env expected actual
                        (Just _, _) -> q
                        (Nothing, _) -> Nothing
 
--- the lazy type T of `whnf(T)`
-whnfOf :: Env -> Name -> Maybe Name
-whnfOf env w = M.lookup w (envTypes env) >>= tdefWhnfOf
-
--- The actual type with `whnf(T⟨B̄⟩)` as `T⟨B̄⟩` where the expected type has the latter, also
+-- The actual type with `whnf(τ)` as τ where the expected type has the latter, also
 -- behind pointers and in boxes.
-forgetWhnfV :: Env -> VType -> VType -> VType
-forgetWhnfV env expected actual
+forgetWhnfV :: VType -> VType -> VType
+forgetWhnfV expected actual
   = case (expected,actual) of
-      (VPtr a, VPtr b) -> VPtr (forgetWhnfA env a b)
-      (VProd a b, VProd c d) -> VProd (forgetWhnfV env a c) (forgetWhnfV env b d)
-      (VSum ts, VSum us) | length ts == length us -> VSum (zipWith (forgetWhnfV env) ts us)
+      (VPtr a, VPtr b) -> VPtr (forgetWhnfA a b)
+      (VProd a b, VProd c d) -> VProd (forgetWhnfV a c) (forgetWhnfV b d)
+      (VSum ts, VSum us) | length ts == length us -> VSum (zipWith forgetWhnfV ts us)
       _ -> actual
 
-forgetWhnfA :: Env -> AType -> AType -> AType
-forgetWhnfA env expected actual
+forgetWhnfA :: AType -> AType -> AType
+forgetWhnfA expected actual
   = case (expected,actual) of
-      (ACon n _, ACon w bs) | whnfOf env w == Just n -> ACon n bs
-      (ABox v, ABox u) -> ABox (forgetWhnfV env v u)
-      (ASum as, ASum bs) | map fst as == map fst bs -> ASum [(i,forgetWhnfA env a b) | ((i,a),(_,b)) <- zip as bs]
+      (a, AWhnf b) | alphaEq a b -> a
+      (ABox v, ABox u) -> ABox (forgetWhnfV v u)
+      (ASum as, ASum bs) | map fst as == map fst bs -> ASum [(i,forgetWhnfA a b) | ((i,a),(_,b)) <- zip as bs]
       _ -> actual
 
--- `whnf(T⟨B̄⟩)*` as `T⟨B̄⟩*` in a value
-widenWhnf :: Env -> VType -> VType
-widenWhnf env t = case t of
-  VPtr (ACon w bs) | Just n <- whnfOf env w -> VPtr (ACon n bs)
-  VProd a b -> VProd (widenWhnf env a) (widenWhnf env b)
-  VSum ts -> VSum (map (widenWhnf env) ts)
-  VExists vs b -> VExists vs (widenWhnf env b)
+-- `whnf(τ)*` as `τ*` in a value
+widenWhnf :: VType -> VType
+widenWhnf t = case t of
+  VPtr (AWhnf a) -> VPtr a
+  VProd a b -> VProd (widenWhnf a) (widenWhnf b)
+  VSum ts -> VSum (map widenWhnf ts)
+  VExists vs b -> VExists vs (widenWhnf b)
   _ -> t
 
 -- Forget only credits and contexts carried by a value, not contracts behind a pointer.
@@ -180,7 +176,7 @@ inferExpr env g js expr
                              branches env [inferE env (uniqueGamma g x) js e1, inferE env g js e2]
       IfWhnf x e1 e2 -> do t <- inferVar g x
                            case t of
-                             V (VPtr (ACon n _)) | Just _ <- whnfName env n -> return ()
+                             V (VPtr a) | hasWhnf env a -> return ()
                              _ -> Left ("WHNF test of a value that is not lazy with strict alternatives: " ++ ppr t)
                            branches env [inferE env (whnfGamma env g x) js e1, inferE env g js e2]
       -- the credit is full in the first branch and empty in the second
@@ -203,7 +199,7 @@ inferExpr env g js expr
                                 -- uses that disagree on WHNF agree on the lazy type, as in `branches`
                                 let scope r = r <$ checkE env g js{ jsPoints = M.insert j (caps,tvs,[p | (_,_,p) <- ps],r) (jsPoints js) } e2 r
                                 case scope t of
-                                  Left _ | not (alphaEq t (widenWhnf env t)) -> scope (widenWhnf env t)
+                                  Left _ | not (alphaEq t (widenWhnf t)) -> scope (widenWhnf t)
                                   r -> r
       -- the captured variables must still be in scope (`[unbox-ru]` renames the contents of a box)
       Jump j ts vs -> case M.lookup j (jsPoints js) of
@@ -326,12 +322,12 @@ uniqueGamma g x
 whnfGamma :: Env -> Gamma -> Path -> Gamma
 whnfGamma env g x
   = case M.lookup x g of
-      Just (V (VPtr (ACon n bs))) | Just w <- whnfName env n -> M.insert x (V (VPtr (ACon w bs))) g
+      Just (V (VPtr a)) | hasWhnf env a -> M.insert x (V (VPtr (AWhnf a))) g
       _ -> g
 
--- the name of `whnf(T)`
-whnfName :: Env -> Name -> Maybe Name
-whnfName env n = M.lookup n (envTypes env) >>= tdefLazy >>= lazyWhnf
+-- whether `whnf(τ)` is formed: τ is lazy with strict alternatives
+hasWhnf :: Env -> AType -> Bool
+hasWhnf env a = either (const False) (const True) (unrollT env (AWhnf a))
 
 branches :: Env -> [Q VType] -> Q VType
 branches env cs = do ts <- sequence cs
@@ -344,8 +340,8 @@ branches env cs = do ts <- sequence cs
                                            return (erase t)
   where
     -- disagreeing branches forget credits, contexts and WHNF
-    weaken = widenWhnf env . mapCredits (const MaybeEmpty) id
-    erase = widenWhnf env . mapCredits (const MaybeEmpty) (const Nothing)
+    weaken = widenWhnf . mapCredits (const MaybeEmpty) id
+    erase = widenWhnf . mapCredits (const MaybeEmpty) (const Nothing)
 
 funSig :: Env -> Name -> [AType] -> Q ([VType],VType)
 funSig env f tys
@@ -367,21 +363,35 @@ checkArgs env g ps vs
   | length ps == length vs = zipWithM_ (\p v -> checkV env g v p) ps vs
   | otherwise = Left ("expecting " ++ show (length ps) ++ " arguments but got " ++ show (length vs))
 
--- `unroll(T⟨B̄⟩)`
+-- `unroll(τ)` of a recursive type, also by its name (δ), when the unrolling folds back to it
 unrollT :: Env -> AType -> Q AType
 unrollT env t
   = case t of
+      AMu l x vs a bs | length vs == length bs
+        -> return (unrollMu (if null vs then t else ALam vs (AMu l x vs a (map AVar vs))) x vs a bs)
+      AWhnf a -> do b <- unrollT env a
+                    let lz = lazyTags env a
+                    case b of
+                      ASum ts | not (null lz), any ((`notElem` lz) . fst) ts
+                        -> return (ASum [alt | alt@(i,_) <- ts, i `notElem` lz])
+                      _ -> Left ("whnf of a type that is not lazy with strict alternatives: " ++ ppr (A a))
       ACon n args -> case M.lookup n (envTypes env) of
-                       Just (TypeDef _ tvs (Just body) _ _) | length tvs == length args -> return (inst tvs args body)
+                       Just (TypeDef _ tvs (Just body)) | length tvs == length args
+                         -> case body of
+                              AMu _ x vs a bs | bs == map AVar tvs -> return (unrollMu (ACon n []) x vs a args)
+                              _ -> unrollT env (inst tvs args body)
                        Just _  -> Left ("cannot unroll abstract type " ++ show n)
                        Nothing -> Left ("unknown type " ++ show n)
       _ -> Left ("unroll of " ++ ppr (A t))
 
--- `lazy(T⟨B̄⟩)`: the tags of the lazy alternatives of a lazy type (none for another type)
+-- `lazy(τ)`: the tags of the lazy alternatives of a lazy type, also by its name (none for
+-- another type)
 lazyTags :: Env -> AType -> [Int]
 lazyTags env t
   = case t of
-      ACon n _ | Just TypeDef{ tdefLazy = Just lz } <- M.lookup n (envTypes env) -> lazyAlts lz
+      AMu l _ _ _ _ -> l
+      ACon n args | Just (TypeDef _ tvs (Just body)) <- M.lookup n (envTypes env), length tvs == length args
+        -> lazyTags env (inst tvs args body)
       _ -> []
 
 -- values of these types need no references, also through named types
@@ -403,6 +413,7 @@ pointerShape env t
       ACon n _ | not (S.member n seen)
                , Just TypeDef{} <- M.lookup n (envTypes env)
                , Right b <- unrollT env a -> shape (S.insert n seen) b
+      AWhnf _ | Right b <- unrollT env a -> shape seen b
       _ -> Nothing
 
 -- the fields of an open constructor at an instance `T⟨B̄⟩` of its type
@@ -441,7 +452,7 @@ litType lit
       LitFloat _  -> vtFloat
 
 checkA :: Env -> Gamma -> AVal -> AType -> Q ()
-checkA env g val t = inferA env g val >>= expect t . forgetWhnfA env t
+checkA env g val t = inferA env g val >>= expect t . forgetWhnfA t
 
 checkV :: Env -> Gamma -> VVal -> VType -> Q ()
 checkV env g val t = do checkReuseTy (V t)
@@ -479,6 +490,8 @@ checkReuseTy ty = case ty of
     AFun ps r -> mapM_ (checkReuseTy . V) (map snd ps ++ [r])
     AForall _ b -> checkReuseTy (A b)
     ALam _ b -> checkReuseTy (A b)
+    AMu _ _ _ b ts -> mapM_ (checkReuseTy . A) (b : ts)
+    AWhnf b -> checkReuseTy (A b)
     ACon _ ts -> mapM_ (checkReuseTy . A) ts
     AApp _ ts -> mapM_ (checkReuseTy . A) ts
     AVar _ -> return ()
