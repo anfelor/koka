@@ -462,6 +462,14 @@ boxOf (Path x ss)
       (_,SContents : rest) -> Just (Path x (reverse rest))
       _ -> Nothing
 
+-- the box whose block a variable is a place of: as `boxOf`, unless a `deref` step follows the
+-- last `contents` step (`[deref]` read the pointer out of the block)
+placeOf :: Path -> Maybe Path
+placeOf (Path x ss)
+  = case break (`elem` [SContents,STaken,SLoad,SDeref]) (reverse ss) of
+      (_,SContents : rest) -> Just (Path x (reverse rest))
+      _ -> Nothing
+
 -- `[unbox-ru]` of `z` renames its contents `z.contents` and their parts to `z.taken`, and
 -- the body's uses of them are uses of the old names outside (`unrebase`). The parts loaded
 -- out of the block (on a path with a `load` step after `z.contents`) keep their names.
