@@ -25,8 +25,8 @@
   ownership. Descriptions and the checking rules stay unchanged.
 
   Bindings that keep a literal dereference named are retained, preserving its operand
-  path without introducing a fresh root, and so are those of values that are duplicated as
-  a whole (`[dup]` takes a variable). Existentials are not inlined: unpacking a known
+  path without introducing a fresh root, and so are those of values that are duplicated or
+  loaded as a whole (`[dup]` and `[load]` take a variable). Existentials are not inlined: unpacking a known
   `pack` would substitute its types.
 -}
 module Backend.Typed.Passes.Inline( inlineProgram ) where
@@ -98,6 +98,7 @@ valuesE expr = here <> getConst (descendE (const (Const mempty)) (Const . values
              Let x _ (Ret v) _ | structural v -> (M.singleton x v,S.empty)
              Deref _ (Var x) _ _ -> (M.empty,S.singleton x)
              Dup x _ _ -> (M.empty,S.singleton x)
+             Load x _ _ -> (M.empty,S.singleton x)
              _ -> mempty
 
 valuesV :: VVal -> (Values,S.Set Path)

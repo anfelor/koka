@@ -389,6 +389,7 @@ descendB fn fv fb expr
       Drop x e              -> Drop <$> fn x <*> plain e
       Free r e              -> Free <$> fn r <*> plain e
       Dup x y e             -> (\x' (y',e') -> Dup x' y' e') <$> fn x <*> one y [] e
+      Load x y e            -> (\x' (y',e') -> Load x' y' e') <$> fn x <*> one y [SLoad] e
       IsUnique x e1 e2      -> IsUnique <$> fn x <*> plain e1 <*> plain e2
       IfWhnf x e1 e2        -> IfWhnf <$> fn x <*> plain e1 <*> plain e2
       IfFull r e1 e2        -> IfFull <$> fn r <*> plain e1 <*> plain e2
@@ -453,18 +454,22 @@ stepsFrom :: Path -> Path -> [Step]
 stepsFrom (Path _ ts) (Path _ ss) = drop (length ts) ss
 
 -- the box whose block holds a variable in its contents: the variable before the last
--- `contents` step on its path, unless a `taken` step follows it (`[unbox-ru]` took the
--- contents out of their block)
+-- `contents` step on its path, unless a `taken` step (`[unbox-ru]` took the contents out of
+-- their block) or a `load` step (`[load]` copied the part out of it) follows it
 boxOf :: Path -> Maybe Path
 boxOf (Path x ss)
-  = case break (`elem` [SContents,STaken]) (reverse ss) of
+  = case break (`elem` [SContents,STaken,SLoad]) (reverse ss) of
       (_,SContents : rest) -> Just (Path x (reverse rest))
       _ -> Nothing
 
 -- `[unbox-ru]` of `z` renames its contents `z.contents` and their parts to `z.taken`, and
--- the body's uses of them are uses of the old names outside (`unrebase`)
+-- the body's uses of them are uses of the old names outside (`unrebase`). The parts loaded
+-- out of the block (on a path with a `load` step after `z.contents`) keep their names.
 rebase, unrebase :: Path -> Path -> Path
-rebase z = renamePrefix (child z SContents) (child z STaken)
+rebase z x
+  | x `within` p && SLoad `elem` stepsFrom p x = x
+  | otherwise = renamePrefix p (child z STaken) x
+  where p = child z SContents
 unrebase z = renamePrefix (child z STaken) (child z SContents)
 
 renamePrefix :: Path -> Path -> Path -> Path
@@ -861,6 +866,7 @@ destructAOf expr
       Unroll m v x e        -> Just (Destruct m v [([x],e)] (\m' v' es -> Unroll m' v' x (head es)))
       Unbox m v x e         -> Just (Destruct m v [([x],e)] (\m' v' es -> Unbox m' v' x (head es)))
       Unscalar m v x e      -> Just (Destruct m v [([x],e)] (\m' v' es -> Unscalar m' v' x (head es)))
+      Load v x e            -> Just (Destruct Borrowed v [([x],e)] (\_ v' es -> Load v' x (head es)))
       CaseOpen m v alts def -> Just (Destruct m v ([(xs,e) | (_,xs,e) <- alts] ++ [([],def)])
                                        (\m' v' es -> CaseOpen m' v' [(c,xs,e) | ((c,xs,_),e) <- zip alts es] (last es)))
       Proj{} -> Nothing
@@ -899,6 +905,7 @@ destructVOf expr
       Unroll{} -> Nothing
       Unbox{} -> Nothing
       Unscalar{} -> Nothing
+      Load{} -> Nothing
       CaseOpen{} -> Nothing
       Ret{} -> Nothing
       Let{} -> Nothing
@@ -920,13 +927,14 @@ destructVOf expr
       Join{} -> Nothing
       Jump{} -> Nothing
 
--- reading the contents of a box never moves them
+-- reading the contents of a box (or loading a part of them) never moves them
 isRead :: VExpr -> Bool
 isRead expr
   = case expr of
       SplitA{}    -> False
       Unbox{}     -> True
       Unscalar{}  -> False
+      Load{}      -> True
       CaseOpen{}  -> True
       Proj{}      -> False
       CaseV{}     -> False
@@ -968,6 +976,7 @@ keepsPointer expr
       CaseV{}     -> False
       Unbox{}     -> False
       Unscalar{}  -> False
+      Load{}      -> False
       CaseOpen{}  -> False
       Ret{}       -> False
       Let{}       -> False
@@ -989,8 +998,8 @@ keepsPointer expr
       Join{}      -> False
       Jump{}      -> False
 
--- Where a variable gets the bits of another variable: a copy (`[dup]`) gets those of its
--- variable, the contents taken by `[unbox-ru]` or `[lock]` those of the old contents, and a parameter of
+-- Where a variable gets the bits of another variable: a copy (`[dup]` or `[load]`) gets those
+-- of its variable, the contents taken by `[unbox-ru]` or `[lock]` those of the old contents, and a parameter of
 -- a join point those of its arguments.
 data Source = Copy Path | Param [VVal]
 
@@ -1001,6 +1010,7 @@ sources expr = M.union here (getConst (descendE (const (Const M.empty)) (Const .
   where
     here = case expr of
              Dup x y _ -> M.singleton y (Copy x)
+             Load x y _ -> M.singleton y (Copy x)
              _ | Just (z,_,_) <- takesContents expr -> M.singleton (child z STaken) (Copy (child z SContents))
              Join j _ ps _ e2 -> M.fromList [(y,Param [vs !! i | vs <- jumpArgs j e2]) | (i,(y,_,_)) <- zip [0..] ps]
              _ -> M.empty
@@ -1015,7 +1025,7 @@ sameBits :: Sources -> Path -> Path
 sameBits src x@(Path r ss)
   = case [(k,s) | k <- [length ss, length ss - 1 .. 0], Just s <- [M.lookup (Path r (take k ss)) src]] of
       ((k,s):_) -> case s of
-                     Copy y -> extend (sameBits src y) (drop k ss)
+                     Copy y -> sameBits src (extend y (drop k ss))
                      Param vs | Just (y:ys) <- mapM sameOf vs, all (== y) ys -> extend y (drop k ss)
                      _ -> x
       [] -> x

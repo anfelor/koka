@@ -11,8 +11,9 @@
 
   Variables of a trivial type (without pointers, also through named types: `trivialTy`) are
   unrestricted, except that one in the contents of a box `z` (`boxOf`) is read from the
-  block of `z`: only `val y = dup x`, which loads it, and a case on it may read it, and they
-  read the block `z.credit`. `UnboxRu` takes the contents of `z` out of its block and renames
+  block of `z`: only `let^ load x.load = x` may read it, and it reads the block `z.credit`.
+  The binder `x.load` is not in the block. A case never reads a block: its scrutinee is not
+  in the contents of a box (a sum there is loaded first). `UnboxRu` takes the contents of `z` out of its block and renames
   them to `z.taken`, which are not in a block. A projection or unpack of it binds a part
   without reading it, and descriptions do not read it. Every other variable is a path (see
   `Syntax.Path`) and has the mode of its owner, the longest variable on its path that is a
@@ -298,15 +299,15 @@ useVar env g m b x
                    (if m == Unique then S.singleton p else S.empty) False)
 
 -- A variable of a trivial type in the contents of a box is read from the block of the box, so
--- only a dup or a case may read it (`loadOf`).
+-- only a load may read it (`loadOf`).
 loaded :: Path -> L Use
 loaded x
   = case boxOf x of
       Just _ -> fail ("read of a trivial part of the contents of a box that is not loaded: " ++ show x)
       Nothing -> return noUse
 
--- A dup of a variable of a trivial type in the contents of a box `z` loads it: it reads the
--- block `z.credit`.
+-- A load of a variable of a trivial type in the contents of a box `z` reads the block
+-- `z.credit`.
 loadOf :: Env -> Gamma -> Path -> L Use
 loadOf env g x
   = case boxOf x of
@@ -420,6 +421,10 @@ checkE env g js expr@(Unscalar m z x e)
 checkE _ _ _ expr
   | isRead expr, Just ds <- destructAOf expr, owning (dsMode ds)
   = fail ("owned read of the contents of a box: " ++ show (dsScrut ds))
+-- a case only scrutinises a loaded value
+checkE _ _ _ (CaseV _ (Var z) _)
+  | Just _ <- boxOf z
+  = fail ("case on the contents of a box that is not loaded: " ++ show z)
 checkE env g js expr
   | Just ds <- destructAOf expr = destructE (liftE (inferVar g (dsScrut ds))) (dsMode ds) (Var (dsScrut ds)) (dsAlts ds)
   | Just ds <- destructVOf expr = destructE (V <$> liftE (inferV env g (dsScrut ds))) (dsMode ds) (dsScrut ds) (dsAlts ds)
@@ -477,7 +482,7 @@ checkE env g js expr
       -- the copy is a new root
       Dup x y e -> do t <- liftE (inferVar g x)
                       liftE (checkDupType t)
-                      before ((if trivialVar env g x then loadOf else inspect) env g x) (roots env Owned [(y,t)] (checkE env (bindAll [(y,t)] g) js e))
+                      before (inspect env g x) (roots env Owned [(y,t)] (checkE env (bindAll [(y,t)] g) js e))
       -- the test reads the variable without borrowing it, which is unique in the first branch
       IsUnique x e1 e2 -> do m <- ownerMode x
                              when (m == Borrowed) (fail ("uniqueness test of a variable that is not owned: " ++ show x))
@@ -566,7 +571,7 @@ destruct env g js m part v alts
                             use <- uniqueName env g z
                             return u{ uNeeded = S.union (uNeeded use) (uNeeded u), uUnique = S.union (uUnique use) (uUnique u) }
                   where
-                    -- a case on a trivial part of the contents of a box reads its block, like a dup
+                    -- a load of a trivial part of the contents of a box reads its block
                     scrutinee | not (trivialVar env g z) = readVar env g z
                               | part = return noUse
                               | otherwise = loadOf env g z
