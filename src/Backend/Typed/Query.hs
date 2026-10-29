@@ -168,6 +168,7 @@ inferExpr env g js expr
                        _ -> Left ("free of a non-credit: " ++ ppr t)
       Dup x y e -> do t <- inferVar g x
                       checkDupType t
+                      when (trivialTy env t) (Left ("dup of a trivial value: " ++ show x))
                       inferE env (bindAll [(y,t)] g) js e
       IsUnique x e1 e2 -> do t <- inferVar g x
                              case t of
@@ -274,6 +275,9 @@ altTypes env t expr
                             return [[A b]]
       (Unbox{}, A (ABox s)) -> return [[V s]]
       (Unscalar{}, A (AScalar r)) -> return [[V (VRaw r)]]
+      (Load{}, V s@VSum{}) -> return [[V s]]
+      (Load{}, V s) | trivialTy env t -> return [[V s]]
+                    | otherwise -> Left ("load of a value that is neither trivial nor a sum: " ++ ppr t)
       (Unpack _ _ tvs _ _, V (VExists bs s)) | length bs == length tvs -> return [[V (inst bs (map AVar tvs) s)]]
       (CaseOpen _ _ alts _, A a) -> do fss <- mapM (\(c,_,_) -> openFields env c a) alts
                                        return (map (map V) fss ++ [[]])

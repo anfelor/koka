@@ -882,6 +882,13 @@ genE cx dest expr
               ve <- genVar cx x
               s <- genE (bindVar cx y t) dest e
               return (declare (cty ct) y (dupAt cx x t ct ve) : s)
+      -- a copy of a trivial value
+      Load x y e
+        -> do t <- tyOfName cx x
+              ct <- ctOf t
+              ve <- genVar cx x
+              s <- genE (bindVar cx y t) dest e
+              return (declare (cty ct) y ve : s)
       IsUnique x e1 e2
         -> do t <- liftC (inferVar (cxGamma cx) x)
               s1 <- genE cx{ cxGamma = uniqueGamma (cxGamma cx) x } dest e1
@@ -1004,11 +1011,15 @@ genE cx dest expr
                     ([([tag],body)],Just other) -> ifChain [(tg <+> "==" <+> int tag,body)] other
                     _ -> switchCases tg brs fallback
               return [block [tagDecl t tg ve, dispatch]]
+      -- the scrutinee is loaded (`[load]`): a variable is a local, another value is copied into one
       CaseV _ v alts
         -> do t@(VSum ts) <- tyOf cx v
               ct <- ctype t
               ve <- genV cx v
-              z <- fresh "w"
+              (decls,z) <- case v of
+                             Var _ -> return ([],ve)
+                             _ -> do w <- fresh "w"
+                                     return ([cty ct <+> w <+> "=" <+> ve <.> ";"],w)
               brs <- forM alts $ \(i,x,e) ->
                        do let ti = ts !! i
                           cti <- ctype ti
@@ -1022,7 +1033,7 @@ genE cx dest expr
                     [(_,body)] -> body
                     [([i],first),(_,second)] -> [ifChain [("(" <.> tag <.> ") ==" <+> int i,first)] second]
                     _ -> [switchCases tag brs (Just ["kt_unreachable();"])]
-              return [block ((cty ct <+> z <+> "=" <+> ve <.> ";") : dispatch)]
+              return [block (decls ++ dispatch)]
       CaseLit v alts def
         -> do tv <- tyOf cx v
               ve <- genV cx v

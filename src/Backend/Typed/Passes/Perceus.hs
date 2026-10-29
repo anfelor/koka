@@ -36,15 +36,18 @@
   inner block where the outer value is dead. Reading the contents of a box is always
   borrowed, while reading a dead owned scalar consumes it (`[unscalar]`).
 
-  A copy of a variable is a new root (`[dup]`) that replaces it in the code that takes the
-  copy, which uses the copies of the parts of the variable in scope that it needs, and the
-  parts of a copy that it binds itself (`renameCopies`). Only the function of `[app]` is
+  A copy of a variable is a new root (`[dup]`), or the part `x.load` of a trivial `x`
+  (`[load]`), that replaces it in the code that takes the copy, which uses the copies of the
+  parts of the variable in scope that it needs, and the parts of a copy that it binds itself
+  (`renameCopies`). Only the function of `[app]` is
   copied at a boxed type, through the pointer it is the dereference of.
 
   A variable of a trivial type needs no references, but one in the contents of a box is read
   from the block of the box, which may be freed or reused once the box is consumed. It is
-  therefore copied (a load) where it is first read (`loadsOf`) or before its owner is given
-  up while it is still needed, whichever comes first, and the later uses read the copy.
+  therefore loaded (`[load]`, its copy `x.load`) where it is first read (`loadsOf`) or before
+  its owner is given up while it is still needed, whichever comes first, and the later uses
+  read the copy. `Loads` loads the scrutinee of a case before Perceus; the copy of a sum is a
+  part of it, borrowed like it. A load of a variable that is already a copy is removed.
 
   `[lock]` consumes an owned box like any consumer: its contents become owned under their new
   name `z.taken`, and its cell is a new owned root. So `lazy-eval-locked` takes the fields of
@@ -167,6 +170,10 @@ percE :: PEnv -> VarSet -> VExpr -> P VExpr
 -- control never gets here, so nothing needs to be dropped
 percE _ _ expr@Unreachable{}
   = return expr
+-- a load of a variable that is no longer in a block (a copy of it was taken before)
+percE pe owned (Load x y e)
+  | Nothing <- boxOf x
+  = percE pe owned (renamePath y x e)
 -- Materialize a scheduled borrowed selection before settling its owner. The
 -- selected binding can then survive the transfer, rather than being read back
 -- from a backing snapshot afterward. A scalar read similarly copies trivial
@@ -268,7 +275,7 @@ tyOfVar pe x = maybe (fail ("unknown variable " ++ show x)) return (M.lookup x (
 percE' :: PEnv -> VarSet -> VExpr -> P VExpr
 percE' pe owned expr
   | xs@(_:_) <- loadsOf pe expr
-  = withCopiesThen percE' pe owned xs return expr
+  = withCopies pe owned xs return expr
 -- the binder is a copy of trivial contents, so a dead owned scalar is consumed by the read
 percE' pe owned expr@(Unscalar _ z x e)
   = do t <- tyOfVar pe z
@@ -362,13 +369,14 @@ percE' pe owned expr
 -- A copy of a variable for a use that takes it: a new root with a duplicate of the variable,
 -- or of the pointer of a closure, which it is the dereference of (a closure is not under a
 -- sum). It comes with the duplication, the variable, and the binders of the copy. A variable
--- of a trivial type is not copied, unless it is in the contents of a box: its copy loads it
--- out of the block (see `loadsOf`).
+-- of a trivial type is not copied, unless it is in the contents of a box: its copy `x.load`
+-- loads it out of the block (see `loadsOf`).
 copy :: PEnv -> Path -> P (K,Path,Path,[(Path,Ty)])
 copy pe x
   = do t <- tyOfVar pe x
        case (t,x) of
          _ | unrestricted pe x t -> return (id,x,x,[])
+           | trivialTy (peEnv pe) t -> let y = child x SLoad in return (Load x y,x,y,[(y,t)])
          (V (VCell _ _),_) -> fail ("duplication of a cell: " ++ show x)
          (V _,_) -> do y <- fresh "u"
                        return (Dup x y,x,y,[(y,t)])
@@ -383,7 +391,7 @@ copy pe x
 -- The trivial variables in the contents of boxes that an expression reads before its
 -- subexpressions in tail position: they are copied there, so that every later use reads the
 -- copy (a load), even after the box is consumed. A projection or unpack of a variable binds a
--- part of it without reading it, and a dup copies it already.
+-- part of it without reading it, and a dup or a load copies it already.
 loadsOf :: PEnv -> VExpr -> [Path]
 loadsOf pe expr = [x | x <- S.toList here, Just t <- [M.lookup x (peGamma pe)], trivialTy (peEnv pe) t, isJust (boxOf x)]
   where
@@ -393,21 +401,16 @@ loadsOf pe expr = [x | x <- S.toList here, Just t <- [M.lookup x (peGamma pe)], 
            Proj _ (Var _) _ _ _ -> S.empty
            Unpack _ (Var _) _ _ _ -> S.empty
            Dup{} -> S.empty
+           Load{} -> S.empty
            _ -> getConst (descendE (Const . S.singleton) (Const . fvV) (\_ _ -> Const S.empty) expr)
 
 -- Copy the variables `xs` for an expression, which takes the copies as owned; `k` comes
--- between the copies and the expression.
+-- between the copies and the expression. Only the outermost products among `xs` are copied:
+-- a copy of a product owns its fields, so a part of it in `xs` is bound as a borrowed
+-- projection of the copy instead of getting another owned reference (the expression copies
+-- it again if it needs one).
 withCopies :: PEnv -> VarSet -> [Path] -> (VExpr -> P VExpr) -> VExpr -> P VExpr
-withCopies = withCopiesThen percE
-
--- Only the outermost products among `xs` are copied: a copy of a product owns its fields,
--- so a part of it in `xs` is bound as a borrowed projection of the copy instead of getting
--- another owned reference (the expression copies it again if it needs one).
--- Loading trivial fields must not restart the owner check before this expression.
--- The copied scrutinee no longer names its box, so that would settle the box before
--- the case instead of letting each alternative take its parts for reuse.
-withCopiesThen :: (PEnv -> VarSet -> VExpr -> P VExpr) -> PEnv -> VarSet -> [Path] -> (VExpr -> P VExpr) -> VExpr -> P VExpr
-withCopiesThen cont pe owned xs k expr
+withCopies pe owned xs k expr
   = do let covered x z = x /= z && x `within` z &&
                          case M.lookup z (peGamma pe) of
                            Just (V t) -> isJust (partAt t (stepsFrom z x))
@@ -419,7 +422,7 @@ withCopiesThen cont pe owned xs k expr
            ren = [(x,y) | (_,x,y,_) <- cs, x /= y] ++ [(x,y) | (x,y,_,_) <- parts]
            bs  = concat [bs' | (_,_,_,bs') <- cs]
            projections = [Proj Borrowed (Var z) ss y | (_,y,z,ss) <- parts]
-       body <- cont (bind pe bs) (S.union owned (ownedOf pe [b | b@(y,_) <- bs, y `elem` map snd ren]))
+       body <- percE (bind pe bs) (S.union owned (ownedOf pe [b | b@(y,_) <- bs, y `elem` map snd ren]))
                      (compose projections (renameCopies (peGamma pe) ren expr))
        compose [d | (d,_,_,_) <- cs] <$> k body
 

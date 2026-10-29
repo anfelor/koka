@@ -51,6 +51,7 @@ library
       Backend.Typed.Passes.Contify
       Backend.Typed.Passes.CopyReset
       Backend.Typed.Passes.JoinArgs
+      Backend.Typed.Passes.Loads
       Backend.Typed.Passes.Inline
       Backend.Typed.Passes.OrderFields
       Backend.Typed.Passes.DropSpec

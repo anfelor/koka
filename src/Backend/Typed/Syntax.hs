@@ -47,10 +47,10 @@
 
     - Variables of a trivial type are unrestricted: they may be weakened and contracted at either
       mode, and used owned or borrowed. They need no `dup` or `drop`. (Not in the paper.)
-      Those in the contents of a box `z` (on a path whose last `contents` or `taken` step is
-      a `contents` step, `Common.boxOf`) are read from its block, so only `[dup]`, which
-      loads them, and a case on them (such as one on the immediate side of a split) read
-      them, borrowing the block `z.credit`. `[unbox-ru]` (or `[lock]`) of `z` takes the contents out of the
+      Those in the contents of a box `z` (on a path whose last `contents`, `taken` or `load`
+      step is a `contents` step, `Common.boxOf`) are read from its block, so only `[load]`
+      reads them, borrowing the block `z.credit`; the binder of `[load]` is not in the block.
+      `[unbox-ru]` (or `[lock]`) of `z` takes the contents out of the
       block and renames them to `z.taken`. A projection or unpack binds a part of them
       without reading it, and descriptions do not read them.
     - A unique variable `x :! t` is owned and holds the only reference to its block. It may be used
@@ -75,11 +75,12 @@
     - Code generation reads the contents of a box in place (`Layout.placeBinders`): `z.contents`
       of a product, and the binders of `[proj]` and `[unpack]` of a place that are products
       themselves, stay in the block of `z`, and a use reads the block. It loads them (copies
-      them out of the block) at `[proj]` of any other field, at `[dup]`, and at `[unbox-ru]` and `[lock]`
-      of `z`, which may free or write the block. These rules make that sound: a non-trivial
-      part of `z.contents` is used only before `z` is consumed (after `[unbox-ru]` it is out
-      of scope, and its loaded copy is a part of `z.taken`), and a trivial part only by
-      `[dup]`. A load at a borrowed `[proj]` is sound as the box is live there. Code
+      them out of the block) at `[proj]` of any other field, at `[dup]` and `[load]`, and at
+      `[unbox-ru]` and `[lock]` of `z`, which may free or write the block. These rules make
+      that sound: a non-trivial part of `z.contents` is used only before `z` is consumed
+      (after `[unbox-ru]` it is out of scope, and its loaded copy is a part of `z.taken`),
+      and a trivial part only by `[load]`. A case never reads a block: a sum in it is loaded
+      first (`[load]`). A load at a borrowed `[proj]` is sound as the box is live there. Code
       generation may also load a place at once (`--feager-loads`), which is sound as the box
       is live at `[bunbox]`.
 
@@ -270,6 +271,7 @@ data Step = SFst | SSnd            -- [proj]
           | SLo | SHi              -- [split-a]
           | SContents | SCredit    -- [bunbox]: the contents, and the rest of the block (not a binder)
           | STaken                 -- [unbox-ru], [lock]: the contents, taken out of the block (not a binder)
+          | SLoad                  -- [load]
           | SOpen Name             -- [case-open]
           deriving (Eq,Ord)
 
@@ -291,6 +293,7 @@ instance Show Step where
              SContents -> "contents"
              SCredit   -> "credit"
              STaken    -> "taken"
+             SLoad     -> "load"
              SOpen c   -> show c
 
 root :: Name -> Path
@@ -608,7 +611,8 @@ data VExpr
   --
   -- Every alternative occurs exactly once, in any order; code generation tests them in the
   -- given order, which elaboration takes from the source. For a variable scrutinee z,
-  -- branch i substitutes injᵢ xᵢ in credit descriptions.
+  -- branch i substitutes injᵢ xᵢ in credit descriptions. The scrutinee is not in the
+  -- contents of a box (`Common.boxOf`): `Loads` loads a sum there first (`[load]`).
   | CaseV Mode VVal [(Int,Path,VExpr)]
 
   --   Γ₁ ⊢ v :q ⊕ⱼ∈J Aⱼ    Γ₂, xᵢ :q Aᵢ ⊢ eᵢ : W (i ∈ I)    Γ₂, d :q ⊕ⱼ∈J\I Aⱼ ⊢ e : W
@@ -712,16 +716,28 @@ data VExpr
   -- is freed without a test.
   | Free Path VExpr
 
-  --   Γ, y : V ⊢ e : W    V is not a credit
-  --  ──────────────────────────────── [dup]
+  --   Γ, y : V ⊢ e : W    V is not trivial, a credit or a cell
+  --  ──────────────────────────────────────── [dup]
   --   Γ, x :^ V ⊢ val y = dup x; e : W
   --
-  -- Duplicate an unboxed variable of any type (its pointers and contexts) into a new root
-  -- `y`, the copy. The parts of `x` in scope are not parts of `y`, which has none until it
-  -- is destructured. A boxed operand is duplicated through the pointer it was dereferenced
-  -- from. At a trivial type it is a plain copy: Perceus copies the trivial parts of the
-  -- contents of a box (*loads* them out of its block) before they are read.
+  -- Duplicate an unboxed variable (its pointers and contexts) into a new root `y`, the copy.
+  -- The parts of `x` in scope are not parts of `y`, which has none until it is
+  -- destructured. A boxed operand is duplicated through the pointer it was dereferenced
+  -- from. A trivial value is copied by `[load]`.
   | Dup Path Path VExpr
+
+  --   Γ, x :^ V, x.load :^ V ⊢ e : W    V trivial or a sum
+  --  ──────────────────────────────────────────────────── [load]
+  --   Γ, x :^ V ⊢ let^ load x.load = x in e : W
+  --
+  -- Copy (*load*) a trivial part, or a sum, of the contents of a box out of its block (see
+  -- "Structural rules"): Perceus loads a trivial part before it is read, `Loads` a sum
+  -- before a case on it, and the later uses read the copy. A sum is copied whole, tag and
+  -- payload. The binder is the part `x.load` of `x`, which is not in the block
+  -- (`Common.boxOf`): a trivial one is unrestricted, and another one is a part of `x` with
+  -- its ownership, whose references the block still holds (like the binder of `[deref]`).
+  -- It is a destructuring form that is always borrowed.
+  | Load Path Path VExpr
 
   --   Γ, x :! Box V ⊢ e₁ : W    Γ, x : Box V ⊢ e₂ : W    |V| defined
   --  ────────────────────────────────────────────────────────────────── [if-unique]
@@ -764,7 +780,9 @@ data VExpr
   -- the part of `z` that is left (the credit consumes the block `z.credit`), renamed to
   -- `z.taken`: `Γ[z.taken / z.contents]` replaces the prefix `z.contents` of every variable
   -- of Γ and keeps the rest of its path (`Common.rebase`), so the parts in scope stay in
-  -- scope, but are no longer in the block. The description of `r` still names the old
+  -- scope, but are no longer in the block. The parts loaded out of the block before (a path
+  -- with a `load` step after `z.contents`, see `[load]`) are not renamed: they are copies
+  -- that were never in it. The description of `r` still names the old
   -- contents. With `[if-unique]` it makes `drop-reuse` of a box derivable. The block of `z`
   -- has tag tag(z).
   | UnboxRu Path Path VExpr
@@ -793,8 +811,8 @@ data VExpr
   -- Since J is reset outside of tail positions, a jump cannot escape
   -- and is always a tail call. Join points only have owned parameters, except for contexts
   -- that are plugged in place (unique, see `[plug]`). Perceus only produces closed join
-  -- points (Γ_c = ∅); only the late passes `JoinArgs` (for owned parameters) and
-  -- `ExpandReuse` introduce captures. A captured variable must not be bound again in e₂, so every jump sees
+  -- points (Γ_c = ∅); only `DropSpec` (the loaded trivial parts of a box, `[load]`) and the
+  -- late passes `JoinArgs` (for owned parameters) and `ExpandReuse` introduce captures. A captured variable must not be bound again in e₂, so every jump sees
   -- the same variable. The descriptions in V̄ do not name the parameters x̄, as every jump
   -- binds them to different values (a jump can only pass an empty credit for them).
   -- The type parameters ā abstract over the witnesses of existentials that are unpacked

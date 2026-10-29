@@ -196,6 +196,7 @@ prettyExpr expr
       Unroll m v x e -> letIn (mode m) (text "roll" <+> pv x) (pv v) e
       Unbox m v x e -> letIn (mode m) (text "box" <+> pv x) (pv v) e
       Unscalar m v x e -> letIn (mode m) (text "scalar" <+> pv x) (pv v) e
+      Load v x e -> letIn (mode Borrowed) (text "load" <+> pv x) (pv v) e
       Unpack m v vs x e -> letIn (mode m) (text "pack" <.> brackets (commaSep (map tv vs)) <+> pv x) (prettyVal v) e
       CaseLit v alts def -> caseOf (text "case") (prettyVal v) ([(prettyLit l, e) | (l,e) <- alts] ++ [(text "_", def)])
       Dup x y e -> text "val" <+> pv y <+> text "= dup" <+> pv x <.> semi <-> prettyExpr e

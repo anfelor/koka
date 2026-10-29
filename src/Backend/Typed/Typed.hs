@@ -26,6 +26,7 @@ import Backend.Typed.Elab.Lazy( lazyProgram, lazyCopies )
 import Backend.Typed.Check( checkProgram, checkTypes )
 import Backend.Typed.Passes.Simplify( simplifyProgram )
 import Backend.Typed.Passes.Yields( yieldsProgram )
+import Backend.Typed.Passes.Loads( loadsProgram )
 import Backend.Typed.Passes.Perceus( perceusProgram )
 import Backend.Typed.Passes.Reuse( reuseProgram )
 import Backend.Typed.Passes.ExpandReuse( expandReuseProgram )
@@ -46,7 +47,7 @@ typedFromCore :: Bool -> Newtypes -> [C.Core] -> Int -> C.Core -> (Program,[(Str
 typedFromCore enableReuse nt imports uniq core
   = let (acore,_)              = runUnique uniq (matchCore nt core)
         (eprog,elabErrs,notes) = elabProgram nt imports acore
-        passes                 = [("lazy",Elaborated,lazyProgram nt), ("orderfields",Unchecked,named orderFieldsProgram), ("anf",Unchecked,pure' anfProgram), ("contify",Unchecked,contifyProgram), ("simplify",Unchecked,pure' simplifyProgram), ("yields",Unchecked,pure' yieldsProgram), ("perceus",Linear,perceusProgram)
+        passes                 = [("lazy",Elaborated,lazyProgram nt), ("orderfields",Unchecked,named orderFieldsProgram), ("anf",Unchecked,pure' anfProgram), ("contify",Unchecked,contifyProgram), ("simplify",Unchecked,pure' simplifyProgram), ("yields",Unchecked,pure' yieldsProgram), ("loads",Unchecked,pure' loadsProgram), ("perceus",Linear,perceusProgram)
                                    ,("dropspec",Linear,dropSpecProgram)] ++ [("reuse",Linear,reuseProgram) | enableReuse]
                                    ++ [("match",Linear,matchProgram), ("sinkjoins",Linear,pure' sinkJoinsProgram), ("joinargs",Linear,pure' joinArgsProgram)]
                                    ++ concat [[("copyreset",Linear,pure' copyResetProgram),("expandreuse",Linear,pure' expandReuseProgram)] | enableReuse] ++ [("inline",Linear,inlineProgram)]

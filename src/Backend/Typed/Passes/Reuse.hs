@@ -215,6 +215,7 @@ ruE expr
       Unroll{} -> plain
       Unbox{} -> plain
       Unscalar{} -> plain
+      Load{} -> plain
       Unpack{} -> plain
       CaseOpen{} -> plain
   where
