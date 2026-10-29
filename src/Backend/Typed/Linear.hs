@@ -489,8 +489,7 @@ checkE env g js expr
       Drop x e -> before (consume env g x) (checkE env g js e)
       Free r e -> before (consume env g r) (checkE env g js e)
       -- the copy is a new root
-      Dup x y e -> do t <- liftE (inferVar g x)
-                      liftE (checkDupType t)
+      Dup x y e -> do t <- liftE (inferVar g x >>= dupType x)
                       before (inspect env g x) (roots env Owned [(y,t)] (checkE env (bindAll [(y,t)] g) js e))
       -- the test reads the variable without borrowing it, which is unique in the first branch
       IsUnique x e1 e2 -> do m <- ownerMode x

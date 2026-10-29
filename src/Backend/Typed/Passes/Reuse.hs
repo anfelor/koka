@@ -204,7 +204,7 @@ ruE expr
       Gen _ _ -> plain
       Dup x y e
         -> do g <- asks reGamma
-              t <- liftE (inferVar g x)
+              t <- liftE (inferVar g x >>= dupType x)
               Dup x y <$> bind [(y,t)] (ruE e)
       -- destructuring forms are handled above
       Proj{} -> plain
@@ -253,13 +253,16 @@ dropReuse x r n e
 branches :: [([(Path,Ty)],VExpr)] -> R [VExpr]
 branches alts = branchActions [bind bs (ruE e) | (bs,e) <- alts]
 
--- DropSpec's shared arm only duplicates fields before releasing the tested box.
--- Duplication cannot make that box unique, so do not offer its block for reuse.
+-- DropSpec's shared arm only dereferences and duplicates fields before releasing the
+-- tested box. Duplication cannot make that box unique, so do not offer its block for reuse.
 -- Stop at any other operation: a release or call could change its reference count.
 sharedDrop :: Path -> VExpr -> R VExpr
 sharedDrop z (Dup x y e)
-  = do t <- typeOfName x
+  = do t <- typeOfName x >>= liftE . dupType x
        Dup x y <$> bind [(y,t)] (sharedDrop z e)
+sharedDrop z (Deref Borrowed (Var x) d e)
+  = do V (VPtr a) <- typeOfName x
+       Deref Borrowed (Var x) d <$> bind [(d,A a)] (sharedDrop z e)
 sharedDrop z (Drop x e) | x == z = Drop x <$> ruE e
 sharedDrop _ e = ruE e
 

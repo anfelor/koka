@@ -71,7 +71,7 @@ expr e = case e of
     IfWhnf x <$> local (const (env,whnfGamma env g x)) (expr a) <*> expr b
   Dup x y b -> do
     (_,g) <- ask
-    t <- liftE (inferVar g x)
+    t <- liftE (inferVar g x >>= dupType x)
     Dup x y <$> bind [(y,t)] (expr b)
   IfFull r a b -> do
     (_,g) <- ask
