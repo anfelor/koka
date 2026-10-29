@@ -241,9 +241,7 @@ altTypes env t expr
                             return [[A b]]
       (Unbox{}, A (ABox s)) -> return [[V s]]
       (Unscalar{}, A (AScalar r)) -> return [[V (VRaw r)]]
-      (Load{}, V s@VSum{}) -> return [[V s]]
-      (Load{}, V s) | trivialTy env t -> return [[V s]]
-                    | otherwise -> Left ("load of a value that is neither trivial nor a sum: " ++ ppr t)
+      (Load{}, V s) -> return [[V s]]
       (Unpack _ _ tvs _ _, V (VExists bs s)) | length bs == length tvs -> return [[V (inst bs (map AVar tvs) s)]]
       (CaseOpen _ _ alts _, A a) -> do fss <- mapM (\(c,_,_) -> openFields env c a) alts
                                        return (map (map V) fss ++ [[]])

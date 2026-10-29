@@ -879,7 +879,7 @@ genE cx dest expr
               ty <- liftC (dupType x t)
               s <- genE (bindVar cx y ty) dest e
               return (declare (cty ct) y (dupAt cx x t ct ve) : s)
-      -- a copy of a trivial value
+      -- a copy of a value's bits; its references are still held by the block
       Load x y e
         -> do t <- tyOfName cx x
               ct <- ctOf t

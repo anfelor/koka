@@ -15,8 +15,8 @@
   block. Any read of a place of `z` (`placeOf`: also of a part that is not trivial, but not
   of one under a `deref` or `load` step) reads the block `z.credit`, so it cannot follow the
   `UnboxRu` or `Lock` that takes the block, also in a `let` body after a bound expression
-  that contains it. A case never reads a block: its scrutinee is not
-  in the contents of a box (a sum there is loaded first). `UnboxRu` takes the contents of `z` out of its block and renames
+  that contains it. A case, a dereference, a dup and a use of a value as a whole never read
+  a block: they only take loaded values (`Loads`). `UnboxRu` takes the contents of `z` out of its block and renames
   them to `z.taken`, which are not in a block. A projection or unpack of a place binds a
   part without reading it, and descriptions do not read it. Every other variable is a path (see
   `Syntax.Path`) and has the mode of its owner, the longest variable on its path that is a
@@ -335,10 +335,15 @@ readVar env g = useVar env g Borrowed False
 
 -- values
 
+-- a value uses its variables as a whole, so they are not in the contents of a box (a
+-- place is loaded first)
+whole :: Path -> L ()
+whole x = when (isJust (placeOf x)) (fail ("use of the contents of a box that is not loaded: " ++ show x))
+
 ownedV :: Env -> Gamma -> VVal -> L Use
 ownedV env g val
   = case val of
-      Var x -> consume env g x
+      Var x -> whole x >> consume env g x
       DupV _ -> liftE (inferV env g val) >> return noUse   -- a global
       Glob _ _ -> do t <- V <$> liftE (inferV env g val)
                      unless (trivialTy env t) (fail ("owned use of global " ++ show val))
@@ -371,6 +376,7 @@ ownedA env g val
               let caps = S.toList (fvA val)
               closed ([(x,Owned) | x <- caps, not (trivialVar env g x)] ++ params env ps)
                      (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) M.empty e)
+              mapM_ whole caps
               uses (map (consume env g) caps)
       UnitA -> return noUse
       InjA _ _ v -> ownedA env g v
@@ -386,7 +392,7 @@ ownedA env g val
 uniqueV :: Env -> Gamma -> VVal -> L Use
 uniqueV env g val
   = case val of
-      Var x -> uniqueName env g x
+      Var x -> whole x >> uniqueName env g x
       UnitV -> return noUse
       Lit _ -> do t <- V <$> liftE (inferV env g val)
                   unless (trivialTy env t) (fail ("unique use of a shared literal: " ++ show val))
@@ -402,7 +408,7 @@ uniqueV env g val
 borrowedV :: Env -> Gamma -> VVal -> L Use
 borrowedV env g val
   = case val of
-      Var x -> inspect env g x
+      Var x -> whole x >> inspect env g x
       Glob _ _ -> return noUse
       Lit _ -> return noUse
       UnitV -> return noUse
@@ -431,10 +437,16 @@ checkE env g js expr@(Unscalar m z x e)
 checkE _ _ _ expr
   | isRead expr, Just ds <- destructAOf expr, owning (dsMode ds)
   = fail ("owned read of the contents of a box: " ++ show (dsScrut ds))
--- a case only scrutinises a loaded value
+-- a case, a dereference and a dup only read a loaded value
 checkE _ _ _ (CaseV _ (Var z) _)
-  | Just _ <- boxOf z
+  | Just _ <- placeOf z
   = fail ("case on the contents of a box that is not loaded: " ++ show z)
+checkE _ _ _ (Deref _ (Var z) _ _)
+  | Just _ <- placeOf z
+  = fail ("dereference of the contents of a box that is not loaded: " ++ show z)
+checkE _ _ _ (Dup z _ _)
+  | Just _ <- placeOf z
+  = fail ("dup of the contents of a box that is not loaded: " ++ show z)
 checkE env g js expr
   | Just ds <- destructAOf expr = destructE (liftE (inferVar g (dsScrut ds))) (dsMode ds) (Var (dsScrut ds)) (dsAlts ds)
   | Just ds <- destructVOf expr = destructE (V <$> liftE (inferV env g (dsScrut ds))) (dsMode ds) (dsScrut ds) (dsAlts ds)
