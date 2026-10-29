@@ -68,7 +68,7 @@
       the parent is consumed once all of its parts are: both components of a pair, the contents
       `z.contents` (or `z.taken`) and the block `z.credit` of a box (neither of the latter
       is a binder, see `[unbox-ru]`), or the binder of any other destructuring. The binder of `[case-a]`,
-      `[split-a]`, `[deref]` or `[unroll]` at a boxed type is the parent's pointer, and that of
+      `[split-a]`, `[if-whnf]`, `[deref]` or `[unroll]` at a boxed type is the parent's pointer, and that of
       `[unpack]` (a no-op) is the parent itself: consuming it, or testing it with `[if-unique]`, consumes or tests the parent (so it is unique
       where the parent is). Hence an owned destructuring of a variable is a borrowed one whose
       binders are consumed, and only a unique destructuring needs its mode: it consumes a unique
@@ -152,33 +152,31 @@ owning m
 --   a recursive type. The body of a datatype is `(μt⟨ā⟩. A)⟨ā⟩`, whose recursive occurrences
 --   `t⟨C̄⟩` fold back to `T⟨C̄⟩`: `unroll(T⟨B̄⟩) = A[T/t][B̄/ā]` (`Query.unrollT`), which is
 --   δ-equal to the unrolling of `(μt⟨ā⟩. A)⟨B̄⟩`.
--- - A lazy recursive type `μt⟨ā⟩. A ~> B` (the paper's `μt. A ~F> (B + t)`) divides the tags of
---   its sum into lazy ones L (the thunks A, each a `Box V`, among them the indirection ι with
---   `Aι = Box(t⟨ā⟩*)`) and strict ones (B). It unrolls as `μt⟨ā⟩. A ⊕ B` does, and
---   `lazy(τ) = L` for an instance τ of it (`Query.lazyTags`, also by its name); a τ is lazy if
---   L is nonempty. No rule refers to ι. Elaboration pads the contents V of a lazy
---   alternative `Box V` whose block would be smaller than that of ι (`Elab.TypeInfo.conFieldTypes`),
---   so that an indirection fits every thunk. The padding is not trusted: `[memoize]` checks the size.
--- - `whnf(τ)` is the recursive type of the values of a lazy τ in WHNF: for
---   `τ = (μt⟨ā⟩. A ~> B)⟨C̄⟩`, `unroll(whnf(τ)) = B[μt⟨ā⟩. A ~> B / t][C̄/ā]`, the strict
---   alternatives of `unroll(τ)` at their tags, and it is rolled and unrolled like τ. It is
---   only formed if B is nonempty. `whnf(τ) ≤ τ`: it can be used where τ is expected, also
---   behind pointers and in boxes (`Query.expectV`, `Query.checkA`), and branches that disagree
---   on it agree on `τ*`: its blocks are blocks of τ, and a value in WHNF is never a thunk
---   again. `[if-whnf]` narrows a `τ*` to it.
+-- - A lazy sum `L ~> S` (the paper's `A ~F> (B + t)`) is one flat sum at run time, whose tags
+--   are split into the thunks L = ⊕ⱼ Box Vⱼ and the strict alternatives S = ⊕ᵢ Aᵢ. Both are
+--   shapes (sums, nonempty), and every tag of S is smaller than every tag of L, so the
+--   smallest tag of L separates them. A lazy datatype unrolls to one, with the indirection
+--   `Box(τ*)` among the thunks. It is introduced by `[whnf]` and `[delay]`, and eliminated by
+--   `[if-whnf]`. Elaboration pads the contents V of a thunk `Box V` whose block would be
+--   smaller than that of the indirection (`Elab.TypeInfo.conFieldTypes`), so that an
+--   indirection fits every thunk. The padding is not trusted: `[memoize]` checks the size.
 data AType = ABox VType                 -- Box V
            | AScalar Raw                -- Scalar raw
            | AUnit                      -- 1
            | ASum [(Int,AType)]         -- ⊕ᵢ Aᵢ, indexed by tags
+           | ALazy AType AType          -- L ~> S, a lazy sum of the thunks L and the strict alternatives S
            | AFun [(Mode,VType)] VType  -- (q̄ V̄) -> W, for top-level functions and closures alike
            | AForall [TVar] AType       -- ∀ā. A
            | AVar TVar                  -- a
            | AApp TVar [AType]          -- a⟨B̄⟩, an applied higher-kinded variable
            | ACon Name [AType]          -- T⟨B̄⟩, a named type
            | ALam [TVar] AType          -- λā. A, a partially applied type
-           | AMu [Int] TVar [TVar] AType [AType] -- (μt⟨ā⟩. A)⟨B̄⟩, a recursive type, or (μt⟨ā⟩. A ~> B)⟨B̄⟩ with these lazy tags
-           | AWhnf AType                -- whnf(τ), the values of a lazy τ in WHNF
+           | AMu TVar [TVar] AType [AType] -- (μt⟨ā⟩. A)⟨B̄⟩, a recursive type
            deriving (Eq,Show)
+
+-- the sides of a lazy sum `L ~> S`: its strict alternatives S (`whnf`) and its thunks L (`delay`)
+data Side = Whnf | Delay
+          deriving (Eq,Show)
 
 -- unboxed types V, W: values of a fixed size without a header.
 --
@@ -240,7 +238,8 @@ data Ty = A AType | V VType
           deriving (Eq,Show)
 
 -- a named type `T⟨ā⟩ := A` (see `AType`); without a body (`int`, `string`, ...) it is
--- abstract. The body of a datatype is a recursive type, which is lazy for a lazy datatype.
+-- abstract. The body of a datatype is a recursive type, which unrolls to a lazy sum for a lazy
+-- datatype.
 data TypeDef = TypeDef{ tdefName :: Name, tdefParams :: [TVar], tdefBody :: Maybe AType }
              deriving (Show)
 
@@ -273,6 +272,7 @@ data Step = SFst | SSnd            -- [fst], [snd]
           | SRoll                  -- [unroll]
           | SInjA Int | SRest      -- [case-a]: an alternative or the default
           | SLo | SHi              -- [split-a]
+          | SWhnf | SDelay         -- [if-whnf]
           | SContents | SCredit    -- [bunbox]: the contents, and the rest of the block (not a binder)
           | STaken                 -- [unbox-ru], [lock]: the contents, taken out of the block (not a binder)
           | SLoad                  -- [load]
@@ -294,6 +294,8 @@ instance Show Step where
              SRest     -> "rest"
              SLo       -> "lo"
              SHi       -> "hi"
+             SWhnf     -> "whnf"
+             SDelay    -> "delay"
              SContents -> "contents"
              SCredit   -> "credit"
              STaken    -> "taken"
@@ -332,9 +334,16 @@ data AVal
   --  ──────────────────────────────── [roll]
   --   Γ ⊢ roll v : (μt⟨ā⟩. A)⟨B̄⟩
   --
-  -- A no-op at run time. The annotation is the recursive type, usually by its name `T⟨B̄⟩`. A lazy
-  -- type, and `whnf(τ)`, are rolled likewise (see `AType`).
+  -- A no-op at run time. The annotation is the recursive type, usually by its name `T⟨B̄⟩`.
   | Roll AType AVal
+
+  --       Γ ⊢ v : S                          Γ ⊢ v : L
+  --  ─────────────────── [whnf]          ─────────────────── [delay]
+  --   Γ ⊢ whnf v : L ~> S                 Γ ⊢ delay v : L ~> S
+  --
+  -- No-ops at run time, as the tags of L and S are those of the lazy sum. The annotation is the
+  -- lazy sum.
+  | InjLazy Side AType AVal
 
   --   Γ ⊢ v : V
   --  ──────────────────── [box]
@@ -458,7 +467,7 @@ data VVal
   -- Constructor contexts (see "Constructor contexts" at the top). A context is built from a
   -- one-hole value K whose hole lies in a field of a block that K allocates:
   --
-  --   K ::= □ | ptr C          C ::= roll C | injᵢ C | box F | box@r F
+  --   K ::= □ | ptr C          C ::= roll C | injᵢ C | whnf C | delay C | box F | box@r F
   --   F ::= K | (F, v) | (v, F)
   --
   -- The hole is a linear variable of the context, so it occurs exactly once, and it only
@@ -511,16 +520,21 @@ data VVal
   -- unique parameter.
   | CtxCopy VVal
 
-  --   Γ ⊢ v : V    unroll(τ) = ⊕ᵢ Aᵢ    Aₖ = Box V    |V| ≤ n
-  --  ──────────────────────────────────────────────────── [memoize]
-  --   Γ, c : cell_n⟨τ⟩ ⊢ memoize c (injₖ v) : τ*
+  --   Γ ⊢ v : V    unroll(τ) = L ~> S    Sₖ = Box V    |V| ≤ n
+  --  ───────────────────────────────────────────────────────── [memoize]
+  --   Γ, c : cell_n⟨τ⟩ ⊢ memoize c (whnf (injₖ v)) : τ*
+  --
+  --   Γ ⊢ v : V    unroll(τ) = L ~> S    Lₖ = Box V    |V| ≤ n
+  --  ───────────────────────────────────────────────────────── [memoize-delay]
+  --   Γ, c : cell_n⟨τ⟩ ⊢ memoize c (delay (injₖ v)) : τ*
   --
   -- Writes the alternative k over the block of the cell in place, keeping its reference count,
   -- and releases the cell: the result is its reference, now a value. A strict k is the paper's
-  -- `memoize l w`; a lazy k replaces the thunk by another one (Koka's step mode), and k = ι is
-  -- the paper's `indirect l w`, which always fits as lazy blocks are padded. The cell is an
-  -- ordinary operand (it is unboxed), and the value is evaluated before the block is written.
-  | Memoize VVal Int VVal
+  -- `memoize l w`; a thunk k replaces the thunk by another one (Koka's step mode), and the
+  -- indirection is the paper's `indirect l w`, which always fits as thunks are padded. The cell
+  -- is an ordinary operand (it is unboxed), and the value is evaluated before the block is
+  -- written.
+  | Memoize VVal Side Int VVal
   deriving (Eq,Show)
 
 -- Expressions `Γ | J ⊢ e : W` (always unboxed).
@@ -571,7 +585,7 @@ data VExpr
   --  ───────────────────────── [unreachable]
   --   Γ | J ⊢ unreachable : W
   --
-  -- Control never gets here (an impossible alternative of a match, such as a lazy one on a
+  -- Control never gets here (an impossible alternative of a match, such as the thunks of a
   -- forced value), so Γ is arbitrary: it may hold owned references, credits and cells, which
   -- no other form can discharge without filling them. Code generation aborts.
   | Unreachable VType
@@ -593,8 +607,8 @@ data VExpr
   -- Destructuring takes a mode: owned destructuring consumes the scrutinee and its binders are
   -- owned (a move); borrowed destructuring gives binders borrowed from the scrutinee. Unique
   -- destructuring consumes a unique scrutinee and its binders are unique; it is only allowed
-  -- where the binder is the scrutinee's pointer: `[case]` on `⊕ᵢ Aᵢ`, `[deref]`, `[unroll]` and
-  -- `[unpack]` (`keepsPointer`).
+  -- where the binder is the scrutinee's pointer: `[case-a]`, `[split-a]`, `[if-whnf]`, `[deref]`,
+  -- `[unroll]` and `[unpack]` (`keepsPointer`).
   --
   --   Γ₁ ⊢ v :q V₁ ⊗ V₂    Γ₂, x :q V₁ ⊢ e : W
   --  ─────────────────────────────────────── [fst]
@@ -642,6 +656,14 @@ data VExpr
   -- pointer and runtime tags. Even singleton partitions keep their sum wrapper.
   -- Like CaseA, this supports owned, borrowed and unique modes without repacking.
   | SplitA Mode Path Int (Path,VExpr) (Path,VExpr)
+
+  --   Γ₁ ⊢ v :q L ~> S    Γ₂, s :q S ⊢ e₁ : W    Γ₂, l :q L ⊢ e₂ : W
+  --  ──────────────────────────────────────────────────────────────── [if-whnf]
+  --   Γ₁, Γ₂ ⊢ if-whnf_q v of { whnf s -> e₁; delay l -> e₂ } : W
+  --
+  -- Branches on whether a lazy value is in WHNF, by its tag (the strict tags come before the
+  -- thunks). Like `[split-a]`, the binders are the pointer of v at any mode, with their tags.
+  | IfWhnf Mode Path (Path,VExpr) (Path,VExpr)
 
   --   Γ₁ ⊢ v :q A*    Γ₂, x :q A ⊢ e : W
   --  ───────────────────────────────────── [deref]
@@ -768,15 +790,6 @@ data VExpr
   -- (`Query.uniqueGamma`), which `[free]` frees without touching the taken contents.
   | IsUnique Path VExpr VExpr
 
-  --   Γ, x :q whnf(τ)* | J ⊢ e₁ : W    Γ, x :q τ* | J ⊢ e₂ : W
-  --  ───────────────────────────────────────────────────────── [if-whnf]
-  --   Γ, x :q τ* | J ⊢ if-whnf x then e₁ else e₂ : W
-  --
-  -- Branches on whether a lazy value is in WHNF, by its tag (the strict tags come before the
-  -- lazy ones), and narrows its type in the first branch (`Query.whnfGamma`). The test reads
-  -- `x` at any mode, and consumes nothing.
-  | IfWhnf Path VExpr VExpr
-
   --   Γ, r : ◆n[k; p : V] ⊢ e₁ : W    Γ ⊢ e₂ : W
   --  ─────────────────────────────────────────────── [if-full]
   --   Γ, r : ◇n[k; p : V] ⊢ if-full r then e₁ else e₂ : W
@@ -807,9 +820,10 @@ data VExpr
   --   Γ[z.taken / z.contents], c : cell_|V|⟨τ⟩ | J ⊢ e : W
   --  ──────────────────────────────────────────────────────── [lock]
   --   Γ, z : Box V | J ⊢ let lock c = z in e : W
-  --                 (z = y.roll.injⱼ with y : τ and j ∈ lazy(τ); z.contents :^ V ∈ Γ)
+  --                 (z = y.roll.delay.p.injⱼ with y : τ, p ∈ {lo,hi}*; z.contents :^ V ∈ Γ)
   --
-  -- The counterpart of `[unbox-ru]` for an owned, possibly shared, thunk: its contents are taken
+  -- The counterpart of `[unbox-ru]` for an owned, possibly shared, thunk (the `delay` step shows
+  -- that z is one): its contents are taken
   -- out of the block without reference counting and renamed to `z.taken`, as there (where the
   -- split loads the parts that `e` uses), and its block becomes the cell `c`, a new root, which must be filled by `[memoize]` (or freed if it
   -- turns out to be unique, `[if-unique-cell]`). Consuming `z` consumes the pointer it was

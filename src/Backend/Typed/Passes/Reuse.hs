@@ -29,7 +29,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, whnfGamma, boxContents, reuseSize, inferE, noJoins, unrollT, trivialTy )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize, inferE, noJoins, unrollT, trivialTy )
 
 -- credits with the size of their block
 type Credits = [(Path,Int)]
@@ -181,10 +181,6 @@ ruE expr
         -> do g <- asks reGamma
               es <- branchActions [withGamma (uniqueGamma g x) (ruE e1), sharedDrop x e2]
               return (IsUnique x (es !! 0) (es !! 1))
-      IfWhnf x e1 e2
-        -> do re <- ask
-              es <- branchActions [withGamma (whnfGamma (reEnv re) (reGamma re) x) (ruE e1), ruE e2]
-              return (IfWhnf x (es !! 0) (es !! 1))
       IfFull r e1 e2
         -> do es <- branches [([],e1),([],e2)]
               return (IfFull r (es !! 0) (es !! 1))
@@ -194,7 +190,7 @@ ruE expr
               UnboxRu v r <$> withGamma g' (ruE e)
       Lock z c e
         -> do re <- ask
-              g' <- liftE (lockGamma (reEnv re) (reGamma re) z c)
+              g' <- liftE (lockGamma (reGamma re) z c)
               Lock z c <$> withGamma g' (ruE e)
       Ret _ -> plain
       Yielded _ -> plain
@@ -212,6 +208,7 @@ ruE expr
       CaseV{} -> plain
       CaseA{} -> plain
       SplitA{} -> plain
+      IfWhnf{} -> plain
       Deref{} -> plain
       Unroll{} -> plain
       Unbox{} -> plain

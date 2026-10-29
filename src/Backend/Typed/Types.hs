@@ -84,8 +84,8 @@ traverseReuseContents f = goV
       AApp v ts -> AApp v <$> traverse goA ts
       ACon n ts -> ACon n <$> traverse goA ts
       ALam vs b -> ALam vs <$> goA b
-      AMu l x vs b ts -> AMu l x vs <$> goA b <*> traverse goA ts
-      AWhnf b -> AWhnf <$> goA b
+      ALazy l b -> ALazy <$> goA l <*> goA b
+      AMu x vs b ts -> AMu x vs <$> goA b <*> traverse goA ts
       AUnit -> pure a
       AVar _ -> pure a
 
@@ -157,8 +157,8 @@ substA sub a
       AFun ps r     -> AFun [(m,substV sub p) | (m,p) <- ps] (substV sub r)
       AForall tvs b -> AForall tvs (substA (foldr M.delete sub tvs) b)
       ALam tvs b    -> ALam tvs (substA (foldr M.delete sub tvs) b)
-      AMu l x tvs b ts -> AMu l x tvs (substA (foldr M.delete sub (x:tvs)) b) (map (substA sub) ts)
-      AWhnf b       -> AWhnf (substA sub b)
+      ALazy l b     -> ALazy (substA sub l) (substA sub b)
+      AMu x tvs b ts -> AMu x tvs (substA (foldr M.delete sub (x:tvs)) b) (map (substA sub) ts)
       AUnit         -> AUnit
 
 -- type application, with β-reduction of type lambdas
@@ -171,7 +171,7 @@ applyA f ts
       ACon n ss -> ACon n (ss ++ ts)
       ALam vs b | length vs == length ts -> inst vs ts b
                 | length vs > length ts  -> ALam (drop (length ts) vs) (inst (take (length ts) vs) ts b)
-      AMu l x vs b ss -> AMu l x vs b (ss ++ ts)
+      AMu x vs b ss -> AMu x vs b (ss ++ ts)
       _         -> AApp (-1) ts
 
 ftvV :: VType -> [TVar]
@@ -199,8 +199,8 @@ ftvA a
       AFun ps r     -> concatMap (ftvV . snd) ps ++ ftvV r
       AForall vs b  -> filter (`notElem` vs) (ftvA b)
       ALam vs b     -> filter (`notElem` vs) (ftvA b)
-      AMu _ x vs b ts -> filter (`notElem` (x:vs)) (ftvA b) ++ concatMap ftvA ts
-      AWhnf b       -> ftvA b
+      ALazy l b     -> ftvA l ++ ftvA b
+      AMu x vs b ts -> filter (`notElem` (x:vs)) (ftvA b) ++ concatMap ftvA ts
       AUnit         -> []
 
 isPtr :: VType -> Bool
@@ -243,8 +243,8 @@ boxFunA a
       AApp _ _      -> a
       ACon _ _      -> a
       ALam _ _      -> a
-      AMu _ _ _ _ _ -> a
-      AWhnf _       -> a
+      ALazy _ _     -> a
+      AMu _ _ _ _   -> a
 
 -- Koka's `box`: a raw value is boxed by itself, any other value as a shape, and a product of a
 -- single raw value or enumeration (`scalarField`) like that field
@@ -363,9 +363,9 @@ eqA s t
         -> eqA a (inst bs (map AVar as) b)
       (ALam as a, ALam bs b) | length as == length bs
         -> eqA a (inst bs (map AVar as) b)
-      (AMu l x as a ss, AMu k y bs b ts) | l == k && length as == length bs
+      (ALazy l a, ALazy k b)  -> eqA l k && eqA a b
+      (AMu x as a ss, AMu y bs b ts) | length as == length bs
         -> eqA a (inst (y:bs) (map AVar (x:as)) b) && eqAs ss ts
-      (AWhnf a, AWhnf b)      -> eqA a b
       _ -> s == t
 
 matchVWith :: [TVar] -> Sub -> VType -> VType -> Maybe Sub
@@ -423,11 +423,11 @@ matchAWith tvs sub pat t
                      ALam bs s | length as == length bs
                        -> matchAWith tvs sub p (inst bs (map AVar as) s)
                      _ -> Nothing
-      AWhnf p   -> case t of
-                     AWhnf s -> matchAWith tvs sub p s
+      ALazy l p -> case t of
+                     ALazy k s -> matchAWith tvs sub l k >>= \sub' -> matchAWith tvs sub' p s
                      _ -> Nothing
-      AMu l x as p ps -> case t of
-                         AMu k y bs s ts | l == k && length as == length bs
+      AMu x as p ps -> case t of
+                         AMu y bs s ts | length as == length bs
                            -> matchAWith tvs sub p (inst (y:bs) (map AVar (x:as)) s) >>= \sub' -> matchAs sub' ps ts
                          _ -> Nothing
       AVar _    -> if pat == t then Just sub else Nothing

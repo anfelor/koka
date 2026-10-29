@@ -50,11 +50,9 @@ prettyA a
       ACon n []     -> nm n
       ACon n ts     -> nm n <.> angles (commaSep (map prettyA ts))
       ALam vs b     -> parens (text "\\" <.> hsep (map tv vs) <.> text "." <+> prettyA b)
-      AMu l x vs b ts -> parens (text "mu" <+> tv x <.> angles (commaSep (map tv vs)) <.> text "."
-                                 <+> (if null l then empty else text "lazy" <.> braces (commaSep (map (text . show) l)))
-                                 <+> prettyA b)
-                           <.> angles (commaSep (map prettyA ts))
-      AWhnf b       -> text "whnf" <.> parens (prettyA b)
+      ALazy l b     -> parens (prettyA l <+> text "~>" <+> prettyA b)
+      AMu x vs b ts -> parens (text "mu" <+> tv x <.> angles (commaSep (map tv vs)) <.> text "." <+> prettyA b)
+                         <.> angles (commaSep (map prettyA ts))
 
 mode :: Mode -> Doc
 mode Owned    = empty
@@ -110,6 +108,10 @@ args vs = parens (commaSep (map prettyVal vs))
 params :: [(Path,Mode,VType)] -> Doc
 params ps = parens (commaSep [mode m <.> pv x <+> colon <+> prettyV t | (x,m,t) <- ps])
 
+side :: Side -> Doc
+side Whnf  = text "whnf"
+side Delay = text "delay"
+
 prettyAVal :: AVal -> Doc
 prettyAVal val
   = case val of
@@ -117,6 +119,7 @@ prettyAVal val
       UnitA      -> text "()"
       InjA i _ v -> text "inj-a" <.> int i <+> atomAVal v
       Roll _ v   -> text "roll" <+> atomAVal v
+      InjLazy d _ v -> side d <+> atomAVal v
       Box v      -> text "box" <+> atomVal v
       Scalar v   -> text "scalar" <+> atomVal v
       OpenCon c ts vs -> nm c <.> tyArgs ts <.> args vs
@@ -146,7 +149,7 @@ prettyVal val
       Plug c v    -> atomVal c <.> brackets (prettyVal v)
       CtxCopy v   -> text "ctx-copy" <+> atomVal v
       Append c d  -> atomVal c <+> text "++" <+> atomVal d
-      Memoize c k v -> text "memoize" <+> atomVal c <+> parens (text "inj" <.> int k <+> atomVal v)
+      Memoize c d k v -> text "memoize" <+> atomVal c <+> parens (side d <+> parens (text "inj" <.> int k <+> atomVal v))
 
 atomAVal :: AVal -> Doc
 atomAVal v
@@ -164,7 +167,7 @@ atomVal v
       Context _ _ -> parens (prettyVal v)
       CtxCopy _ -> parens (prettyVal v)
       Append _ _ -> parens (prettyVal v)
-      Memoize _ _ _ -> parens (prettyVal v)
+      Memoize _ _ _ _ -> parens (prettyVal v)
       _         -> prettyVal v
 
 prettyLit :: Lit -> Doc
@@ -191,6 +194,7 @@ prettyExpr expr
       Snd m v x e -> letIn (mode m) (pv x) (atomVal v <.> text ".snd") e
       CaseV m v alts -> caseOf (text "case" <.> mode m) (prettyVal v) [(text "inj" <.> int i <+> pv x, e) | (i,x,e) <- alts]
       SplitA m v k (x,e1) (y,e2) -> caseOf (text "split" <.> mode m) (pv v <+> text "at" <+> int k) [(pv x, e1), (pv y, e2)]
+      IfWhnf m v (x,e1) (y,e2) -> caseOf (text "if-whnf" <.> mode m) (pv v) [(side Whnf <+> pv x, e1), (side Delay <+> pv y, e2)]
       CaseA m v alts def -> caseOf (text "case" <.> mode m) (pv v)
                               ([(text "inj-a" <.> int i <+> pv x, e) | (i,x,e) <- alts] ++ [(text "_" <+> pv x, e) | Just (x,e) <- [def]])
       Deref m v x e -> letIn (mode m) (text "ptr" <+> pv x) (prettyVal v) e
@@ -204,7 +208,6 @@ prettyExpr expr
       Drop x e -> text "drop" <+> pv x <.> semi <-> prettyExpr e
       Free r e -> text "free" <+> pv r <.> semi <-> prettyExpr e
       IsUnique x e1 e2 -> ifThen (text "if-unique" <+> pv x) e1 e2
-      IfWhnf x e1 e2 -> ifThen (text "if-whnf" <+> pv x) e1 e2
       IfFull r e1 e2 -> ifThen (text "if-full" <+> pv r) e1 e2
       UnboxRu v r e -> letIn empty (text "@" <+> pv r) (pv v) e
       Lock z c e -> letIn empty (text "lock" <+> pv c) (pv z) e

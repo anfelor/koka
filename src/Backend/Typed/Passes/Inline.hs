@@ -39,7 +39,7 @@ import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, whnfGamma )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma )
 
 -- the structural values bound by lets
 type Values = M.Map Path VVal
@@ -164,12 +164,10 @@ reuseE expr
                           g' <- liftE (unboxRuGamma g z r)
                           UnboxRu z r <$> local (const (env,g',M.mapKeys (rebase z) facts,src)) (reuseE e)
       Lock z c e -> do (env,g,facts,src) <- ask
-                       g' <- liftE (lockGamma env g z c)
+                       g' <- liftE (lockGamma g z c)
                        Lock z c <$> local (const (env,g',M.mapKeys (rebase z) facts,src)) (reuseE e)
       IsUnique x e1 e2 -> do (env,g,facts,src) <- ask
                              IsUnique x <$> local (const (env,uniqueGamma g x,facts,src)) (reuseE e1) <*> reuseE e2
-      IfWhnf x e1 e2 -> do (env,g,facts,src) <- ask
-                           IfWhnf x <$> local (const (env,whnfGamma env g x,facts,src)) (reuseE e1) <*> reuseE e2
       Dup x y e -> do (_,g,_,_) <- ask
                       t <- liftE (inferVar g x >>= dupType x)
                       Dup x y <$> bindReuse [(y,t)] (reuseE e)

@@ -112,6 +112,7 @@ exE full expr
       CaseV{} -> alternatives
       CaseA{} -> alternatives
       SplitA{} -> alternatives
+      IfWhnf{} -> alternatives
       CaseLit{} -> alternatives
       _ -> descendE pure exV (\_ e -> exE full e) expr
   where

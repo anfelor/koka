@@ -12,6 +12,7 @@ module Backend.Typed.Elab.TypeInfo( Tr
                                   , elabType, elabFunType, elabScheme
                                   , isValueInfo, elabArgs
                                   , conIndex, conFieldTypes, schemeFieldTypes, conCount, conShape, conExists, padFields
+                                  , isLazyInfo, refShape, refInj
                                   , dataInfoOf, valueBody
                                   , tvarStar
                                   ) where
@@ -203,6 +204,29 @@ conShape :: Newtypes -> [AType] -> ConInfo -> Tr AType
 conShape nt vargs con
   | null (conInfoParams con) = Right AUnit
   | otherwise = ABox <$> conValueFields nt vargs con
+
+-- a lazy datatype has an indirection among its constructors
+isLazyInfo :: DataInfo -> Bool
+isLazyInfo info = any (isLazyIndirectConName . conInfoName) (dataInfoConstrs info)
+
+-- The unrolling of a reference datatype, given the shapes of its constructors: their sum by
+-- tag, or for a lazy datatype the lazy sum `L ~> S` of its thunks (the lazy constructors) and
+-- its strict alternatives.
+refShape :: DataInfo -> [AType] -> AType
+refShape info shapes
+  | isLazyInfo info = ALazy (ASum (side True)) (ASum (side False))
+  | otherwise = sumOf shapes
+  where
+    side lz = [(tag,s) | (tag,con,s) <- zip3 [1..] (dataInfoConstrs info) shapes, conInfoIsLazy con == lz]   -- tags start at 1
+
+-- the injection of the constructor with index i into the unrolling of its reference datatype
+refInj :: DataInfo -> [AType] -> Int -> AVal -> AVal
+refInj info shapes i v
+  = case refShape info shapes of
+      t@(ALazy l s) | conInfoIsLazy (dataInfoConstrs info !! i) -> InjLazy Delay t (InjA (i+1) l v)
+                    | otherwise -> InjLazy Whnf t (InjA (i+1) s v)
+      t@(ASum _) -> InjA (i+1) t v
+      _ -> v
 
 conCount :: DataInfo -> Int
 conCount = length . dataInfoConstrs

@@ -10,8 +10,8 @@
 -- Type inference and environment queries shared by typed IR consumers.
 -- Keep inference in sync with the typing rules in Syntax.
 module Backend.Typed.Query( Env(..), Gamma, noJoins, yieldJoins, envOf, bindAll, checkE, inferE, inferA, inferV
-                          , inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, whnfGamma, hasWhnf, boxContents, reuseSize
-                          , unrollT, lazyTags, trivialTy, openFields, funSig, paramModes, altPattern, pointerShape ) where
+                          , inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize
+                          , unrollT, lazySides, trivialTy, openFields, funSig, paramModes, altPattern, pointerShape ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -63,10 +63,10 @@ inferE env g js e = do mapM_ checkReuseTy (M.elems g)
                        inferExpr env g js e
 
 -- Forgetting a description, its tag, or that a credit is full or a context nonempty is allowed;
--- inventing any is not. A cell can be used as a smaller one, and a value in WHNF as a lazy one.
+-- inventing any is not. A cell can be used as a smaller one.
 expectV :: Env -> VType -> VType -> Q ()
 expectV _ expected actual
-  = expect expected (forget expected (forgetWhnfV expected actual))
+  = expect expected (forget expected actual)
   where
     forget (VReuse f _ p) (VReuse g n q) = VReuse (if f == MaybeEmpty then f else g) n (forgetDesc p q)
     forget (VCtx f _ _) (VCtx g a b) = VCtx (if f == MaybeEmpty then f else g) a b
@@ -80,33 +80,6 @@ expectV _ expected actual
                        (Just (Contents Nothing _ _), Just (Contents _ v s)) -> Just (Contents Nothing v s)
                        (Just _, _) -> q
                        (Nothing, _) -> Nothing
-
--- The actual type with `whnf(τ)` as τ where the expected type has the latter, also
--- behind pointers and in boxes.
-forgetWhnfV :: VType -> VType -> VType
-forgetWhnfV expected actual
-  = case (expected,actual) of
-      (VPtr a, VPtr b) -> VPtr (forgetWhnfA a b)
-      (VProd a b, VProd c d) -> VProd (forgetWhnfV a c) (forgetWhnfV b d)
-      (VSum ts, VSum us) | length ts == length us -> VSum (zipWith forgetWhnfV ts us)
-      _ -> actual
-
-forgetWhnfA :: AType -> AType -> AType
-forgetWhnfA expected actual
-  = case (expected,actual) of
-      (a, AWhnf b) | alphaEq a b -> a
-      (ABox v, ABox u) -> ABox (forgetWhnfV v u)
-      (ASum as, ASum bs) | map fst as == map fst bs -> ASum [(i,forgetWhnfA a b) | ((i,a),(_,b)) <- zip as bs]
-      _ -> actual
-
--- `whnf(τ)*` as `τ*` in a value
-widenWhnf :: VType -> VType
-widenWhnf t = case t of
-  VPtr (AWhnf a) -> VPtr a
-  VProd a b -> VProd (widenWhnf a) (widenWhnf b)
-  VSum ts -> VSum (map widenWhnf ts)
-  VExists vs b -> VExists vs (widenWhnf b)
-  _ -> t
 
 -- Forget only credits and contexts carried by a value, not contracts behind a pointer.
 mapCredits :: (Fill -> Fill) -> (Maybe Contents -> Maybe Contents) -> VType -> VType
@@ -175,11 +148,6 @@ inferExpr env g js expr
                                V (VCell _ _) -> return ()
                                _ -> () <$ (inferAVar g x >>= boxContents >>= reuseSize)
                              branches env [inferE env (uniqueGamma g x) js e1, inferE env g js e2]
-      IfWhnf x e1 e2 -> do t <- inferVar g x
-                           case t of
-                             V (VPtr a) | hasWhnf env a -> return ()
-                             _ -> Left ("WHNF test of a value that is not lazy with strict alternatives: " ++ ppr t)
-                           branches env [inferE env (whnfGamma env g x) js e1, inferE env g js e2]
       -- the credit is full in the first branch and empty in the second
       IfFull r e1 e2 -> do t <- inferV env g (Var r)
                            case t of
@@ -187,7 +155,7 @@ inferExpr env g js expr
                              _ -> Left ("test of a non-credit: " ++ ppr t)
       UnboxRu v r e -> do g' <- unboxRuGamma g v r
                           inferE env g' js e
-      Lock z c e -> do g' <- lockGamma env g z c
+      Lock z c e -> do g' <- lockGamma g z c
                        inferE env g' js e
       Join j tvs ps e1 e2 -> do let xs = [x | (x,_,_) <- ps]
                                 unless (S.disjoint (fvE e1 `S.difference` S.fromList xs) (S.fromList (bindersE e2)))
@@ -197,11 +165,7 @@ inferExpr env g js expr
                                 t <- inferE env (bindAll [(x,V p) | (x,_,p) <- ps] g) js e1
                                 unbound tvs (ftv t ++ ftvCtx g e1)
                                 let caps = S.unions (S.difference (fvE e1) (S.fromList xs) : [cs | (k,(cs,_,_,_)) <- M.toList (jsPoints js), not (null (jumpArgs k e1))])
-                                -- uses that disagree on WHNF agree on the lazy type, as in `branches`
-                                let scope r = r <$ checkE env g js{ jsPoints = M.insert j (caps,tvs,[p | (_,_,p) <- ps],r) (jsPoints js) } e2 r
-                                case scope t of
-                                  Left _ | not (alphaEq t (widenWhnf t)) -> scope (widenWhnf t)
-                                  r -> r
+                                t <$ checkE env g js{ jsPoints = M.insert j (caps,tvs,[p | (_,_,p) <- ps],t) (jsPoints js) } e2 t
       -- the captured variables must still be in scope (`[unbox-ru]` renames the contents of a box)
       Jump j ts vs -> case M.lookup j (jsPoints js) of
                      Just (caps,tvs,ps,t) -> do forM_ (S.toList caps) $ \x ->
@@ -262,6 +226,7 @@ altTypes env t expr
         let (ls,rs) = span ((< k) . fst) ts
         unless (not (null ls) && not (null rs)) (Left "invalid boxed sum partition")
         return [[A (ASum ls)], [A (ASum rs)]]
+      (IfWhnf{}, A (ALazy l a)) -> return [[A a], [A l]]
       (CaseA _ _ alts def, A a@(ASum ts)) -> do
         checkShape a
         let indices = [i | (i,_,_) <- alts]
@@ -299,17 +264,14 @@ unboxRuGamma g z r
 
 -- The context of the body of `[lock]`: as for `[unbox-ru]`, the contents `z.contents` of the
 -- box must have been read and are renamed to `z.taken`, and the binder is the cell of the
--- block, a new root. The box is a lazy alternative of a value `y` of a lazy type.
-lockGamma :: Env -> Gamma -> Path -> Path -> Q Gamma
-lockGamma env g z c
+-- block, a new root. The box is a thunk of a value `y` of a lazy type, also after `[split-a]`.
+lockGamma :: Gamma -> Path -> Path -> Q Gamma
+lockGamma g z c
   = do s <- inferAVar g z >>= boxContents
        t <- case z of
-              Path r ss | (SInjA j : SRoll : rest) <- reverse ss
-                -> do let y = Path r (reverse rest)
-                      t <- inferAVar g y
-                      unless (j `elem` lazyTags env t) (Left ("locking " ++ show z ++ ", a strict alternative of " ++ ppr (A t)))
-                      return t
-              _ -> Left ("locking " ++ show z ++ ", which is not an alternative of a lazy value")
+              Path r ss | (SInjA _ : splits) <- reverse ss, (SDelay : SRoll : rest) <- dropWhile (`elem` [SLo,SHi]) splits
+                -> inferAVar g (Path r (reverse rest))
+              _ -> Left ("locking " ++ show z ++ ", which is not a thunk of a lazy value")
        n <- reuseSize s
        case M.lookup (child z SContents) g of
          Just (V s') | alphaEq s s' -> return ()
@@ -323,17 +285,6 @@ uniqueGamma g x
       Just (V (VCell n _)) -> M.insert x (V (VReuse Full n Nothing)) g
       _ -> g
 
--- Γ of the first branch of `[if-whnf]`: `x` in WHNF, if it is a lazy value with strict alternatives
-whnfGamma :: Env -> Gamma -> Path -> Gamma
-whnfGamma env g x
-  = case M.lookup x g of
-      Just (V (VPtr a)) | hasWhnf env a -> M.insert x (V (VPtr (AWhnf a))) g
-      _ -> g
-
--- whether `whnf(τ)` is formed: τ is lazy with strict alternatives
-hasWhnf :: Env -> AType -> Bool
-hasWhnf env a = either (const False) (const True) (unrollT env (AWhnf a))
-
 branches :: Env -> [Q VType] -> Q VType
 branches env cs = do ts <- sequence cs
                      case ts of
@@ -344,9 +295,9 @@ branches env cs = do ts <- sequence cs
                          | otherwise -> do mapM_ (expect (erase t) . erase) rest
                                            return (erase t)
   where
-    -- disagreeing branches forget credits, contexts and WHNF
-    weaken = widenWhnf . mapCredits (const MaybeEmpty) id
-    erase = widenWhnf . mapCredits (const MaybeEmpty) (const Nothing)
+    -- disagreeing branches forget credits and contexts
+    weaken = mapCredits (const MaybeEmpty) id
+    erase = mapCredits (const MaybeEmpty) (const Nothing)
 
 funSig :: Env -> Name -> [AType] -> Q ([VType],VType)
 funSig env f tys
@@ -372,32 +323,24 @@ checkArgs env g ps vs
 unrollT :: Env -> AType -> Q AType
 unrollT env t
   = case t of
-      AMu l x vs a bs | length vs == length bs
-        -> return (unrollMu (if null vs then t else ALam vs (AMu l x vs a (map AVar vs))) x vs a bs)
-      AWhnf a -> do b <- unrollT env a
-                    let lz = lazyTags env a
-                    case b of
-                      ASum ts | not (null lz), any ((`notElem` lz) . fst) ts
-                        -> return (ASum [alt | alt@(i,_) <- ts, i `notElem` lz])
-                      _ -> Left ("whnf of a type that is not lazy with strict alternatives: " ++ ppr (A a))
+      AMu x vs a bs | length vs == length bs
+        -> return (unrollMu (if null vs then t else ALam vs (AMu x vs a (map AVar vs))) x vs a bs)
       ACon n args -> case M.lookup n (envTypes env) of
                        Just (TypeDef _ tvs (Just body)) | length tvs == length args
                          -> case body of
-                              AMu _ x vs a bs | bs == map AVar tvs -> return (unrollMu (ACon n []) x vs a args)
+                              AMu x vs a bs | bs == map AVar tvs -> return (unrollMu (ACon n []) x vs a args)
                               _ -> unrollT env (inst tvs args body)
                        Just _  -> Left ("cannot unroll abstract type " ++ show n)
                        Nothing -> Left ("unknown type " ++ show n)
       _ -> Left ("unroll of " ++ ppr (A t))
 
--- `lazy(τ)`: the tags of the lazy alternatives of a lazy type, also by its name (none for
--- another type)
-lazyTags :: Env -> AType -> [Int]
-lazyTags env t
-  = case t of
-      AMu l _ _ _ _ -> l
-      ACon n args | Just (TypeDef _ tvs (Just body)) <- M.lookup n (envTypes env), length tvs == length args
-        -> lazyTags env (inst tvs args body)
-      _ -> []
+-- the thunks and the strict alternatives of a lazy type, `unroll(τ) = L ~> S`
+lazySides :: Env -> AType -> Q ([(Int,AType)],[(Int,AType)])
+lazySides env t
+  = do b <- unrollT env t
+       case b of
+         ALazy (ASum l) (ASum s) -> return (l,s)
+         _ -> Left ("not a lazy type: " ++ ppr (A t))
 
 -- values of these types need no references, also through named types
 trivialTy :: Env -> Ty -> Bool
@@ -418,7 +361,6 @@ pointerShape env t
       ACon n _ | not (S.member n seen)
                , Just TypeDef{} <- M.lookup n (envTypes env)
                , Right b <- unrollT env a -> shape (S.insert n seen) b
-      AWhnf _ | Right b <- unrollT env a -> shape seen b
       _ -> Nothing
 
 -- the fields of an open constructor at an instance `T⟨B̄⟩` of its type
@@ -451,7 +393,7 @@ litType lit
       LitFloat _  -> vtFloat
 
 checkA :: Env -> Gamma -> AVal -> AType -> Q ()
-checkA env g val t = inferA env g val >>= expect t . forgetWhnfA t
+checkA env g val t = inferA env g val >>= expect t
 
 checkV :: Env -> Gamma -> VVal -> VType -> Q ()
 checkV env g val t = do checkReuseTy (V t)
@@ -489,8 +431,9 @@ checkReuseTy ty = case ty of
     AFun ps r -> mapM_ (checkReuseTy . V) (map snd ps ++ [r])
     AForall _ b -> checkReuseTy (A b)
     ALam _ b -> checkReuseTy (A b)
-    AMu _ _ _ b ts -> mapM_ (checkReuseTy . A) (b : ts)
-    AWhnf b -> checkReuseTy (A b)
+    ALazy l b -> do checkLazy a
+                    checkReuseTy (A l) >> checkReuseTy (A b)
+    AMu _ _ b ts -> mapM_ (checkReuseTy . A) (b : ts)
     ACon _ ts -> mapM_ (checkReuseTy . A) ts
     AApp _ ts -> mapM_ (checkReuseTy . A) ts
     AVar _ -> return ()
@@ -523,6 +466,22 @@ inferAVar g x
 checkShape :: AType -> Q ()
 checkShape a = unless (isShape a) (Left ("sum alternatives must be shapes: " ++ ppr a))
 
+-- A lazy sum `L ~> S` consists of two sums, of thunks and of strict alternatives, whose tags
+-- are separated by the smallest tag of L.
+checkLazy :: AType -> Q ()
+checkLazy a
+  = case a of
+      ALazy l@(ASum ls) s@(ASum ss)
+        -> do checkShape l
+              checkShape s
+              unless (all (isBox . snd) ls) (Left ("the thunks of a lazy sum must be boxes: " ++ ppr a))
+              unless (maximum (map fst ss) < minimum (map fst ls)) (Left ("the strict tags of a lazy sum must come before its thunks: " ++ ppr a))
+      _ -> Left ("ill-formed lazy sum: " ++ ppr a)
+  where
+    isBox t = case t of
+                ABox _ -> True
+                _ -> False
+
 noHeapCredit :: VType -> Q ()
 noHeapCredit t = when (containsLinear (V t)) (Left "cannot store reuse credits or cells in a heap block")
 
@@ -539,6 +498,11 @@ inferA env g val
       Roll a v -> do b <- unrollT env a
                      checkA env g v b
                      return a
+      InjLazy d a v -> case a of
+                         ALazy l s -> do checkLazy a
+                                         checkA env g v (case d of Whnf -> s; Delay -> l)
+                                         return a
+                         _ -> Left ("invalid injection into the lazy sum " ++ ppr a)
       Box v -> do t <- inferV env g v
                   noHeapCredit t
                   return (ABox t)
@@ -614,18 +578,18 @@ inferV env g val
                       case t of
                         VCtx _ _ _ -> return t
                         _ -> Left ("unsharing a non-context: " ++ ppr t)
-      Memoize c k v -> do tc <- inferV env g c
-                          case tc of
-                            VCell n a -> do b <- unrollT env a
-                                            s <- case b of
-                                                   ASum ts | Just (ABox s) <- lookup k ts -> return s
-                                                   _ -> Left ("memoizing alternative " ++ show k ++ " of " ++ ppr (A a) ++ ", which is not a box")
-                                            checkV env g v s
-                                            noHeapCredit s
-                                            m <- reuseSize s
-                                            unless (m <= n) (Left ("memoizing " ++ show m ++ " bytes in a cell of " ++ show n ++ " bytes"))
-                                            return (VPtr a)
-                            _ -> Left ("memoizing into a non-cell: " ++ ppr tc)
+      Memoize c d k v -> do tc <- inferV env g c
+                            case tc of
+                              VCell n a -> do (l,ss) <- lazySides env a
+                                              s <- case lookup k (case d of Whnf -> ss; Delay -> l) of
+                                                     Just (ABox s) -> return s
+                                                     _ -> Left ("memoizing alternative " ++ show k ++ " of " ++ ppr (A a) ++ ", which is not a box on its side")
+                                              checkV env g v s
+                                              noHeapCredit s
+                                              m <- reuseSize s
+                                              unless (m <= n) (Left ("memoizing " ++ show m ++ " bytes in a cell of " ++ show n ++ " bytes"))
+                                              return (VPtr a)
+                              _ -> Left ("memoizing into a non-cell: " ++ ppr tc)
       DupV v -> do unless (isGlob v) (Left ("dup of a value that is not a global: " ++ ppr val))
                    inferV env g v
       TyApp v tys -> do tv <- inferV env g v

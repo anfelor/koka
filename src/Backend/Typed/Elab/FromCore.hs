@@ -11,7 +11,8 @@ module Backend.Typed.Elab.FromCore( elabProgram ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Data.List( find, sortOn )
+import Data.List( find, sortOn, partition )
+import Data.Maybe( isNothing, listToMaybe )
 import Control.Monad( foldM, unless )
 import Common.Name
 import Common.NamePrim( nameFieldAddrOf, nameCCtxHoleCreate, nameCCtxCreate, nameCCtxExtend, nameCCtxApply, nameCCtxEmpty, nameCCtxCompose, nameCCtxComposeExtend )
@@ -613,7 +614,7 @@ conValue info vargs idx exSub v
                           return (if conCount info > 1 then Inj idx t packed else packed)
   | otherwise = do shapes <- conShapes info vargs
                    let t = ACon (dataInfoName info) vargs
-                   return (Ptr t (Roll t (injA shapes idx (shapeVal (shapes !! idx)))))
+                   return (Ptr t (Roll t (refInj info shapes idx (shapeVal (shapes !! idx)))))
   where
     shapeVal (ABox t) = Box (packV t v)
     shapeVal _ = UnitA
@@ -736,22 +737,53 @@ elabBoxedCase :: DataInfo -> [AType] -> VVal -> [C.Branch] -> E VExpr
 elabBoxedCase info vargs v brs
   = do p <- fresh "d"
        z <- fresh "z"
-       let cons = dataInfoConstrs info
-           wild = [b | b@(C.Branch [C.PatWild] _) <- brs]
-           matches c (C.Branch [C.PatCon pc _ _ _ _ _ _ _] _) = getName pc == conInfoName c
-           matches _ _ = False
-           selected = [(i,c) | (i,c) <- zip [1..] cons, null wild || any (matches c) brs]   -- by tag
+       let cons = zip [1..] (dataInfoConstrs info)   -- by tag
        body <- case cons of
-                 [con] -> conBranch vargs con (Left z) (findBranch con brs)
-                 _ -> do alts <- mapM (boxedAlt vargs brs) selected
-                         def <- case wild of
-                                  b:_ | length selected < length cons -> do
-                                    y <- fresh "default"
-                                    e <- branchBody b
-                                    return (Just (y,e))
-                                  _ -> return Nothing
-                         return (CaseA Owned z alts def)
+                 [(_,con)] -> conBranch vargs con (Left z) (findBranch con brs)
+                 _ | isLazyInfo info -> lazyCase vargs brs z cons
+                   | otherwise -> sumCase vargs brs z cons (wildBody brs)
        return (Deref Owned v p (Unroll Owned p z body))
+
+-- A case on the alternatives `cons` of the boxed sum `z`. Those without a branch of their own
+-- take the default, if any; a case of the default alone is the default.
+sumCase :: [AType] -> [C.Branch] -> Path -> [(Int,ConInfo)] -> Maybe (E VExpr) -> E VExpr
+sumCase vargs brs z cons def
+  = do let selected = [(i,c) | (i,c) <- cons, isNothing def || any (matches c) brs]
+       alts <- mapM (boxedAlt vargs brs) selected
+       case def of
+         Just d | null alts -> d
+                | length selected < length cons -> do y <- fresh "default"
+                                                      e <- d
+                                                      return (CaseA Owned z alts (Just (y,e)))
+         _ -> return (CaseA Owned z alts Nothing)
+
+-- A match on a lazy value tests whether it is in WHNF (`[if-whnf]`), and then matches on its
+-- strict alternatives or on its thunks. Only a lazy match can name thunks, as Koka forces the
+-- value of every other match (`Type.Infer`); without a default, the thunks of a match that
+-- names none are thus `unreachable`. Inlining can remove the force, so a default may cover
+-- thunks as well as strict alternatives; it then appears on both sides, which is cheap as
+-- `Elab.Match` makes every body that is not an atom a jump to a join point.
+lazyCase :: [AType] -> [C.Branch] -> Path -> [(Int,ConInfo)] -> E VExpr
+lazyCase vargs brs z cons
+  = do s <- fresh "whnf"
+       l <- fresh "delay"
+       let (thunks,stricts) = partition (conInfoIsLazy . snd) cons
+           named = [c | (_,c) <- thunks, any (matches c) brs]
+           def = wildBody brs
+       e1 <- sumCase vargs brs s stricts def
+       e2 <- if null named && isNothing def then Unreachable <$> vt (typeOf (head brs))
+             else sumCase vargs brs l thunks def
+       return (IfWhnf Owned z (s,e1) (l,e2))
+
+-- the body of the default branch
+wildBody :: [C.Branch] -> Maybe (E VExpr)
+wildBody brs = listToMaybe [branchBody b | b@(C.Branch [C.PatWild] _) <- brs]
+
+matches :: ConInfo -> C.Branch -> Bool
+matches con br
+  = case br of
+      C.Branch [C.PatCon pc _ _ _ _ _ _ _] _ -> getName pc == conInfoName con
+      _ -> False
 
 boxedAlt :: [AType] -> [C.Branch] -> (Int,ConInfo) -> E (Int,Path,VExpr)
 boxedAlt vargs brs (i,con)

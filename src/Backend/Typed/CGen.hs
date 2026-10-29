@@ -35,7 +35,7 @@ import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types( inst, collapse, Types(..) )
-import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, whnfGamma, unrollT, lazyTags, openFields, boxContents, reuseSize, pointerShape )
+import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, unrollT, openFields, boxContents, reuseSize, pointerShape )
 import Backend.Typed.Layout hiding( dupExpr, dropStmt )
 import Backend.Typed.Monad
 
@@ -239,7 +239,7 @@ genV cx val
                       ce <- genV cx c
                       x <- fresh "c"
                       return (stmtExpr [cty ct <+> x <+> "=" <+> ce <.> ";", "kt_ctx_copy(&" <.> x <.> ".f0,&" <.> x <.> ".f1,_ctx);"] x)
-      Memoize c k v -> genBox cx k (In c) v
+      Memoize c _ k v -> genBox cx k (In c) v
 
 -- a context is `res` and the address of its hole; the empty context has neither
 genCtx :: Ctx -> AType -> VVal -> G Doc
@@ -309,6 +309,7 @@ genHolePath cx k
     blockOf a = case a of
                   Roll _ w -> blockOf w
                   InjA _ _ w -> blockOf w
+                  InjLazy _ _ w -> blockOf w
                   Box v -> payload v
                   BoxAt _ v -> payload v
                   _ -> failG ("not a one-hole value: " ++ show a)
@@ -348,6 +349,7 @@ genAIn cx tag val
       Roll _ v -> genAIn cx tag v
       InjA i (ASum _) v -> genAIn cx i v
       InjA _ _ _ -> failG "injection into a non-sum"
+      InjLazy _ _ v -> genAIn cx tag v
       Box v -> genBox cx tag Fresh v
       BoxAt r v -> genBox cx tag (At r) v
       Scalar v -> genScalar cx v
@@ -585,7 +587,7 @@ genUnboxRu cx dest z r e
 -- `[lock]` of `z` takes its block as a cell, the pointer to the block, which is then written.
 genLock :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
 genLock cx dest z c e
-  = do g' <- liftC (lockGamma (cxEnv cx) (cxGamma cx) z c)
+  = do g' <- liftC (lockGamma (cxGamma cx) z c)
        genTaken cx dest g' z e (declare "kk_box_t" c (localName z))
 
 -- The contents of `z` that are taken out of its block, with the declaration of the root that
@@ -832,7 +834,7 @@ genE cx dest expr
         -> do s1 <- genBound cx x t e1
               -- a shared cell stays shared once memoized
               let cx' = case e1 of
-                          Ret (Memoize (Var c) _ _) -> shareAlias cx c x
+                          Ret (Memoize (Var c) _ _ _) -> shareAlias cx c x
                           _ -> cx
               s2 <- genE (bindVar cx' x (V t)) dest e2
               return (s1 ++ s2)
@@ -901,23 +903,6 @@ genE cx dest expr
                        _ -> return s1
               s2 <- genE cx{ cxShared = shared } dest e2
               return ["if kk_likely(" <.> test <.> ")" <+> block s1' <+> "else" <+> block s2]
-      -- the strict tags come before the lazy ones, and only strict alternatives are immediate
-      IfWhnf x e1 e2
-        -> do t <- liftC (inferVar (cxGamma cx) x)
-              a <- case t of
-                     V (VPtr a) -> return a
-                     _ -> failG ("WHNF test of a non-pointer: " ++ show x)
-              alts <- liftC (unrollT (cxEnv cx) a)
-              xe <- genVar cx x
-              let lazies = lazyTags (cxEnv cx) a
-                  immediate = case alts of
-                                ASum as -> or [True | (_,AUnit) <- as]
-                                _ -> False
-                  test = (if immediate then "kk_datatype_is_whnf" else "kk_datatype_ptr_is_whnf")
-                         <.> "(kk_datatype_unbox(" <.> xe <.> ")," <.> text (show (minimum lazies)) <.> ",_ctx)"
-              s1 <- genE cx{ cxGamma = whnfGamma (cxEnv cx) (cxGamma cx) x } dest e1
-              s2 <- genE cx dest e2
-              return ["if kk_likely(" <.> test <.> ")" <+> block s1 <+> "else" <+> block s2]
       IfFull r e1 e2
         -> do t <- liftC (inferVar (cxGamma cx) r)
               full <- case t of
@@ -990,6 +975,17 @@ genE cx dest expr
                                    Just c -> ([],c)
                                    Nothing -> ([tagDecl t tg ve],tg <+> "<" <+> int k)
               return [block (header ++ [ifChain [(test,left)] right])]
+      -- the strict tags come before the thunks, and only strict alternatives are immediate
+      IfWhnf _ v (x,e1) (y,e2)
+        -> do t <- tyOfName cx v
+              [[ts@(A (ASum ss))],[tl@(A (ASum ls))]] <- liftC (altTypes (cxEnv cx) t expr)
+              let ve = localName v
+                  immediate = or [True | (_,AUnit) <- ss]
+                  test = (if immediate then "kk_datatype_is_whnf" else "kk_datatype_ptr_is_whnf")
+                         <.> "(kk_datatype_unbox(" <.> ve <.> ")," <.> int (minimum (map fst ls)) <.> ",_ctx)"
+              s1 <- genSumBranch cx dest v x ts e1
+              s2 <- genSumBranch cx dest v y tl e2
+              return [ifChain [("kk_likely(" <.> test <.> ")",s1)] s2]
       CaseA _ v alts def
         -> do t <- tyOfName cx v
               tss <- liftC (altTypes (cxEnv cx) t expr)
