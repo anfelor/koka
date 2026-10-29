@@ -24,7 +24,11 @@
     else (val y₁' = dup x₁; ..; val yₙ' = dup xₙ; drop z; jump j(y₁',..,yₙ',no-reuse n [k; z.contents : V]))
 
   In the unique branch the contents are renamed to `z.taken` (`[unbox-ru]`), so xᵢ' is the
-  part of `z.taken` at the steps of xᵢ from `z.contents`.
+  part of `z.taken` at the steps of xᵢ from `z.contents`. The loads of trivial parts
+  (`[load]`) among the copies stay before the test: the loaded parts are not in the block,
+  so they keep their names in both branches, and the join point captures those that `e`
+  uses. So do the parts of a sum loaded before a case on it (`z.contents.π.load`), which
+  the unique branch passes on as they are.
   The description of the credit names the contents and the tag k of the block, which follows
   from the path of `z`. The empty credit of the shared branch has the same description, so that
   the jumps agree on it. The shared branch is the original code. Freeing the credit releases
@@ -70,23 +74,27 @@ dsE :: VExpr -> D VExpr
 dsE expr
   = do (_,g) <- ask
        case transferOf g expr of
-         Just (others,inside,z,s,n,e) | Just ways <- mapM (wayTo (child z SContents) (map fst inside) . fst) inside
-           -> compose [Dup x y | (x,y) <- others] <$> specialize (zip inside ways) z s n e
+         Just (loads,others,inside,z,s,n,e) | Just ways <- mapM (wayTo (child z SContents) (map fst inside) . fst) inside
+           -> do ts <- mapM (liftE . inferVar g . fst) (loads ++ others)
+                 compose ([Load x y | (x,y) <- loads] ++ [Dup x y | (x,y) <- others])
+                   <$> bind (zip (map snd (loads ++ others)) ts) (specialize (zip inside ways) z s n e)
          _ -> dsPlain expr
 
--- The copies of parts of the contents of a box `z` (among other copies) that Perceus makes
--- before it drops `z`, with the type of the contents and the size of the block.
-transferOf :: Gamma -> VExpr -> Maybe ([(Path,Path)],[(Path,Path)],Path,VType,Int,VExpr)
+-- The copies and loads of parts of the contents of a box `z` (among other copies) that
+-- Perceus makes before it drops `z`, with the type of the contents and the size of the block.
+transferOf :: Gamma -> VExpr -> Maybe ([(Path,Path)],[(Path,Path)],[(Path,Path)],Path,VType,Int,VExpr)
 transferOf g expr
-  = do (cs,z,e) <- copiesThenDrop expr
-       let (inside,others) = partition ((`within` child z SContents) . fst) cs
-       guard (not (null inside))
+  = do (ls,cs,z,e) <- copiesThenDrop expr
+       let (inside,others) = partition (inContents z . fst) cs
+       guard (not (null inside) || any (inContents z . fst) ls)
        s <- either (const Nothing) Just (inferAVar g z >>= boxContents)
        n <- either (const Nothing) Just (reuseSize s)
-       return (others,inside,z,s,n,e)
+       return (ls,others,inside,z,s,n,e)
   where
-    copiesThenDrop (Dup x y e) = (\(cs,z,r) -> ((x,y):cs,z,r)) <$> copiesThenDrop e
-    copiesThenDrop (Drop z e) = Just ([],z,e)
+    inContents z x = x `within` child z SContents
+    copiesThenDrop (Dup x y e) = (\(ls,cs,z,r) -> (ls,(x,y):cs,z,r)) <$> copiesThenDrop e
+    copiesThenDrop (Load x y e) = (\(ls,cs,z,r) -> ((x,y):ls,cs,z,r)) <$> copiesThenDrop e
+    copiesThenDrop (Drop z e) = Just ([],[],z,e)
     copiesThenDrop _ = Nothing
 
 -- How the unique branch takes a copied part of the contents
@@ -126,7 +134,7 @@ specialize parts z s n e
            covered = [Dup (tk x) c | (((x,_),Covered),c) <- zip parts uniqueCopies]
            copies b = [Dup (tk x) c | (((x,_),Under _ b'),c) <- zip parts uniqueCopies, tk b' == b]
        g' <- liftE (unboxRuGamma g z r')
-       taken <- withGamma g' (dropExcept (moved ++ nub (map fst unders)) (tk p) s
+       taken <- withGamma g' (dropExcept z (moved ++ nub (map fst unders)) (tk p) s
                   (compose covered (compose [compose (copies b) . Drop b | b <- nub (map snd unders)] (Jump j [] (map Var uniqueCopies ++ [Var r'])))))
        unique <- dsE (UnboxRu z r' taken)
        sharedCopies <- mapM (const (fresh "u")) parts
@@ -135,23 +143,26 @@ specialize parts z s n e
        body <- bind [(y,V ty) | (y,_,ty) <- ps] (dsE (Free r e))
        return (Join j [] ps body (IsUnique z unique shared))
 
--- Drop `v : t` except for its parts `xs`, which the unique branch passes on.
-dropExcept :: [Path] -> Path -> VType -> VExpr -> D VExpr
-dropExcept xs v t e
-  | any (v `within`) xs = return e
-  | not (any (`within` v) xs)
+-- Drop `v : t` except for its parts `xs`, which the unique branch passes on. A part
+-- `z.taken.π` of the contents whose copy `z.contents.π.load` (which keeps its name) has parts
+-- that the unique branch passes on is dropped through the copy.
+dropExcept :: Path -> [Path] -> Path -> VType -> VExpr -> D VExpr
+dropExcept z xs v t e
   = do (env,g) <- ask
-       dropValue (trivialTy env) (fresh "d") (scopeOf (M.keys g)) v (V t) e
-  | VProd{} <- t
-  = do (_,g) <- ask
-       let fields = fieldsAt v t
-       body <- bind [(y,V s) | (y,_,s) <- fields] (foldM (\rest (y,_,s) -> dropExcept xs y s rest) e (reverse fields))
-       return (projectAll (scopeOf (M.keys g)) Borrowed v fields body)
-  | otherwise
-  = do (_,g) <- ask
-       case [(y,s) | (y,V s) <- M.toList g, y `within` v, length (stepsFrom v y) == 1, any (`within` y) xs] of
-         [(y,s)] -> dropExcept xs y s e
-         _ -> fail ("cannot drop the rest of " ++ show v)
+       let loaded = child (unrebase z v) SLoad
+       case t of
+         _ | v `within` child z STaken, M.member loaded g, any (`within` loaded) xs -> dropExcept z xs loaded t e
+           | any (v `within`) xs -> return e
+           | not (any (`inside` v) xs) -> dropValue (trivialTy env) (fresh "d") (scopeOf (M.keys g)) v (V t) e
+         VProd{} -> do let fields = fieldsAt v t
+                       body <- bind [(y,V s) | (y,_,s) <- fields] (foldM (\rest (y,_,s) -> dropExcept z xs y s rest) e (reverse fields))
+                       return (projectAll (scopeOf (M.keys g)) Borrowed v fields body)
+         _ -> case [(y,s) | (y,V s) <- M.toList g, y `within` v, length (stepsFrom v y) == 1, any (`inside` y) xs] of
+                [(y,s)] -> dropExcept z xs y s e
+                _ -> fail ("cannot drop the rest of " ++ show v)
+  where
+    -- a part of `y`, or of its copy loaded out of the contents
+    inside x y = x `within` y || x `within` unrebase z y
 
 dsPlain :: VExpr -> D VExpr
 dsPlain expr
