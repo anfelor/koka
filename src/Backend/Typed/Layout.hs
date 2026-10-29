@@ -18,7 +18,7 @@
   Structs are named by a hash of their layout so modules agree on them.
 -}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Layout( CT(..), EnumSize(..), layout, readInPlace, placeBinders, leaves, leafSlots, isEnum, orderFields, memoryOrder, shapeIsHeap, shapeIsSmall
+module Backend.Typed.Layout( CT(..), EnumSize(..), layout, leaves, leafSlots, isEnum, orderFields, memoryOrder, shapeIsHeap, shapeIsSmall
                            , checkLayout, ctName, scanOf, rawOf, needsRC
                            , structDefs, blockName, blockDef, blockSize, lazyBlockSize, isBlock, scalarField
                            , dupExpr, dropStmt, dupFun, dropFun, primBox, scalarHeapSize, fnv
@@ -71,30 +71,6 @@ shapeIsSmall a = case a of
   ABox v -> blockSize (layout v) <= 128 * 8
   ASum ts -> not (null ts) && all (\(i,b) -> i > 0 && i <= 0xFFC0 && shapeIsSmall b) ts
   _ -> False
-
--- A product in a box is read in place: code generation binds the contents of the box as a
--- pointer into its block, and a projection of a place reads the field into a local, unless
--- the field is such a product itself.
-readInPlace :: VType -> Bool
-readInPlace t
-  = case t of
-      VProd{} -> case layout t of { CProd{} -> True; _ -> False }
-      VExists _ b -> readInPlace b
-      _ -> False
-
--- The binders of a destructuring that are places (`[bunbox]`), with the variable that each is
--- a place of: the contents of a box `z` are a place of `z`, and the binders of `[unpack]` and
--- `[proj]` of a place `p` are places of `p`. Each only if its type is read in place: other
--- parts of a place are loaded where they are bound.
-placeBinders :: (Path -> Bool) -> VExpr -> [Path] -> [Ty] -> [(Path,Path)]
-placeBinders isPlace e xs ts
-  = case e of
-      Unbox _ z _ _ -> inPlace z
-      Unpack _ (Var p) _ _ _ | isPlace p -> inPlace p
-      Proj _ (Var p) _ _ _ | isPlace p -> inPlace p
-      _ -> []
-  where
-    inPlace z = [(x,z) | (x,V t) <- zip xs ts, readInPlace t]
 
 -- The layout of a type, with the leaves of a product in the order of the type: memory order
 -- once the program is in layout normal form (`OrderFields`).

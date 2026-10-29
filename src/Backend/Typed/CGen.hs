@@ -474,10 +474,10 @@ genBox cx tag at v
                                return (stmtExpr ([cty ct <+> v <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> clear <.> ";",
                                                   setPath] ++ storeFrom v) box)
 
--- A projection reads exactly the selected field (`[proj]`), where it is, and copies it into a
--- local. A product read in place stays a place (`isPlace`), read at its uses.
-genProjection :: Ctx -> Dest -> VExpr -> VVal -> [Step] -> Path -> VExpr -> G [Doc]
-genProjection cx dest proj v ss x e = do
+-- A projection of a place is a place: the selected field (`[proj]`), read at its uses. A
+-- projection of a local copies the field into a local.
+genProjection :: Ctx -> Dest -> VVal -> [Step] -> Path -> VExpr -> G [Doc]
+genProjection cx dest v ss x e = do
   t <- tyOf cx v
   (base,pre) <- case v of
     Var z -> do b <- genVar cx z
@@ -488,7 +488,7 @@ genProjection cx dest proj v ss x e = do
             return (z,[cty ct <+> z <+> "=" <+> ve <.> ";"])
   (start,u) <- liftC (fieldRange t ss)
   p <- projLeaves t base start u
-  if isPlace cx proj x (V u)
+  if isPlace cx v
     then genE (bindPlace cx x u p) dest e
   -- a later pass may remove every use (DropSpec removes the drop of a field that reuse overwrites)
   else if not (any (`within` x) (fvE e))
@@ -549,17 +549,17 @@ genAlias cx dest ve x t e
   = do s <- genE (bindVar cx x t) dest e
        return ([declare "kk_box_t" x ve] ++ s)
 
--- A place stays in its box: it is read at its uses, while the box is alive (Linear), and loaded
--- at `[proj]` of a field that is not a place (`genProjection`), at `[dup]` and at `[unbox-ru]`
--- (`genUnboxRu`).
+-- The contents of a box are a place: they stay in its block and are read at their uses, while
+-- the box is alive (Linear), through a pointer to the payload. Every read is a load with
+-- `--feager-loads`, so that both semantics can be tested.
 genUnbox :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
 genUnbox cx dest v x e
   = do A a <- tyOfName cx v
        t <- liftC (boxContents a)
+       ct <- ctype t
        ue <- unboxBlock t (localName v)
-       if isPlace cx (Unbox Borrowed v x e) x (V t)
-         then do ct <- ctype t
-                 p <- fresh "payload"
+       if not (ceEagerLoads (cxCEnv cx)) && ct /= CUnit
+         then do p <- fresh "payload"
                  s <- genE (bindPlace cx x t ("(*" <.> p <.> ")")) dest e
                  return ((cty ct <.> "*" <+> p <+> "= &(" <.> ue <.> ");") : s)
          else genRead cx dest x t ue e
@@ -577,10 +577,9 @@ genRead cx dest x t ue e
        s <- genE (bindVar cx x (V t)) dest e
        return ([declare (cty ct) x ue] ++ s)
 
--- Whether a binder of a destructuring is a place (`Layout.placeBinders`). Every read is a
--- load with `--feager-loads`, so that both semantics can be tested.
-isPlace :: Ctx -> VExpr -> Path -> Ty -> Bool
-isPlace cx e x t = not (ceEagerLoads (cxCEnv cx)) && not (null (placeBinders (`M.member` cxPlaces cx) e [x] [t]))
+-- The binders of `[proj]` and `[unpack]` of a place are places.
+isPlace :: Ctx -> VVal -> Bool
+isPlace cx v = case v of { Var p -> M.member p (cxPlaces cx); _ -> False }
 
 -- `[unbox-ru]` of `z` takes its block as a credit, which may then be freed or written, and
 -- renames its contents to `z.taken`.
@@ -961,12 +960,12 @@ genE cx dest expr
               let call = "kk_function_call(" <.> cty rct <.> ",(kk_function_t" <.> hcat [", " <.> cty ct | ct <- pcts] <.> ", kk_context_t*),"
                          <.> fx <.> ",(" <.> fx <.> hcat [", " <.> a | a <- args] <.> ", _ctx),_ctx)"
               return [block (("kk_function_t" <+> fx <+> "= kk_datatype_unbox(" <.> localName f <.> ");") : assignTo dest rct call)]
-      Proj _ v ss x e -> genProjection cx dest expr v ss x e
+      Proj _ v ss x e -> genProjection cx dest v ss x e
       Unpack _ v tvs x e
         -> do VExists bs body <- tyOf cx v
               let t = inst bs (map AVar tvs) body
               ve <- genV cx v
-              if isPlace cx expr x (V t)
+              if isPlace cx v
                 then genE (bindPlace cx x t ve) dest e
                 else genRead cx dest x t ve e
       Deref _ v x e

@@ -11,11 +11,14 @@
 
   Variables of a trivial type (without pointers, also through named types: `trivialTy`) are
   unrestricted, except that one in the contents of a box `z` (`boxOf`) is read from the
-  block of `z`: only `let^ load x.load = x` may read it, and it reads the block `z.credit`.
-  The binder `x.load` is not in the block. A case never reads a block: its scrutinee is not
+  block of `z`: only `let^ load x.load = x` may read it. The binder `x.load` is not in the
+  block. Any read of a place of `z` (`placeOf`: also of a part that is not trivial, but not
+  of one under a `deref` or `load` step) reads the block `z.credit`, so it cannot follow the
+  `UnboxRu` or `Lock` that takes the block, also in a `let` body after a bound expression
+  that contains it. A case never reads a block: its scrutinee is not
   in the contents of a box (a sum there is loaded first). `UnboxRu` takes the contents of `z` out of its block and renames
-  them to `z.taken`, which are not in a block. A projection or unpack of it binds a part
-  without reading it, and descriptions do not read it. Every other variable is a path (see
+  them to `z.taken`, which are not in a block. A projection or unpack of a place binds a
+  part without reading it, and descriptions do not read it. Every other variable is a path (see
   `Syntax.Path`) and has the mode of its owner, the longest variable on its path that is a
   root (or, in the body of a join point, a variable it captures). An owned root holds one
   reference, which must be consumed exactly once on every path; a borrowed root (a borrowed
@@ -84,6 +87,7 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad( unless, when, forM_, foldM )
 import Data.List( inits )
+import Data.Maybe( isJust )
 import Data.Functor.Const( Const(..) )
 import Common.Name
 import Backend.Typed.Syntax
@@ -295,7 +299,8 @@ useVar env g m b x
   = do o <- ownerMode x
        when (m == Unique && o == Borrowed) (fail ("unique use of a variable that is not unique: " ++ show x))
        p <- keyOf x
-       return (Use (if owning m then S.singleton p else S.empty) (S.singleton p) (if b then S.singleton p else S.empty)
+       n <- blockOf x
+       return (Use (if owning m then S.singleton p else S.empty) (S.insert p n) (if b then S.singleton p else S.empty)
                    (if m == Unique then S.singleton p else S.empty) False)
 
 -- A variable of a trivial type in the contents of a box is read from the block of the box, so
@@ -306,13 +311,17 @@ loaded x
       Just _ -> fail ("read of a trivial part of the contents of a box that is not loaded: " ++ show x)
       Nothing -> return noUse
 
--- A load of a variable of a trivial type in the contents of a box `z` reads the block
--- `z.credit`.
-loadOf :: Env -> Gamma -> Path -> L Use
-loadOf env g x
-  = case boxOf x of
-      Just z -> useVar env g Borrowed False (child z SCredit)
-      Nothing -> return noUse
+-- A read of a place of a box `z` (`placeOf`), at any mode and type, reads the block
+-- `z.credit`, so it comes before `[unbox-ru]` or `[lock]` takes the block.
+blockOf :: Path -> L Keys
+blockOf x
+  = case placeOf x of
+      Just z -> S.singleton <$> keyOf (child z SCredit)
+      Nothing -> return S.empty
+
+-- a load of a variable of a trivial type reads its block
+loadOf :: Path -> L Use
+loadOf x = (\n -> noUse{ uNeeded = n }) <$> blockOf x
 
 -- consume a reference
 consume, uniqueName :: Env -> Gamma -> Path -> L Use
@@ -571,10 +580,11 @@ destruct env g js m part v alts
                             use <- uniqueName env g z
                             return u{ uNeeded = S.union (uNeeded use) (uNeeded u), uUnique = S.union (uUnique use) (uUnique u) }
                   where
-                    -- a load of a trivial part of the contents of a box reads its block
-                    scrutinee | not (trivialVar env g z) = readVar env g z
-                              | part = return noUse
-                              | otherwise = loadOf env g z
+                    -- a projection or an unpack of a place binds a sub-place without reading it,
+                    -- and a load of a trivial part of the contents of a box reads its block
+                    scrutinee | part, trivialVar env g z || isJust (placeOf z) = return noUse
+                              | trivialVar env g z = loadOf z
+                              | otherwise = readVar env g z
                     -- The parts of a trivial type need no references. A binder of a trivial type
                     -- that is all of `z` (see `key`) makes `z` trivial in its alternative.
                     alt zc bs e

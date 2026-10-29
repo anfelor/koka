@@ -51,8 +51,11 @@
       step is a `contents` step, `Common.boxOf`) are read from its block, so only `[load]`
       reads them, borrowing the block `z.credit`; the binder of `[load]` is not in the block.
       `[unbox-ru]` (or `[lock]`) of `z` takes the contents out of the
-      block and renames them to `z.taken`. A projection or unpack binds a part of them
-      without reading it, and descriptions do not read them.
+      block and renames them to `z.taken`. More generally, a read of a place of `z` (a part
+      of the contents with no `deref` or `load` step after its last `contents` step,
+      `Common.placeOf`), at any mode and type, reads the block `z.credit`, so it comes before
+      the block is taken. A projection or unpack of a place binds a part of it without reading
+      it, and descriptions do not read it.
     - A unique variable `x :! t` is owned and holds the only reference to its block. It may be used
       as an owned one. Any borrowed use of `x`, or of a variable on its path, may duplicate the
       reference and demotes it to `x : t`; branches agree on the weaker status.
@@ -72,15 +75,13 @@
       scrutinee.
     - `[dup]` binds its copy as a new root, so a variable holds at most one owned reference.
       For example, after `val y = dup z.fst; drop z` the context holds `y : V`.
-    - Code generation reads the contents of a box in place (`Layout.placeBinders`): `z.contents`
-      of a product, and the binders of `[proj]` and `[unpack]` of a place that are products
-      themselves, stay in the block of `z`, and a use reads the block. It loads them (copies
-      them out of the block) at `[proj]` of any other field, at `[dup]` and `[load]`, and at
+    - Code generation reads the contents of a box in place: `z.contents`, and the binders of
+      `[proj]` and `[unpack]` of a place, stay in the block of `z`, and a use reads the block.
+      It loads them (copies them out of the block) at `[load]`, `[deref]` and `[dup]`, and at
       `[unbox-ru]` and `[lock]` of `z`, which may free or write the block. These rules make
-      that sound: a non-trivial part of `z.contents` is used only before `z` is consumed
-      (after `[unbox-ru]` it is out of scope, and its loaded copy is a part of `z.taken`),
-      and a trivial part only by `[load]`. A case never reads a block: a sum in it is loaded
-      first (`[load]`). A load at a borrowed `[proj]` is sound as the box is live there. Code
+      that sound: a place of `z` is read only before `z` is consumed or its block is taken
+      (after `[unbox-ru]` its loaded copy is a part of `z.taken`), and a trivial part only by
+      `[load]`. A case never reads a block: a sum in it is loaded first (`[load]`). Code
       generation may also load a place at once (`--feager-loads`), which is sound as the box
       is live at `[bunbox]`.
 
@@ -782,8 +783,10 @@ data VExpr
   -- of Γ and keeps the rest of its path (`Common.rebase`), so the parts in scope stay in
   -- scope, but are no longer in the block. The parts loaded out of the block before (a path
   -- with a `load` step after `z.contents`, see `[load]`) are not renamed: they are copies
-  -- that were never in it. The description of `r` still names the old
-  -- contents. With `[if-unique]` it makes `drop-reuse` of a box derivable. The block of `z`
+  -- that were never in it. The split loads the parts of `z.taken` that `e` uses (code
+  -- generation, `genTaken`), and no place of `z` is read after it (see "Structural rules"),
+  -- also not in a `let` body after a bound expression that contains it. The description of
+  -- `r` still names the old contents. With `[if-unique]` it makes `drop-reuse` of a box derivable. The block of `z`
   -- has tag tag(z).
   | UnboxRu Path Path VExpr
 
@@ -793,8 +796,8 @@ data VExpr
   --                 (z = y.roll.injⱼ with y : τ and j ∈ lazy(τ); z.contents :^ V ∈ Γ)
   --
   -- The counterpart of `[unbox-ru]` for an owned, possibly shared, thunk: its contents are taken
-  -- out of the block without reference counting and renamed to `z.taken`, as there, and its
-  -- block becomes the cell `c`, a new root, which must be filled by `[memoize]` (or freed if it
+  -- out of the block without reference counting and renamed to `z.taken`, as there (where the
+  -- split loads the parts that `e` uses), and its block becomes the cell `c`, a new root, which must be filled by `[memoize]` (or freed if it
   -- turns out to be unique, `[if-unique-cell]`). Consuming `z` consumes the pointer it was
   -- matched from (see "Structural rules").
   | Lock Path Path VExpr
