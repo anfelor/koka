@@ -479,12 +479,12 @@ genBox cx tag at v
                                return (stmtExpr ([cty ct <+> v <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> clear <.> ";",
                                                   setPath] ++ storeFrom v) box)
 
--- A projection of a place is a place: the selected part (`[proj]`), read at its uses. A
--- projection of a local copies the part into a local.
-genProjection :: Ctx -> Dest -> VVal -> [Step] -> Path -> VExpr -> G [Doc]
-genProjection cx dest v ss x e = do
+-- A projection of a place is a place: the selected component (`[fst]`, `[snd]`), read at its
+-- uses. A projection of a local copies the component into a local.
+genProjection :: Ctx -> Dest -> VVal -> Step -> Path -> VExpr -> G [Doc]
+genProjection cx dest v s x e = do
   t <- tyOf cx v
-  (start,u) <- liftC (fieldRange t ss)
+  (start,u) <- liftC (fieldRange t s)
   case v of
     Var z | Just (Place b w i _) <- M.lookup z (cxPlaces cx)
       -> genE (bindPlace cx x (Place b w (i + start) u)) dest e
@@ -502,14 +502,12 @@ genProjection cx dest v ss x e = do
             body <- genE (bindVar cx x (V u)) dest e
             return (pre ++ [declare (cty ct) x p] ++ body)
 
--- the first leaf and the type of the part at the steps of a projection
-fieldRange :: VType -> [Step] -> Either String (Int,VType)
-fieldRange t [] = Right (0,t)
-fieldRange (VProd a b) (s:ss)
+-- the first leaf and the type of the component at the step of a projection
+fieldRange :: VType -> Step -> Either String (Int,VType)
+fieldRange (VProd a b) s
   = case s of
-      SFst -> fieldRange a ss
-      SSnd -> do (i,u) <- fieldRange b ss
-                 return (length (leaves a) + i,u)
+      SFst -> Right (0,a)
+      SSnd -> Right (length (leaves a),b)
       _ -> Left "projection at a non-product step"
 fieldRange _ _ = Left "projection of a non-product"
 
@@ -963,7 +961,8 @@ genE cx dest expr
               let call = "kk_function_call(" <.> cty rct <.> ",(kk_function_t" <.> hcat [", " <.> cty ct | ct <- pcts] <.> ", kk_context_t*),"
                          <.> fx <.> ",(" <.> fx <.> hcat [", " <.> a | a <- args] <.> ", _ctx),_ctx)"
               return [block (("kk_function_t" <+> fx <+> "= kk_datatype_unbox(" <.> localName f <.> ");") : assignTo dest rct call)]
-      Proj _ v ss x e -> genProjection cx dest v ss x e
+      Fst _ v x e -> genProjection cx dest v SFst x e
+      Snd _ v x e -> genProjection cx dest v SSnd x e
       Unpack _ v tvs x e
         -> do VExists bs body <- tyOf cx v
               let t = inst bs (map AVar tvs) body

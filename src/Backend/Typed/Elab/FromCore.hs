@@ -185,7 +185,7 @@ elabLet def body
          then do (k,v) <- elabVal (C.defExpr def)
                  k <$> withHole x (Just v) (elabExpr body)
        -- Match binds a pattern variable where the source first needs it (`Match.guardChain`):
-       -- the field is read there, once. Its binder stays a part of the box (`[proj]`); a `let`
+       -- the field is read there, once. Its binder stays a part of the box (`[fst]`, `[snd]`); a `let`
        -- would bind an owned root and acquire a reference.
        else if fieldAlias en (C.defExpr def)
          then do t <- vt (C.defType def)
@@ -850,15 +850,16 @@ subBinder _              = Nothing
 
 -- Construct field getters without emitting reads. A variable occurrence asks
 -- for its getter in the expression that actually uses the field.
--- Field i of n is at the steps `snd`ⁱ `fst`, and the last one at `snd`ⁿ⁻¹ (`[proj]`).
+-- The fields are a right-nested product: the first at `fst` and the others in the product at
+-- `snd` (`[fst]`, `[snd]`). Getters of different fields repeat the projections on the way,
+-- which `Paths` merges where one is in scope.
 destructure :: [(Maybe TName,VType)] -> (K,VVal) -> E [(Name,(K,VVal))]
+destructure [] _ = return []
 destructure [(x,s)] getter = bindField x s getter
-destructure fields (k,p) = concat <$> mapM field (zip [0..] fields)
-  where
-    n = length fields
-    field (i,(x,s)) = do
-      y <- fresh "field"
-      bindField x s (k . Proj Borrowed p (replicate i SSnd ++ [SFst | i < n-1]) y,Var y)
+destructure ((x,s):fields) (k,p)
+  = do y <- fresh "field"
+       rest <- fresh "fields"
+       (++) <$> bindField x s (k . Fst Borrowed p y,Var y) <*> destructure fields (k . Snd Borrowed p rest,Var rest)
 
 bindField :: Maybe TName -> VType -> (K,VVal) -> E [(Name,(K,VVal))]
 bindField Nothing _ _ = return []

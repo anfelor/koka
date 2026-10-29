@@ -102,7 +102,7 @@ dropValue trivial fresh scope x t e
       V v -> case v of
         VPtr a -> do let y = child x SDeref
                      return (reuseParts scope (Deref Owned (Var x) y (Drop y e)))
-        VProd{} -> do let fields = [f | f@(_,_,s) <- fieldsAt x v, not (trivial (V s))]
+        VProd{} -> do let fields = [f | f@(_,_,s) <- halvesAt x v, not (trivial (V s))]
                           parts = M.union (scopeOf [y | (y,_,_) <- fields]) scope
                       body <- foldM (\rest (y,_,s) -> dropValue trivial fresh parts y (V s) rest) e (reverse fields)
                       return (projectAll scope Owned x fields body)
@@ -132,19 +132,8 @@ dropValue trivial fresh scope x t e
         VUnit -> return e
         VRaw _ -> return e
 
--- The fields of a product along its right spine (`[proj]`): the steps to each field and its
--- type.
-productFields :: VType -> [([Step],VType)]
-productFields t
-  = case t of
-      VProd a b -> ([SFst],a) : [(SSnd:ss,s) | (ss,s) <- spine b]
-      _ -> []
-  where
-    spine s@VProd{} = productFields s
-    spine s = [([],s)]
-
--- the steps to the fields of a right-nested product of `n` fields (`productFields`): field i at
--- `snd`ⁱ `fst` and the last one at `snd`ⁿ⁻¹
+-- the steps to the fields of a right-nested product of `n` fields: field i at `snd`ⁱ `fst`
+-- and the last one at `snd`ⁿ⁻¹
 fieldSteps :: Int -> [[Step]]
 fieldSteps n = [replicate i SSnd ++ [SFst] | i <- [0 .. n-2]] ++ [replicate (n-1) SSnd | n > 0]
 
@@ -158,13 +147,23 @@ partAt (VProd a b) (s:ss)
       _ -> Nothing
 partAt _ _ = Nothing
 
--- the fields of a product variable, named by their paths
-fieldsAt :: Path -> VType -> [(Path,[Step],VType)]
-fieldsAt x t = [(foldl child x ss,ss,s) | (ss,s) <- productFields t]
+-- the components of a product variable (`[fst]`, `[snd]`), named by their paths
+halvesAt :: Path -> VType -> [(Path,Step,VType)]
+halvesAt x t
+  = case t of
+      VProd a b -> [(child x SFst,SFst,a),(child x SSnd,SSnd,b)]
+      _ -> []
 
--- project the fields of a product variable around an expression, reusing those in scope
-projectAll :: Scope -> Mode -> Path -> [(Path,[Step],VType)] -> VExpr -> VExpr
-projectAll scope m x fields body = foldr (\(y,ss,_) e -> reuseParts scope (Proj m (Var x) ss y e)) body fields
+-- project components of a product variable around an expression, reusing those in scope
+projectAll :: Scope -> Mode -> Path -> [(Path,Step,VType)] -> VExpr -> VExpr
+projectAll scope m x fields body = foldr (\(y,s,_) e -> reuseParts scope (projAt s m (Var x) y e)) body fields
+
+-- the projection at a step into a product
+projAt :: Step -> Mode -> VVal -> Path -> VExpr -> VExpr
+projAt s = case s of
+             SFst -> Fst
+             SSnd -> Snd
+             _ -> error ("Backend.Typed.Common.projAt: not a step into a product: " ++ show s)
 
 -- The duplication rule: the type of the copy of `x : t`. A boxed operand is duplicated into
 -- a pointer, if it is the dereference of one (`[deref]`).
@@ -381,7 +380,8 @@ descendB fn fv fb expr
       Unreachable _         -> pure expr
       Call f ts vs          -> Call f ts <$> traverse fv vs
       App f vs              -> App <$> fn f <*> traverse fv vs
-      Proj m v ss x e       -> (\v' (x',e') -> Proj m v' ss x' e') <$> fv v <*> one x ss e
+      Fst m v x e           -> (\v' (x',e') -> Fst m v' x' e') <$> fv v <*> one x [SFst] e
+      Snd m v x e           -> (\v' (x',e') -> Snd m v' x' e') <$> fv v <*> one x [SSnd] e
       CaseV m v alts        -> CaseV m <$> fv v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x [SInjV i] e) alts
       CaseA m v alts def    -> CaseA m <$> fn v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x [SInjA i] e) alts
                                        <*> traverse (\(x,e) -> one x [SRest] e) def
@@ -886,7 +886,8 @@ destructAOf expr
       Load v x e            -> Just (Destruct Borrowed v [([x],e)] (\_ v' es -> Load v' x (head es)))
       CaseOpen m v alts def -> Just (Destruct m v ([(xs,e) | (_,xs,e) <- alts] ++ [([],def)])
                                        (\m' v' es -> CaseOpen m' v' [(c,xs,e) | ((c,xs,_),e) <- zip alts es] (last es)))
-      Proj{} -> Nothing
+      Fst{} -> Nothing
+      Snd{} -> Nothing
       CaseV{} -> Nothing
       Deref{} -> Nothing
       Unpack{} -> Nothing
@@ -914,7 +915,8 @@ destructVOf :: VExpr -> Maybe (Destruct VVal)
 destructVOf expr
   = case expr of
       SplitA{} -> Nothing
-      Proj m v ss x e       -> Just (Destruct m v [([x],e)] (\m' v' es -> Proj m' v' ss x (head es)))
+      Fst m v x e           -> Just (Destruct m v [([x],e)] (\m' v' es -> Fst m' v' x (head es)))
+      Snd m v x e           -> Just (Destruct m v [([x],e)] (\m' v' es -> Snd m' v' x (head es)))
       CaseV m v alts        -> Just (Destruct m v [([x],e) | (_,x,e) <- alts] (\m' v' es -> CaseV m' v' [(i,x,e) | ((i,x,_),e) <- zip alts es]))
       Deref m v x e         -> Just (Destruct m v [([x],e)] (\m' v' es -> Deref m' v' x (head es)))
       Unpack m v tvs x e    -> Just (Destruct m v [([x],e)] (\m' v' es -> Unpack m' v' tvs x (head es)))
@@ -953,7 +955,8 @@ isRead expr
       Unscalar{}  -> False
       Load{}      -> True
       CaseOpen{}  -> True
-      Proj{}      -> False
+      Fst{}       -> False
+      Snd{}       -> False
       CaseV{}     -> False
       CaseA{}     -> False
       Deref{}     -> False
@@ -989,7 +992,8 @@ keepsPointer expr
       Deref{}     -> True
       Unroll{}    -> True
       Unpack{}    -> True
-      Proj{}      -> False
+      Fst{}       -> False
+      Snd{}       -> False
       CaseV{}     -> False
       Unbox{}     -> False
       Unscalar{}  -> False
