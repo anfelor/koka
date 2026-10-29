@@ -17,41 +17,80 @@
   The variable must be in scope at the join point and not be bound in its body or scope:
   every jump then passes the same one. (`[unbox-ru]` renames the contents of a box, so a jump
   after it may pass a variable that is not in scope at the join point.)
+
+  A credit that `Reuse` asks for has no description. If the jumps pass different credits
+  with the same declared description, or empty ones (which satisfy every description), the
+  parameter gets that description, so the join body can still omit the stores: for example,
+  the shared continuation of two branches that both took the block of the same box. Its
+  names must be in scope at the join point, as substitution does not follow a name out of
+  its scope (such as `z.taken` before the `[unbox-ru]` of `z`); `SinkJoins` moves a join
+  into the branch that binds the box.
 -}
 module Backend.Typed.Passes.JoinArgs( joinArgsProgram ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.List( transpose )
+import Data.Functor.Const( Const(..) )
 import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 
 joinArgsProgram :: Program -> Program
-joinArgsProgram prog = prog{ progDefs = [d{ defBody = jaE (defScope d) (defBody d) } | d <- progDefs prog] }
+joinArgsProgram prog = prog{ progDefs = [d{ defBody = jaE (declared (defBody d)) (defScope d) (defBody d) } | d <- progDefs prog] }
 
-jaE :: Scope -> VExpr -> VExpr
-jaE scope expr
+-- the declared descriptions of the credits that join parameters and `let`s bind in a
+-- definition (its binders are fresh)
+type Declared = M.Map Path (Maybe Contents)
+
+declared :: VExpr -> Declared
+declared expr = M.union here (getConst (descendE (const (Const M.empty)) (Const . declaredV) (\_ e -> Const (declared e)) expr))
+  where
+    here = case expr of
+             Join _ _ ps _ _ -> M.fromList [(x,p) | (x,_,VReuse _ _ p) <- ps]
+             Let x (VReuse _ _ p) _ _ -> M.singleton x p
+             _ -> M.empty
+    declaredV = getConst . descendV (Const . declaredA) (Const . declaredV)
+    declaredA a = case a of
+                    Lam _ _ e -> declared e
+                    _ -> getConst (descendA (const (Const M.empty)) (Const . declaredA) (Const . declaredV) a)
+
+jaE :: Declared -> Scope -> VExpr -> VExpr
+jaE decl scope expr
   = case expr of
       Join j tvs ps e1 e2
-        -> let e1' = jaE (M.union (scopeOf [x | (x,_,_) <- ps]) scope) e1
-               e2' = jaE scope e2
+        -> let e1' = jaE decl (M.union (scopeOf [x | (x,_,_) <- ps]) scope) e1
+               e2' = jaE decl scope e2
                bound = S.fromList (bindersE e1' ++ bindersE e2')
+               args = transpose (jumpArgs j e2') ++ repeat []
                -- for each parameter, the variable that every jump passes to it
                invariant (_,Owned,_) vs@(Var y : _) | all (== Var y) vs, M.member y scope, S.notMember y bound = Just y
                invariant _ _ = Nothing
-               ys = zipWith invariant ps (transpose (jumpArgs j e2') ++ repeat [])
+               ys = zipWith invariant ps args
                sub = M.fromList [(x,Var y) | ((x,_,_),Just y) <- zip ps ys]
                kept :: [a] -> [a]
                kept vs = [v | (v,Nothing) <- zip vs ys]
-           in Join j tvs (kept ps) (substEIn (M.union (scopeOf [x | (x,_,_) <- kept ps]) scope) (valueAt sub) e1') (substJump j (\ts -> Jump j ts . kept) e2')
-      _ -> runIdentity (descendE Identity (Identity . jaV scope) (\xs e -> Identity (jaE (bindScope expr xs scope) e)) expr)
+               -- the description of every credit that the jumps pass to a credit without one
+               describe (x,m,VReuse f n Nothing) vs
+                 | (p:qs) <- [descOf v | v <- vs, not (isNoReuse v)], all (== p) qs, Just d <- p, inScope d
+                 = (x,m,VReuse f n (Just d))
+               describe p _ = p
+               descOf v = case v of
+                            Var y -> M.findWithDefault Nothing y decl
+                            _ -> Nothing
+               isNoReuse v = case v of
+                               NoReuse _ _ -> True
+                               _ -> False
+               inScope (Contents _ v _) = all (`M.member` scope) (fvV v)
+               ps' = kept (zipWith describe ps args)
+           in Join j tvs ps' (substEIn (M.union (scopeOf [x | (x,_,_) <- ps']) scope) (valueAt sub) e1') (substJump j (\ts -> Jump j ts . kept) e2')
+      _ -> runIdentity (descendE Identity (Identity . jaV decl scope) (\xs e -> Identity (jaE decl (bindScope expr xs scope) e)) expr)
 
-jaV :: Scope -> VVal -> VVal
-jaV scope = mapV (jaA scope) (jaV scope)
+jaV :: Declared -> Scope -> VVal -> VVal
+jaV decl scope = mapV (jaA decl scope) (jaV decl scope)
 
-jaA :: Scope -> AVal -> AVal
-jaA scope val
+jaA :: Declared -> Scope -> AVal -> AVal
+jaA decl scope val
   = case val of
-      Lam ps r e -> Lam ps r (jaE (M.union (scopeOf [x | (x,_,_) <- ps]) scope) e)
-      _          -> mapA id (jaA scope) (jaV scope) val
+      Lam ps r e -> Lam ps r (jaE decl (M.union (scopeOf [x | (x,_,_) <- ps]) scope) e)
+      _          -> mapA id (jaA decl scope) (jaV decl scope) val
