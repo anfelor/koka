@@ -16,7 +16,7 @@ import Data.Functor.Const( Const(..) )
 import Data.Monoid( Sum(..) )
 import Data.Functor.Identity( Identity(..) )
 import Data.List( isPrefixOf, sortOn )
-import Data.Maybe( listToMaybe, fromMaybe )
+import Data.Maybe( listToMaybe, fromMaybe, isJust )
 import Control.Monad( foldM )
 import Common.Name
 import Common.NamePrim( nameTpReuse )
@@ -166,14 +166,23 @@ fieldsAt x t = [(foldl child x ss,ss,s) | (ss,s) <- productFields t]
 projectAll :: Scope -> Mode -> Path -> [(Path,[Step],VType)] -> VExpr -> VExpr
 projectAll scope m x fields body = foldr (\(y,ss,_) e -> reuseParts scope (Proj m (Var x) ss y e)) body fields
 
--- The duplication rule, shared by the type and linearity checkers.
-checkDupType :: Ty -> Either String ()
-checkDupType t
+-- The duplication rule: the type of the copy of `x : t`. A boxed operand is duplicated into
+-- a pointer, if it is the dereference of one (`[deref]`).
+dupType :: Path -> Ty -> Either String Ty
+dupType x t
   = case t of
       V (VReuse _ _ _) -> Left "dup of a reuse credit"
       V (VCell _ _) -> Left "dup of a cell"
-      V _ -> Right ()
-      A _ -> Left "dup of a boxed value"
+      V _ -> Right t
+      A a | isJust (derefOf x) -> Right (V (VPtr a))
+          | otherwise -> Left "dup of a boxed value that is not a dereferenced pointer"
+
+-- the pointer that the binder of a `[deref]` is the dereference of
+derefOf :: Path -> Maybe Path
+derefOf (Path x ss)
+  = case reverse ss of
+      SDeref : rest -> Just (Path x (reverse rest))
+      _ -> Nothing
 
 -- values of these types need no reference counting, where `unroll` gives the body of a
 -- named type if it is known (a type with a single constructor without fields, for example)
@@ -1007,7 +1016,7 @@ keepsPointer expr
       Jump{}      -> False
 
 -- Where a variable gets the bits of another variable: a copy (`[dup]` or `[load]`) gets those
--- of its variable, the contents taken by `[unbox-ru]` or `[lock]` those of the old contents, and a parameter of
+-- of its variable (the pointer of a dereference), the contents taken by `[unbox-ru]` or `[lock]` those of the old contents, and a parameter of
 -- a join point those of its arguments.
 data Source = Copy Path | Param [VVal]
 
@@ -1017,7 +1026,7 @@ sources :: VExpr -> Sources
 sources expr = M.union here (getConst (descendE (const (Const M.empty)) (Const . sourcesV) (\_ e -> Const (sources e)) expr))
   where
     here = case expr of
-             Dup x y _ -> M.singleton y (Copy x)
+             Dup x y _ -> M.singleton y (Copy (fromMaybe x (derefOf x)))
              Load x y _ -> M.singleton y (Copy x)
              _ | Just (z,_,_) <- takesContents expr -> M.singleton (child z STaken) (Copy (child z SContents))
              Join j _ ps _ e2 -> M.fromList [(y,Param [vs !! i | vs <- jumpArgs j e2]) | (i,(y,_,_)) <- zip [0..] ps]

@@ -83,7 +83,7 @@ matchE expr
               IfWhnf x <$> local (const (env,whnfGamma env g x)) (matchE e1) <*> matchE e2
       Dup x y e
         -> do (_,g) <- ask
-              t <- liftE (inferVar g x)
+              t <- liftE (inferVar g x >>= dupType x)
               Dup x y <$> bind [(y,t)] (matchE e)
       _ -> descendE pure matchV (\_ -> matchE) expr
 

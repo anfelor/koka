@@ -167,9 +167,9 @@ inferExpr env g js expr
                        VReuse _ _ _ -> inferE env g js e
                        _ -> Left ("free of a non-credit: " ++ ppr t)
       Dup x y e -> do t <- inferVar g x
-                      checkDupType t
+                      ty <- dupType x t
                       when (trivialTy env t) (Left ("dup of a trivial value: " ++ show x))
-                      inferE env (bindAll [(y,t)] g) js e
+                      inferE env (bindAll [(y,ty)] g) js e
       IsUnique x e1 e2 -> do t <- inferVar g x
                              case t of
                                V (VCell _ _) -> return ()

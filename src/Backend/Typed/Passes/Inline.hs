@@ -170,7 +170,7 @@ reuseE expr
       IfWhnf x e1 e2 -> do (env,g,facts,src) <- ask
                            IfWhnf x <$> local (const (env,whnfGamma env g x,facts,src)) (reuseE e1) <*> reuseE e2
       Dup x y e -> do (_,g,_,_) <- ask
-                      t <- liftE (inferVar g x)
+                      t <- liftE (inferVar g x >>= dupType x)
                       Dup x y <$> bindReuse [(y,t)] (reuseE e)
       _ -> descendE pure reuseV (\_ -> reuseE) expr
 
