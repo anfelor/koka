@@ -59,6 +59,8 @@ checkLayoutProgram p = concatMap check (programTypes p)
       AFun ps r -> concatMap check (r : map snd ps)
       AForall _ b -> atomic b
       ALam _ b -> atomic b
+      AMu _ _ _ b ts -> concatMap atomic (b : ts)
+      AWhnf b -> atomic b
       ACon _ ts -> concatMap atomic ts
       AApp _ ts -> concatMap atomic ts
       _ -> []

@@ -50,6 +50,11 @@ prettyA a
       ACon n []     -> nm n
       ACon n ts     -> nm n <.> angles (commaSep (map prettyA ts))
       ALam vs b     -> parens (text "\\" <.> hsep (map tv vs) <.> text "." <+> prettyA b)
+      AMu l x vs b ts -> parens (text "mu" <+> tv x <.> angles (commaSep (map tv vs)) <.> text "."
+                                 <+> (if null l then empty else text "lazy" <.> braces (commaSep (map (text . show) l)))
+                                 <+> prettyA b)
+                           <.> angles (commaSep (map prettyA ts))
+      AWhnf b       -> text "whnf" <.> parens (prettyA b)
 
 mode :: Mode -> Doc
 mode Owned    = empty

@@ -42,7 +42,7 @@
   `[lock]` requires before `Paths`: the box `y.roll.injⱼ` of the lazy value `y`, and its
   contents `y.roll.injⱼ.contents`, which the lock renames to `y.roll.injⱼ.taken`.
 
-  Finally, forced values get the type `whnf(T⟨B̄⟩)*` (`whnfProgram`), so that their matches
+  Finally, forced values get the type `whnf(τ)*` (`whnfProgram`), so that their matches
   have no lazy alternatives.
 -}
 module Backend.Typed.Elab.Lazy( lazyProgram, lazyCopies ) where
@@ -50,7 +50,6 @@ module Backend.Typed.Elab.Lazy( lazyProgram, lazyCopies ) where
 import qualified Data.Map as M
 import qualified Data.Set as S
 import qualified Common.NameMap as NM
-import Data.Maybe( isJust )
 import Data.Functor.Const( Const(..) )
 import Data.Functor.Identity( Identity(..) )
 import Common.Name
@@ -61,12 +60,13 @@ import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Query( Env(..), envOf, unrollT, reuseSize, lazySize, whnfName )
+import Backend.Typed.Query( Env(..), envOf, unrollT, reuseSize, lazySize, lazyTags, hasWhnf )
 
 -- The `lazy-C` functions with the tag of their constructor and the size of its cell, the
--- `lazy-eval-locked` functions, the `lazy-eval` functions, and the `lazy-whnf` and
--- `lazy-force` functions.
-data Lazies = Lazies{ lzCons :: M.Map Name (Int,Int), lzLocked :: S.Set Name, lzEval :: S.Set Name, lzForce :: S.Set Name }
+-- `lazy-eval-locked` functions, the `lazy-eval` functions, the `lazy-whnf` and `lazy-force`
+-- functions, and the tag of the indirection ι of each lazy type.
+data Lazies = Lazies{ lzCons :: M.Map Name (Int,Int), lzLocked :: S.Set Name, lzEval :: S.Set Name, lzForce :: S.Set Name
+                    , lzIndirect :: M.Map Name Int }
 
 -- the lazy value of `lazy-eval-locked` and its type
 data LEnv = LEnv{ leEnv :: Env, leLazies :: Lazies, leLocked :: Maybe (Path,AType) }
@@ -99,15 +99,21 @@ lazyProgram nt prog
 lazyFuns :: Newtypes -> TypeDefs -> Lazies
 lazyFuns nt tdefs
   = Lazies (M.fromList [(funName info (show (unqualify (conInfoName con))), (tag,n))
-                       | (info,lz,alts) <- infos, (tag,con) <- zip [1..] (dataInfoConstrs info)   -- tags start at 1
-                       , tag `elem` lazyAlts lz, tag /= lazyIndirect lz
+                       | (info,lz,alts) <- infos, (tag,con) <- cons info
+                       , tag `elem` lz, not (isLazyIndirectConName (conInfoName con))
                        , Just (ABox s) <- [lookup tag alts], Right n <- [lazySize s]])
            (S.fromList [funName info "eval-locked" | (info,_,_) <- infos])
            (S.fromList [funName info "eval" | (info,_,_) <- infos])
            (S.fromList [funName info stem | (info,_,_) <- infos, stem <- ["whnf","force"]])
+           (M.fromList [(dataInfoName info, tag) | (info,_,_) <- infos, (tag,con) <- cons info, isLazyIndirectConName (conInfoName con)])
   where
+    env = Env tdefs M.empty
+    cons info = zip [1..] (dataInfoConstrs info)   -- tags start at 1
     infos = [(info,lz,alts) | (_,info) <- NM.toList (newtypesTypeDefs nt)
-                            , Just TypeDef{ tdefLazy = Just lz, tdefBody = Just (ASum alts) } <- [M.lookup (dataInfoName info) tdefs]]
+                            , Just TypeDef{ tdefParams = tvs } <- [M.lookup (dataInfoName info) tdefs]
+                            , let t = ACon (dataInfoName info) (map AVar tvs)
+                            , let lz = lazyTags env t, not (null lz)
+                            , Right (ASum alts) <- [unrollT env t]]
     funName info stem = qualify (qualifier (dataInfoName info)) (lazyName info stem)
 
 -- the functions with a parameter `recurse`
@@ -155,11 +161,11 @@ cellE cs expr
        case expr of
          Deref m (Var x) y (Unroll m' y' z (CaseA m'' z' alts def))
            | Just (x',a) <- locked, x == x', y' == y, z' == z, M.null cs
-           -> do lz <- lazyOf a
+           -> do (lz,ind) <- lazyOf a
                  shapes <- altsOf a
                  let r = child y SRoll
                      lockAlt (i,b,e)
-                       | i `elem` lazyAlts lz, i /= lazyIndirect lz, Just (ABox s) <- lookup i shapes
+                       | i `elem` lz, i /= ind, Just (ABox s) <- lookup i shapes
                        = do n <- liftE (lazySize s)
                             c <- fresh "cell"
                             (,,) i (child r (SInjA i)) <$> lock (x,c,n,a) (child r (SInjA i)) b e
@@ -239,7 +245,7 @@ memoize c n a v
 -- `indirect c v`: free the cell if it is unique, and otherwise write an indirection to `v` over it
 indirect :: Path -> AType -> VVal -> L VExpr
 indirect c a v
-  = do i <- lazyIndirect <$> lazyOf a
+  = do i <- snd <$> lazyOf a
        r <- fresh "r"
        p <- fresh "p"
        return (Let r (VPtr a) (Ret v)
@@ -263,11 +269,13 @@ altsOf a
          ASum shapes -> return shapes
          _ -> fail ("a lazy type that is not a sum: " ++ ppr (A a))
 
-lazyOf :: AType -> L Lazy
+-- the lazy tags of a lazy type, and the tag of its indirection
+lazyOf :: AType -> L ([Int],Int)
 lazyOf a
   = do env <- asks leEnv
+       inds <- asks (lzIndirect . leLazies)
        case a of
-         ACon n _ | Just TypeDef{ tdefLazy = Just lz } <- M.lookup n (envTypes env) -> return lz
+         ACon n _ | Just i <- M.lookup n inds -> return (lazyTags env a, i)
          _ -> fail ("not a lazy type: " ++ ppr (A a))
 
 -- Specialise the functions of this module with a parameter `recurse` (the second, a `bool`)
@@ -312,7 +320,7 @@ whnfProgram lazies prog
   where
     env = envOf prog
     narrow t = case t of
-                 VPtr (ACon n as) | Just w <- whnfName env n -> Just (VPtr (ACon w as))
+                 VPtr a | hasWhnf env a -> Just (VPtr (AWhnf a))
                  _ -> Nothing
     sigs = M.mapWithKey (\f sig -> case sig of
                                      SigFun tvs ps r | S.member f (lzForce lazies), Just r' <- narrow r -> SigFun tvs ps r'
@@ -353,7 +361,7 @@ whnfProgram lazies prog
     forced xs js expr
       = case expr of
           Ret (Var x) -> S.member x xs
-          Call f _ _ | Just (SigFun _ _ (VPtr (ACon w _))) <- M.lookup f sigs -> isJust (M.lookup w (envTypes env) >>= tdefWhnfOf)
+          Call f _ _ | Just (SigFun _ _ (VPtr (AWhnf _))) <- M.lookup f sigs -> True
           Jump j _ _ -> S.member j js
           IfWhnf x e1 e2 -> forced (S.insert x xs) js e1 && forced xs js e2
           Unreachable _ -> True

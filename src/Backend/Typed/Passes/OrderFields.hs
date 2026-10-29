@@ -61,6 +61,8 @@ normalizeAType a = case a of
   ALam vs b -> ALam vs (normalizeAType b)
   AApp v ts -> AApp v (map normalizeAType ts)
   ACon n ts -> ACon n (map normalizeAType ts)
+  AMu l x vs b ts -> AMu l x vs (normalizeAType b) (map normalizeAType ts)
+  AWhnf b -> AWhnf (normalizeAType b)
   _ -> a
 
 normalizeVType :: VType -> VType
@@ -114,6 +116,8 @@ variablesA a = case a of
   AFun ps r -> concatMap (variablesV . snd) ps ++ variablesV r
   AForall vs b -> vs ++ variablesA b
   ALam vs b -> vs ++ variablesA b
+  AMu _ x vs b ts -> x : vs ++ variablesA b ++ concatMap variablesA ts
+  AWhnf b -> variablesA b
   AVar v -> [v]
   AApp v ts -> v : concatMap variablesA ts
   ACon _ ts -> concatMap variablesA ts

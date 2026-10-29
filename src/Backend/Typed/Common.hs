@@ -197,6 +197,8 @@ isTrivialWith unroll t
                    AUnit     -> True
                    ASum ts   -> all (trivialA . snd) ts
                    ACon n _  -> n == nameTpReuse || maybe False trivialA (unroll a)
+                   AMu _ _ _ _ _ -> maybe False trivialA (unroll a)
+                   AWhnf _   -> maybe False trivialA (unroll a)
                    ABox _    -> False
                    AScalar _ -> False
                    AFun _ _  -> False
@@ -237,6 +239,8 @@ containsLinear (A a) = case a of
   ASum ts -> any (containsLinear . A . snd) ts
   AForall _ b -> containsLinear (A b)
   ALam _ b -> containsLinear (A b)
+  AMu _ _ _ b ts -> any (containsLinear . A) (b : ts)
+  AWhnf b -> containsLinear (A b)
   ACon _ ts -> any (containsLinear . A) ts
   AApp _ ts -> any (containsLinear . A) ts
   AVar _ -> False
@@ -1045,6 +1049,8 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
       AFun ps r -> r : map snd ps
       AForall _ b -> at b
       ALam _ b -> at b
+      AMu _ _ _ b ts -> concatMap at (b : ts)
+      AWhnf b -> at b
       ACon _ ts -> concatMap at ts
       AApp _ ts -> concatMap at ts
       _ -> []
