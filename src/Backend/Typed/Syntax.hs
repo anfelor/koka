@@ -156,8 +156,9 @@ owning m
 --   its sum into lazy ones L (the thunks A, each a `Box V`, among them the indirection ι with
 --   `Aι = Box(t⟨ā⟩*)`) and strict ones (B). It unrolls as `μt⟨ā⟩. A ⊕ B` does, and
 --   `lazy(τ) = L` for an instance τ of it (`Query.lazyTags`, also by its name); a τ is lazy if
---   L is nonempty. No rule refers to ι. The block of a lazy alternative `Box V` has
---   `‖V‖ = max(|V|, |τ*|)` bytes (`Layout.lazyBlockSize`), so that an indirection always fits.
+--   L is nonempty. No rule refers to ι. Elaboration pads the contents V of a lazy
+--   alternative `Box V` whose block would be smaller than that of ι (`Elab.TypeInfo.conFieldTypes`),
+--   so that an indirection fits every thunk. The padding is not trusted: `[memoize]` checks the size.
 -- - `whnf(τ)` is the recursive type of the values of a lazy τ in WHNF: for
 --   `τ = (μt⟨ā⟩. A ~> B)⟨C̄⟩`, `unroll(whnf(τ)) = B[μt⟨ā⟩. A ~> B / t][C̄/ā]`, the strict
 --   alternatives of `unroll(τ)` at their tags, and it is rolled and unrolled like τ. It is
@@ -803,7 +804,7 @@ data VExpr
   -- has tag tag(z).
   | UnboxRu Path Path VExpr
 
-  --   Γ[z.taken / z.contents], c : cell_‖V‖⟨τ⟩ | J ⊢ e : W
+  --   Γ[z.taken / z.contents], c : cell_|V|⟨τ⟩ | J ⊢ e : W
   --  ──────────────────────────────────────────────────────── [lock]
   --   Γ, z : Box V | J ⊢ let lock c = z in e : W
   --                 (z = y.roll.injⱼ with y : τ and j ∈ lazy(τ); z.contents :^ V ∈ Γ)

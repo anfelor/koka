@@ -20,7 +20,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Layout( CT(..), EnumSize(..), layout, leaves, leafSlots, isEnum, orderFields, shapeIsHeap, shapeIsSmall
                            , checkLayout, ctName, scanOf, rawOf, needsRC
-                           , structDefs, blockName, blockDef, blockSize, lazyBlockSize, isBlock, scalarField
+                           , structDefs, blockName, blockDef, blockSize, isBlock, scalarField
                            , dupExpr, dropStmt, dupFun, dropFun, primBox, scalarHeapSize, fnv
                            ) where
 
@@ -275,11 +275,6 @@ blockDef ct
 -- The size in bytes of the block of a box (checked by the C compiler where it is reused).
 blockSize :: CT -> Int
 blockSize ct = fst (structSize [(8,4), sizeAlign ct])
-
--- `‖V‖`: the size of the block of a lazy alternative, padded so that an indirection, a box of a
--- pointer, always fits
-lazyBlockSize :: CT -> Int
-lazyBlockSize ct = max (blockSize ct) (blockSize CBox)
 
 -- the offset and layout of each leaf of a payload, in the order of `leaves`
 leafSlots :: CT -> [(Int,CT)]

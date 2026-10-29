@@ -11,7 +11,7 @@
 module Backend.Typed.Elab.TypeInfo( Tr
                                   , elabType, elabFunType, elabScheme
                                   , isValueInfo, elabArgs
-                                  , conIndex, conFieldTypes, schemeFieldTypes, conCount, conShape, conExists
+                                  , conIndex, conFieldTypes, schemeFieldTypes, conCount, conShape, conExists, padFields
                                   , dataInfoOf, valueBody
                                   , tvarStar
                                   ) where
@@ -26,6 +26,7 @@ import Kind.Newtypes
 import Type.Type
 import Backend.Typed.Syntax
 import Backend.Typed.Types
+import Backend.Typed.Layout( CT(CBox), layout, blockSize )
 
 type Tr a = Either String a
 
@@ -152,8 +153,19 @@ existsV tvs t = VExists tvs t
 conFields :: Newtypes -> [AType] -> ConInfo -> Tr VType
 conFields nt vargs con = prodV <$> conFieldTypes nt vargs con
 
+-- The fields of a constructor. A thunk is padded after its fields if its block would be
+-- smaller than that of an indirection `Box(τ*)`, so that `[memoize]` can write one over it.
+-- Such fields are raw and fit in 4 bytes (with the header, a block is a multiple of 4
+-- bytes), so a `char` (zero, see `padFields`) makes the block exactly as large.
 conFieldTypes :: Newtypes -> [AType] -> ConInfo -> Tr [VType]
-conFieldTypes nt vargs con = schemeFieldTypes nt vargs (conInfoType con)
+conFieldTypes nt vargs con = pad <$> schemeFieldTypes nt vargs (conInfoType con)
+  where
+    pad fs | conInfoIsLazy con && not (null fs) && blockSize (layout (prodV fs)) < blockSize CBox = fs ++ [vtChar]
+           | otherwise = fs
+
+-- the values of the fields of a constructor `fields`, followed by those of its padding
+padFields :: [VType] -> [VVal] -> [VVal]
+padFields fields vs = vs ++ [Lit (LitChar '\0') | _ <- drop (length vs) fields]
 
 schemeFieldTypes :: Newtypes -> [AType] -> Type -> Tr [VType]
 schemeFieldTypes nt vargs scheme

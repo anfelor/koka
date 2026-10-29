@@ -345,8 +345,6 @@ genAIn cx tag val
   = case val of
       Fun f -> staticFun f
       UnitA -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" <.> int tag <.> "))")
-      -- a lazy alternative is allocated with the padded size `‖V‖`
-      Roll t (InjA i _ (Box v)) | i `elem` lazyTags (cxEnv cx) t -> genBox cx i Padded v
       Roll _ v -> genAIn cx tag v
       InjA i (ASum _) v -> genAIn cx i v
       InjA _ _ _ -> failG "injection into a non-sum"
@@ -408,9 +406,9 @@ projLeaves whole e start part
          _ -> return e
 
 -- where the block of a box comes from
-data Alloc = Fresh | Padded | At Path | In VVal
+data Alloc = Fresh | At Path | In VVal
 
--- a box: freshly allocated (with the padded size of a lazy alternative), in the block of a
+-- a box: freshly allocated, in the block of a
 -- reuse credit, or over the block of a cell (whose old fields were taken, see `[lock]`, and
 -- whose reference count is kept). A box on the path of a one-hole value records the context path with its header (see `genHolePath`).
 genBox :: Ctx -> Int -> Alloc -> VVal -> G Doc
@@ -433,7 +431,6 @@ genBox cx tag at v
                      allocFresh = case cpath of
                                     Nothing -> "kk_block_alloc_as(" <.> bt <.> "," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
                                     Just _ -> allocAt "kk_reuse_null"
-                     allocPadded = "(" <.> bt <.> "*)kk_block_alloc_at(kk_reuse_null," <.> int (lazyBlockSize ct) <.> "," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
                      setPath = maybe empty (\i -> x <.> "->_block.header._field_idx =" <+> i <.> ";") cpath
                      -- store a product field by field: a whole struct copy can also copy its
                      -- padding, from a temporary on the stack
@@ -445,8 +442,6 @@ genBox cx tag at v
                  case at of
                    Fresh -> do s <- store
                                return (stmtExpr ((bt <.> "*" <+> x <+> "=" <+> allocFresh <.> ";") : s) box)
-                   Padded -> do s <- store
-                                return (stmtExpr ((bt <.> "*" <+> x <+> "=" <+> allocPadded <.> ";") : s) box)
                    At r  -> do rt <- tyOfName cx r
                                let check = "_Static_assert(sizeof(" <.> bt <.> ") ==" <+> int (blockSize ct) <.> ",\"kt_reuse\");"
                                case rt of

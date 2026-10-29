@@ -19,7 +19,7 @@ import Kind.Newtypes
 import Type.Type( typevarId, conInfoName, conInfoIsLazy, dataInfoIsLazy )
 import Backend.Typed.Syntax
 import Backend.Typed.Types( sumOf, applyA )
-import Backend.Typed.Query( lazySize )
+import Backend.Typed.Query( reuseSize )
 import Backend.Typed.Elab.TypeInfo
 
 refBody :: Newtypes -> DataInfo -> Tr (Maybe AType)
@@ -92,7 +92,7 @@ lazyDef nt info
               forM_ [con | (_,con) <- cons, conInfoIsLazy con] $ \con ->
                 do shape <- conShape nt (paramArgs info) con
                    case shape of
-                     ABox s | Right _ <- lazySize s -> return ()
+                     ABox s | Right _ <- reuseSize s -> return ()
                      _ -> Left ("the lazy constructor " ++ show (conInfoName con) ++ " has no fields")
               return lazies
   where
