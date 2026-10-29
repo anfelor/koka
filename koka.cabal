@@ -53,7 +53,6 @@ library
       Backend.Typed.Passes.JoinArgs
       Backend.Typed.Passes.Loads
       Backend.Typed.Passes.Inline
-      Backend.Typed.Passes.OrderFields
       Backend.Typed.Passes.DropSpec
       Backend.Typed.Passes.ExpandReuse
       Backend.Typed.Passes.Match

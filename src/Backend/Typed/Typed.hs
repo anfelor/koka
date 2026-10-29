@@ -38,7 +38,6 @@ import Backend.Typed.Passes.JoinArgs( joinArgsProgram )
 import Backend.Typed.Passes.Inline( inlineProgram )
 import Backend.Typed.Passes.Paths( pathsProgram )
 import Backend.Typed.Passes.Hoist( hoistProgram )
-import Backend.Typed.Passes.OrderFields( orderFieldsProgram )
 import Backend.Typed.Linear( checkLinear )
 import Backend.Typed.Fip( checkFip )
 
@@ -47,7 +46,7 @@ typedFromCore :: Bool -> Newtypes -> [C.Core] -> Int -> C.Core -> (Program,[(Str
 typedFromCore enableReuse nt imports uniq core
   = let (acore,_)              = runUnique uniq (matchCore nt core)
         (eprog,elabErrs,notes) = elabProgram nt imports acore
-        passes                 = [("lazy",Elaborated,lazyProgram nt), ("orderfields",Unchecked,named orderFieldsProgram), ("anf",Unchecked,pure' anfProgram), ("contify",Unchecked,contifyProgram), ("simplify",Unchecked,pure' simplifyProgram), ("yields",Unchecked,pure' yieldsProgram), ("loads",Unchecked,pure' loadsProgram), ("perceus",Linear,perceusProgram)
+        passes                 = [("lazy",Unchecked,named (lazyProgram nt)), ("anf",Unchecked,pure' anfProgram), ("contify",Unchecked,contifyProgram), ("simplify",Unchecked,pure' simplifyProgram), ("yields",Unchecked,pure' yieldsProgram), ("loads",Unchecked,pure' loadsProgram), ("perceus",Linear,perceusProgram)
                                    ,("dropspec",Linear,dropSpecProgram)] ++ [("reuse",Linear,reuseProgram) | enableReuse]
                                    ++ [("match",Linear,matchProgram), ("sinkjoins",Linear,pure' sinkJoinsProgram), ("joinargs",Linear,pure' joinArgsProgram)]
                                    ++ concat [[("copyreset",Linear,pure' copyResetProgram),("expandreuse",Linear,pure' expandReuseProgram)] | enableReuse] ++ [("inline",Linear,inlineProgram)]
@@ -59,7 +58,7 @@ typedFromCore enableReuse nt imports uniq core
     in (hoisted, label "elab" elabErrs ++ msgs ++ fipMsgs ++ hoistMsgs ++ label "note" notes)
   where
     pure' f prog = (f prog,[])
-    -- OrderFields completes elaboration; the paths are named once, after it
+    -- Lazy completes elaboration; the paths are named once, after it
     named f prog = let (prog',errs) = f prog in (pathsProgram prog',errs)
 
 -- the FIP annotations of the functions
@@ -86,9 +85,8 @@ copyGroups copies groups = M.union groups (M.fromList [(c,S.map (copyOf b) gs) |
 -- a pass on the typed IR: its name, what its result must satisfy, and the pass
 type Pass = (String, Checks, Program -> (Program,[String]))
 
--- Beyond the types, the result of a pass may need to be linear. Before the paths are named
--- (`Elaborated`), only the types are checked.
-data Checks = Elaborated | Unchecked | Linear
+-- Beyond the types, the result of a pass may need to be linear.
+data Checks = Unchecked | Linear
 
 -- Each pass preserves path naming; validate its result directly, and check linearity
 -- if the pass produces linear code. Stop at the first error so that later passes
@@ -98,9 +96,8 @@ runPasses prog msgs _ | not (null msgs) = (prog,msgs)
 runPasses prog msgs [] = (prog,msgs)
 runPasses prog msgs ((name,checks,pass):passes)
   = let (prog',errs) = pass prog
-        checkErrs    = label ("check after " ++ name) ((case checks of Elaborated -> checkTypes; _ -> checkProgram) prog')
+        checkErrs    = label ("check after " ++ name) (checkProgram prog')
         linErrs      = case checks of
-                         Elaborated -> []
                          Unchecked -> []
                          _ | not (null checkErrs) -> []
                          Linear -> label ("linear after " ++ name) (checkLinear prog')
