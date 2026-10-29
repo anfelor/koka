@@ -133,7 +133,7 @@ dropValue trivial fresh scope x t e
         VRaw _ -> return e
 
 -- The fields of a product along its right spine (`[proj]`): the steps to each field and its
--- type. In layout normal form these are the fields in memory order.
+-- type.
 productFields :: VType -> [([Step],VType)]
 productFields t
   = case t of

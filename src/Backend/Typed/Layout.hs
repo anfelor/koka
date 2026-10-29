@@ -9,16 +9,16 @@
 {- The C representation of unboxed types.
 
   - pointer-sized types are `kk_box_t`; raw types are their C type; unit is `kk_unit_t`;
-  - an unboxed product is a struct of its leaves in the order of its type; in layout normal
-    form (`OrderFields`) that is Koka's order (`orderFields`): fields with pointers first,
-    then raw fields by decreasing alignment;
+  - an unboxed product is a struct of its leaves (nested products flattened) in Koka's order
+    (`orderFields`): fields with pointers first, then raw fields by decreasing alignment;
+    the member of a leaf is named by its position in the type;
   - an unboxed sum is a struct with a `kk_value_tag_t` and a union of its alternatives
     (or the smallest unsigned integer that holds its tag if all alternatives are unit);
   - a box is a heap block with the payload after the header.
   Structs are named by a hash of their layout so modules agree on them.
 -}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Layout( CT(..), EnumSize(..), layout, leaves, leafSlots, isEnum, orderFields, memoryOrder, shapeIsHeap, shapeIsSmall
+module Backend.Typed.Layout( CT(..), EnumSize(..), layout, leaves, leafSlots, isEnum, orderFields, shapeIsHeap, shapeIsSmall
                            , checkLayout, ctName, scanOf, rawOf, needsRC
                            , structDefs, blockName, blockDef, blockSize, lazyBlockSize, isBlock, scalarField
                            , dupExpr, dropStmt, dupFun, dropFun, primBox, scalarHeapSize, fnv
@@ -72,8 +72,7 @@ shapeIsSmall a = case a of
   ASum ts -> not (null ts) && all (\(i,b) -> i > 0 && i <= 0xFFC0 && shapeIsSmall b) ts
   _ -> False
 
--- The layout of a type, with the leaves of a product in the order of the type: memory order
--- once the program is in layout normal form (`OrderFields`).
+-- The layout of a type, with the leaves of a product in memory order.
 layout :: VType -> CT
 layout t
   = case t of
@@ -86,8 +85,8 @@ layout t
       VProd _ _   -> case map layout (leaves t) of
                        [] -> CUnit
                        [ct] -> ct
-                       cts  -> CProd (structName ("P(" ++ intercalate "," [show i ++ ":" ++ canonCT ct | (i,ct) <- zip [0::Int ..] cts] ++ ")"))
-                                     (zip [0..] cts)
+                       cts  -> let fs = orderFields (zip [0..] cts)
+                               in CProd (structName ("P(" ++ intercalate "," [show i ++ ":" ++ canonCT ct | (i,ct) <- fs] ++ ")")) fs
       VUnit       -> CUnit
       VPtr _      -> CBox
       -- Koka's `cctx`: `res` and the address of the hole, which is boxed as a value
@@ -141,10 +140,6 @@ orderFields fs
   where
     notUnit CUnit = False
     notUnit _ = True
-
--- The memory order of the fields of a product in layout normal form (`orderFields`).
-memoryOrder :: [VType] -> [Int]
-memoryOrder ts = map fst (orderFields (zip [0..] (map layout ts)))
 
 ctName :: CT -> String
 ctName ct
@@ -277,16 +272,9 @@ blockDef ct
   = let name = blockName ct
     in (name, guarded name ("struct " ++ name ++ " { kk_block_t _block; " ++ ctName ct ++ " p; };\n"))
 
--- The size in bytes of the block of a box (checked by the C compiler where it is reused), with
--- the fields of its products in memory order (`orderFields`), so that it does not depend on
--- the order of the fields before `OrderFields` (where the order is already the memory order).
+-- The size in bytes of the block of a box (checked by the C compiler where it is reused).
 blockSize :: CT -> Int
-blockSize ct = fst (structSize [(8,4), sizeAlign (inMemoryOrder ct)])
-  where
-    inMemoryOrder c = case c of
-      CProd n fs -> CProd n (orderFields [(i,inMemoryOrder f) | (i,f) <- fs])
-      CSum n alts -> CSum n (map (fmap inMemoryOrder) alts)
-      _ -> c
+blockSize ct = fst (structSize [(8,4), sizeAlign ct])
 
 -- `‖V‖`: the size of the block of a lazy alternative, padded so that an indirection, a box of a
 -- pointer, always fits

@@ -20,39 +20,26 @@ import Backend.Typed.Common
 import Backend.Typed.Types( Types(..) )
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Query( Env, envOf, checkE, yieldJoins )
-import Backend.Typed.Layout( layout, leaves, checkLayout, memoryOrder )
+import Backend.Typed.Layout( layout, checkLayout )
 
--- After OrderFields the types are also in layout normal form.
 checkProgram :: Program -> [String]
 checkProgram prog
   = checkLayoutProgram prog ++ [show (defName d) ++ ": " ++ err | d <- progDefs prog, Left err <- [checkPaths d >> checkTypeVars d >> checkDef (envOf prog) d]]
 
--- The types of a program are in layout normal form and have valid layouts.
+-- The types of a program, and the contents of their boxes, have valid layouts.
 checkLayoutProgram :: Program -> [String]
 checkLayoutProgram p = concatMap check (programTypes p)
   where
-    check t = normal t ++ checkLayout (layout t)
-    normal t = case t of
-      VProd a b -> ["product is not in layout normal form" | compound a || empty b || ordered /= [0..length fs-1]]
-                   ++ normal a ++ normal b
-        where fs = leaves t
-              ordered = memoryOrder fs
-      VExists _ b -> ["nested existential in layout normal form" | exists b] ++ normal b
+    check t = checkLayout (layout t) ++ inner t
+    inner t = case t of
+      VProd a b -> inner a ++ inner b
+      VExists _ b -> inner b
       VPtr a -> atomic a
-      VSum ts -> concatMap normal ts
+      VSum ts -> concatMap inner ts
       VCtx _ a b -> atomic a ++ atomic b
       VCell _ a -> atomic a
-      VReuse _ _ d -> maybe [] (\(Contents _ _ s) -> normal s) d
+      VReuse _ _ d -> maybe [] (\(Contents _ _ s) -> inner s) d
       _ -> []
-    compound VProd{} = True
-    compound VExists{} = True
-    compound VUnit = True
-    compound _ = False
-    empty VUnit = True
-    empty VExists{} = True
-    empty _ = False
-    exists VExists{} = True
-    exists _ = False
     atomic a = case a of
       ABox t -> check t
       ASum ts -> concatMap (atomic . snd) ts

@@ -60,9 +60,13 @@ data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [Strin
 -- `cxJoins`: the label and the parameters of each join point in scope
 data Ctx = Ctx{ cxEnv :: Env, cxCEnv :: CEnv, cxGamma :: Gamma, cxSelf :: Maybe (Name,[Path])
               , cxJoins :: M.Map Name (Doc,[Path])
-              , cxPlaces :: M.Map Path Doc  -- places, read through the pointer to their box (`genUnbox`)
+              , cxPlaces :: M.Map Path Place  -- places, read through the pointer to their box (`genUnbox`)
               , cxShared :: S.Set Path     -- blocks known to be shared (the else branch of `IsUnique`, and its aliases)
               , cxSources :: Sources }     -- the copies and join parameters of the definition (`sameBits`)
+
+-- A place: the lvalue of the contents of a box and their type, and a part of them, by its
+-- first leaf and its type. Its leaves are members of the contents (`projLeaves`).
+data Place = Place Doc VType Int VType
 
 type G a = M () St a
 
@@ -369,10 +373,11 @@ genProd cx t vs
                  x <- fresh "p"
                  assigns <- assignLeaves x (zip [0..] fs) parts 0
                  return (stmtExpr ((text name <+> x <.> ";") : assigns) x)
-         _ -> case vs of
-                [v] -> genV cx v
-                _ -> do es <- mapM (genV cx) vs
-                        return (last es)
+         -- at most one value has a leaf
+         _ -> do ts <- mapM (tyOf cx) vs
+                 case [v | (v,s) <- zip vs ts, not (null (leaves s))] of
+                   [v] -> genV cx v
+                   _ -> return "kk_Unit"
   where
     assignLeaves x fs [] _ = return []
     assignLeaves x fs ((e,n,s):rest) i
@@ -474,26 +479,26 @@ genBox cx tag at v
                                return (stmtExpr ([cty ct <+> v <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> clear <.> ";",
                                                   setPath] ++ storeFrom v) box)
 
--- A projection of a place is a place: the selected field (`[proj]`), read at its uses. A
--- projection of a local copies the field into a local.
+-- A projection of a place is a place: the selected part (`[proj]`), read at its uses. A
+-- projection of a local copies the part into a local.
 genProjection :: Ctx -> Dest -> VVal -> [Step] -> Path -> VExpr -> G [Doc]
 genProjection cx dest v ss x e = do
   t <- tyOf cx v
-  (base,pre) <- case v of
-    Var z -> do b <- genVar cx z
-                return (b,[])
-    _ -> do ve <- genV cx v
-            z <- fresh "product"
-            ct <- ctype t
-            return (z,[cty ct <+> z <+> "=" <+> ve <.> ";"])
   (start,u) <- liftC (fieldRange t ss)
-  p <- projLeaves t base start u
-  if isPlace cx v
-    then genE (bindPlace cx x u p) dest e
-  -- a later pass may remove every use (DropSpec removes the drop of a field that reuse overwrites)
-  else if not (any (`within` x) (fvE e))
-    then genE (bindVar cx x (V u)) dest e
-    else do ct <- ctype u
+  case v of
+    Var z | Just (Place b w i _) <- M.lookup z (cxPlaces cx)
+      -> genE (bindPlace cx x (Place b w (i + start) u)) dest e
+    -- a later pass may remove every use (DropSpec removes the drop of a field that reuse overwrites)
+    _ | not (any (`within` x) (fvE e))
+      -> genE (bindVar cx x (V u)) dest e
+    _ -> do (base,pre) <- case v of
+              Var z -> return (localName z,[])
+              _ -> do ve <- genV cx v
+                      z <- fresh "product"
+                      ct <- ctype t
+                      return (z,[cty ct <+> z <+> "=" <+> ve <.> ";"])
+            p <- projLeaves t base start u
+            ct <- ctype u
             body <- genE (bindVar cx x (V u)) dest e
             return (pre ++ [declare (cty ct) x p] ++ body)
 
@@ -560,7 +565,7 @@ genUnbox cx dest v x e
        ue <- unboxBlock t (localName v)
        if not (ceEagerLoads (cxCEnv cx)) && ct /= CUnit
          then do p <- fresh "payload"
-                 s <- genE (bindPlace cx x t ("(*" <.> p <.> ")")) dest e
+                 s <- genE (bindPlace cx x (Place ("(*" <.> p <.> ")") t 0 t)) dest e
                  return ((cty ct <.> "*" <+> p <+> "= &(" <.> ue <.> ");") : s)
          else genRead cx dest x t ue e
 
@@ -576,10 +581,6 @@ genRead cx dest x t ue e
   = do ct <- ctype t
        s <- genE (bindVar cx x (V t)) dest e
        return ([declare (cty ct) x ue] ++ s)
-
--- The binders of `[proj]` and `[unpack]` of a place are places.
-isPlace :: Ctx -> VVal -> Bool
-isPlace cx v = case v of { Var p -> M.member p (cxPlaces cx); _ -> False }
 
 -- `[unbox-ru]` of `z` takes its block as a credit, which may then be freed or written, and
 -- renames its contents to `z.taken`.
@@ -610,11 +611,14 @@ genTaken cx dest g' z e root
        s <- genE cx' dest e
        return (map snd locals ++ [root] ++ s)
 
+-- A place is read from its members (a copy if it has more than one leaf), a local by its name.
 genVar :: Ctx -> Path -> G Doc
-genVar cx x = return (M.findWithDefault (localName x) x (cxPlaces cx))
+genVar cx x = case M.lookup x (cxPlaces cx) of
+  Just (Place b w i t) -> projLeaves w b i t
+  Nothing -> return (localName x)
 
-bindPlace :: Ctx -> Path -> VType -> Doc -> Ctx
-bindPlace cx x t d = let cx' = bindVar cx x (V t) in cx'{ cxPlaces = M.insert x d (cxPlaces cx') }
+bindPlace :: Ctx -> Path -> Place -> Ctx
+bindPlace cx x pl@(Place _ _ _ t) = let cx' = bindVar cx x (V t) in cx'{ cxPlaces = M.insert x pl (cxPlaces cx') }
 
 -- Koka's `box` of a scalar
 genScalar :: Ctx -> VVal -> G Doc
@@ -706,9 +710,7 @@ genLam cx ps r e
                                Nothing -> failG ("unbound captured variable " ++ show x)) caps
        capCts <- mapM (ctOf . snd) capTys
        -- the captures in memory order, like the fields of a product
-       let fields = [(i,capCts !! i) | i <- memoryOrder (map (capType . snd) capTys)]
-           capType (V t) = t
-           capType (A a) = VPtr a
+       let fields = orderFields (zip [0..] capCts)
            scan   = 1 + sum (map (scanOf . snd) fields)
        n <- freshName "lam"
        let sname = "struct kt_clo" <.> text n
@@ -965,10 +967,11 @@ genE cx dest expr
       Unpack _ v tvs x e
         -> do VExists bs body <- tyOf cx v
               let t = inst bs (map AVar tvs) body
-              ve <- genV cx v
-              if isPlace cx v
-                then genE (bindPlace cx x t ve) dest e
-                else genRead cx dest x t ve e
+              case v of
+                Var y | Just (Place b w i _) <- M.lookup y (cxPlaces cx)
+                  -> genE (bindPlace cx x (Place b w i t)) dest e
+                _ -> do ve <- genV cx v
+                        genRead cx dest x t ve e
       Deref _ v x e
         -> do VPtr a <- tyOf cx v
               ve <- genV cx v

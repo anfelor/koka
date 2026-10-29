@@ -192,7 +192,7 @@ data AType = ABox VType                 -- Box V
 --   `ctx⁺⟨A,B⟩` is also a context `ctx⟨A,B⟩`, as a full credit is also a credit.
 -- - `|V|` is the size of the heap block of a `Box V` (`Layout.blockSize`); it is only defined when
 --   V has contents (`Layout.isBlock`). It is the size with the fields in memory order, so it
---   does not depend on the order in which a product is written (before `OrderFields`).
+--   does not depend on the order in which a product is written.
 -- - A cell `cell_n⟨τ⟩` is the n-byte block of a lazy value under evaluation (the paper's
 --   locked location): its contents were taken out (`[lock]`), it holds one reference to the
 --   block, and other references to the block must see a τ once it is filled. It is not
@@ -259,7 +259,7 @@ data Lit = LitInt Integer
 -- `let_q ptr x = z.snd` where `z.snd` is the binder of `let_q x = z.snd`. A projection
 -- (`[proj]`), and a field of `[case-open]`, contributes all of its steps. The binders
 -- of other forms are roots, and a root is bound only once in a definition. `Paths`
--- establishes these invariants after elaboration, which ends with `OrderFields`.
+-- establishes these invariants after elaboration, which ends with `Lazy`.
 -- The other passes preserve them; `Check` validates each pass's output directly.
 data Path = Path Name [Step]
           deriving (Eq,Ord)
@@ -602,10 +602,9 @@ data VExpr
   -- Reads and binds one part of a product, at the nonempty steps s̄ (each `fst` or `snd`)
   -- from v: `V₁ ⊗ V₂` at `fst s̄` is V₁ at s̄, and at `snd s̄` it is V₂ at s̄. For a variable v
   -- the binder is the path v.s̄, with that part's existing ownership; the other parts remain
-  -- available, and the intermediate products are not bound. In layout normal form
-  -- (`OrderFields`) a product is a right-nested chain of fields in memory order, and s̄
-  -- selects one field: `snd`ⁱ `fst`, or `snd`ⁱ for the last one. Code generation then reads
-  -- exactly that field, where the projection is.
+  -- available, and the intermediate products are not bound. Products are logical: their
+  -- fields are in source order and may be products themselves, and code generation places
+  -- the leaves of a product in memory order (`Layout.layout`).
   | Proj Mode VVal [Step] Path VExpr
 
   --   Γ₁ ⊢ v :q ⊕ᵢ Vᵢ    Γ₂, xᵢ :q Vᵢ ⊢ eᵢ : W   (for each i)
