@@ -139,19 +139,28 @@ owning m
 --   passed around.
 -- - `λā.A` only occurs as the argument of a higher-kinded variable, and applying it is
 --   β-reduction: `a⟨B̄⟩[λb̄.A / a] = A[B̄/b̄]`. A partial application `T⟨B̄⟩` is also allowed there.
--- - `unroll(T⟨B̄⟩) = A[B̄/ā]` for a definition `T⟨ā⟩ := A` (`TypeDef`); in the paper `T⟨B̄⟩` is
---   `μt.A[B̄/ā]` with the recursive occurrences replaced by `t`.
--- - A lazy definition `T⟨ā⟩ := A ~> B` divides the tags of its sum into lazy ones (the
---   thunks A, each a `Box V`, among them the indirection ι with `Aι = Box(T⟨ā⟩*)`) and strict
---   ones (B): `unroll(T⟨B̄⟩) = (A ⊕ B)[B̄/ā]` and `lazy(T⟨B̄⟩)` is the set of lazy tags
---   (`Query.lazyTags`). No rule refers to ι. The block of a lazy alternative `Box V` has
---   `‖V‖ = max(|V|, |T⟨ā⟩*|)` bytes (`Layout.lazyBlockSize`), so that an indirection always fits.
--- - A lazy definition with strict alternatives has a named type of its values in WHNF,
---   `whnf(T)⟨ā⟩ := B` (`lazyWhnf`), an ordinary definition with the strict alternatives of T at
---   their tags. A `whnf(T⟨B̄⟩)` can be used where a `T⟨B̄⟩` is expected, also behind pointers
---   and in boxes (`Query.expectV`, `Query.checkA`), and
---   branches that disagree on it agree on `T⟨B̄⟩*`: its blocks are blocks of T, and a value in
---   WHNF is never a thunk again. `[if-whnf]` narrows a `T⟨B̄⟩*` to it.
+-- - `μt⟨ā⟩. A` is a recursive type of the kind of ā, so that a recursive occurrence may be
+--   applied to other arguments (a nested datatype); its instance `(μt⟨ā⟩. A)⟨B̄⟩` unrolls to
+--   `unroll((μt⟨ā⟩. A)⟨B̄⟩) = A[μt⟨ā⟩. A / t][B̄/ā]`, where `μt⟨ā⟩. A` stands for
+--   `λā. (μt⟨ā⟩. A)⟨ā⟩`. It only relates to its unrolling by `[roll]` and `[unroll]`.
+-- - `T⟨B̄⟩` with a definition `T⟨ā⟩ := A` (`TypeDef`) is an abbreviation of `A[B̄/ā]` (δ). Types
+--   stay folded: two names are compared by name, and a name is unfolded only where a rule needs
+--   a recursive type. The body of a datatype is `(μt⟨ā⟩. A)⟨ā⟩`, whose recursive occurrences
+--   `t⟨C̄⟩` fold back to `T⟨C̄⟩`: `unroll(T⟨B̄⟩) = A[T/t][B̄/ā]` (`Query.unrollT`), which is
+--   δ-equal to the unrolling of `(μt⟨ā⟩. A)⟨B̄⟩`.
+-- - A lazy recursive type `μt⟨ā⟩. A ~> B` (the paper's `μt. A ~F> (B + t)`) divides the tags of
+--   its sum into lazy ones L (the thunks A, each a `Box V`, among them the indirection ι with
+--   `Aι = Box(t⟨ā⟩*)`) and strict ones (B). It unrolls as `μt⟨ā⟩. A ⊕ B` does, and
+--   `lazy(τ) = L` for an instance τ of it (`Query.lazyTags`, also by its name); a τ is lazy if
+--   L is nonempty. No rule refers to ι. The block of a lazy alternative `Box V` has
+--   `‖V‖ = max(|V|, |τ*|)` bytes (`Layout.lazyBlockSize`), so that an indirection always fits.
+-- - `whnf(τ)` is the recursive type of the values of a lazy τ in WHNF: for
+--   `τ = (μt⟨ā⟩. A ~> B)⟨C̄⟩`, `unroll(whnf(τ)) = B[μt⟨ā⟩. A ~> B / t][C̄/ā]`, the strict
+--   alternatives of `unroll(τ)` at their tags, and it is rolled and unrolled like τ. It is
+--   only formed if B is nonempty. `whnf(τ) ≤ τ`: it can be used where τ is expected, also
+--   behind pointers and in boxes (`Query.expectV`, `Query.checkA`), and branches that disagree
+--   on it agree on `τ*`: its blocks are blocks of τ, and a value in WHNF is never a thunk
+--   again. `[if-whnf]` narrows a `τ*` to it.
 data AType = ABox VType                 -- Box V
            | AScalar Raw                -- Scalar raw
            | AUnit                      -- 1
@@ -160,8 +169,10 @@ data AType = ABox VType                 -- Box V
            | AForall [TVar] AType       -- ∀ā. A
            | AVar TVar                  -- a
            | AApp TVar [AType]          -- a⟨B̄⟩, an applied higher-kinded variable
-           | ACon Name [AType]          -- T⟨B̄⟩, a named (recursive) type
+           | ACon Name [AType]          -- T⟨B̄⟩, a named type
            | ALam [TVar] AType          -- λā. A, a partially applied type
+           | AMu [Int] TVar [TVar] AType [AType] -- (μt⟨ā⟩. A)⟨B̄⟩, a recursive type, or (μt⟨ā⟩. A ~> B)⟨B̄⟩ with these lazy tags
+           | AWhnf AType                -- whnf(τ), the values of a lazy τ in WHNF
            deriving (Eq,Show)
 
 -- unboxed types V, W: values of a fixed size without a header.
@@ -178,9 +189,9 @@ data AType = ABox VType                 -- Box V
 -- - `|V|` is the size of the heap block of a `Box V` (`Layout.blockSize`); it is only defined when
 --   V has contents (`Layout.isBlock`). It is the size with the fields in memory order, so it
 --   does not depend on the order in which a product is written (before `OrderFields`).
--- - A cell `cell_n⟨T⟨B̄⟩⟩` is the n-byte block of a lazy value under evaluation (the paper's
+-- - A cell `cell_n⟨τ⟩` is the n-byte block of a lazy value under evaluation (the paper's
 --   locked location): its contents were taken out (`[lock]`), it holds one reference to the
---   block, and other references to the block must see a `T⟨B̄⟩` once it is filled. It is not
+--   block, and other references to the block must see a τ once it is filled. It is not
 --   trivial and it is linear: it is never duplicated or dropped, but consumed by `[memoize]`,
 --   `[if-unique-cell]` or a call or jump with a parameter of a cell type. It never occurs
 --   inside another type (a product, sum, existential or box), is never captured by a closure,
@@ -197,7 +208,7 @@ data VType = VPtr AType                 -- A*
            | VExists [TVar] VType       -- ∃ā. V
            | VReuse Fill Int (Maybe Contents) -- ◇n[k; p : V] or ◆n[k; p : V]: if nonempty, an n-byte block with tag k containing p
            | VCtx Fill AType AType      -- ctx⟨A,B⟩ or ctx⁺⟨A,B⟩: an A with a hole of type B*, nonempty if full
-           | VCell Int AType            -- cell_n⟨T⟨B̄⟩⟩: the n-byte block of a lazy value under evaluation
+           | VCell Int AType            -- cell_n⟨τ⟩: the n-byte block of a lazy value under evaluation
            deriving (Eq,Show)
 
 -- raw types: the primitive value types of Koka (`TypeInfo.rawType`), named by their C type
@@ -223,16 +234,10 @@ data Fill = Full | MaybeEmpty
 data Ty = A AType | V VType
           deriving (Eq,Show)
 
--- a named type `T⟨ā⟩ := A`, or a lazy one `T⟨ā⟩ := A ~> B` (see `AType`); without a body
--- (`int`, `string`, ...) it cannot be unrolled. The definition of `whnf(T)` names the lazy
--- type T that it refines.
-data TypeDef = TypeDef{ tdefName :: Name, tdefParams :: [TVar], tdefBody :: Maybe AType, tdefLazy :: Maybe Lazy, tdefWhnfOf :: Maybe Name }
+-- a named type `T⟨ā⟩ := A` (see `AType`); without a body (`int`, `string`, ...) it is
+-- abstract. The body of a datatype is a recursive type, which is lazy for a lazy datatype.
+data TypeDef = TypeDef{ tdefName :: Name, tdefParams :: [TVar], tdefBody :: Maybe AType }
              deriving (Show)
-
--- the lazy tags `lazy(T)` of a lazy definition, the tag of the indirection ι among them, and
--- the name of `whnf(T)` if T has strict alternatives
-data Lazy = Lazy{ lazyAlts :: [Int], lazyIndirect :: Int, lazyWhnf :: Maybe Name }
-          deriving (Show)
 
 type TypeDefs = M.Map Name TypeDef
 
@@ -316,11 +321,12 @@ data AVal
   --   Γ ⊢ injᵢ v : ⊕ⱼ Aⱼ
   | InjA Int AType AVal
 
-  --   Γ ⊢ v : unroll(T⟨B̄⟩)
-  --  ──────────────────────── [roll]
-  --   Γ ⊢ roll v : T⟨B̄⟩
+  --   Γ ⊢ v : A[μt⟨ā⟩. A / t][B̄/ā]
+  --  ──────────────────────────────── [roll]
+  --   Γ ⊢ roll v : (μt⟨ā⟩. A)⟨B̄⟩
   --
-  -- A no-op at run time; the annotation is `T⟨B̄⟩`.
+  -- A no-op at run time. The annotation is the recursive type, usually by its name `T⟨B̄⟩`. A lazy
+  -- type, and `whnf(τ)`, are rolled likewise (see `AType`).
   | Roll AType AVal
 
   --   Γ ⊢ v : V
@@ -498,9 +504,9 @@ data VVal
   -- unique parameter.
   | CtxCopy VVal
 
-  --   Γ ⊢ v : V    unroll(T⟨B̄⟩) = ⊕ᵢ Aᵢ    Aₖ = Box V    |V| ≤ n
-  --  ─────────────────────────────────────────────────────────── [memoize]
-  --   Γ, c : cell_n⟨T⟨B̄⟩⟩ ⊢ memoize c (injₖ v) : T⟨B̄⟩*
+  --   Γ ⊢ v : V    unroll(τ) = ⊕ᵢ Aᵢ    Aₖ = Box V    |V| ≤ n
+  --  ──────────────────────────────────────────────────── [memoize]
+  --   Γ, c : cell_n⟨τ⟩ ⊢ memoize c (injₖ v) : τ*
   --
   -- Writes the alternative k over the block of the cell in place, keeping its reference count,
   -- and releases the cell: the result is its reference, now a value. A strict k is the paper's
@@ -629,8 +635,8 @@ data VExpr
   --   Γ₁, Γ₂ ⊢ let_q ptr x = v in e : W
   | Deref Mode VVal Path VExpr
 
-  --   Γ₁ ⊢ v :q T⟨B̄⟩    Γ₂, x :q unroll(T⟨B̄⟩) ⊢ e : W
-  --  ──────────────────────────────────────────────────── [unroll]
+  --   Γ₁ ⊢ v :q (μt⟨ā⟩. A)⟨B̄⟩    Γ₂, x :q A[μt⟨ā⟩. A / t][B̄/ā] ⊢ e : W
+  --  ──────────────────────────────────────────────────────────────────── [unroll]
   --   Γ₁, Γ₂ ⊢ let_q roll x = v in e : W
   | Unroll Mode Path Path VExpr
 
@@ -723,17 +729,17 @@ data VExpr
   --
   -- Branches on whether a box is unique (`DropSpec`).
   --
-  --   Γ, c : ◆n | J ⊢ e₁ : W    Γ, c : cell_n⟨T⟨B̄⟩⟩ | J ⊢ e₂ : W
+  --   Γ, c : ◆n | J ⊢ e₁ : W    Γ, c : cell_n⟨τ⟩ | J ⊢ e₂ : W
   --  ───────────────────────────────────────────────────────────── [if-unique-cell]
-  --   Γ, c : cell_n⟨T⟨B̄⟩⟩ | J ⊢ if-unique c then e₁ else e₂ : W
+  --   Γ, c : cell_n⟨τ⟩ | J ⊢ if-unique c then e₁ else e₂ : W
   --
   -- Nobody else sees a unique cell, so it is just an empty block, a full credit
   -- (`Query.uniqueGamma`), which `[free]` frees without touching the taken contents.
   | IsUnique Path VExpr VExpr
 
-  --   Γ, x :q whnf(T⟨B̄⟩)* | J ⊢ e₁ : W    Γ, x :q T⟨B̄⟩* | J ⊢ e₂ : W
-  --  ─────────────────────────────────────────────────────────────── [if-whnf]
-  --   Γ, x :q T⟨B̄⟩* | J ⊢ if-whnf x then e₁ else e₂ : W
+  --   Γ, x :q whnf(τ)* | J ⊢ e₁ : W    Γ, x :q τ* | J ⊢ e₂ : W
+  --  ───────────────────────────────────────────────────────── [if-whnf]
+  --   Γ, x :q τ* | J ⊢ if-whnf x then e₁ else e₂ : W
   --
   -- Branches on whether a lazy value is in WHNF, by its tag (the strict tags come before the
   -- lazy ones), and narrows its type in the first branch (`Query.whnfGamma`). The test reads
@@ -763,10 +769,10 @@ data VExpr
   -- has tag tag(z).
   | UnboxRu Path Path VExpr
 
-  --   Γ[z.taken / z.contents], c : cell_‖V‖⟨T⟨B̄⟩⟩ | J ⊢ e : W
+  --   Γ[z.taken / z.contents], c : cell_‖V‖⟨τ⟩ | J ⊢ e : W
   --  ──────────────────────────────────────────────────────── [lock]
   --   Γ, z : Box V | J ⊢ let lock c = z in e : W
-  --                 (z = y.roll.injⱼ with y : T⟨B̄⟩ and j ∈ lazy(T⟨B̄⟩); z.contents :^ V ∈ Γ)
+  --                 (z = y.roll.injⱼ with y : τ and j ∈ lazy(τ); z.contents :^ V ∈ Γ)
   --
   -- The counterpart of `[unbox-ru]` for an owned, possibly shared, thunk: its contents are taken
   -- out of the block without reference counting and renamed to `z.taken`, as there, and its
