@@ -31,8 +31,8 @@
   and a parent is consumed once all of its parts are. The binder of `[deref]`, `[unroll]`,
   `[case-a]` or `[split-a]` of a boxed value is the pointer of its scrutinee, and that of
   `[unpack]` is its scrutinee, so consuming or testing it consumes or tests the scrutinee (`key`). So does a part whose
-  sibling is of a trivial type, which is determined from the type of the parent: a projection
-  binds only its field, not the products around it (`[proj]`). In an alternative whose binder of a trivial type is all of
+  sibling is of a trivial type, which is determined from the type of the parent: a `[case-open]`
+  binds only its fields, not the products around them. In an alternative whose binder of a trivial type is all of
   the scrutinee (`Nothing`), the scrutinee needs no references. The mode of a
   destructuring of a variable is therefore irrelevant (an owned destructuring is a borrowed one
   whose parts are consumed), except that a unique destructuring consumes a unique scrutinee:
@@ -135,8 +135,8 @@ checkDef env def
 params :: Env -> [(Path,Mode,VType)] -> [(Path,Mode)]
 params env ps = [(x,m) | (x,m,t) <- ps, not (trivialTy env (V t))]
 
--- The parts of a trivial type beside the way from a product `p : t` to its part `x`: a
--- projection, and `[case-open]`, leave the products on the way unbound.
+-- The parts of a trivial type beside the way from a product `p : t` to its part `x`:
+-- `[case-open]` leaves the products on the way unbound.
 trivialSiblings :: Env -> Path -> VType -> Path -> [Path]
 trivialSiblings env p@(Path _ ps) t (Path _ xs)
   = [foldl child p ss | (pre,s) <- zip (inits steps) steps, Just s' <- [sibling s]
@@ -549,7 +549,8 @@ checkE env g js expr
 bindsPart :: VExpr -> Bool
 bindsPart expr
   = case expr of
-      Proj{} -> True
+      Fst{} -> True
+      Snd{} -> True
       Unpack{} -> True
       _ -> False
 

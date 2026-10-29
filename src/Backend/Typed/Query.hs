@@ -250,7 +250,8 @@ ftvCtx g e = concat [ftv t | x <- S.toList (fvE e), Just t <- [M.lookup x g]]
 altTypes :: Env -> Ty -> VExpr -> Q [[Ty]]
 altTypes env t expr
   = case (expr,t) of
-      (Proj _ _ ss@(_:_) _ _, V s) | Just u <- partAt s ss -> return [[V u]]
+      (Fst{}, V (VProd a _)) -> return [[V a]]
+      (Snd{}, V (VProd _ b)) -> return [[V b]]
       (CaseV _ _ alts, V (VSum ts)) -> do
         let indices = [i | (i,_,_) <- alts]
         unless (S.fromList indices == S.fromList [0 .. length ts - 1] && length indices == length ts)

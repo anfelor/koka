@@ -207,7 +207,8 @@ ruE expr
               t <- liftE (inferVar g x >>= dupType x)
               Dup x y <$> bind [(y,t)] (ruE e)
       -- destructuring forms are handled above
-      Proj{} -> plain
+      Fst{} -> plain
+      Snd{} -> plain
       CaseV{} -> plain
       CaseA{} -> plain
       SplitA{} -> plain

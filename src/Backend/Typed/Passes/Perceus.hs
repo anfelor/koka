@@ -214,7 +214,8 @@ percE pe owned expr
 consumedWith :: VExpr -> Path -> Path -> Bool
 consumedWith expr z x
   = case expr of
-      Proj{}     -> False
+      Fst{}      -> False
+      Snd{}      -> False
       Ret _      -> True
       Call _ _ _ -> True
       App f _    -> x /= f
@@ -247,7 +248,7 @@ settle pe owned expr z xs
        let owned' = S.delete z owned
        case [x | x <- xs, all keepsPtr (stepsFrom z x)] of
          _ | V v@VProd{} <- t -> do
-               let fields = [f | f@(_,_,s) <- fieldsAt z v, not (trivialTy (peEnv pe) (V s))]
+               let fields = [f | f@(_,_,s) <- halvesAt z v, not (trivialTy (peEnv pe) (V s))]
                    missing = [f | f@(y,_,_) <- fields, M.notMember y (peGamma pe)]
                if null missing
                  then percE pe (S.union owned' (S.fromList [y | (y,_,_) <- fields])) expr
@@ -403,7 +404,8 @@ loadsOf pe expr = [x | x <- S.toList here, Just t <- [M.lookup x (peGamma pe)], 
     here = case expr of
            Let _ _ e1 _ -> fvE e1
            LetYield _ _ e1 _ _ -> fvE e1
-           Proj _ (Var _) _ _ _ -> S.empty
+           Fst _ (Var _) _ _ -> S.empty
+           Snd _ (Var _) _ _ -> S.empty
            Unpack _ (Var _) _ _ _ -> S.empty
            Dup{} -> S.empty
            Load{} -> S.empty
@@ -422,11 +424,12 @@ withCopies pe owned xs k expr
                            _ -> False
            roots = [x | x <- xs, not (any (covered x) xs)]
        cs <- mapM (copy pe) roots
-       let parts = [(x,renamePrefix z y x,y,stepsFrom z x)
-                   | (_,z,y,_) <- cs, z /= y, x <- xs, covered x z]
-           ren = [(x,y) | (_,x,y,_) <- cs, x /= y] ++ [(x,y) | (x,y,_,_) <- parts]
+       let parts = [(x,renamePrefix z y x,y) | (_,z,y,_) <- cs, z /= y, x <- xs, covered x z]
+           ren = [(x,y) | (_,x,y,_) <- cs, x /= y] ++ [(x,y) | (x,y,_) <- parts]
            bs  = concat [bs' | (_,_,_,bs') <- cs]
-           projections = [Proj Borrowed (Var z) ss y | (_,y,z,ss) <- parts]
+           -- a projection per step, each product on the way bound once and before its parts
+           steps = S.toAscList (S.fromList [q | (_,y,c) <- parts, q <- prefixes y ++ [y], q /= c, q `within` c])
+           projections = [projAt (last ss) Borrowed (Var (Path r (init ss))) q | q@(Path r ss) <- steps]
        body <- percE (bind pe bs) (S.union owned (ownedOf pe [b | b@(y,_) <- bs, y `elem` map snd ren]))
                      (compose projections (renameCopies (peGamma pe) ren expr))
        compose [d | (d,_,_,_) <- cs] <$> k body
@@ -448,7 +451,8 @@ hoistdupAll es k expr
       _ -> k expr
 
 productProjection :: VExpr -> Bool
-productProjection Proj{} = True
+productProjection Fst{} = True
+productProjection Snd{} = True
 productProjection _ = False
 
 -- destructuring

@@ -60,9 +60,9 @@ fieldOf :: VType -> VVal -> E (K,VVal)
 fieldOf t v
   = case t of
       VProd a b -> do x <- fresh "f"
-                      let (step,s) = if null (leaves a) then (SSnd,b) else (SFst,a)
+                      let (proj,s) = if null (leaves a) then (Snd,b) else (Fst,a)
                       (k,w) <- fieldOf s (Var x)
-                      return (Proj Owned v [step] x . k, w)
+                      return (proj Owned v x . k, w)
       VExists tvs b -> do x <- fresh "f"
                           (k,w) <- fieldOf b (Var x)
                           return (Unpack Owned v tvs x . k, w)
