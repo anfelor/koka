@@ -291,7 +291,7 @@ specialise lazies prog
           _ -> ss
     boolV t b = Inj (if b then 1 else 0) t UnitV
     dispatch f tvs r ps
-      = CaseV Owned (Var r) [(child r (SInjV i), Call (copyName b f) (map AVar tvs) [Var x | (x,_,_) <- ps]) | (i,b) <- [(0,False),(1,True)]]
+      = CaseV Owned (Var r) [(i, child r (SInjV i), Call (copyName b f) (map AVar tvs) [Var x | (x,_,_) <- ps]) | (i,b) <- [(0,False),(1,True)]]
     callsE expr
       = case expr of
           Call f ts (v : Inj i _ UnitV : vs) | S.member f funs -> Call (copyName (i == 1) f) ts (v:vs)
@@ -327,7 +327,7 @@ whnfProgram lazies prog
       = case expr of
           Let b _ e body
             | Just (x,a,pre) <- whnfTest e, Just _ <- narrow (VPtr a)
-            , Just (joins,CaseV _ (Var b') [(_,e0),(_,e1)]) <- joinsTo ws body, b == b'
+            , Just (joins,CaseV _ (Var b') alts) <- joinsTo ws body, b == b', [e0,e1] <- altBodies alts
             , let expr' = pre (joins (if S.member x ws then whnfE ws e1
                                       else IfWhnf x (whnfE (S.insert x ws) e1) (whnfE ws e0)))
             , S.notMember b (fvE expr')
@@ -359,7 +359,7 @@ whnfProgram lazies prog
           Unreachable _ -> True
           Let _ _ _ e -> forced xs js e
           Join j _ _ e1 e2 -> forced xs (if forced xs js e1 then S.insert j js else js) e2
-          CaseV _ _ alts -> all (forced xs js . snd) alts
+          CaseV _ _ alts -> all (forced xs js) (altBodies alts)
           _ -> False
 
 -- The matches on a value `m` in WHNF, whose sum has the tags `strict`, keep the alternatives

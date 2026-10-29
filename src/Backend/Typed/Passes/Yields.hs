@@ -102,8 +102,8 @@ yieldTest expr
   = case expr of
       Let y _ (Call f [] []) body | f == nameYielding
         -> case body of
-             CaseV _ (Var y') [(_,e2),(_,e3)] | y' == y -> test y e2 (e3,False)
-             Let z t (CaseV _ (Var y') [(_,e2),(_,e3)]) c | y' == y, coercion z c -> test y (Let z t e2 c) (Let z t e3 c,True)
+             CaseV _ (Var y') alts | y' == y, [e2,e3] <- altBodies alts -> test y e2 (e3,False)
+             Let z t (CaseV _ (Var y') alts) c | y' == y, [e2,e3] <- altBodies alts, coercion z c -> test y (Let z t e2 c) (Let z t e3 c,True)
              _ -> Nothing
       _ -> Nothing
   where
