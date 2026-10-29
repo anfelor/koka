@@ -178,7 +178,7 @@ dropExcept z xs v t e
          _ | v `within` child z STaken, M.member loaded g, any (`within` loaded) xs -> dropExcept z xs loaded t e
            | any (v `within`) xs -> return e
            | not (any (`inside` v) xs) -> dropValue (trivialTy env) (fresh "d") (scopeOf (M.keys g)) v (V t) e
-         VProd{} -> do let fields = fieldsAt v t
+         VProd{} -> do let fields = halvesAt v t
                        body <- bind [(y,V s) | (y,_,s) <- fields] (foldM (\rest (y,_,s) -> dropExcept z xs y s rest) e (reverse fields))
                        return (projectAll (scopeOf (M.keys g)) Borrowed v fields body)
          _ -> case [(y,s) | (y,V s) <- M.toList g, y `within` v, length (stepsFrom v y) == 1, any (`inside` y) xs] of

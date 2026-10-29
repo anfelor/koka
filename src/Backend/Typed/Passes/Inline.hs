@@ -115,7 +115,8 @@ inlineE :: Values -> VExpr -> VExpr
 inlineE vals expr
   = case expr of
       Let x _ _ e | M.member x vals -> inlineE vals e
-      Proj _ (Var z) ss _ e | Just w@Pair{} <- known vals z, Just _ <- project w ss -> inlineE vals e
+      Fst _ (Var z) _ e | Just Pair{} <- known vals z -> inlineE vals e
+      Snd _ (Var z) _ e | Just Pair{} <- known vals z -> inlineE vals e
       CaseV _ (Var z) alts | Just (Inj i _ _) <- known vals z, (e:_) <- [e | (j,_,e) <- alts, j == i] -> inlineE vals e
       _ -> runIdentity (descendE Identity (Identity . inlineV vals) (\_ e -> Identity (inlineE vals e)) expr)
 

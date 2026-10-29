@@ -76,7 +76,7 @@
     - `[dup]` binds its copy as a new root, so a variable holds at most one owned reference.
       For example, after `val y = dup z.fst; drop z` the context holds `y : V`.
     - Code generation reads the contents of a box in place: `z.contents`, and the binders of
-      `[proj]` and `[unpack]` of a place, stay in the block of `z`, and a use reads the block.
+      `[fst]`, `[snd]` and `[unpack]` of a place, stay in the block of `z`, and a use reads the block.
       It loads them (copies them out of the block) at `[load]`, `[deref]` and `[dup]`, and at
       `[unbox-ru]` and `[lock]` of `z`, which may free or write the block. Perceus duplicates
       a pointer of the block through its `[deref]` (`[dup-a]`), so that it is loaded before the
@@ -256,8 +256,8 @@ data Lit = LitInt Integer
 
 -- Variables are paths: a root followed by the steps of the destructurings that lead from the
 -- root to the variable, outermost first. For example, `z.snd.deref` is the binder of
--- `let_q ptr x = z.snd` where `z.snd` is the binder of `let_q x = z.snd`. A projection
--- (`[proj]`), and a field of `[case-open]`, contributes all of its steps. The binders
+-- `let_q ptr x = z.snd` where `z.snd` is the binder of `let_q x = z.snd`. A field of
+-- `[case-open]` contributes all of its steps (`snd`ⁱ `fst`). The binders
 -- of other forms are roots, and a root is bound only once in a definition. `Paths`
 -- establishes these invariants after elaboration, which ends with `Lazy`.
 -- The other passes preserve them; `Check` validates each pass's output directly.
@@ -265,7 +265,7 @@ data Path = Path Name [Step]
           deriving (Eq,Ord)
 
 -- the steps from the scrutinee of a destructuring form to its binders
-data Step = SFst | SSnd            -- [proj]
+data Step = SFst | SSnd            -- [fst], [snd]
           | SInjV Int              -- [case]
           | SPack                  -- [unpack]
           | SDeref                 -- [deref]
@@ -595,17 +595,23 @@ data VExpr
   -- where the binder is the scrutinee's pointer: `[case]` on `⊕ᵢ Aᵢ`, `[deref]`, `[unroll]` and
   -- `[unpack]` (`keepsPointer`).
   --
-  --   Γ₁ ⊢ v :q V    V at s̄ is U    Γ₂, x :q U ⊢ e : W
-  --  ──────────────────────────────────────────────── [proj]
-  --   Γ₁, Γ₂ ⊢ let_q x = v.s̄ in e : W
+  --   Γ₁ ⊢ v :q V₁ ⊗ V₂    Γ₂, x :q V₁ ⊢ e : W
+  --  ─────────────────────────────────────── [fst]
+  --   Γ₁, Γ₂ ⊢ let_q x = v.fst in e : W
   --
-  -- Reads and binds one part of a product, at the nonempty steps s̄ (each `fst` or `snd`)
-  -- from v: `V₁ ⊗ V₂` at `fst s̄` is V₁ at s̄, and at `snd s̄` it is V₂ at s̄. For a variable v
-  -- the binder is the path v.s̄, with that part's existing ownership; the other parts remain
-  -- available, and the intermediate products are not bound. Products are logical: their
-  -- fields are in source order and may be products themselves, and code generation places
-  -- the leaves of a product in memory order (`Layout.layout`).
-  | Proj Mode VVal [Step] Path VExpr
+  -- Reads and binds the first component of a product; a deeper part is reached by a chain of
+  -- projections. For a variable v the binder is the path v.fst, with that part's existing
+  -- ownership; the other part remains available. Products are logical: their fields are in
+  -- source order and may be products themselves, and code generation places the leaves of a
+  -- product in memory order (`Layout.layout`).
+  | Fst Mode VVal Path VExpr
+
+  --   Γ₁ ⊢ v :q V₁ ⊗ V₂    Γ₂, x :q V₂ ⊢ e : W
+  --  ─────────────────────────────────────── [snd]
+  --   Γ₁, Γ₂ ⊢ let_q x = v.snd in e : W
+  --
+  -- The second component, as `[fst]`.
+  | Snd Mode VVal Path VExpr
 
   --   Γ₁ ⊢ v :q ⊕ᵢ Vᵢ    Γ₂, xᵢ :q Vᵢ ⊢ eᵢ : W   (for each i)
   --  ────────────────────────────────────────────────────────── [case]
@@ -683,8 +689,9 @@ data VExpr
   --
   -- Matching on the tag of an open datatype, with a mandatory default. Always borrowed. An
   -- alternative binds one binder for each source field. For a variable v the binders are the
-  -- parts of `v.C` at the steps of the fields of a right-nested product, like `[proj]`: field
-  -- i of n at `snd`ⁱ `fst`, the last one at `snd`ⁿ⁻¹ (just `v.C` if there is one field).
+  -- parts of `v.C` at the steps of the fields of a right-nested product, as a chain of
+  -- `[fst]` and `[snd]` would bind them: field i of n at `snd`ⁱ `fst`, the last one at `snd`ⁿ⁻¹ (just
+  -- `v.C` if there is one field), without binding the products on the way.
   | CaseOpen Mode Path [(Name,[Path],VExpr)] VExpr
 
   --   Γ | ∅ ⊢ e : A*    ā ∉ ftv(Γ)
