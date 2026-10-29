@@ -879,7 +879,8 @@ genE cx dest expr
         -> do t <- tyOfName cx x
               ct <- ctOf t
               ve <- genVar cx x
-              s <- genE (bindVar cx y t) dest e
+              ty <- liftC (dupType x t)
+              s <- genE (bindVar cx y ty) dest e
               return (declare (cty ct) y (dupAt cx x t ct ve) : s)
       -- a copy of a trivial value
       Load x y e

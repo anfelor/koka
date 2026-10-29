@@ -78,7 +78,9 @@
     - Code generation reads the contents of a box in place: `z.contents`, and the binders of
       `[proj]` and `[unpack]` of a place, stay in the block of `z`, and a use reads the block.
       It loads them (copies them out of the block) at `[load]`, `[deref]` and `[dup]`, and at
-      `[unbox-ru]` and `[lock]` of `z`, which may free or write the block. These rules make
+      `[unbox-ru]` and `[lock]` of `z`, which may free or write the block. Perceus duplicates
+      a pointer of the block through its `[deref]` (`[dup-a]`), so that it is loaded before the
+      reference count is incremented. These rules make
       that sound: a place of `z` is read only before `z` is consumed or its block is taken
       (after `[unbox-ru]` its loaded copy is a part of `z.taken`), and a trivial part only by
       `[load]`. A case never reads a block: a sum in it is loaded first (`[load]`). Code
@@ -721,10 +723,15 @@ data VExpr
   --  ──────────────────────────────────────── [dup]
   --   Γ, x :^ V ⊢ val y = dup x; e : W
   --
+  --         Γ, y : A* ⊢ e : W
+  --  ─────────────────────────────────── [dup-a]
+  --   Γ, x.deref :^ A ⊢ val y = dup x.deref; e : W
+  --
   -- Duplicate an unboxed variable (its pointers and contexts) into a new root `y`, the copy.
   -- The parts of `x` in scope are not parts of `y`, which has none until it is
-  -- destructured. A boxed operand is duplicated through the pointer it was dereferenced
-  -- from. A trivial value is copied by `[load]`.
+  -- destructured. A boxed operand is duplicated only if it is the binder of `[deref]`: its
+  -- copy is a duplicate of the pointer it was dereferenced from (`Common.dupType`). A trivial
+  -- value is copied by `[load]`.
   | Dup Path Path VExpr
 
   --   Γ, x :^ V, x.load :^ V ⊢ e : W    V trivial or a sum
