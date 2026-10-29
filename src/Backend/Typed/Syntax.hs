@@ -77,10 +77,10 @@
       For example, after `val y = dup z.fst; drop z` the context holds `y : V`.
     - Code generation reads the contents of a box in place: `z.contents`, and the binders of
       `[fst]`, `[snd]` and `[unpack]` of a place, stay in the block of `z`, and a use reads the block.
-      It loads them (copies them out of the block) at `[load]`, `[deref]` and `[dup]`, and at
-      `[unbox-ru]` and `[lock]` of `z`, which may free or write the block. Perceus duplicates
-      a pointer of the block through its `[deref]` (`[dup-a]`), so that it is loaded before the
-      reference count is incremented. These rules make
+      It loads them (copies them out of the block) at `[load]`, and at `[unbox-ru]` and
+      `[lock]` of `z`, which may free or write the block. `[case]`, `[deref]`, `[dup]` and a
+      use of a value as a whole read loaded values, so a part of the block is loaded before
+      its reference count is incremented. These rules make
       that sound: a place of `z` is read only before `z` is consumed or its block is taken
       (after `[unbox-ru]` its loaded copy is a part of `z.taken`), and a trivial part only by
       `[load]`. A case never reads a block: a sum in it is loaded first (`[load]`). Code
@@ -668,6 +668,9 @@ data VExpr
   --   Γ₁ ⊢ v :q A*    Γ₂, x :q A ⊢ e : W
   --  ───────────────────────────────────── [deref]
   --   Γ₁, Γ₂ ⊢ let_q ptr x = v in e : W
+  --
+  -- The scrutinee is not in the contents of a box (`Common.placeOf`): `Loads` loads a pointer
+  -- there first (`[load]`).
   | Deref Mode VVal Path VExpr
 
   --   Γ₁ ⊢ v :q (μt⟨ā⟩. A)⟨B̄⟩    Γ₂, x :q A[μt⟨ā⟩. A / t][B̄/ā] ⊢ e : W
@@ -763,16 +766,14 @@ data VExpr
   -- value is copied by `[load]`.
   | Dup Path Path VExpr
 
-  --   Γ, x :^ V, x.load :^ V ⊢ e : W    V trivial or a sum
-  --  ──────────────────────────────────────────────────── [load]
+  --   Γ, x :^ V, x.load :^ V ⊢ e : W
+  --  ──────────────────────────────────── [load]
   --   Γ, x :^ V ⊢ let^ load x.load = x in e : W
   --
-  -- Copy (*load*) a trivial part, or a sum, of the contents of a box out of its block (see
-  -- "Structural rules"): Perceus loads a trivial part before it is read, `Loads` a sum
-  -- before a case on it, and the later uses read the copy. A sum is copied whole, tag and
-  -- payload. The binder is the part `x.load` of `x`, which is not in the block
-  -- (`Common.boxOf`): a trivial one is unrestricted, and another one is a part of `x` with
-  -- its ownership, whose references the block still holds (like the binder of `[deref]`).
+  -- Copy (*load*) a value out of its block (see "Structural rules"), whole: a sum with its
+  -- tag and payload, a product with all of its leaves. The binder is the part `x.load` of
+  -- `x`, which is not in the block (`Common.boxOf`): a trivial one is unrestricted, and
+  -- another one is a part of `x` with its ownership, whose references the block still holds.
   -- It is a destructuring form that is always borrowed.
   | Load Path Path VExpr
 
