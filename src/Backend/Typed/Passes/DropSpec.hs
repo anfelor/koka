@@ -48,7 +48,7 @@ import Data.List( nub, partition )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferAVar, inferV, altTypes, unboxRuGamma, lockGamma, uniqueGamma, whnfGamma, boxContents, reuseSize, trivialTy )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferAVar, inferV, altTypes, unboxRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize, trivialTy )
 
 type D a = M (Env,Gamma) NameSupply a
 
@@ -211,13 +211,11 @@ dsPlain expr
       UnboxRu v r e -> do (_,g) <- ask
                           g' <- liftE (unboxRuGamma g v r)
                           UnboxRu v r <$> withGamma g' (dsE e)
-      Lock z c e -> do (env,g) <- ask
-                       g' <- liftE (lockGamma env g z c)
+      Lock z c e -> do (_,g) <- ask
+                       g' <- liftE (lockGamma g z c)
                        Lock z c <$> withGamma g' (dsE e)
       IsUnique x e1 e2 -> do (_,g) <- ask
                              IsUnique x <$> withGamma (uniqueGamma g x) (dsE e1) <*> dsE e2
-      IfWhnf x e1 e2 -> do (env,g) <- ask
-                           IfWhnf x <$> withGamma (whnfGamma env g x) (dsE e1) <*> dsE e2
       Dup x y e -> do (_,g) <- ask
                       t <- liftE (inferVar g x >>= dupType x)
                       Dup x y <$> bind [(y,t)] (dsE e)

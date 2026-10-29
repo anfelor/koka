@@ -93,7 +93,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, whnfGamma, paramModes, trivialTy )
+import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, paramModes, trivialTy )
 
 -- the mode of the variables at and below each owner: the roots in scope, and in the body of a
 -- join point the variables it captures
@@ -357,7 +357,7 @@ ownedV env g val
       Append c d -> uses [uniqueV env g c, uniqueV env g d]
       CtxCopy c -> ownedV env g c
       -- the value is evaluated before the block is written
-      Memoize c _ v -> uses [ownedV env g v, ownedV env g c]
+      Memoize c _ _ v -> uses [ownedV env g v, ownedV env g c]
   where
     children = uses (getConst (descendV (\a -> Const [ownedA env g a]) (\v -> Const [ownedV env g v]) val))
 
@@ -375,6 +375,7 @@ ownedA env g val
       UnitA -> return noUse
       InjA _ _ v -> ownedA env g v
       Roll _ v -> ownedA env g v
+      InjLazy _ _ v -> ownedA env g v
       Box v -> ownedV env g v
       Scalar v -> ownedV env g v
       OpenCon _ _ vs -> uses (map (ownedV env g) vs)
@@ -498,10 +499,6 @@ checkE env g js expr
                              u1 <- checkE env (uniqueGamma g x) js e1
                              u2 <- checkE env g js e2
                              before (readVar env g x) (branches [u1{ uUnique = S.delete z (uUnique u1) }, u2])
-      -- the test reads the variable at any mode
-      IfWhnf x e1 e2 -> do u1 <- checkE env (whnfGamma env g x) js e1
-                           u2 <- checkE env g js e2
-                           before (readVar env g x) (branches [u1, u2])
       -- the test reads the credit, which is empty in the second branch: the test consumes it there
       IfFull r e1 e2 -> do u1 <- checkE env g js e1
                            u2 <- before (consume env g r) (checkE env g js e2)
@@ -517,7 +514,7 @@ checkE env g js expr
               before (return u{ uConsumed = S.singleton c }) (return (mapUse (unrebase z) body))
       -- the same for an owned box, whose block becomes a cell
       Lock z c e
-        -> do g' <- liftE (lockGamma env g z c)
+        -> do g' <- liftE (lockGamma g z c)
               u <- consume env g z
               k <- keyOf (child z SCredit)
               modify (\tr -> S.union tr (S.map (rebase z) tr))

@@ -53,7 +53,7 @@ import Backend.Typed.Common
 import Backend.Typed.Monad
 import Backend.Typed.Layout( layout, isBlock )
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, lockGamma, uniqueGamma, whnfGamma, trivialTy )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, lockGamma, uniqueGamma, trivialTy )
 
 -- The allocations of the most allocating path; whether there are allocations, calls to the
 -- recursive group, and both in sequence; and the types of the values boxed for polymorphism.
@@ -208,6 +208,8 @@ immediate x
                    SRest   -> True
                    SLo     -> True
                    SHi     -> True
+                   SWhnf   -> True
+                   SDelay  -> True
                    SPack   -> True
                    _       -> False
     noBlock a = case a of
@@ -283,9 +285,6 @@ fipE expr
               ty <- liftE (dupType x t)
               local borrowCopy (bind [(y,ty)] (fipE e))
       IsUnique x e1 _ -> local (\fe -> fe{ fGamma = uniqueGamma (fGamma fe) x }) (fipE e1)
-      IfWhnf x e1 e2
-        -> do alive <- alivePaths
-              branches ([local (\fe -> fe{ fGamma = whnfGamma (fEnv fe) (fGamma fe) x }) (fipE e1) | alive e1] ++ [fipE e2 | alive e2])
       IfFull r e1 e2
         -> do full <- isFull r
               alive <- alivePaths
@@ -296,7 +295,7 @@ fipE expr
               local (\fe -> fe{ fGamma = g' }) (fipE e)
       Lock z c e
         -> do fe <- ask
-              g' <- liftE (lockGamma (fEnv fe) (fGamma fe) z c)
+              g' <- liftE (lockGamma (fGamma fe) z c)
               local (\fe' -> fe'{ fGamma = g' }) (fipE e)
       Join j _ ps e1 e2
         -> do i <- state (\s -> (fsUniq s, s{ fsUniq = fsUniq s + 1 }))
@@ -409,7 +408,7 @@ fipV v
   = case v of
       Ptr t a -> fipA (Just t) a
       -- memoization writes over the block of its cell: it neither allocates nor frees
-      Memoize _ _ w -> fipV w
+      Memoize _ _ _ w -> fipV w
       Context b k -> bind [(nameHole,V (VPtr b))] (fipV k)
       _ -> mconcat <$> sequence (getConst (descendV (\a -> Const [fipA Nothing a]) (\w -> Const [fipV w]) v))
 
@@ -427,6 +426,7 @@ fipA ptr val
                       return (if full then c else c <> b)
       Roll _ a -> fipA Nothing a
       InjA _ _ a -> fipA ptr a
+      InjLazy _ _ a -> fipA ptr a
       OpenCon _ _ ws -> (<> allocation) . mconcat <$> mapM fipV ws
       Lam ps _ e -> do require mayAlloc "allocating a lambda expression"
                        let enter fe = fe{ fGamma = bindAll [(x,V t) | (x,_,t) <- ps] (fGamma fe), fJoins = M.empty, fTail = False }

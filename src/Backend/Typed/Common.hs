@@ -86,6 +86,7 @@ mentionedA a = case a of
   where annotations = case a of
           InjA _ t _ -> mentionedT (VPtr t)
           Roll t _ -> mentionedT (VPtr t)
+          InjLazy _ t _ -> mentionedT (VPtr t)
           OpenCon _ ts _ -> concatMap (mentionedT . VPtr) ts
           _ -> []
 
@@ -205,8 +206,8 @@ isTrivialWith unroll t
                    AUnit     -> True
                    ASum ts   -> all (trivialA . snd) ts
                    ACon n _  -> n == nameTpReuse || maybe False trivialA (unroll a)
-                   AMu _ _ _ _ _ -> maybe False trivialA (unroll a)
-                   AWhnf _   -> maybe False trivialA (unroll a)
+                   ALazy l b -> trivialA l && trivialA b
+                   AMu _ _ _ _ -> maybe False trivialA (unroll a)
                    ABox _    -> False
                    AScalar _ -> False
                    AFun _ _  -> False
@@ -247,8 +248,8 @@ containsLinear (A a) = case a of
   ASum ts -> any (containsLinear . A . snd) ts
   AForall _ b -> containsLinear (A b)
   ALam _ b -> containsLinear (A b)
-  AMu _ _ _ b ts -> any (containsLinear . A) (b : ts)
-  AWhnf b -> containsLinear (A b)
+  ALazy l b -> containsLinear (A l) || containsLinear (A b)
+  AMu _ _ b ts -> any (containsLinear . A) (b : ts)
   ACon _ ts -> any (containsLinear . A) ts
   AApp _ ts -> any (containsLinear . A) ts
   AVar _ -> False
@@ -271,6 +272,7 @@ isCtxValue k
     block a = case a of
                 Roll _ b -> block b
                 InjA _ _ b -> block b
+                InjLazy _ _ b -> block b
                 Box v -> field v
                 BoxAt _ v -> field v
                 _ -> False
@@ -327,6 +329,7 @@ descendA fn fa fv val
   = case val of
       InjA i a v     -> InjA i a <$> fa v
       Roll a v       -> Roll a <$> fa v
+      InjLazy d a v  -> InjLazy d a <$> fa v
       Box v          -> Box <$> fv v
       Scalar v       -> Scalar <$> fv v
       OpenCon c ts vs -> OpenCon c ts <$> traverse fv vs
@@ -348,7 +351,7 @@ descendV fa fv val
       Plug c v       -> Plug <$> fv c <*> fv v
       CtxCopy v      -> CtxCopy <$> fv v
       Append c d     -> Append <$> fv c <*> fv d
-      Memoize c k v  -> Memoize <$> fv c <*> pure k <*> fv v
+      Memoize c d k v -> Memoize <$> fv c <*> pure d <*> pure k <*> fv v
       Hole           -> pure val
       Var _          -> pure val
       Glob _ _       -> pure val
@@ -386,6 +389,7 @@ descendB fn fv fb expr
       CaseA m v alts def    -> CaseA m <$> fn v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x [SInjA i] e) alts
                                        <*> traverse (\(x,e) -> one x [SRest] e) def
       SplitA m v k (x,e1) (y,e2) -> SplitA m <$> fn v <*> pure k <*> one x [SLo] e1 <*> one y [SHi] e2
+      IfWhnf m v (x,e1) (y,e2) -> IfWhnf m <$> fn v <*> one x [SWhnf] e1 <*> one y [SDelay] e2
       Deref m v x e         -> (\v' (x',e') -> Deref m v' x' e') <$> fv v <*> one x [SDeref] e
       Unroll m v x e        -> (\v' (x',e') -> Unroll m v' x' e') <$> fn v <*> one x [SRoll] e
       Unbox m v x e         -> (\v' (x',e') -> Unbox m v' x' e') <$> fn v <*> one x [SContents] e
@@ -400,7 +404,6 @@ descendB fn fv fb expr
       Dup x y e             -> (\x' (y',e') -> Dup x' y' e') <$> fn x <*> one y [] e
       Load x y e            -> (\x' (y',e') -> Load x' y' e') <$> fn x <*> one y [SLoad] e
       IsUnique x e1 e2      -> IsUnique <$> fn x <*> plain e1 <*> plain e2
-      IfWhnf x e1 e2        -> IfWhnf <$> fn x <*> plain e1 <*> plain e2
       IfFull r e1 e2        -> IfFull <$> fn r <*> plain e1 <*> plain e2
       UnboxRu v r e         -> (\v' (r',e') -> UnboxRu v' r' e') <$> fn v <*> one r [] e
       Lock z c e            -> (\z' (c',e') -> Lock z' c' e') <$> fn z <*> one c [] e
@@ -593,6 +596,7 @@ substTypesA sub val
       Lam ps r e      -> Lam [(x,m,subst sub t) | (x,m,t) <- ps] (subst sub r) (substTypesE sub e)
       InjA i a v      -> InjA i (subst sub a) (substTypesA sub v)
       Roll a v        -> Roll (subst sub a) (substTypesA sub v)
+      InjLazy d a v   -> InjLazy d (subst sub a) (substTypesA sub v)
       OpenCon c ts vs -> OpenCon c (map (subst sub) ts) (map (substTypesV sub) vs)
       _               -> mapA id (substTypesA sub) (substTypesV sub) val
 
@@ -676,6 +680,7 @@ substAWith renameRoot recur scope sub val
                          (substVType sub' r) (recur (M.union (scopeOf ys) scope) sub' e)
       InjA i a v -> InjA i (substAType sub a) (goA v)
       Roll a v -> Roll (substAType sub a) (goA v)
+      InjLazy d a v -> InjLazy d (substAType sub a) (goA v)
       OpenCon c ts vs -> OpenCon c (map (substAType sub) ts) (map goV vs)
       _ -> mapA (substName sub) goA goV val
   where
@@ -877,6 +882,8 @@ destructAOf expr
   = case expr of
       SplitA m v k (x,e1) (y,e2) -> Just (Destruct m v [([x],e1),([y],e2)]
                                       (\m' v' es -> SplitA m' v' k (x,head es) (y,last es)))
+      IfWhnf m v (x,e1) (y,e2) -> Just (Destruct m v [([x],e1),([y],e2)]
+                                    (\m' v' es -> IfWhnf m' v' (x,head es) (y,last es)))
       CaseA m v alts def -> Just (Destruct m v ([([x],e) | (_,x,e) <- alts] ++ maybe [] (\(x,e) -> [([x],e)]) def)
                                   (\m' v' es -> CaseA m' v' [(i,x,e) | ((i,x,_),e) <- zip alts es]
                                     (fmap (\(x,_) -> (x,last es)) def)))
@@ -904,7 +911,6 @@ destructAOf expr
       Drop{} -> Nothing
       Free{} -> Nothing
       IsUnique{} -> Nothing
-      IfWhnf{} -> Nothing
       IfFull{} -> Nothing
       UnboxRu{} -> Nothing
       Lock{} -> Nothing
@@ -988,6 +994,7 @@ keepsPointer :: VExpr -> Bool
 keepsPointer expr
   = case expr of
       SplitA{}    -> True
+      IfWhnf{}    -> True
       CaseA{}     -> True
       Deref{}     -> True
       Unroll{}    -> True
@@ -1012,7 +1019,6 @@ keepsPointer expr
       Drop{}      -> False
       Free{}      -> False
       IsUnique{}  -> False
-      IfWhnf{}    -> False
       IfFull{}    -> False
       UnboxRu{}   -> False
       Lock{}      -> False
@@ -1080,8 +1086,8 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
       AFun ps r -> r : map snd ps
       AForall _ b -> at b
       ALam _ b -> at b
-      AMu _ _ _ b ts -> concatMap at (b : ts)
-      AWhnf b -> at b
+      ALazy l b -> at l ++ at b
+      AMu _ _ b ts -> concatMap at (b : ts)
       ACon _ ts -> concatMap at ts
       AApp _ ts -> concatMap at ts
       _ -> []
@@ -1111,5 +1117,6 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
       Lam ps r e -> r : map (\(_,_,t) -> t) ps ++ et e
       Roll t w -> at t ++ avTypes w
       InjA _ t w -> at t ++ avTypes w
+      InjLazy _ t w -> at t ++ avTypes w
       OpenCon _ ts ws -> concatMap at ts ++ concatMap vt ws
       _ -> getConst (descendA (const (Const [])) (Const . avTypes) (Const . vt) a)
