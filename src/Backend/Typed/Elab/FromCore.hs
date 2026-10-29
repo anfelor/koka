@@ -546,7 +546,7 @@ elabConWith info vargs con args
        argTys <- mapM (vt . typeOf) args
        exSub <- tr (existsSub (conExists con) fields argTys)
        (ks,vs) <- unzip <$> mapM (\(t,arg) -> elabValAt t arg) (zip (map (subst exSub) fields) args)
-       v <- conValue info vargs idx exSub (prodVal vs)
+       v <- conValue info vargs idx exSub (prodVal (padFields fields vs))
        return (compose ks, v)
 
 elabOpenCon :: DataInfo -> [AType] -> Name -> Type -> [C.Expr] -> E (K,VVal)
@@ -816,7 +816,8 @@ conBranch vargs con y (Just br@(C.Branch [pat] _))
         let exIds = [typevarId tv | tv <- exists, tvarStar tv]
             exSub = M.fromList (zip (conExists con) (map AVar exIds))
         (k,payload) <- openCon y (conExists con) exIds
-        getters <- destructure (zip (map subBinder subs) (map (subst exSub) fields)) (id,payload)
+        -- the padding of a thunk has no binder
+        getters <- destructure (zip (map subBinder subs ++ repeat Nothing) (map (subst exSub) fields)) (id,payload)
         body <- withFields getters (branchBody br)
         return (k body)
       _ -> branchBody br
