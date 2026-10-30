@@ -39,7 +39,7 @@ import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 
 -- the structural values bound by lets
 type Values = M.Map Path VVal
@@ -163,6 +163,9 @@ reuseE expr
       UnboxRu z r e -> do (env,g,facts,src) <- ask
                           g' <- liftE (unboxRuGamma g z r)
                           UnboxRu z r <$> local (const (env,g',M.mapKeys (rebase z) facts,src)) (reuseE e)
+      CopyRu z r e -> do (env,g,facts,src) <- ask
+                         g' <- liftE (copyRuGamma g z r)
+                         CopyRu z r <$> local (const (env,g',facts,src)) (reuseE e)
       Lock z c e -> do (env,g,facts,src) <- ask
                        g' <- liftE (lockGamma g z c)
                        Lock z c <$> local (const (env,g',M.mapKeys (rebase z) facts,src)) (reuseE e)

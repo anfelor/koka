@@ -47,7 +47,8 @@
   A unique variable is owned and holds the only reference to its block, so `UnboxRu` may
   take its contents and keep its block as a credit, a new root that consumes the block
   `z.credit` of `z` (the part of `z` beside its contents). Its body is checked with the
-  contents renamed (`rebase`), and its uses of `z.taken` are uses of `z.contents`. `Lock` is
+  contents renamed (`rebase`), and its uses of `z.taken` are uses of `z.contents`. `CopyRu`
+  only reads the block of `z` and binds a copy of it as a new root. `Lock` is
   checked in the same way, but consumes an owned box, and its new root is a cell. A cell is
   linear: it is owned and not trivial, so it must be consumed (as `Check` rejects a dup or a
   drop of it, by `memoize`, a uniqueness test or a call or jump), and it must not be live
@@ -93,7 +94,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, paramModes, trivialTy )
+import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, paramModes, trivialTy )
 
 -- the mode of the variables at and below each owner: the roots in scope, and in the body of a
 -- join point the variables it captures
@@ -524,6 +525,10 @@ checkE env g js expr
               modify (\tr -> S.union tr (S.map (rebase z) tr))
               body <- local (M.mapKeys (rebase z)) (roots env Owned [(r,g' M.! r)] (checkE env g' js e))
               before (return u{ uConsumed = S.singleton c }) (return (mapUse (unrebase z) body))
+      -- a copy of the block of `z`, which only reads the block, as a new root
+      CopyRu z r e
+        -> do g' <- liftE (copyRuGamma g z r)
+              before (loadOf (child z SContents)) (roots env Owned [(r,g' M.! r)] (checkE env g' js e))
       -- the same for an owned box, whose block becomes a cell
       Lock z c e
         -> do g' <- liftE (lockGamma g z c)

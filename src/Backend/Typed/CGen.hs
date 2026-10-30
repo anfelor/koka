@@ -35,7 +35,7 @@ import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types( inst, collapse, Types(..) )
-import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, unrollT, openFields, boxContents, reuseSize, pointerShape )
+import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, unrollT, openFields, boxContents, reuseSize, pointerShape )
 import Backend.Typed.Layout hiding( dupExpr, dropStmt )
 import Backend.Typed.Monad
 
@@ -581,6 +581,23 @@ genUnboxRu cx dest z r e
   = do g' <- liftC (unboxRuGamma (cxGamma cx) z r)
        genTaken cx dest g' z e (declare "kk_reuse_t" r ("kk_datatype_as_ptr(kk_datatype_unbox(" <.> localName z <.> "),_ctx)"))
 
+-- `[copy-ru]` of `z` allocates a block with the header of `z` and copies its payload. The
+-- header is not copied: the reference count of `z` may change concurrently if `z` is
+-- thread-shared, and the copy needs a fresh one. The runtime's `kk_block_alloc_copy` would
+-- dup the fields, which the copy does not own.
+genCopyRu :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
+genCopyRu cx dest z r e
+  = do g' <- liftC (copyRuGamma (cxGamma cx) z r)
+       ct <- liftC (inferAVar (cxGamma cx) z >>= boxContents) >>= ctype
+       bt <- blockType ct
+       ze <- genVar cx z
+       x <- fresh "copy"
+       s <- genE cx{ cxGamma = g' } dest e
+       let old = "((" <.> bt <.> "*)kk_datatype_as_ptr(kk_datatype_unbox(" <.> ze <.> "),_ctx))"
+       return ([bt <.> "*" <+> x <+> "= kk_block_alloc_as(" <.> bt <.> "," <.> int (scanOf ct) <.> ",(kk_tag_t)" <.> int (boxTag z) <.> ",_ctx);",
+                "memcpy(&" <.> x <.> "->p,&" <.> old <.> "->p,sizeof(" <.> x <.> "->p));",
+                declare "kk_reuse_t" r ("&" <.> x <.> "->_block")] ++ s)
+
 -- `[lock]` of `z` takes its block as a cell, the pointer to the block, which is then written.
 genLock :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
 genLock cx dest z c e
@@ -909,6 +926,7 @@ genE cx dest expr
               s2 <- genE cx dest e2
               return ["if kk_likely(" <.> localName r <+> "!= kk_reuse_null)" <+> block s1 <+> "else" <+> block s2]
       UnboxRu v r e -> genUnboxRu cx dest v r e
+      CopyRu z r e -> genCopyRu cx dest z r e
       Lock z c e -> genLock cx dest z c e
       Gen _ e -> genE cx dest e
       Join j _ ps e1 e2

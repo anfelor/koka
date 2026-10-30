@@ -71,6 +71,10 @@ expr e = case e of
     (env,g) <- ask
     g' <- liftE (unboxRuGamma g z r)
     UnboxRu z r <$> local (const (env,g')) (expr b)
+  CopyRu z r b -> do
+    (env,g) <- ask
+    g' <- liftE (copyRuGamma g z r)
+    CopyRu z r <$> local (const (env,g')) (expr b)
   Lock z c b -> do
     (env,g) <- ask
     g' <- liftE (lockGamma g z c)
