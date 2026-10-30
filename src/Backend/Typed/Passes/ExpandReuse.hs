@@ -39,9 +39,10 @@
   tag, so that every alternative writes the tag and the C compiler can select it without a
   branch.
 
-  The test that made the credit is Lean's `reset`, which `DropSpec` and `Reuse` already expand.
-  A credit is full where it is bound at a full type (`◆n`), by `[unbox-ru]`, and in the first
-  branch of a test.
+  The test that made the credit is Lean's `reset`, which `DropSpec` and `Reuse` already expand,
+  and whose credit `FillCredits` makes full where the continuation always allocates in it.
+  A credit is full where it is bound at a full type (`◆n`), by `[unbox-ru]` or `[copy-ru]`, and
+  in the first branch of a test.
 -}
 module Backend.Typed.Passes.ExpandReuse( expandReuseProgram ) where
 
