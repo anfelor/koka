@@ -818,6 +818,19 @@ data VExpr
   -- has tag tag(z).
   | UnboxRu Path Path VExpr
 
+  --   Γ, z :^ Box V, r : ◆n[tag(z); z.contents : V] ⊢ e : W    |V| = n
+  --  ─────────────────────────────────────────────────────────────────── [copy-ru]
+  --   Γ, z :^ Box V ⊢ let @copy r = z in e : W
+  --
+  -- The counterpart of `[unbox-ru]` for a box that may be shared: the credit `r`, a new root,
+  -- is a fresh block that holds a bitwise copy of the contents of `z`, with the same tag and
+  -- scan size. The copy needs no reference counting, as a description carries no ownership:
+  -- the references of the copied fields are still held by the block of `z`, which is only
+  -- read (like a `[load]` of its contents), so `z` may be borrowed. As the credit has the
+  -- description of the credit of `[unbox-ru]`, the branches of `[if-unique]` can agree on it
+  -- (`FillCredits`).
+  | CopyRu Path Path VExpr
+
   --   Γ[z.taken / z.contents], c : cell_|V|⟨τ⟩ | J ⊢ e : W
   --  ──────────────────────────────────────────────────────── [lock]
   --   Γ, z : Box V | J ⊢ let lock c = z in e : W

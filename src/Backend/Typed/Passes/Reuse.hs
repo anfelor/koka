@@ -29,7 +29,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize, inferE, noJoins, unrollT, trivialTy )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize, inferE, noJoins, unrollT, trivialTy )
 
 -- credits with the size of their block
 type Credits = [(Path,Int)]
@@ -188,6 +188,10 @@ ruE expr
         -> do g <- asks reGamma
               g' <- liftE (unboxRuGamma g v r)
               UnboxRu v r <$> withGamma g' (ruE e)
+      CopyRu z r e
+        -> do g <- asks reGamma
+              g' <- liftE (copyRuGamma g z r)
+              CopyRu z r <$> withGamma g' (ruE e)
       Lock z c e
         -> do re <- ask
               g' <- liftE (lockGamma (reGamma re) z c)

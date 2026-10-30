@@ -10,7 +10,7 @@
 -- Type inference and environment queries shared by typed IR consumers.
 -- Keep inference in sync with the typing rules in Syntax.
 module Backend.Typed.Query( Env(..), Gamma, noJoins, yieldJoins, envOf, bindAll, checkE, inferE, inferA, inferV
-                          , inferVar, inferAVar, altTypes, unboxRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize
+                          , inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize
                           , unrollT, lazySides, trivialTy, openFields, funSig, paramModes, altPattern, pointerShape ) where
 
 import qualified Data.Map as M
@@ -155,6 +155,8 @@ inferExpr env g js expr
                              _ -> Left ("test of a non-credit: " ++ ppr t)
       UnboxRu v r e -> do g' <- unboxRuGamma g v r
                           inferE env g' js e
+      CopyRu z r e -> do g' <- copyRuGamma g z r
+                         inferE env g' js e
       Lock z c e -> do g' <- lockGamma g z c
                        inferE env g' js e
       Join j tvs ps e1 e2 -> do let xs = [x | (x,_,_) <- ps]
@@ -259,6 +261,14 @@ unboxRuGamma g z r
          Just (V s') | alphaEq s s' -> return ()
          _ -> Left ("taking the block of " ++ show z ++ " whose contents are not read")
        return (M.insert r (V (VReuse Full n (Just (Contents (Just (boxTag z)) (Var x) s)))) (M.mapKeys (rebase z) g))
+
+-- The context of the body of `[copy-ru]`: the binder is a credit with the description of the
+-- block of `z`, a new root.
+copyRuGamma :: Gamma -> Path -> Path -> Q Gamma
+copyRuGamma g z r
+  = do s <- inferAVar g z >>= boxContents
+       n <- reuseSize s
+       return (M.insert r (V (VReuse Full n (Just (Contents (Just (boxTag z)) (Var (child z SContents)) s)))) g)
 
 -- The context of the body of `[lock]`: as for `[unbox-ru]`, the contents `z.contents` of the
 -- box must have been read and are renamed to `z.taken`, and the binder is the cell of the
