@@ -33,8 +33,9 @@
   be empty (in practice there is at most one).
 
   The alternatives of a case that differ only in an allocation in the same credit, such as
-  `f(MkLo@r(x,k))` and `f(MkHi@r(x,k))`, share one join point, and the test of the credit is
-  done before the case. Where their tags differ, the description of the credit forgets its
+  `f(MkLo@r(x,k))` and `f(MkHi@r(x,k))`, share one join point, and the test of the credit (if
+  it may be empty) is done before the case. A credit that may be empty is preferred, as it
+  saves tests as well. Where their tags differ, the description of the credit forgets its
   tag, so that every alternative writes the tag and the C compiler can select it without a
   branch.
 
@@ -148,7 +149,7 @@ exA val
 -- Bind each allocation of a statement in a credit that may be empty by a join point.
 allocate :: Full -> VExpr -> X VExpr
 allocate full stmt
-  = case pick full stmt of
+  = case pick (`S.notMember` full) stmt of
       Nothing -> return stmt
       Just (u,_,_) | Let x t (Ret v) e <- stmt, v == u
         -> do j <- fresh "reusejp"
@@ -168,7 +169,7 @@ allocate full stmt
                  _ -> Owned
 
 -- Alternatives that are the same statement up to an allocation in the same credit `r` jump to
--- one join point, after one test of `r`.
+-- one join point, after one test of `r` if it may be empty.
 merge :: Full -> VExpr -> (Path,Mode,VType,VVal -> VExpr,[VVal]) -> X VExpr
 merge full expr (r,m,t,stmt,us)
   = do j <- fresh "reusejp"
@@ -177,8 +178,10 @@ merge full expr (r,m,t,stmt,us)
        hs <- mapM hoist us
        let jumps f = withArms expr [lets bs (f (Jump j [] [u'])) | (u',bs) <- hs]
        when (length (nub (map tagOf us)) > 1) (modify (\(n,u) -> (n,S.insert r u)))
-       slow <- cloneE (root <$> fresh "reusecopy") (jumps (allocFresh r))
-       return (Join j [] [(x,m,t)] e (IfFull r (jumps id) slow))
+       if S.member r full
+         then return (Join j [] [(x,m,t)] e (jumps id))
+         else do slow <- cloneE (root <$> fresh "reusecopy") (jumps (allocFresh r))
+                 return (Join j [] [(x,m,t)] e (IfFull r (jumps id) slow))
   where
     tagOf v = case v of
                 Context _ k -> tagOf k
@@ -190,21 +193,23 @@ merge full expr (r,m,t,stmt,us)
                _ -> Nothing
 
 -- The statements of all alternatives, if they are the same up to an allocation in the same
--- credit (the alternatives bind different paths, so the statement does not use them).
+-- credit (the alternatives bind different paths, so the statement does not use them): one
+-- that may be empty, or else a full one.
 shared :: Full -> [VExpr] -> Maybe (Path,Mode,VType,VVal -> VExpr,[VVal])
 shared full alts
-  | length alts > 1 && all isStatement alts
-  = do ps <- mapM (pick full) alts
-       let us = [u | (u,_,_) <- ps]
-       r <- case nub (map (tested full . pure) us) of
-              [[r]] -> Just r
-              _ -> Nothing
-       case (nub [(m,t) | (_,m,t) <- ps], nub [replace u (Var hole) e | (u,e) <- zip us alts]) of
-         ([(m,t)],[stmt]) -> Just (r,m,t,\v -> replace (Var hole) v stmt,us)
-         _ -> Nothing
+  | length alts > 1 && all isStatement alts = sharedIn (`S.notMember` full) <|> sharedIn (const True)
   | otherwise = Nothing
   where
     hole = root (newHiddenName "alloc")
+    sharedIn may
+      = do ps <- mapM (pick may) alts
+           let us = [u | (u,_,_) <- ps]
+           r <- case nub [filter may (nub (credits u)) | u <- us] of
+                  [[r]] -> Just r
+                  _ -> Nothing
+           case (nub [(m,t) | (_,m,t) <- ps], nub [replace u (Var hole) e | (u,e) <- zip us alts]) of
+             ([(m,t)],[stmt]) -> Just (r,m,t,\v -> replace (Var hole) v stmt,us)
+             _ -> Nothing
 
 -- the alternatives of a case
 arms :: VExpr -> [VExpr]
@@ -262,18 +267,18 @@ replace u x stmt
     replaceA = mapA id replaceA replaceV
 
 -- The first allocation to bind, with the mode and type of its join parameter: a pointer to a
--- box in a credit that may be empty, or a context with such a box on its path, whose values
+-- box in a credit that it `may` pick, or a context with such a box on its path, whose values
 -- allocate in no other such credit.
-pick :: Full -> VExpr -> Maybe (VVal,Mode,VType)
-pick full stmt = getFirst (foldMap (First . pickV) (values stmt))
+pick :: (Path -> Bool) -> VExpr -> Maybe (VVal,Mode,VType)
+pick may stmt = getFirst (foldMap (First . pickV) (values stmt))
   where
     pickV v = case v of
                 Context b k@(Ptr a _) -> pickV k <|> self Unique (VCtx Full a b)
-                Ptr a c | holes v == 0, Just r <- boxCredit c, r `S.notMember` full
+                Ptr a c | holes v == 0, Just r <- boxCredit c, may r
                   -> inner <|> self Owned (VPtr a)
                 _ -> inner
       where
-        self m t = if null (tested full [v]) then Nothing else Just (v,m,t)
+        self m t = if any may (credits v) then Just (v,m,t) else Nothing
         inner = getFirst (getConst (descendV (Const . First . pickA) (Const . First . pickV) v))
     pickA a = getFirst (getConst (descendA (const (Const (First Nothing))) (Const . First . pickA) (Const . First . pickV) a))
     boxCredit a = case a of
