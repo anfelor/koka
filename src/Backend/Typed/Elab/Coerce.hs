@@ -90,13 +90,15 @@ leafAV t v k
   | VSum ts <- t, isMultiSum t = CaseV Owned v <$> mapM alt (zip3 [0..] (leafStarts ts) ts)
   | otherwise                  = k 0 (boxLeaf t v)
   where
-    alt (i,start,ti) = do y <- fresh "y"
-                          body <- leafAV ti (Var y) (k . (+ start))
-                          return (i, y, body)
+    alt (i,start,(c,ti)) = do y <- case v of
+                                     Var z -> return (child z (SInjV i c))
+                                     _     -> fresh "y"
+                              body <- leafAV ti (Var y) (k . (+ start))
+                              return (i, y, body)
 
 -- the position of the first leaf of each alternative
-leafStarts :: [VType] -> [Int]
-leafStarts ts = scanl (+) 0 (map (length . shapeLeaves) ts)
+leafStarts :: [(Con,VType)] -> [Int]
+leafStarts ts = scanl (+) 0 (map (length . shapeLeaves . snd) ts)
 
 -- the shape of a type that is not a sum of several alternatives
 boxLeaf :: VType -> VVal -> AVal
@@ -130,9 +132,9 @@ unboxAV t a
   | otherwise
   = case t of
       VUnit -> return (id, UnitV)
-      VSum _ | isMultiSum t ->
+      VSum ts | isMultiSum t ->
         do r <- fresh "s"
-           body <- caseSum fresh (shapeLeaves t) a (\j y -> (\(k,w) -> k (Ret w)) <$> unboxLeaf t j y)
+           body <- caseSum (leafCons ts) (shapeLeaves t) a (\j y -> (\(k,w) -> k (Ret w)) <$> unboxLeaf t j y)
            return (Let r t body, Var r)
       VSum _      -> unbox Unbox
       VPtr _      -> unbox Unbox
@@ -151,7 +153,7 @@ unboxLeaf :: VType -> Int -> Path -> E (K,VVal)
 unboxLeaf t j y
   | VSum ts <- t, isMultiSum t
   = do let (i,start) = last [(i,s) | (i,s) <- zip [0..] (leafStarts ts), s <= j]
-       (k,w) <- unboxLeaf (ts !! i) (j - start) y
+       (k,w) <- unboxLeaf (snd (ts !! i)) (j - start) y
        return (k, Inj i t w)
   | otherwise = unboxAV t y
 

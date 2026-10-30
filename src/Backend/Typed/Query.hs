@@ -72,7 +72,7 @@ expectV _ expected actual
     forget (VCtx f _ _) (VCtx g a b) = VCtx (if f == MaybeEmpty then f else g) a b
     forget (VCell m _) (VCell n a) | m <= n = VCell m a
     forget (VProd a b) (VProd c d) = VProd (forget a c) (forget b d)
-    forget (VSum ts) (VSum us) | length ts == length us = VSum (zipWith forget ts us)
+    forget (VSum ts) (VSum us) | length ts == length us = VSum (zipWith (\(c,t) (_,u) -> (c,forget t u)) ts us)
     forget (VExists as a) (VExists bs b) | length as == length bs
       = VExists as (forget a (inst bs (map AVar as) b))
     forget _ t = t
@@ -87,7 +87,7 @@ mapCredits f g t = case t of
   VReuse fl n p -> VReuse (f fl) n (g p)
   VCtx fl a b -> VCtx (f fl) a b
   VProd a b -> VProd (mapCredits f g a) (mapCredits f g b)
-  VSum ts -> VSum (map (mapCredits f g) ts)
+  VSum ts -> VSum [(c,mapCredits f g t) | (c,t) <- ts]
   VExists vs b -> VExists vs (mapCredits f g b)
   _ -> t
 
@@ -96,7 +96,7 @@ descriptions :: VType -> [Contents]
 descriptions t = case t of
   VReuse _ _ p -> maybe [] pure p
   VProd a b -> descriptions a ++ descriptions b
-  VSum ts -> concatMap descriptions ts
+  VSum ts -> concatMap (descriptions . snd) ts
   VExists _ b -> descriptions b
   _ -> []
 
@@ -222,7 +222,7 @@ altTypes env t expr
         let indices = [i | (i,_,_) <- alts]
         unless (S.fromList indices == S.fromList [0 .. length ts - 1] && length indices == length ts)
           (Left "invalid value case indices")
-        return [[V (ts !! i)] | i <- indices]
+        return [[V (snd (ts !! i))] | i <- indices]
       (SplitA _ _ k _ _, A a@(ASum ts)) -> do
         checkShape a
         let (ls,rs) = span ((< k) . fst) ts
@@ -277,7 +277,7 @@ lockGamma :: Gamma -> Path -> Path -> Q Gamma
 lockGamma g z c
   = do s <- inferAVar g z >>= boxContents
        t <- case z of
-              Path r ss | (SInjA _ : splits) <- reverse ss, (SDelay : SRoll : rest) <- dropWhile (`elem` [SLo,SHi]) splits
+              Path r ss | (SInjA _ _ : splits) <- reverse ss, (SDelay : SRoll : rest) <- dropWhile (`elem` [SLo,SHi]) splits
                 -> inferAVar g (Path r (reverse rest))
               _ -> Left ("locking " ++ show z ++ ", which is not a thunk of a lazy value")
        n <- reuseSize s
@@ -425,7 +425,7 @@ checkReuseTy ty = case ty of
                                                      unless (n == m) (Left "reuse contents do not match the block size")
     VPtr a -> checkReuseTy (A a)
     VProd a b -> mapM_ inner [a,b]
-    VSum ts -> mapM_ inner ts
+    VSum ts -> mapM_ (inner . snd) ts
     VExists _ b -> inner b
     VCtx _ a b -> checkReuseTy (A a) >> checkReuseTy (A b)
     VCell n a -> do when (n < 0) (Left "negative cell size")
@@ -557,7 +557,7 @@ inferV env g val
                         checkReuseTy (V t)
                         return t
       Inj i t v -> case t of
-                     VSum ts | 0 <= i, i < length ts -> checkV env g v (ts !! i) >> return t
+                     VSum ts | 0 <= i, i < length ts -> checkV env g v (snd (ts !! i)) >> return t
                      _ -> Left ("injection into " ++ ppr t)
       Pair v w -> VProd <$> inferV env g v <*> inferV env g w
       Ptr a v -> checkA env g v a >> return (VPtr a)

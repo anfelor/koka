@@ -35,7 +35,7 @@ checkLayoutProgram p = concatMap check (programTypes p)
       VProd a b -> inner a ++ inner b
       VExists _ b -> inner b
       VPtr a -> atomic a
-      VSum ts -> concatMap inner ts
+      VSum ts -> concatMap (inner . snd) ts
       VCtx _ a b -> atomic a ++ atomic b
       VCell _ a -> atomic a
       VReuse _ _ d -> maybe [] (\(Contents _ _ s) -> inner s) d

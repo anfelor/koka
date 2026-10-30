@@ -126,7 +126,7 @@ valueBody nt info vargs
   = case dataInfoConstrs info of
       []    -> VRaw <$> rawType (dataInfoName info)
       [con] -> conValueFields nt vargs con
-      cons  -> VSum <$> mapM (conValueFields nt vargs) cons
+      cons  -> VSum <$> mapM (\con -> (,) (Con (conInfoName con)) <$> conValueFields nt vargs con) cons
 
 -- the primitive value types, which have no constructors; a `marker` is an `int32` (as in Koka)
 rawType :: Name -> Tr Raw

@@ -69,7 +69,7 @@ prettyV t
       VPtr a     -> parens (prettyA a) <.> text "*"
       VReuse f n contents -> text ("reuse" ++ (if f == Full then "!" else "") ++ show n) <.> prettyContents contents
       VUnit      -> text "I"
-      VSum ts    -> parens (hsep (punctuate (text " (+)") (map prettyV ts)))
+      VSum ts    -> parens (hsep (punctuate (text " (+)") (map (prettyV . snd) ts)))
       VProd x y  -> parens (prettyV x <+> text "(x)" <+> prettyV y)
       VRaw r     -> prettyRaw r
       VExists vs t -> parens (text "exists" <+> hsep (map tv vs) <.> text "." <+> prettyV t)

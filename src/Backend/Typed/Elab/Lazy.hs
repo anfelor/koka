@@ -54,7 +54,7 @@ import qualified Common.NameMap as NM
 import Data.Functor.Const( Const(..) )
 import Data.Functor.Identity( Identity(..) )
 import Common.Name
-import Common.NamePrim( nameLazyMemoize, nameLazyMemoizeTarget, nameLazyIsWhnf, nameLazyPtrIsWhnf )
+import Common.NamePrim( nameLazyMemoize, nameLazyMemoizeTarget, nameLazyIsWhnf, nameLazyPtrIsWhnf, nameTrue, nameFalse )
 import Kind.Newtypes
 import Type.Type( lazyName, conInfoName )
 import Backend.Typed.Syntax
@@ -170,7 +170,8 @@ cellE cs expr
                        | i /= ind, Just (ABox w) <- lookup i thunks
                        = do n <- liftE (reuseSize w)
                             c <- fresh "cell"
-                            (,,) i (child d (SInjA i)) <$> lock (x,c,n,a) (child d (SInjA i)) b e
+                            let y = child d (injAStep i b)
+                            (,,) i y <$> lock (x,c,n,a) y b e
                        | otherwise = (,,) i b <$> cellE cs e
                  e1' <- cellE cs e1
                  alts' <- mapM lockAlt alts
@@ -302,7 +303,7 @@ specialise lazies prog
           _ -> ss
     boolV t b = Inj (if b then 1 else 0) t UnitV
     dispatch f tvs r ps
-      = CaseV Owned (Var r) [(i, child r (SInjV i), Call (copyName b f) (map AVar tvs) [Var x | (x,_,_) <- ps]) | (i,b) <- [(0,False),(1,True)]]
+      = CaseV Owned (Var r) [(i, child r (SInjV i (Con c)), Call (copyName b f) (map AVar tvs) [Var x | (x,_,_) <- ps]) | (i,b,c) <- [(0,False,nameFalse),(1,True,nameTrue)]]
     callsE expr
       = case expr of
           Call f ts (v : Inj i _ UnitV : vs) | S.member f funs -> Call (copyName (i == 1) f) ts (v:vs)
