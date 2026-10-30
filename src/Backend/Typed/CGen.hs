@@ -485,9 +485,6 @@ genProjection cx dest v s x e = do
   case v of
     Var z | Just (Place b w i _) <- M.lookup z (cxPlaces cx)
       -> genE (bindPlace cx x (Place b w (i + start) u)) dest e
-    -- a later pass may remove every use (DropSpec removes the drop of a field that reuse overwrites)
-    _ | not (any (`within` x) (fvE e))
-      -> genE (bindVar cx x (V u)) dest e
     _ -> do (base,pre) <- case v of
               Var z -> return (localName z,[])
               _ -> do ve <- genV cx v

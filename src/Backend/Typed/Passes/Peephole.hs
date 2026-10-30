@@ -4,20 +4,24 @@
 -----------------------------------------------------------------------------
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
--- Bound C expression nesting before computing backend plans. Hoisting is an
--- ordinary typed-IR transformation, checked before any C is emitted.
-module Backend.Typed.Passes.Hoist( hoistProgram ) where
+-- Local rewrites for the C code generator, as ordinary typed-IR transformations, checked
+-- before any C is emitted: bound C expression nesting (`hoistDeep`), read a box in memory
+-- order (`inMemoryOrder`), and remove projections whose binder is not used.
+module Backend.Typed.Passes.Peephole( peepholeProgram ) where
 
 import qualified Data.Map as M
+import Data.List( sortOn, groupBy, findIndex )
+import Data.Function( on )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
 import Backend.Typed.Query
+import Backend.Typed.Layout( CT(..), layout, leaves )
 
 type H a = M (Env,Gamma) NameSupply a
 
-hoistProgram :: Program -> (Program,[String])
-hoistProgram prog = (prog{ progDefs = map fst results },concatMap snd results)
+peepholeProgram :: Program -> (Program,[String])
+peepholeProgram prog = (prog{ progDefs = map fst results },concatMap snd results)
   where
     results = map run (progDefs prog)
     run d = case evalM (expr (defBody d)) (envOf prog,params d) (freshFor d) of
@@ -38,6 +42,14 @@ expr e
       a <- expr (Ret v)
       b <- bind [(x,V t)] (expr (mk (Var x)))
       return (Let x t a b)
+  | Load{} <- e = do
+      (_,g) <- ask
+      let (ls,b) = loadRun e
+      ts <- liftE (mapM (inferVar g . fst) ls)
+      b' <- bind (zip (map snd ls) ts) (expr b)
+      return (foldr (uncurry Load) b' (inMemoryOrder g ls))
+  -- a later pass may remove every use (DropSpec removes the drop of a field that reuse overwrites)
+  | Just (x,b) <- projection e, not (any (`within` x) (fvE b)) = expr b
   | Just ds <- destructAOf e = do
       (env,g) <- ask
       t <- liftE (inferVar g (dsScrut ds))
@@ -75,8 +87,40 @@ expr e = case e of
     rt <- liftE (inferVar g r)
     case rt of
       V (VReuse _ n p) -> IfFull r <$> bind [(r,V (VReuse Full n p))] (expr a) <*> expr b
-      _ -> fail "hoist: test of a non-credit"
+      _ -> fail "peephole: test of a non-credit"
   _ -> descendE pure value (\_ -> expr) e
+
+projection :: VExpr -> Maybe (Path,VExpr)
+projection (Fst _ _ x b) = Just (x,b)
+projection (Snd _ _ x b) = Just (x,b)
+projection _ = Nothing
+
+-- A run of loads, each a copy of a value's bits; its references are still held by the block.
+loadRun :: VExpr -> ([(Path,Path)], VExpr)
+loadRun (Load x y e) = let (ls,e') = loadRun e in ((x,y) : ls, e')
+loadRun e = ([], e)
+
+-- The loads of a run are independent (a load binder is not a place), so the loads of
+-- adjacent places of one box can read it in memory order, for clang to pair the reads (`ldp`).
+inMemoryOrder :: Gamma -> [(Path,Path)] -> [(Path,Path)]
+inMemoryOrder g = concatMap (sortOn (slot . fst)) . groupBy ((==) `on` (box . fst))
+  where box x = placeOf x <$ slot x
+        slot x = do (i,w) <- firstLeaf g x
+                    CProd _ fs <- Just (layout w)
+                    findIndex ((== i) . fst) fs
+
+-- the first leaf of a place in the contents of its box, and the type of the contents
+firstLeaf :: Gamma -> Path -> Maybe (Int,VType)
+firstLeaf g x@(Path r ss)
+  = case reverse ss of
+      SContents : _ | Right (V w) <- inferVar g x -> Just (0,w)
+      SFst : rest -> firstLeaf g (Path r (reverse rest))
+      SPack : rest -> firstLeaf g (Path r (reverse rest))
+      SSnd : rest -> do let p = Path r (reverse rest)
+                        Right (V (VProd a _)) <- Just (inferVar g p)
+                        (i,w) <- firstLeaf g p
+                        Just (i + length (leaves a),w)
+      _ -> Nothing
 
 value :: VVal -> H VVal
 value = descendV atom value
