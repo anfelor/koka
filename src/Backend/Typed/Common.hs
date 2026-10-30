@@ -371,7 +371,7 @@ descendE fn fv fe = descendB fn fv (\bs e -> let xs = map fst bs in (,) xs <$> f
 
 -- Like `descendE`, but each binder comes with its steps from the scrutinee, and `fb` gives new
 -- binders for a subexpression. The binders of a `let`, a dup, a join point, the credit of
--- `[unbox-ru]` and the cell of `[lock]` have no steps, and neither has that of `[unscalar]`,
+-- `[unbox-ru]` and `[copy-ru]`, and the cell of `[lock]` have no steps, and neither has that of `[unscalar]`,
 -- which copies the contents of a scalar.
 descendB :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([(Path,[Step])] -> VExpr -> f ([Path],VExpr)) -> VExpr -> f VExpr
 descendB fn fv fb expr
@@ -406,6 +406,7 @@ descendB fn fv fb expr
       IsUnique x e1 e2      -> IsUnique <$> fn x <*> plain e1 <*> plain e2
       IfFull r e1 e2        -> IfFull <$> fn r <*> plain e1 <*> plain e2
       UnboxRu v r e         -> (\v' (r',e') -> UnboxRu v' r' e') <$> fn v <*> one r [] e
+      CopyRu v r e          -> (\v' (r',e') -> CopyRu v' r' e') <$> fn v <*> one r [] e
       Lock z c e            -> (\z' (c',e') -> Lock z' c' e') <$> fn z <*> one c [] e
       Join j tvs ps e1 e2   -> (\(xs,e1') e2' -> Join j tvs [(x',m,t) | (x',(_,m,t)) <- zip xs ps] e1' e2')
                                  <$> fb [(x,[]) | (x,_,_) <- ps] e1 <*> plain e2
@@ -913,6 +914,7 @@ destructAOf expr
       IsUnique{} -> Nothing
       IfFull{} -> Nothing
       UnboxRu{} -> Nothing
+      CopyRu{} -> Nothing
       Lock{} -> Nothing
       Join{} -> Nothing
       Jump{} -> Nothing
@@ -948,6 +950,7 @@ destructVOf expr
       IfWhnf{} -> Nothing
       IfFull{} -> Nothing
       UnboxRu{} -> Nothing
+      CopyRu{} -> Nothing
       Lock{} -> Nothing
       Join{} -> Nothing
       Jump{} -> Nothing
@@ -984,6 +987,7 @@ isRead expr
       IfWhnf{}    -> False
       IfFull{}    -> False
       UnboxRu{}   -> False
+      CopyRu{}    -> False
       Lock{}      -> False
       Join{}      -> False
       Jump{}      -> False
@@ -1021,6 +1025,7 @@ keepsPointer expr
       IsUnique{}  -> False
       IfFull{}    -> False
       UnboxRu{}   -> False
+      CopyRu{}    -> False
       Lock{}      -> False
       Join{}      -> False
       Jump{}      -> False

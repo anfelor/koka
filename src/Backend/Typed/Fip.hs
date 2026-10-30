@@ -53,7 +53,7 @@ import Backend.Typed.Common
 import Backend.Typed.Monad
 import Backend.Typed.Layout( layout, isBlock )
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, lockGamma, uniqueGamma, trivialTy )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, trivialTy )
 
 -- The allocations of the most allocating path; whether there are allocations, calls to the
 -- recursive group, and both in sequence; and the types of the values boxed for polymorphism.
@@ -292,6 +292,11 @@ fipE expr
       UnboxRu z r e
         -> do g <- asks fGamma
               g' <- liftE (unboxRuGamma g z r)
+              local (\fe -> fe{ fGamma = g' }) (fipE e)
+      -- only in the shared branch of `if-unique`, which is not taken
+      CopyRu z r e
+        -> do g <- asks fGamma
+              g' <- liftE (copyRuGamma g z r)
               local (\fe -> fe{ fGamma = g' }) (fipE e)
       Lock z c e
         -> do fe <- ask

@@ -108,6 +108,7 @@ exE full expr
                                 ps' <- mapM (\(x,m,t) -> (,,) x m <$> untagged x t) ps
                                 Join j tvs ps' e1' <$> exE full e2
       UnboxRu z r e -> UnboxRu z r <$> exE (S.insert r full) e
+      CopyRu z r e -> CopyRu z r <$> exE (S.insert r full) e
       IfFull r e1 e2 -> IfFull r <$> exE (S.insert r full) e1 <*> exE full e2
       CaseV{} -> alternatives
       CaseA{} -> alternatives
