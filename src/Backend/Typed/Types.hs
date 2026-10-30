@@ -68,7 +68,7 @@ traverseReuseContents f = goV
     goV t = case t of
       VPtr a -> VPtr <$> goA a
       VSum ts -> VSum <$> traverse (\(c,s) -> (,) c <$> goV s) ts
-      VProd a b -> VProd <$> goV a <*> goV b
+      VProd fs -> VProd <$> traverse (\(f,s) -> (,) f <$> goV s) fs
       VExists vs b -> VExists vs <$> goV b
       VReuse fl n p -> VReuse fl n <$> f p
       VCtx fl a b -> VCtx fl <$> goA a <*> goA b
@@ -118,10 +118,11 @@ sumOf :: [AType] -> AType
 sumOf [a] = a
 sumOf ts = ASum (sumAlts ts)
 
+-- the product of fields named by their position; one field is not wrapped
 prodV :: [VType] -> VType
-prodV []     = VUnit
-prodV [t]    = t
-prodV (t:ts) = VProd t (prodV ts)
+prodV []  = VUnit
+prodV [t] = t
+prodV ts  = VProd (zip (map posField [0..]) ts)
 
 vtInt, vtString, vtChar, vtFloat :: VType
 vtInt    = VPtr (ACon nameTpInt [])
@@ -137,7 +138,7 @@ substV sub t
   = case t of
       VPtr a    -> VPtr (substA sub a)
       VSum ts   -> VSum [(c,substV sub s) | (c,s) <- ts]
-      VProd x y -> VProd (substV sub x) (substV sub y)
+      VProd fs  -> VProd [(f,substV sub s) | (f,s) <- fs]
       VExists tvs b -> VExists tvs (substV (foldr M.delete sub tvs) b)
       VUnit     -> t
       VRaw _    -> t
@@ -179,7 +180,7 @@ ftvV t
   = case t of
       VPtr a        -> ftvA a
       VSum ts       -> concatMap (ftvV . snd) ts
-      VProd x y     -> ftvV x ++ ftvV y
+      VProd fs      -> concatMap (ftvV . snd) fs
       VExists vs b  -> filter (`notElem` vs) (ftvV b)
       VUnit         -> []
       VRaw _        -> []
@@ -209,7 +210,7 @@ isPtr t
       VPtr _      -> True
       VUnit       -> False
       VSum _      -> False
-      VProd _ _   -> False
+      VProd _     -> False
       VRaw _      -> False
       VExists _ _ -> False
       VReuse _ _ _  -> False
@@ -273,7 +274,7 @@ shapeLeaves t
       VSum ts | not (null ts) -> concatMap (shapeLeaves . snd) ts
       VSum _      -> [ABox t]
       VPtr _      -> [ABox t]
-      VProd _ _   -> [ABox t]
+      VProd _     -> [ABox t]
       VRaw _      -> [ABox t]
       VExists _ _ -> [ABox t]
       VReuse _ _ _  -> [ABox t]
@@ -285,7 +286,7 @@ eqV s t
   = case (s,t) of
       (VPtr a, VPtr b)       -> eqA a b
       (VSum ss, VSum ts)     -> eqVs (map snd ss) (map snd ts)
-      (VProd a b, VProd c d) -> eqV a c && eqV b d
+      (VProd fs, VProd gs)   -> eqVs (map snd fs) (map snd gs)
       (VExists as a, VExists bs b) | length as == length bs
         -> eqV a (inst bs (map AVar as) b)
       (VReuse f n p, VReuse g m q) -> f == g && n == m && eqContentsMaybe p q
@@ -299,7 +300,7 @@ substContents sub (Contents k p t) = Contents k (go p) (substV sub t)
   where
     go v = case v of
       Inj i s x -> Inj i (substV sub s) (go x)
-      Pair x y -> Pair (go x) (go y)
+      Tuple xs -> Tuple (map go xs)
       Pack s ts x -> Pack (substV sub s) (map (substA sub) ts) (go x)
       TyApp x ts -> TyApp (go x) (map (substA sub) ts)
       _ -> v
@@ -309,7 +310,7 @@ ftvContents (Contents _ p t) = go p ++ ftvV t
   where
     go v = case v of
       Inj _ s x -> ftvV s ++ go x
-      Pair x y -> go x ++ go y
+      Tuple xs -> concatMap go xs
       Pack s ts x -> ftvV s ++ concatMap ftvA ts ++ go x
       TyApp x ts -> go x ++ concatMap ftvA ts
       _ -> []
@@ -325,21 +326,20 @@ eqContents p0 q0 = go (collapse p0) (collapse q0)
   where
     go p q = case (p,q) of
       (Inj i t x, Inj j u y) -> i == j && eqV t u && go x y
-      (Pair a b, Pair c d) -> go a c && go b d
+      (Tuple as, Tuple bs) -> length as == length bs && and (zipWith go as bs)
       (Pack t ts x, Pack u us y) -> eqV t u && eqAs ts us && go x y
       (TyApp x ts, TyApp y us) -> go x y && eqAs ts us
       _ -> p == q
 
 -- The normal form of a description: a value built from the parts of a variable is that
--- variable, as in `(z.fst, z.snd) = z` and `injᵢ z.injᵢ = z`.
+-- variable, as in `(z.f₀, ..., z.fₙ₋₁) = z` and `injᵢ z.injᵢ = z`.
 collapse :: VVal -> VVal
 collapse v
   = case v of
-      Pair a b -> let a' = collapse a
-                      b' = collapse b
-                  in case (parentAt SFst a', parentAt SSnd b') of
-                       (Just x, Just y) | x == y -> Var x
-                       _ -> Pair a' b'
+      Tuple ws -> let ws' = map collapse ws
+                  in case sequence [parentAt (SField i (posField i)) w | (i,w) <- zip [0..] ws'] of
+                       Just (x:xs) | all (== x) xs -> Var x
+                       _ -> Tuple ws'
       Inj i t w -> let w' = collapse w in maybe (Inj i t w') Var (parentAt (SInjV i (tagCon i)) w')
       Pack t ts w -> let w' = collapse w in maybe (Pack t ts w') Var (parentAt SPack w')
       TyApp w ts -> TyApp (collapse w) ts
@@ -378,7 +378,8 @@ matchVWith tvs sub pat t
       (VPtr p, VPtr s)       -> matchAWith tvs sub p s
       (VSum ps, VSum ts) | length ps == length ts
         -> foldM (\sb (p,s) -> matchVWith tvs sb p s) sub (zip (map snd ps) (map snd ts))
-      (VProd p q, VProd s u) -> matchVWith tvs sub p s >>= \sub' -> matchVWith tvs sub' q u
+      (VProd ps, VProd ts) | length ps == length ts
+        -> foldM (\sb (p,s) -> matchVWith tvs sb p s) sub (zip (map snd ps) (map snd ts))
       (VCtx f p q, VCtx g s u) | f == g -> matchAWith tvs sub p s >>= \sub' -> matchAWith tvs sub' q u
       (VCell n p, VCell m s) | n == m -> matchAWith tvs sub p s
       (VExists as p, VExists bs s) | length as == length bs

@@ -85,7 +85,7 @@ structural :: VVal -> Bool
 structural v
   = case v of
       Var _ -> True
-      Pair a b -> structural a && structural b
+      Tuple ws -> all structural ws
       Inj _ _ w -> structural w
       UnitV -> True
       Lit _ -> True
@@ -115,8 +115,7 @@ inlineE :: Values -> VExpr -> VExpr
 inlineE vals expr
   = case expr of
       Let x _ _ e | M.member x vals -> inlineE vals e
-      Fst _ (Var z) _ e | Just Pair{} <- known vals z -> inlineE vals e
-      Snd _ (Var z) _ e | Just Pair{} <- known vals z -> inlineE vals e
+      Proj _ (Var z) _ _ e | Just Tuple{} <- known vals z -> inlineE vals e
       CaseV _ (Var z) alts | Just (Inj i _ _) <- known vals z, (e:_) <- [e | (j,_,e) <- alts, j == i] -> inlineE vals e
       _ -> runIdentity (descendE Identity (Identity . inlineV vals) (\_ e -> Identity (inlineE vals e)) expr)
 
@@ -204,6 +203,6 @@ restore g facts src old new
   | Var x <- old
   , (y:_) <- [y | y <- x : M.keys facts, y == x || sameBits src y == x, Just (V t) <- [M.lookup y g], enumType t, M.lookup y facts == Just new]
   = Var y
-  | Pair a b <- new, Just x <- project old [SFst], Just y <- project old [SSnd]
-  = Pair (restore g facts src x a) (restore g facts src y b)
+  | Tuple ws <- new, Just xs <- mapM (\i -> project old [SField i (posField i)]) [0 .. length ws - 1]
+  = Tuple (zipWith (restore g facts src) xs ws)
   | otherwise = new

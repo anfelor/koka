@@ -13,7 +13,7 @@ import Data.Functor.Identity( Identity(..) )
 import Lib.PPrint
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Common( child, descendE, mapA, mapV )
+import Backend.Typed.Common( child, descendE, mapA, mapV, projStep )
 
 nm :: Name -> Doc
 nm n = text (show n)
@@ -70,7 +70,7 @@ prettyV t
       VReuse f n contents -> text ("reuse" ++ (if f == Full then "!" else "") ++ show n) <.> prettyContents contents
       VUnit      -> text "I"
       VSum ts    -> parens (hsep (punctuate (text " (+)") (map (prettyV . snd) ts)))
-      VProd x y  -> parens (prettyV x <+> text "(x)" <+> prettyV y)
+      VProd fs   -> parens (hsep (punctuate (text " (x)") (map (prettyV . snd) fs)))
       VRaw r     -> prettyRaw r
       VExists vs t -> parens (text "exists" <+> hsep (map tv vs) <.> text "." <+> prettyV t)
       VCtx f a b -> text ("ctx" ++ (if f == Full then "+" else "")) <.> angles (commaSep [prettyA a, prettyA b])
@@ -140,7 +140,7 @@ prettyVal val
       UnitV      -> text "()"
       Lit l      -> prettyLit l
       Inj i _ v  -> text "inj" <.> int i <+> atomVal v
-      Pair v w   -> parens (prettyVal v <.> comma <+> prettyVal w)
+      Tuple vs   -> parens (commaSep (map prettyVal vs))
       Ptr _ v    -> text "ptr" <+> atomAVal v
       Pack _ ts v -> text "pack" <.> tyArgs ts <+> atomVal v
       TyApp v ts  -> atomVal v <.> tyArgs ts
@@ -192,8 +192,7 @@ prettyExpr expr
       Call f [] vs -> nm f <.> args vs
       Call f ts vs -> nm f <.> tyArgs ts <.> args vs
       App f vs -> pv f <.> args vs
-      Fst m v x e -> letIn (mode m) (pv x) (atomVal v <.> text ".fst") e
-      Snd m v x e -> letIn (mode m) (pv x) (atomVal v <.> text ".snd") e
+      Proj m v i x e -> letIn (mode m) (pv x) (atomVal v <.> text ("." ++ show (projStep i x))) e
       CaseV m v alts -> caseOf (text "case" <.> mode m) (prettyVal v) [(text "inj" <.> int i <+> pv x, e) | (i,x,e) <- alts]
       SplitA m v k (x,e1) (y,e2) -> caseOf (text "split" <.> mode m) (pv v <+> text "at" <+> int k) [(pv x, e1), (pv y, e2)]
       IfWhnf m v (x,e1) (y,e2) -> caseOf (text "if-whnf" <.> mode m) (pv v) [(side Whnf <+> pv x, e1), (side Delay <+> pv y, e2)]
@@ -258,8 +257,7 @@ elideDef def
 elideE :: VExpr -> VExpr
 elideE expr
   = case expr of
-      Fst _ (Var v) x e | x == child v SFst -> elideE e
-      Snd _ (Var v) x e | x == child v SSnd -> elideE e
+      Proj _ (Var v) i x e | x == child v (projStep i x) -> elideE e
       Deref _ (Var v) x e | x == child v SDeref -> elideE e
       Unroll _ v x e    | x == child v SRoll -> elideE e
       _ -> runIdentity (descendE Identity (Identity . elideV) (\_ e -> Identity (elideE e)) expr)
