@@ -41,7 +41,7 @@
 
   `val y = dup x` borrows `x` and binds its copy `y` as a new owned root, so a variable holds
   at most one reference. The consumed references are sets of variables (`Keys`), where a
-  variable stands for all of its parts (`refine`): `z.field0` is left after a `let` that consumes
+  variable stands for all of its parts (`refine`): `z.left` is left after a `let` that consumes
   the other parts of `z`, for example.
 
   A unique variable is owned and holds the only reference to its block, so `UnboxRu` may

@@ -62,7 +62,7 @@
     - The paper scopes borrowing syntactically: `[let]` lends `^Γ₂` to the bound expression.
       Our IR borrows from an owned variable `z` anywhere (e.g. `case^ z` with `z` owned, as Perceus
       produces). The binders of a destructuring of `z` are its *parts*, named by their paths
-      (`z.field0`, see `Path`), and their borrowed uses become invalid once `z` is consumed. In
+      (`z.left`, see `Path`), and their borrowed uses become invalid once `z` is consumed. In
       particular a borrowed argument of a call cannot be one that is passed owned.
     - The parts of an owned variable are owned: consuming a part takes it out of its parent, and
       the parent is consumed once all of its parts are: all fields of a product, the contents
@@ -74,7 +74,7 @@
       binders are consumed, and only a unique destructuring needs its mode: it consumes a unique
       scrutinee.
     - `[dup]` binds its copy as a new root, so a variable holds at most one owned reference.
-      For example, after `val y = dup z.field0; drop z` the context holds `y : V`.
+      For example, after `val y = dup z.left; drop z` the context holds `y : V`.
     - Code generation reads the contents of a box in place: `z.contents`, and the binders of
       `[proj]` and `[unpack]` of a place, stay in the block of `z`, and a use reads the block.
       It loads them (copies them out of the block) at `[load]`, and at `[unbox-ru]` and
@@ -255,8 +255,8 @@ data Lit = LitInt Integer
          deriving (Eq,Show)
 
 -- Variables are paths: a root followed by the steps of the destructurings that lead from the
--- root to the variable, outermost first. For example, `z.field1.deref` is the binder of
--- `let_q ptr x = z.field1` where `z.field1` is the binder of `let_q x = z.field1`. A field of
+-- root to the variable, outermost first. For example, `z.left.deref` is the binder of
+-- `let_q ptr x = z.left` where `z.left` is the binder of `let_q x = z.left`. A field of
 -- `[case-open]` contributes the steps to its constructor and its field. The binders
 -- of other forms are roots, and a root is bound only once in a definition. `Paths`
 -- establishes these invariants after elaboration, which ends with `Lazy`.
@@ -329,7 +329,8 @@ instance Ord Field where
 instance Show Field where
   show (Field f) = show (unqualify f)
 
--- a field without a name of its own, named by its position
+-- a field without a name of its own (the fields of a constructor are named as in the source,
+-- `TypeInfo.conFieldNames`), named by its position
 posField :: Int -> Field
 posField i = Field (newName ("field" ++ show i))
 
