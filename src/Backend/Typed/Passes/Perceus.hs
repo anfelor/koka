@@ -159,7 +159,7 @@ keepsPtr s
   = case s of
       SDeref -> True
       SRoll -> True
-      SInjA _ -> True
+      SInjA _ _ -> True
       SRest -> True
       SLo -> True
       SHi -> True

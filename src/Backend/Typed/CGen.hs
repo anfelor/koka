@@ -91,7 +91,13 @@ cName :: Name -> String
 cName name = "kt_" ++ encode (show name)
 
 localName :: Path -> Doc
-localName (Path x ss) = text ("x_" ++ encode (show x) ++ concat ["_p_" ++ encode (show s) | s <- ss])
+localName (Path x ss) = text ("x_" ++ encode (show x) ++ concat ["_p_" ++ encode (stepName s) | s <- ss])
+  where
+    -- by tag, as paths compare
+    stepName s = case s of
+                   SInjA i _ -> "inj" ++ show i
+                   SInjV i _ -> "inj" ++ show i
+                   _ -> show s
 
 encode :: String -> String
 encode = concatMap enc
@@ -1029,7 +1035,7 @@ genE cx dest expr
                              _ -> do w <- fresh "w"
                                      return ([cty ct <+> w <+> "=" <+> ve <.> ";"],w)
               brs <- forM alts $ \(i,x,e) ->
-                       do let ti = ts !! i
+                       do let ti = snd (ts !! i)
                           cti <- ctype ti
                           let payload = case ct of
                                 CSum _ alts' | Just _ <- alts' !! i -> z <.> "._cons.c" <.> int i
