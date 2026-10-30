@@ -1013,12 +1013,12 @@ genE cx dest expr
                             (Just (x,e), [[td]]) -> Just <$> genSumBranch cx dest v x td e
                             _ -> return Nothing
               tg <- fresh "t"
-              -- Match owns partitioning. Only a single alternative with a
-              -- default needs an equality branch.
-              let dispatch = case (brs,fallback) of
-                    ([([tag],body)],Just other) -> ifChain [(tg <+> "==" <+> int tag,body)] other
-                    _ -> switchCases tg brs fallback
-              return [block [tagDecl t tg ve, dispatch]]
+              -- Match owns partitioning. A single alternative needs no test, and
+              -- with a default only an equality branch.
+              case (brs,fallback) of
+                ([(_,body)],Nothing) -> return [block body]
+                ([([tag],body)],Just other) -> return [block [tagDecl t tg ve, ifChain [(tg <+> "==" <+> int tag,body)] other]]
+                _ -> return [block [tagDecl t tg ve, switchCases tg brs fallback]]
       -- the scrutinee is loaded (`[load]`): a variable is a local, another value is copied into one
       CaseV _ v alts
         -> do t@(VSum ts) <- tyOf cx v
