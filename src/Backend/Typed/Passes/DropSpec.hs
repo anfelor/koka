@@ -33,7 +33,8 @@
   copy duplicates the loaded part, which the unique branch passes on as it is.
   The description of the credit names the contents and the tag k of the block, which follows
   from the path of `z`. The empty credit of the shared branch has the same description, so that
-  the jumps agree on it. The shared branch is the original code. Freeing the credit releases
+  the jumps agree on it (and `FillCredits` may fill it with a copy of the block). The shared
+  branch is the original code. Freeing the credit releases
   the block, unless `Reuse` uses it for an allocation in `e`.
 
   As in Koka's Parc, a part that is under a pointer in the contents is copied in the unique

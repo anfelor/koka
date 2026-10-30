@@ -30,7 +30,7 @@ import Backend.Typed.Passes.Loads( loadsProgram )
 import Backend.Typed.Passes.Perceus( perceusProgram )
 import Backend.Typed.Passes.Reuse( reuseProgram )
 import Backend.Typed.Passes.ExpandReuse( expandReuseProgram )
-import Backend.Typed.Passes.CopyReset( copyResetProgram )
+import Backend.Typed.Passes.FillCredits( fillCreditsProgram )
 import Backend.Typed.Passes.DropSpec( dropSpecProgram )
 import Backend.Typed.Passes.Match( matchProgram )
 import Backend.Typed.Passes.SinkJoins( sinkJoinsProgram )
@@ -49,7 +49,7 @@ typedFromCore enableReuse nt imports uniq core
         passes                 = [("lazy",Unchecked,named (lazyProgram nt)), ("anf",Unchecked,pure' anfProgram), ("contify",Unchecked,contifyProgram), ("simplify",Unchecked,pure' simplifyProgram), ("yields",Unchecked,pure' yieldsProgram), ("loads",Unchecked,pure' loadsProgram), ("perceus",Linear,perceusProgram)
                                    ,("dropspec",Linear,dropSpecProgram)] ++ [("reuse",Linear,reuseProgram) | enableReuse]
                                    ++ [("match",Linear,matchProgram), ("sinkjoins",Linear,pure' sinkJoinsProgram), ("joinargs",Linear,pure' joinArgsProgram)]
-                                   ++ concat [[("copyreset",Linear,pure' copyResetProgram),("expandreuse",Linear,pure' expandReuseProgram)] | enableReuse] ++ [("inline",Linear,inlineProgram)]
+                                   ++ concat [[("fillcredits",Linear,pure' fillCreditsProgram),("expandreuse",Linear,pure' expandReuseProgram)] | enableReuse] ++ [("inline",Linear,inlineProgram)]
         (dsprog,msgs)          = runPasses eprog (label "check" (checkTypes eprog)) passes
         -- without reuse every constructor allocates
         copies                 = lazyCopies nt (progTypes eprog)
