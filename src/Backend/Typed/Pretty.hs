@@ -7,11 +7,13 @@
 -----------------------------------------------------------------------------
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
-module Backend.Typed.Pretty( ppr ) where
+module Backend.Typed.Pretty( ppr, prettyElided ) where
 
+import Data.Functor.Identity( Identity(..) )
 import Lib.PPrint
 import Common.Name
 import Backend.Typed.Syntax
+import Backend.Typed.Common( child, descendE, mapA, mapV )
 
 nm :: Name -> Doc
 nm n = text (show n)
@@ -239,3 +241,34 @@ prettyDef def
 prettyProgram :: Program -> Doc
 prettyProgram prog
   = vcat (map prettyDef (progDefs prog))
+
+-- The program without the forms that have no operational meaning and whose binders follow
+-- from their paths: `[fst]`, `[snd]`, `[deref]` and `[unroll]` of a variable. For reading the IR;
+-- messages show the full program.
+prettyElided :: Program -> Doc
+prettyElided prog
+  = prettyProgram prog{ progDefs = map elideDef (progDefs prog) }
+
+elideDef :: Def -> Def
+elideDef def
+  = case def of
+      DefFun f vs ps r e -> DefFun f vs ps r (elideE e)
+      DefVal x vs t e    -> DefVal x vs t (elideE e)
+
+elideE :: VExpr -> VExpr
+elideE expr
+  = case expr of
+      Fst _ (Var v) x e | x == child v SFst -> elideE e
+      Snd _ (Var v) x e | x == child v SSnd -> elideE e
+      Deref _ (Var v) x e | x == child v SDeref -> elideE e
+      Unroll _ v x e    | x == child v SRoll -> elideE e
+      _ -> runIdentity (descendE Identity (Identity . elideV) (\_ e -> Identity (elideE e)) expr)
+
+elideV :: VVal -> VVal
+elideV = mapV elideA elideV
+
+elideA :: AVal -> AVal
+elideA val
+  = case val of
+      Lam ps r e -> Lam ps r (elideE e)
+      _          -> mapA id elideA elideV val
