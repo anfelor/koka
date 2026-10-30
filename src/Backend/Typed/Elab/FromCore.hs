@@ -812,22 +812,26 @@ valueAlt vargs brs v (i,con)
 elabOpenCase :: DataInfo -> [AType] -> VVal -> [C.Branch] -> E VExpr
 elabOpenCase info vargs v brs
   = do p <- fresh "d"
-       alts <- mapM (openAlt info vargs) [(c,b) | b@(C.Branch [C.PatCon{ C.patConInfo = c }] _) <- brs]
+       alts <- mapM (openAlt info vargs p) [(c,b) | b@(C.Branch [C.PatCon{ C.patConInfo = c }] _) <- brs]
        def  <- case [b | b@(C.Branch [C.PatWild] _) <- brs] of
                  (b:_) -> branchBody b
                  []    -> failE "open match without default"
        return (Deref Owned v p (CaseOpen Owned p alts def))
 
--- one binder for each field
-openAlt :: DataInfo -> [AType] -> (ConInfo,C.Branch) -> E (Name,[Path],VExpr)
-openAlt info vargs (con,br@(C.Branch [pat] _))
+-- one binder for each field of the scrutinee `d`: its path, which names the field
+-- (`Common.openSteps`)
+openAlt :: DataInfo -> [AType] -> Path -> (ConInfo,C.Branch) -> E (Name,[Path],VExpr)
+openAlt info vargs d (con,br@(C.Branch [pat] _))
   = do recordOpenSig info (conInfoName con) (conInfoType con)
        fields <- fieldTypes vargs con
-       xs <- mapM (const (fresh "o")) fields
+       let c = child d (SOpen (conInfoName con))
+           xs = case fields of
+                  [_] -> [c]
+                  _   -> [child c (SField i f) | (i,f) <- zip [0..] (take (length fields) (conFieldNames con))]
        getters <- concat <$> sequence [bindField (subBinder p) s (id,Var x) | (p,s,x) <- zip3 (C.patConPatterns pat) fields xs]
        body <- withFields getters (branchBody br)
        return (conInfoName con, xs, body)
-openAlt _ _ _ = failE "unexpected open branch after matching"
+openAlt _ _ _ _ = failE "unexpected open branch after matching"
 
 -- the position of the branch that `findBranch` selects, after all branches if there is none
 branchIndex :: ConInfo -> [C.Branch] -> Int
@@ -854,7 +858,7 @@ conBranch vargs con y (Just br@(C.Branch [pat] _))
             exSub = M.fromList (zip (conExists con) (map AVar exIds))
         (k,payload) <- openCon y (conExists con) exIds
         -- the padding of a thunk has no binder
-        getters <- destructure (zip (map subBinder subs ++ repeat Nothing) (map (subst exSub) fields)) (id,payload)
+        getters <- destructure (zip3 (map subBinder subs ++ repeat Nothing) (conFieldNames con) (map (subst exSub) fields)) (id,payload)
         body <- withFields getters (branchBody br)
         return (k body)
       _ -> branchBody br
@@ -889,13 +893,16 @@ subBinder _              = Nothing
 -- Construct field getters without emitting reads. A variable occurrence asks
 -- for its getter in the expression that actually uses the field.
 -- The fields are a product (`[proj]`), unless there is only one. Getters of different fields
--- project the same product, which `Paths` merges where it is in scope.
-destructure :: [(Maybe TName,VType)] -> (K,VVal) -> E [(Name,(K,VVal))]
-destructure [(x,s)] getter = bindField x s getter
+-- project the same product, which `Paths` merges where it is in scope. The binder of a field
+-- of a variable is its path, which names the field (`Common.projStep`).
+destructure :: [(Maybe TName,Field,VType)] -> (K,VVal) -> E [(Name,(K,VVal))]
+destructure [(x,_,s)] getter = bindField x s getter
 destructure fields (k,p)
-  = concat <$> sequence [do y <- fresh "field"
+  = concat <$> sequence [do y <- case p of
+                                   Var z -> return (child z (SField i f))
+                                   _     -> fresh "field"
                             bindField x s (k . Proj Borrowed p i y,Var y)
-                        | (i,(x,s)) <- zip [0..] fields]
+                        | (i,(x,f,s)) <- zip [0..] fields]
 
 bindField :: Maybe TName -> VType -> (K,VVal) -> E [(Name,(K,VVal))]
 bindField Nothing _ _ = return []

@@ -13,7 +13,8 @@ import Data.Functor.Identity( Identity(..) )
 import Lib.PPrint
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Common( child, descendE, mapA, mapV, projStep )
+import Backend.Typed.Types( mapReuseContents )
+import Backend.Typed.Common( child, descendB, descendE, mapA, mapV, projStep )
 
 nm :: Name -> Doc
 nm n = text (show n)
@@ -193,11 +194,11 @@ prettyExpr expr
       Call f ts vs -> nm f <.> tyArgs ts <.> args vs
       App f vs -> pv f <.> args vs
       Proj m v i x e -> letIn (mode m) (pv x) (atomVal v <.> text ("." ++ show (projStep i x))) e
-      CaseV m v alts -> caseOf (text "case" <.> mode m) (prettyVal v) [(text "inj" <.> int i <+> pv x, e) | (i,x,e) <- alts]
+      CaseV m v alts -> caseOf (text "case" <.> mode m) (prettyVal v) [(alt "inj" i x, e) | (i,x,e) <- alts]
       SplitA m v k (x,e1) (y,e2) -> caseOf (text "split" <.> mode m) (pv v <+> text "at" <+> int k) [(pv x, e1), (pv y, e2)]
       IfWhnf m v (x,e1) (y,e2) -> caseOf (text "if-whnf" <.> mode m) (pv v) [(side Whnf <+> pv x, e1), (side Delay <+> pv y, e2)]
       CaseA m v alts def -> caseOf (text "case" <.> mode m) (pv v)
-                              ([(text "inj-a" <.> int i <+> pv x, e) | (i,x,e) <- alts] ++ [(text "_" <+> pv x, e) | Just (x,e) <- [def]])
+                              ([(alt "inj-a" i x, e) | (i,x,e) <- alts] ++ [(text "_" <+> pv x, e) | Just (x,e) <- [def]])
       Deref m v x e -> letIn (mode m) (text "ptr" <+> pv x) (prettyVal v) e
       Unroll m v x e -> letIn (mode m) (text "roll" <+> pv x) (pv v) e
       Unbox m v x e -> letIn (mode m) (text "box" <+> pv x) (pv v) e
@@ -219,6 +220,14 @@ prettyExpr expr
       Jump j ts vs -> text "jump" <+> nm j <.> tyArgs ts <.> args vs
       Gen vs e -> text "gen" <+> hsep (map tv vs) <.> text "." <+> align (prettyExpr e)
       CaseOpen m v alts def -> caseOf (text "case" <.> mode m) (pv v) ([(nm c <.> parens (commaSep (map pv xs)), e) | (c,xs,e) <- alts] ++ [(text "_", def)])
+
+-- the binder of an alternative, which names it if it is a path to it
+alt :: String -> Int -> Path -> Doc
+alt kw i x@(Path _ ss)
+  = case reverse ss of
+      (SInjV j _ : _) | i == j -> pv x
+      (SInjA j _ : _) | i == j -> pv x
+      _ -> text kw <.> int i <+> pv x
 
 -- `let` with a mode, followed by the body on the next line
 letIn :: Doc -> Doc -> Doc -> VExpr -> Doc
@@ -242,8 +251,9 @@ prettyProgram prog
   = vcat (map prettyDef (progDefs prog))
 
 -- The program without the forms that have no operational meaning and whose binders follow
--- from their paths: `[fst]`, `[snd]`, `[deref]` and `[unroll]` of a variable. For reading the IR;
--- messages show the full program.
+-- from their paths: `[proj]`, `[deref]`, `[unroll]` and `[bunbox]` of a variable. Neither does
+-- it show `[roll]`, nor the steps of those forms in paths but that of `[proj]`, nor the halves
+-- of a split before an alternative, so that a path reads like a field access in the source. For reading the IR; messages show the full program.
 prettyElided :: Program -> Doc
 prettyElided prog
   = prettyProgram prog{ progDefs = map elideDef (progDefs prog) }
@@ -251,8 +261,8 @@ prettyElided prog
 elideDef :: Def -> Def
 elideDef def
   = case def of
-      DefFun f vs ps r e -> DefFun f vs ps r (elideE e)
-      DefVal x vs t e    -> DefVal x vs t (elideE e)
+      DefFun f vs ps r e -> shortenDef (DefFun f vs ps r (elideE e))
+      DefVal x vs t e    -> shortenDef (DefVal x vs t (elideE e))
 
 elideE :: VExpr -> VExpr
 elideE expr
@@ -260,6 +270,7 @@ elideE expr
       Proj _ (Var v) i x e | x == child v (projStep i x) -> elideE e
       Deref _ (Var v) x e | x == child v SDeref -> elideE e
       Unroll _ v x e    | x == child v SRoll -> elideE e
+      Unbox _ v x e     | x == child v SContents -> elideE e
       _ -> runIdentity (descendE Identity (Identity . elideV) (\_ e -> Identity (elideE e)) expr)
 
 elideV :: VVal -> VVal
@@ -268,5 +279,70 @@ elideV = mapV elideA elideV
 elideA :: AVal -> AVal
 elideA val
   = case val of
+      Roll _ v   -> elideA v
       Lam ps r e -> Lam ps r (elideE e)
       _          -> mapA id elideA elideV val
+
+-- the paths without their roll, deref and contents steps, also in the descriptions of types,
+-- and without the halves of a split on the way to an alternative, which names its tag
+shorten :: Path -> Path
+shorten (Path x ss) = Path x (halves (filter (`notElem` [SRoll,SDeref,SContents]) ss))
+  where
+    halves steps = case span (`elem` [SLo,SHi]) steps of
+                     (_, rest@(SInjA _ _ : _)) -> head rest : halves (tail rest)
+                     (hs, s : rest) -> hs ++ s : halves rest
+                     (hs, []) -> hs
+
+shortenDef :: Def -> Def
+shortenDef def
+  = case def of
+      DefFun f vs ps r e -> DefFun f vs [(shorten x,m,shortenT t) | (x,m,t) <- ps] (shortenT r) (shortenE e)
+      DefVal x vs t e    -> DefVal x vs (shortenT t) (shortenE e)
+
+shortenE :: VExpr -> VExpr
+shortenE expr
+  = runIdentity (descendB (Identity . shorten) (Identity . shortenV) (\bs e -> Identity (map (shorten . fst) bs, shortenE e)) annotated)
+  where
+    annotated = case expr of
+      Let x t e1 e2 -> Let x (shortenT t) e1 e2
+      LetYield x t e1 e2 e3 -> LetYield x (shortenT t) e1 e2 e3
+      Yielded t -> Yielded (shortenT t)
+      Unreachable t -> Unreachable (shortenT t)
+      Call f ts vs -> Call f (map shortenAT ts) vs
+      Jump j ts vs -> Jump j (map shortenAT ts) vs
+      Join j tvs ps e1 e2 -> Join j tvs [(x,m,shortenT t) | (x,m,t) <- ps] e1 e2
+      _ -> expr
+
+shortenV :: VVal -> VVal
+shortenV val
+  = case val of
+      Var x -> Var (shorten x)
+      Glob x ts -> Glob x (map shortenAT ts)
+      Inj i t v -> Inj i (shortenT t) (shortenV v)
+      Ptr a v -> Ptr (shortenAT a) (shortenA v)
+      Pack t ts v -> Pack (shortenT t) (map shortenAT ts) (shortenV v)
+      TyApp v ts -> TyApp (shortenV v) (map shortenAT ts)
+      Context b v -> Context (shortenAT b) (shortenV v)
+      NoReuse n p -> NoReuse n (fmap shortenC p)
+      _ -> mapV shortenA shortenV val
+
+shortenA :: AVal -> AVal
+shortenA val
+  = case val of
+      Lam ps r e -> Lam [(shorten x,m,shortenT t) | (x,m,t) <- ps] (shortenT r) (shortenE e)
+      InjA i a v -> InjA i (shortenAT a) (shortenA v)
+      Roll a v -> Roll (shortenAT a) (shortenA v)
+      InjLazy d a v -> InjLazy d (shortenAT a) (shortenA v)
+      OpenCon c ts vs -> OpenCon c (map shortenAT ts) (map shortenV vs)
+      _ -> mapA shorten shortenA shortenV val
+
+shortenT :: VType -> VType
+shortenT = mapReuseContents (fmap shortenC)
+
+shortenAT :: AType -> AType
+shortenAT a = case shortenT (VPtr a) of
+               VPtr b -> b
+               _ -> a
+
+shortenC :: Contents -> Contents
+shortenC (Contents k p t) = Contents k (shortenV p) (shortenT t)

@@ -8,7 +8,7 @@
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents, collapse
-                          , unrollMu, rep, boxrep, boxA, shapeA, shapeLeaves, leafCons, isPtr, varV, forallA, prodV, sumTypes, sumAlts, sumOf
+                          , unrollMu, rep, boxrep, boxA, shapeA, shapeLeaves, leafCons, isPtr, varV, forallA, prodV, prodFields, sumTypes, sumAlts, sumOf
                           , applyA, vtInt, vtString, vtChar, vtFloat, atAny
                           ) where
 
@@ -118,11 +118,15 @@ sumOf :: [AType] -> AType
 sumOf [a] = a
 sumOf ts = ASum (sumAlts ts)
 
--- the product of fields named by their position; one field is not wrapped
+-- the product of fields named by their position (`prodFields`)
 prodV :: [VType] -> VType
-prodV []  = VUnit
-prodV [t] = t
-prodV ts  = VProd (zip (map posField [0..]) ts)
+prodV = prodFields . zip (map posField [0..])
+
+-- the product of fields; one field is not wrapped
+prodFields :: [(Field,VType)] -> VType
+prodFields []      = VUnit
+prodFields [(_,t)] = t
+prodFields fs      = VProd fs
 
 vtInt, vtString, vtChar, vtFloat :: VType
 vtInt    = VPtr (ACon nameTpInt [])
