@@ -62,10 +62,10 @@
     - The paper scopes borrowing syntactically: `[let]` lends `^Γ₂` to the bound expression.
       Our IR borrows from an owned variable `z` anywhere (e.g. `case^ z` with `z` owned, as Perceus
       produces). The binders of a destructuring of `z` are its *parts*, named by their paths
-      (`z.fst`, see `Path`), and their borrowed uses become invalid once `z` is consumed. In
+      (`z.field0`, see `Path`), and their borrowed uses become invalid once `z` is consumed. In
       particular a borrowed argument of a call cannot be one that is passed owned.
     - The parts of an owned variable are owned: consuming a part takes it out of its parent, and
-      the parent is consumed once all of its parts are: both components of a pair, the contents
+      the parent is consumed once all of its parts are: all fields of a product, the contents
       `z.contents` (or `z.taken`) and the block `z.credit` of a box (neither of the latter
       is a binder, see `[unbox-ru]`), or the binder of any other destructuring. The binder of `[case-a]`,
       `[split-a]`, `[if-whnf]`, `[deref]` or `[unroll]` at a boxed type is the parent's pointer, and that of
@@ -74,9 +74,9 @@
       binders are consumed, and only a unique destructuring needs its mode: it consumes a unique
       scrutinee.
     - `[dup]` binds its copy as a new root, so a variable holds at most one owned reference.
-      For example, after `val y = dup z.fst; drop z` the context holds `y : V`.
+      For example, after `val y = dup z.field0; drop z` the context holds `y : V`.
     - Code generation reads the contents of a box in place: `z.contents`, and the binders of
-      `[fst]`, `[snd]` and `[unpack]` of a place, stay in the block of `z`, and a use reads the block.
+      `[proj]` and `[unpack]` of a place, stay in the block of `z`, and a use reads the block.
       It loads them (copies them out of the block) at `[load]`, and at `[unbox-ru]` and
       `[lock]` of `z`, which may free or write the block. `[case]`, `[deref]`, `[dup]` and a
       use of a value as a whole read loaded values, so a part of the block is loaded before
@@ -206,7 +206,7 @@ data Side = Whnf | Delay
 data VType = VPtr AType                 -- A*
            | VUnit                      -- 𝟙
            | VSum [(Con,VType)]         -- ⊕ᵢ Vᵢ, n-ary (a Koka value type with several constructors)
-           | VProd VType VType          -- V ⊗ W
+           | VProd [(Field,VType)]      -- ⊗ᵢ fᵢ: Vᵢ, n-ary with n ≥ 1 (the fields of a Koka constructor)
            | VRaw Raw                   -- raw: unboxed primitives (`int32`, `float64`, `char`, ...)
            | VExists [TVar] VType       -- ∃ā. V
            | VReuse Fill Int (Maybe Contents) -- ◇n[k; p : V] or ◆n[k; p : V]: if nonempty, an n-byte block with tag k containing p
@@ -255,9 +255,9 @@ data Lit = LitInt Integer
          deriving (Eq,Show)
 
 -- Variables are paths: a root followed by the steps of the destructurings that lead from the
--- root to the variable, outermost first. For example, `z.snd.deref` is the binder of
--- `let_q ptr x = z.snd` where `z.snd` is the binder of `let_q x = z.snd`. A field of
--- `[case-open]` contributes all of its steps (`snd`ⁱ `fst`). The binders
+-- root to the variable, outermost first. For example, `z.field1.deref` is the binder of
+-- `let_q ptr x = z.field1` where `z.field1` is the binder of `let_q x = z.field1`. A field of
+-- `[case-open]` contributes the steps to its constructor and its field. The binders
 -- of other forms are roots, and a root is bound only once in a definition. `Paths`
 -- establishes these invariants after elaboration, which ends with `Lazy`.
 -- The other passes preserve them; `Check` validates each pass's output directly.
@@ -265,7 +265,7 @@ data Path = Path Name [Step]
           deriving (Eq,Ord)
 
 -- the steps from the scrutinee of a destructuring form to its binders
-data Step = SFst | SSnd            -- [fst], [snd]
+data Step = SField Int Field       -- [proj]
           | SInjV Int Con          -- [case]
           | SPack                  -- [unpack]
           | SDeref                 -- [deref]
@@ -284,8 +284,7 @@ instance Show Path where
 
 instance Show Step where
   show s = case s of
-             SFst      -> "fst"
-             SSnd      -> "snd"
+             SField _ f -> show f
              SInjV _ c -> show c
              SPack     -> "pack"
              SDeref    -> "deref"
@@ -318,13 +317,29 @@ instance Show Con where
 tagCon :: Int -> Con
 tagCon i = Con (newName ("inj" ++ show i))
 
+-- the name of a field of a product, for reading the IR: steps and types compare by position
+newtype Field = Field Name
+
+instance Eq Field where
+  _ == _ = True
+
+instance Ord Field where
+  compare _ _ = EQ
+
+instance Show Field where
+  show (Field f) = show (unqualify f)
+
+-- a field without a name of its own, named by its position
+posField :: Int -> Field
+posField i = Field (newName ("field" ++ show i))
+
 root :: Name -> Path
 root x = Path x []
 
 -- Values `Γ ⊢ v :q t`. A borrowed value is structural: a variable, a global, a literal, `()`,
--- a function, a type application of one of these, or a pair, injection or pack of borrowed
+-- a function, a type application of one of these, or a tuple, injection or pack of borrowed
 -- values (as in the paper). A unique value is a variable, a context `ctx K`, `c₁ ++ c₂`,
--- `ctx-copy c`, `()`, a literal of a trivial type, or a pair, injection or pack of unique
+-- `ctx-copy c`, `()`, a literal of a trivial type, or a tuple, injection or pack of unique
 -- values. All other values are owned.
 --
 -- Boxed values `Γ ⊢ a :q A`; boxed variables occur only as named operands.
@@ -436,10 +451,12 @@ data VVal
   --   Γ ⊢ injᵢ v :q ⊕ⱼ Vⱼ
   | Inj Int VType VVal
 
-  --   Γ₁ ⊢ v₁ :q V₁    Γ₂ ⊢ v₂ :q V₂
-  --  ──────────────────────────────────── [pair]
-  --   Γ₁, Γ₂ ⊢ (v₁, v₂) :q V₁ ⊗ V₂
-  | Pair VVal VVal
+  --   Γᵢ ⊢ vᵢ :q Vᵢ   (for each i)
+  --  ──────────────────────────────────────────────── [tuple]
+  --   Γ₁, ..., Γₙ ⊢ (v₁, ..., vₙ) :q ⊗ᵢ fᵢ: Vᵢ
+  --
+  -- The fields are named by their position (`posField`); types compare without the names.
+  | Tuple [VVal]
 
   --   Γ ⊢ v : A
   --  ───────────────── [ptr]
@@ -626,23 +643,17 @@ data VExpr
   -- where the binder is the scrutinee's pointer: `[case-a]`, `[split-a]`, `[if-whnf]`, `[deref]`,
   -- `[unroll]` and `[unpack]` (`keepsPointer`).
   --
-  --   Γ₁ ⊢ v :q V₁ ⊗ V₂    Γ₂, x :q V₁ ⊢ e : W
-  --  ─────────────────────────────────────── [fst]
-  --   Γ₁, Γ₂ ⊢ let_q x = v.fst in e : W
+  --   Γ₁ ⊢ v :q ⊗ⱼ fⱼ: Vⱼ    Γ₂, x :q Vᵢ ⊢ e : W
+  --  ──────────────────────────────────────────── [proj]
+  --   Γ₁, Γ₂ ⊢ let_q x = v.fᵢ in e : W
   --
-  -- Reads and binds the first component of a product; a deeper part is reached by a chain of
-  -- projections. For a variable v the binder is the path v.fst, with that part's existing
-  -- ownership; the other part remains available. Products are logical: their fields are in
+  -- Reads and binds the field i of a product; a deeper part is reached by a chain of
+  -- projections. For a variable v the binder is the path v.fᵢ, with that part's existing
+  -- ownership; the other fields remain available. Products are logical: their fields are in
   -- source order and may be products themselves, and code generation places the leaves of a
-  -- product in memory order (`Layout.layout`).
-  | Fst Mode VVal Path VExpr
-
-  --   Γ₁ ⊢ v :q V₁ ⊗ V₂    Γ₂, x :q V₂ ⊢ e : W
-  --  ─────────────────────────────────────── [snd]
-  --   Γ₁, Γ₂ ⊢ let_q x = v.snd in e : W
-  --
-  -- The second component, as `[fst]`.
-  | Snd Mode VVal Path VExpr
+  -- product in memory order (`Layout.layout`). Elaboration gives a constructor with one field
+  -- the type of that field, so it generates products of at least two fields.
+  | Proj Mode VVal Int Path VExpr
 
   --   Γ₁ ⊢ v :q ⊕ᵢ Vᵢ    Γ₂, xᵢ :q Vᵢ ⊢ eᵢ : W   (for each i)
   --  ────────────────────────────────────────────────────────── [case]
@@ -731,9 +742,8 @@ data VExpr
   --
   -- Matching on the tag of an open datatype, with a mandatory default. Always borrowed. An
   -- alternative binds one binder for each source field. For a variable v the binders are the
-  -- parts of `v.C` at the steps of the fields of a right-nested product, as a chain of
-  -- `[fst]` and `[snd]` would bind them: field i of n at `snd`ⁱ `fst`, the last one at `snd`ⁿ⁻¹ (just
-  -- `v.C` if there is one field), without binding the products on the way.
+  -- fields of the product `v.C`, as `[proj]` would bind them (just `v.C` if there is one
+  -- field), without binding the product.
   | CaseOpen Mode Path [(Name,[Path],VExpr)] VExpr
 
   --   Γ | ∅ ⊢ e : A*    ā ∉ ftv(Γ)

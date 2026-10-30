@@ -26,13 +26,13 @@
   a reference that may only be inspected.
 
   The variables at the steps from a variable are its parts: a reference to a variable is one
-  reference to each of its parts (both components of a pair, the contents and the credit of a
+  reference to each of its parts (all fields of a product, the contents and the credit of a
   box, and the only part at any other step), so consuming a part takes it out of its parent,
   and a parent is consumed once all of its parts are. The binder of `[deref]`, `[unroll]`,
   `[case-a]` or `[split-a]` of a boxed value is the pointer of its scrutinee, and that of
   `[unpack]` is its scrutinee, so consuming or testing it consumes or tests the scrutinee (`key`). So does a part whose
-  sibling is of a trivial type, which is determined from the type of the parent: a `[case-open]`
-  binds only its fields, not the products around them. In an alternative whose binder of a trivial type is all of
+  siblings are of a trivial type, which is determined from the type of the parent: a `[case-open]`
+  binds only its fields, not the product around them. In an alternative whose binder of a trivial type is all of
   the scrutinee (`Nothing`), the scrutinee needs no references. The mode of a
   destructuring of a variable is therefore irrelevant (an owned destructuring is a borrowed one
   whose parts are consumed), except that a unique destructuring consumes a unique scrutinee:
@@ -41,7 +41,7 @@
 
   `val y = dup x` borrows `x` and binds its copy `y` as a new owned root, so a variable holds
   at most one reference. The consumed references are sets of variables (`Keys`), where a
-  variable stands for all of its parts (`refine`): `z.fst` is left after a `let` that consumes
+  variable stands for all of its parts (`refine`): `z.field0` is left after a `let` that consumes
   the other parts of `z`, for example.
 
   A unique variable is owned and holds the only reference to its block, so `UnboxRu` may
@@ -87,22 +87,23 @@ module Backend.Typed.Linear( checkLinear ) where
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad( unless, when, forM_, foldM )
-import Data.List( inits )
 import Data.Maybe( isJust )
 import Data.Functor.Const( Const(..) )
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Monad
+import Backend.Typed.Types( prodV )
 import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, paramModes, trivialTy )
 
 -- the mode of the variables at and below each owner: the roots in scope, and in the body of a
 -- join point the variables it captures
 type Owners = M.Map Path Mode
 
--- the parts of a trivial type, recorded where a destructuring binds a part of their parent (a
--- path denotes the same part in the whole definition, see `Syntax.Path`)
-type Trivial = S.Set Path
+-- the parts recorded where a destructuring binds a part of their parent (a path denotes the same
+-- part in the whole definition, see `Syntax.Path`): those of a trivial type, and the fields of
+-- each product
+data Parts = Parts{ ptTrivial :: S.Set Path, ptFields :: M.Map Path [Path] }
 
 -- variables (`key`) that do not overlap; a variable stands for all of its parts (`refine`)
 type Keys = S.Set Path
@@ -113,7 +114,7 @@ type Keys = S.Set Path
 -- other references (`uDiverges`).
 data Use = Use{ uConsumed :: Keys, uNeeded :: Keys, uBorrowed :: S.Set Path, uUnique :: S.Set Path, uDiverges :: Bool }
 
-type L a = M Owners Trivial a
+type L a = M Owners Parts a
 
 -- the modes of the parameters of the join points in scope, and the variables they capture
 -- with their modes
@@ -130,20 +131,11 @@ checkDef env def
         -> run (M.fromList [(x,V t) | (x,_,t) <- args]) (params env args) body
       DefVal _ _ _ body -> run M.empty [] body
   where
-    run g ps body = evalM (closed ps (checkE env g M.empty body)) M.empty S.empty
+    run g ps body = evalM (closed ps (checkE env g M.empty body)) M.empty (Parts S.empty M.empty)
 
 -- the parameters that are not of a trivial type
 params :: Env -> [(Path,Mode,VType)] -> [(Path,Mode)]
 params env ps = [(x,m) | (x,m,t) <- ps, not (trivialTy env (V t))]
-
--- The parts of a trivial type beside the way from a product `p : t` to its part `x`:
--- `[case-open]` leaves the products on the way unbound.
-trivialSiblings :: Env -> Path -> VType -> Path -> [Path]
-trivialSiblings env p@(Path _ ps) t (Path _ xs)
-  = [foldl child p ss | (pre,s) <- zip (inits steps) steps, Just s' <- [sibling s]
-                      , let ss = pre ++ [s'], Just u <- [partAt t ss], trivialTy env (V u)]
-  where
-    steps = drop (length ps) xs
 
 -- The product that a destructuring of `z` with binders `bs` takes apart, with its type: `z`
 -- for a projection, and `z.C`, the fields of the binders, for `[case-open]`.
@@ -152,37 +144,42 @@ destructed g z@(Path _ zs) bs
   = case (M.lookup z g, bs) of
       (Just (V t), _) -> Just (z,t)
       (_, (Path _ ss,_):_:_) | (SOpen c : _) <- drop (length zs) ss
-        -> Just (child z (SOpen c), foldr1 VProd [t | (_,V t) <- bs])
+        -> Just (child z (SOpen c), prodV [t | (_,V t) <- bs])
       _ -> Nothing
 
 -- references
 
--- the other part of the parent of a variable, unless it is of a trivial type
-siblingOf :: Trivial -> Path -> Maybe Path
-siblingOf tr (Path x ss@(_:_))
-  | Just t <- sibling (last ss), let q = Path x (init ss ++ [t]), S.notMember q tr = Just q
-siblingOf _ _ = Nothing
+-- the other parts of the parent of a variable that are not of a trivial type
+siblingsOf :: Parts -> Path -> [Path]
+siblingsOf tr p@(Path x ss@(_:_))
+  = [q | q <- others, S.notMember q (ptTrivial tr)]
+  where
+    parent = Path x (init ss)
+    others = case last ss of
+               SField _ _ -> [q | q <- M.findWithDefault [] parent (ptFields tr), q /= p]
+               s -> [child parent t | Just t <- [sibling s]]
+siblingsOf _ _ = []
 
--- A part without a sibling (that is not of a trivial type) is all of its parent, so a use of
+-- A part without siblings (that are not of a trivial type) is all of its parent, so a use of
 -- it is a use of the parent: references are counted for the parent.
-key :: Trivial -> Path -> Path
+key :: Parts -> Path -> Path
 key tr p@(Path x ss)
-  | not (null ss), Nothing <- siblingOf tr p = key tr (Path x (init ss))
+  | not (null ss), null (siblingsOf tr p) = key tr (Path x (init ss))
   | otherwise = p
 
 keyOf :: Path -> L Path
 keyOf x = gets (\tr -> key tr x)
 
 -- the parts of `p` on the way to a variable `q` below it, which together make up `p`
-partsToward :: Trivial -> Path -> Path -> [Path]
+partsToward :: Parts -> Path -> Path -> [Path]
 partsToward tr p@(Path _ ss) (Path _ ts) = go p (drop (length ss) ts)
   where
     go v [] = [v]
-    go v (s:rest) = [key tr q | Just q <- [siblingOf tr (child v s)]] ++ go (child v s) rest
+    go v (s:rest) = [key tr q | q <- siblingsOf tr (child v s)] ++ go (child v s) rest
 
 -- Split a variable with one of the `keys` (or another variable of the set) below it into its
 -- parts.
-refine :: Trivial -> [Path] -> Keys -> Keys
+refine :: Parts -> [Path] -> Keys -> Keys
 refine tr keys s
   = case [(p,q) | p <- S.toList s, q <- keys ++ S.toList s, q /= p, q `within` p] of
       ((p,q):_) -> refine tr keys (S.union (S.delete p s) (S.fromList (partsToward tr p q)))
@@ -190,11 +187,17 @@ refine tr keys s
 
 -- Replace all parts of a variable by the variable, so that alternatives that take a variable
 -- apart differently agree on it.
-rollUp :: Trivial -> Keys -> Keys
+rollUp :: Parts -> Keys -> Keys
 rollUp tr s
-  = case [(p,q) | p <- S.toList s, Just q <- [siblingOf tr p], S.member q s] of
-      ((p,q@(Path x ss)):_) -> rollUp tr (S.insert (key tr (Path x (init ss))) (S.delete p (S.delete q s)))
+  = case [(p,qs) | p <- S.toList s, let qs = siblingsOf tr p, not (null qs), all (`S.member` s) qs] of
+      ((p@(Path x ss),qs):_) -> rollUp tr (S.insert (key tr (Path x (init ss))) (foldr S.delete s (p:qs)))
       [] -> s
+
+-- `[unbox-ru]` and `[lock]` of `z` rename the parts of its contents (`rebase`)
+rebaseParts :: Path -> Parts -> Parts
+rebaseParts z (Parts trivial fields)
+  = Parts (S.union trivial (S.map (rebase z) trivial))
+          (M.union fields (M.fromList [(rebase z p, map (rebase z) qs) | (p,qs) <- M.toList fields]))
 
 -- the variables of `a` that share a part with a variable of `b`
 overlapping :: Keys -> Keys -> [Path]
@@ -353,7 +356,7 @@ ownedV env g val
       Lit _ -> return noUse
       NoReuse _ _ -> return noUse
       Inj _ _ _ -> children
-      Pair _ _ -> children
+      Tuple _ -> children
       Ptr _ _ -> children
       Pack _ _ _ -> children
       TyApp _ _ -> children
@@ -399,7 +402,7 @@ uniqueV env g val
                   unless (trivialTy env t) (fail ("unique use of a shared literal: " ++ show val))
                   return noUse
       Inj _ _ w -> uniqueV env g w
-      Pair v w -> uses [uniqueV env g v, uniqueV env g w]
+      Tuple vs -> uses (map (uniqueV env g) vs)
       Pack _ _ w -> uniqueV env g w
       Context _ k -> ownedV env g k
       CtxCopy c -> ownedV env g c
@@ -415,7 +418,7 @@ borrowedV env g val
       UnitV -> return noUse
       TyApp v _ -> borrowedV env g v
       Inj _ _ w -> borrowedV env g w
-      Pair v w -> uses [borrowedV env g v, borrowedV env g w]
+      Tuple vs -> uses (map (borrowedV env g) vs)
       Pack _ _ w -> borrowedV env g w
       _ -> fail ("borrowed use of a value that is not structural: " ++ show val)
 
@@ -522,7 +525,7 @@ checkE env g js expr
         -> do g' <- liftE (unboxRuGamma g z r)
               u <- uniqueName env g z
               c <- keyOf (child z SCredit)
-              modify (\tr -> S.union tr (S.map (rebase z) tr))
+              modify (rebaseParts z)
               body <- local (M.mapKeys (rebase z)) (roots env Owned [(r,g' M.! r)] (checkE env g' js e))
               before (return u{ uConsumed = S.singleton c }) (return (mapUse (unrebase z) body))
       -- a copy of the block of `z`, which only reads the block, as a new root
@@ -534,7 +537,7 @@ checkE env g js expr
         -> do g' <- liftE (lockGamma g z c)
               u <- consume env g z
               k <- keyOf (child z SCredit)
-              modify (\tr -> S.union tr (S.map (rebase z) tr))
+              modify (rebaseParts z)
               body <- local (M.mapKeys (rebase z)) (roots env Owned [(c,g' M.! c)] (checkE env g' js e))
               before (return u{ uConsumed = S.singleton k }) (return (mapUse (unrebase z) body))
       CaseLit v alts def -> before (borrowedV env g v) (branches =<< mapM (checkE env g js) (def : map snd alts))
@@ -563,8 +566,7 @@ checkE env g js expr
 bindsPart :: VExpr -> Bool
 bindsPart expr
   = case expr of
-      Fst{} -> True
-      Snd{} -> True
+      Proj{} -> True
       Unpack{} -> True
       _ -> False
 
@@ -603,7 +605,9 @@ destruct env g js m part v alts
                     -- that is all of `z` (see `key`) makes `z` trivial in its alternative.
                     alt zc bs e
                       = do let ts = [x | (x,t) <- bs, trivialTy env t]
-                           modify (S.union (S.fromList (ts ++ [q | Just (p,t) <- [destructed g z bs], (x,_) <- bs, q <- trivialSiblings env p t x])))
+                               fields = [(p,fieldsAt p t) | Just (p,t) <- [destructed g z bs]]
+                           modify (\tr -> Parts (S.unions [ptTrivial tr, S.fromList ts, S.fromList [y | (_,fs) <- fields, (y,_,u) <- fs, trivialTy env (V u)]])
+                                                (M.union (ptFields tr) (M.fromList [(p,[y | (y,_,_) <- fs]) | (p,fs@(_:_)) <- fields])))
                            tr <- get
                            u <- checkE env (bindAll bs g) js e
                            return (not (trivialVar env g z) && any ((== zc) . key tr) ts, u)

@@ -95,8 +95,7 @@ expr e = case e of
   _ -> descendE pure value (\_ -> expr) e
 
 projection :: VExpr -> Maybe (Path,VExpr)
-projection (Fst _ _ x b) = Just (x,b)
-projection (Snd _ _ x b) = Just (x,b)
+projection (Proj _ _ _ x b) = Just (x,b)
 projection _ = Nothing
 
 -- A run of loads, each a copy of a value's bits; its references are still held by the block.
@@ -118,12 +117,11 @@ firstLeaf :: Gamma -> Path -> Maybe (Int,VType)
 firstLeaf g x@(Path r ss)
   = case reverse ss of
       SContents : _ | Right (V w) <- inferVar g x -> Just (0,w)
-      SFst : rest -> firstLeaf g (Path r (reverse rest))
       SPack : rest -> firstLeaf g (Path r (reverse rest))
-      SSnd : rest -> do let p = Path r (reverse rest)
-                        Right (V (VProd a _)) <- Just (inferVar g p)
-                        (i,w) <- firstLeaf g p
-                        Just (i + length (leaves a),w)
+      SField j _ : rest -> do let p = Path r (reverse rest)
+                              Right (V (VProd fs)) <- Just (inferVar g p)
+                              (i,w) <- firstLeaf g p
+                              Just (i + sum (map (length . leaves . snd) (take j fs)),w)
       _ -> Nothing
 
 value :: VVal -> H VVal
@@ -166,7 +164,7 @@ depth v
 childrenV :: VVal -> [(VVal, VVal -> VVal)]
 childrenV v = case v of
   Inj i t w -> [(w,Inj i t)]
-  Pair u w -> [(u,\x -> Pair x w),(w,Pair u)]
+  Tuple ws -> [(w,\x -> Tuple (before ++ x : after)) | (before,w:after) <- [splitAt i ws | i <- [0 .. length ws - 1]]]
   Ptr a w -> [(u,Ptr a . rebuild) | (u,rebuild) <- childrenA w]
   Pack t ts w -> [(w,Pack t ts)]
   TyApp w ts -> [(w,\x -> TyApp x ts)]

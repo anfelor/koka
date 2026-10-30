@@ -32,7 +32,7 @@ checkLayoutProgram p = concatMap check (programTypes p)
   where
     check t = checkLayout (layout t) ++ inner t
     inner t = case t of
-      VProd a b -> inner a ++ inner b
+      VProd fs -> concatMap (inner . snd) fs
       VExists _ b -> inner b
       VPtr a -> atomic a
       VSum ts -> concatMap (inner . snd) ts

@@ -82,7 +82,7 @@ layout t
       VSum ts | isEnum t -> CEnum (enumSize (length ts))
       VSum ts     -> let alts = map (altLayout . snd) ts
                      in CSum (structName ("S[" ++ intercalate "|" (map (maybe "U" canonCT) alts) ++ "]")) alts
-      VProd _ _   -> case map layout (leaves t) of
+      VProd _     -> case map layout (leaves t) of
                        [] -> CUnit
                        [ct] -> ct
                        cts  -> let fs = orderFields (zip [0..] cts)
@@ -91,7 +91,7 @@ layout t
       VPtr _      -> CBox
       -- Koka's `cctx`: `res` and the address of the hole, which is boxed as a value
       -- (`kk_field_addr_t`), so duplicating and dropping it does nothing
-      VCtx _ a b  -> layout (VProd (VPtr a) (VPtr b))
+      VCtx _ a b  -> layout (VProd [(posField 0,VPtr a),(posField 1,VPtr b)])
       -- a cell is the pointer to its block
       VCell _ _   -> CBox
   where
@@ -103,7 +103,7 @@ layout t
 leaves :: VType -> [VType]
 leaves t
   = case t of
-      VProd a b -> leaves a ++ leaves b
+      VProd fs -> concatMap (leaves . snd) fs
       VExists _ b -> leaves b
       VUnit -> []
       VPtr _ -> [t]
@@ -126,7 +126,7 @@ isEnum t
       _ -> False
   where
     isUnitT VUnit = True
-    isUnitT (VProd a b) = isUnitT a && isUnitT b
+    isUnitT (VProd fs) = all (isUnitT . snd) fs
     isUnitT (VExists _ b) = isUnitT b
     isUnitT _ = False
 
