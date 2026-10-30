@@ -48,7 +48,7 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import qualified Common.NameMap as NM
 import Kind.Newtypes( newtypesTypeDefs )
-import Backend.Typed.Pretty()
+import Backend.Typed.Pretty( prettyElided )
 
 import Compile.Options
 import Compile.Module( Definitions(..), Module(..), modCoreImports, defsFromModules )
@@ -281,15 +281,18 @@ codeGenTyped :: Terminal -> Flags -> [Module] -> Module -> IO ()
 codeGenTyped term flags imports mod
   = do let newtypes = defsNewtypes (defsFromModules (mod:imports))
            (tprog,msgs) = typedFromCore (parcReuse flags) newtypes (mapMaybe modCore imports) 1000000 (fromJust (modCore mod))
-       when (showTyped flags) $ termInfo term (pretty tprog)
+           outDir       = dirname (modIfacePath mod)
+       when (showTyped flags) $ termInfo term (prettyElided tprog)
+       -- the final IR, for debugging; written before validation so that it is kept on failure
+       createDirectoryIfMissing True outDir
+       writeDocW 120 (joinPath outDir (TC.ktFileName (modName mod) ++ ".ir")) (prettyElided tprog <.> linebreak)
        mapM_ (\(phase,msg) -> termInfo term (text ("typed " ++ phase ++ ": " ++ msg))) msgs
        -- FIP diagnostics are advisory, like the frontend's FIP warnings.
        -- Structural/type/linearity failures invalidate the lowering boundary.
        when (typedC flags && any (\(phase,_) -> phase `notElem` ["note","fip"]) msgs) $
          raiseIO "typed backend validation failed; C generation stopped"
        when (typedC flags) $
-         do let outDir  = dirname (modIfacePath mod)
-                cores   = mapMaybe modCore (mod:imports)
+         do let cores   = mapMaybe modCore (mod:imports)
                 externs = M.fromList [(Core.externalName x, TC.External (Core.externalFormat x) (Core.externalType x)) | c <- cores, x@(Core.External{}) <- Core.coreProgExternals c]
                 ktHeader m = TC.ktFileName m ++ ".h"
                 cenv    = TC.CEnv (modName mod)
@@ -302,7 +305,6 @@ codeGenTyped term flags imports mod
                                   (typedEagerLoads flags)
                 (hdr,csrc,errs) = TC.cgenModule cenv tprog
             unless (null errs) $ raiseIO ("typed C generation failed: " ++ intercalate "\n" errs)
-            createDirectoryIfMissing True outDir
             writeFile (joinPath outDir (ktHeader (modName mod))) hdr
             writeFile (joinPath outDir (TC.ktFileName (modName mod) ++ ".c")) csrc
             mapM_ (\err -> termInfo term (text ("typed cgen: " ++ err))) errs
