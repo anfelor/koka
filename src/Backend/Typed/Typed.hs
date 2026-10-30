@@ -37,7 +37,7 @@ import Backend.Typed.Passes.SinkJoins( sinkJoinsProgram )
 import Backend.Typed.Passes.JoinArgs( joinArgsProgram )
 import Backend.Typed.Passes.Inline( inlineProgram )
 import Backend.Typed.Passes.Paths( pathsProgram )
-import Backend.Typed.Passes.Hoist( hoistProgram )
+import Backend.Typed.Passes.Peephole( peepholeProgram )
 import Backend.Typed.Linear( checkLinear )
 import Backend.Typed.Fip( checkFip )
 
@@ -54,8 +54,8 @@ typedFromCore enableReuse nt imports uniq core
         -- without reuse every constructor allocates
         copies                 = lazyCopies nt (progTypes eprog)
         fipMsgs                = if enableReuse && null msgs then label "fip" (checkFip (withCopies copies (fipsOf (core:imports))) (copyGroups copies (groupsOf core)) dsprog) else []
-        (hoisted,hoistMsgs)    = if null elabErrs && null msgs then runPasses dsprog [] [("hoist",Linear,hoistProgram)] else (dsprog,[])
-    in (hoisted, label "elab" elabErrs ++ msgs ++ fipMsgs ++ hoistMsgs ++ label "note" notes)
+        (final,peepholeMsgs)   = if null elabErrs && null msgs then runPasses dsprog [] [("peephole",Linear,peepholeProgram)] else (dsprog,[])
+    in (final, label "elab" elabErrs ++ msgs ++ fipMsgs ++ peepholeMsgs ++ label "note" notes)
   where
     pure' f prog = (f prog,[])
     -- Lazy completes elaboration; the paths are named once, after it
