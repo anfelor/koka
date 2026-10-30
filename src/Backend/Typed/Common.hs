@@ -113,9 +113,9 @@ dropValue trivial fresh scope x t e
                       -- rather than copying its binders into every alternative.
                       return (Let u VUnit (reuseParts scope (CaseV Owned (Var x) alts)) e)
           where
-            dropAlt (i,s) = do let y = child x (SInjV i)
-                               body <- dropValue trivial fresh (M.insert y Nothing scope) y (V s) (Ret UnitV)
-                               return (i,y,body)
+            dropAlt (i,(c,s)) = do let y = child x (SInjV i c)
+                                   body <- dropValue trivial fresh (M.insert y Nothing scope) y (V s) (Ret UnitV)
+                                   return (i,y,body)
         VExists tvs s
           -> do let y = child x SPack
                 u <- fresh
@@ -196,7 +196,7 @@ isTrivialWith unroll t
                    VRaw _       -> True
                    VUnit        -> True
                    VProd x y    -> trivialV x && trivialV y
-                   VSum ts      -> all trivialV ts
+                   VSum ts      -> all (trivialV . snd) ts
                    VExists _ b  -> trivialV b
                    VPtr a       -> trivialA a
                    VReuse _ _ _   -> False
@@ -235,7 +235,7 @@ containsLinear :: Ty -> Bool
 containsLinear (V v) = case v of
   VPtr a -> containsLinear (A a)
   VProd a b -> containsLinear (V a) || containsLinear (V b)
-  VSum ts -> any (containsLinear . V) ts
+  VSum ts -> any (containsLinear . V . snd) ts
   VExists _ b -> containsLinear (V b)
   VUnit -> False
   VRaw _ -> False
@@ -309,15 +309,16 @@ injA [_] 0 v = v
 injA ss i v = InjA (fst (sumAlts ss !! i)) (sumOf ss) v
 
 -- a case on each alternative of a boxed sum `a`; the branch gets the alternative, a variable at a
--- boxed type that it may only destructure
-caseSum :: MonadFail m => (String -> m Path) -> [AType] -> Path -> (Int -> Path -> m VExpr) -> m VExpr
-caseSum fresh shapes a branch
+-- boxed type that it may only destructure. `cons` are the constructors of the alternatives.
+caseSum :: MonadFail m => [Con] -> [AType] -> Path -> (Int -> Path -> m VExpr) -> m VExpr
+caseSum cons shapes a branch
   = case shapes of
       [] -> fail "empty case"
       [_] -> branch 0 a
-      _ -> do alts <- mapM (\i -> do y <- fresh "y"
+      _ -> do alts <- mapM (\i -> do let tag = fst (sumAlts shapes !! i)
+                                         y = child a (SInjA tag (cons !! i))
                                      e <- branch i y
-                                     return (fst (sumAlts shapes !! i),y,e)) [0 .. length shapes - 1]
+                                     return (tag,y,e)) [0 .. length shapes - 1]
               return (CaseA Owned a alts Nothing)
 
 -- one-level traversals
@@ -385,8 +386,8 @@ descendB fn fv fb expr
       App f vs              -> App <$> fn f <*> traverse fv vs
       Fst m v x e           -> (\v' (x',e') -> Fst m v' x' e') <$> fv v <*> one x [SFst] e
       Snd m v x e           -> (\v' (x',e') -> Snd m v' x' e') <$> fv v <*> one x [SSnd] e
-      CaseV m v alts        -> CaseV m <$> fv v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x [SInjV i] e) alts
-      CaseA m v alts def    -> CaseA m <$> fn v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x [SInjA i] e) alts
+      CaseV m v alts        -> CaseV m <$> fv v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x [injVStep i x] e) alts
+      CaseA m v alts def    -> CaseA m <$> fn v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x [injAStep i x] e) alts
                                        <*> traverse (\(x,e) -> one x [SRest] e) def
       SplitA m v k (x,e1) (y,e2) -> SplitA m <$> fn v <*> pure k <*> one x [SLo] e1 <*> one y [SHi] e2
       IfWhnf m v (x,e1) (y,e2) -> IfWhnf m <$> fn v <*> one x [SWhnf] e1 <*> one y [SDelay] e2
@@ -435,8 +436,24 @@ child (Path x ss) s = Path x (ss ++ [s])
 boxTag :: Path -> Int
 boxTag (Path _ ss)
   = case reverse ss of
-      (SInjA i : _) -> i
+      (SInjA i _ : _) -> i
       _ -> 1
+
+-- the step to the alternative i of a `[case]` from its binder x, which names its constructor if
+-- it is a path to that alternative (`FromCore.valueAlt`): not if the scrutinee is not a variable
+injVStep :: Int -> Path -> Step
+injVStep i (Path _ ss)
+  = case reverse ss of
+      (SInjV _ c : _) -> SInjV i c
+      _ -> SInjV i (tagCon i)
+
+-- the step to the alternative i of a `[case-a]` from its binder x, which is a path to that
+-- alternative and so names its constructor (`FromCore.boxedAlt`)
+injAStep :: Int -> Path -> Step
+injAStep i (Path x ss)
+  = case reverse ss of
+      (SInjA _ c : _) -> SInjA i c
+      _ -> error ("Backend.Typed.Common.injAStep: the binder " ++ show (Path x ss) ++ " is not an alternative")
 
 -- the other part of the parent of a part of a pair or a box
 sibling :: Step -> Maybe Step
@@ -528,7 +545,7 @@ project v (s:ss)
       (Var x, _) -> Just (Var (foldl child x (s:ss)))
       (Pair a _, SFst) -> project a ss
       (Pair _ b, SSnd) -> project b ss
-      (Inj i _ w, SInjV j) | i == j -> project w ss
+      (Inj i _ w, SInjV j _) | i == j -> project w ss
       (Pack _ _ w, SPack) -> project w ss
       _ -> Nothing
 

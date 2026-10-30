@@ -80,7 +80,7 @@ layout t
       VExists _ b -> layout b
       VReuse _ _ _  -> CReuse
       VSum ts | isEnum t -> CEnum (enumSize (length ts))
-      VSum ts     -> let alts = map altLayout ts
+      VSum ts     -> let alts = map (altLayout . snd) ts
                      in CSum (structName ("S[" ++ intercalate "|" (map (maybe "U" canonCT) alts) ++ "]")) alts
       VProd _ _   -> case map layout (leaves t) of
                        [] -> CUnit
@@ -122,7 +122,7 @@ enumSize n
 isEnum :: VType -> Bool
 isEnum t
   = case t of
-      VSum ts -> length ts > 1 && all isUnitT ts
+      VSum ts -> length ts > 1 && all (isUnitT . snd) ts
       _ -> False
   where
     isUnitT VUnit = True

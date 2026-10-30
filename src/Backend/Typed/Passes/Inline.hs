@@ -177,7 +177,7 @@ reuseE expr
       _ -> descendE pure reuseV (\_ -> reuseE) expr
 
 enumType :: VType -> Bool
-enumType (VSum ts) = not (null ts) && all (== VUnit) ts
+enumType (VSum ts) = not (null ts) && all ((== VUnit) . snd) ts
 enumType _ = False
 
 reuseV :: VVal -> Reuse VVal

@@ -8,7 +8,7 @@
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents, collapse
-                          , unrollMu, rep, boxrep, boxA, shapeA, shapeLeaves, isPtr, varV, forallA, prodV, sumTypes, sumAlts, sumOf
+                          , unrollMu, rep, boxrep, boxA, shapeA, shapeLeaves, leafCons, isPtr, varV, forallA, prodV, sumTypes, sumAlts, sumOf
                           , applyA, vtInt, vtString, vtChar, vtFloat, atAny
                           ) where
 
@@ -67,7 +67,7 @@ traverseReuseContents f = goV
   where
     goV t = case t of
       VPtr a -> VPtr <$> goA a
-      VSum ts -> VSum <$> traverse goV ts
+      VSum ts -> VSum <$> traverse (\(c,s) -> (,) c <$> goV s) ts
       VProd a b -> VProd <$> goV a <*> goV b
       VExists vs b -> VExists vs <$> goV b
       VReuse fl n p -> VReuse fl n <$> f p
@@ -136,7 +136,7 @@ substV :: Sub -> VType -> VType
 substV sub t
   = case t of
       VPtr a    -> VPtr (substA sub a)
-      VSum ts   -> VSum (map (substV sub) ts)
+      VSum ts   -> VSum [(c,substV sub s) | (c,s) <- ts]
       VProd x y -> VProd (substV sub x) (substV sub y)
       VExists tvs b -> VExists tvs (substV (foldr M.delete sub tvs) b)
       VUnit     -> t
@@ -178,7 +178,7 @@ ftvV :: VType -> [TVar]
 ftvV t
   = case t of
       VPtr a        -> ftvA a
-      VSum ts       -> concatMap ftvV ts
+      VSum ts       -> concatMap (ftvV . snd) ts
       VProd x y     -> ftvV x ++ ftvV y
       VExists vs b  -> filter (`notElem` vs) (ftvV b)
       VUnit         -> []
@@ -251,7 +251,7 @@ boxFunA a
 boxA :: VType -> AType
 boxA t
   = case t of
-      VSum [s] -> boxA s
+      VSum [(_,s)] -> boxA s
       VRaw r   -> AScalar r
       _ | Just s <- scalarField t -> boxA s
         | otherwise -> shapeA t
@@ -260,13 +260,17 @@ boxA t
 shapeA :: VType -> AType
 shapeA t = sumOf (shapeLeaves t)
 
+-- the constructors of the leaves of a value sum (`shapeLeaves`): those of a nested sum are its own
+leafCons :: [(Con,VType)] -> [Con]
+leafCons ts = concat [case s of { VSum us@(_:_) -> leafCons us; _ -> [c] } | (c,s) <- ts]
+
 -- the alternatives of a value, where those of nested sums are spliced in, in order
 shapeLeaves :: VType -> [AType]
 shapeLeaves t
   = case t of
       VUnit   -> [AUnit]
-      VSum [s]    -> shapeLeaves s
-      VSum ts | not (null ts) -> concatMap shapeLeaves ts
+      VSum [(_,s)] -> shapeLeaves s
+      VSum ts | not (null ts) -> concatMap (shapeLeaves . snd) ts
       VSum _      -> [ABox t]
       VPtr _      -> [ABox t]
       VProd _ _   -> [ABox t]
@@ -280,7 +284,7 @@ eqV :: VType -> VType -> Bool
 eqV s t
   = case (s,t) of
       (VPtr a, VPtr b)       -> eqA a b
-      (VSum ss, VSum ts)     -> eqVs ss ts
+      (VSum ss, VSum ts)     -> eqVs (map snd ss) (map snd ts)
       (VProd a b, VProd c d) -> eqV a c && eqV b d
       (VExists as a, VExists bs b) | length as == length bs
         -> eqV a (inst bs (map AVar as) b)
@@ -336,7 +340,7 @@ collapse v
                   in case (parentAt SFst a', parentAt SSnd b') of
                        (Just x, Just y) | x == y -> Var x
                        _ -> Pair a' b'
-      Inj i t w -> let w' = collapse w in maybe (Inj i t w') Var (parentAt (SInjV i) w')
+      Inj i t w -> let w' = collapse w in maybe (Inj i t w') Var (parentAt (SInjV i (tagCon i)) w')
       Pack t ts w -> let w' = collapse w in maybe (Pack t ts w') Var (parentAt SPack w')
       TyApp w ts -> TyApp (collapse w) ts
       _ -> v
@@ -373,7 +377,7 @@ matchVWith tvs sub pat t
   = case (pat,t) of
       (VPtr p, VPtr s)       -> matchAWith tvs sub p s
       (VSum ps, VSum ts) | length ps == length ts
-        -> foldM (\sb (p,s) -> matchVWith tvs sb p s) sub (zip ps ts)
+        -> foldM (\sb (p,s) -> matchVWith tvs sb p s) sub (zip (map snd ps) (map snd ts))
       (VProd p q, VProd s u) -> matchVWith tvs sub p s >>= \sub' -> matchVWith tvs sub' q u
       (VCtx f p q, VCtx g s u) | f == g -> matchAWith tvs sub p s >>= \sub' -> matchAWith tvs sub' q u
       (VCell n p, VCell m s) | n == m -> matchAWith tvs sub p s

@@ -205,7 +205,7 @@ data Side = Whnf | Delay
 --   disagree on it agree on the latter.
 data VType = VPtr AType                 -- A*
            | VUnit                      -- 𝟙
-           | VSum [VType]               -- ⊕ᵢ Vᵢ, n-ary (a Koka value type with several constructors)
+           | VSum [(Con,VType)]         -- ⊕ᵢ Vᵢ, n-ary (a Koka value type with several constructors)
            | VProd VType VType          -- V ⊗ W
            | VRaw Raw                   -- raw: unboxed primitives (`int32`, `float64`, `char`, ...)
            | VExists [TVar] VType       -- ∃ā. V
@@ -266,11 +266,11 @@ data Path = Path Name [Step]
 
 -- the steps from the scrutinee of a destructuring form to its binders
 data Step = SFst | SSnd            -- [fst], [snd]
-          | SInjV Int              -- [case]
+          | SInjV Int Con          -- [case]
           | SPack                  -- [unpack]
           | SDeref                 -- [deref]
           | SRoll                  -- [unroll]
-          | SInjA Int | SRest      -- [case-a]: an alternative or the default
+          | SInjA Int Con | SRest  -- [case-a]: an alternative or the default
           | SLo | SHi              -- [split-a]
           | SWhnf | SDelay         -- [if-whnf]
           | SContents | SCredit    -- [bunbox]: the contents, and the rest of the block (not a binder)
@@ -286,11 +286,11 @@ instance Show Step where
   show s = case s of
              SFst      -> "fst"
              SSnd      -> "snd"
-             SInjV i   -> "inj" ++ show i
+             SInjV _ c -> show c
              SPack     -> "pack"
              SDeref    -> "deref"
              SRoll     -> "roll"
-             SInjA i   -> "inj" ++ show i
+             SInjA _ c -> show c
              SRest     -> "rest"
              SLo       -> "lo"
              SHi       -> "hi"
@@ -301,6 +301,22 @@ instance Show Step where
              STaken    -> "taken"
              SLoad     -> "load"
              SOpen c   -> show c
+
+-- the constructor of an alternative of a sum, for reading the IR: steps and types compare by tag
+newtype Con = Con Name
+
+instance Eq Con where
+  _ == _ = True
+
+instance Ord Con where
+  compare _ _ = EQ
+
+instance Show Con where
+  show (Con c) = show (unqualify c)
+
+-- an alternative without a constructor of its own, named by its tag
+tagCon :: Int -> Con
+tagCon i = Con (newName ("inj" ++ show i))
 
 root :: Name -> Path
 root x = Path x []

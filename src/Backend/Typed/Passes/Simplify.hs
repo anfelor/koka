@@ -203,7 +203,7 @@ knownAt known (Path x ss)
       = case (a,steps) of
           (_,[]) -> Just a
           (Roll _ b, SRoll:as) -> insideA b as
-          (InjA i _ _, SInjA j:as) | i == j -> insideA a as
+          (InjA i _ _, SInjA j _:as) | i == j -> insideA a as
           (InjA _ _ _, s:as) | s `elem` [SRest,SLo,SHi] -> insideA a as
           (InjLazy Whnf _ b, SWhnf:as) -> insideA b as
           (InjLazy Delay _ b, SDelay:as) -> insideA b as

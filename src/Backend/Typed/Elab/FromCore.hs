@@ -618,7 +618,7 @@ conValue info vargs idx exSub v
   where
     shapeVal (ABox t) = Box (packV t v)
     shapeVal _ = UnitA
-    conTypes (VSum ts) | conCount info > 1 = ts !! idx
+    conTypes (VSum ts) | conCount info > 1 = snd (ts !! idx)
     conTypes t = t
     packV t@(VExists tvs _) w = Pack t (exTypes tvs) w
     packV _ w = w
@@ -749,7 +749,7 @@ elabBoxedCase info vargs v brs
 sumCase :: [AType] -> [C.Branch] -> Path -> [(Int,ConInfo)] -> Maybe (E VExpr) -> E VExpr
 sumCase vargs brs z cons def
   = do let selected = [(i,c) | (i,c) <- cons, isNothing def || any (matches c) brs]
-       alts <- mapM (boxedAlt vargs brs) selected
+       alts <- mapM (boxedAlt vargs brs z) selected
        case def of
          Just d | null alts -> d
                 | length selected < length cons -> do y <- fresh "default"
@@ -785,9 +785,10 @@ matches con br
       C.Branch [C.PatCon pc _ _ _ _ _ _ _] _ -> getName pc == conInfoName con
       _ -> False
 
-boxedAlt :: [AType] -> [C.Branch] -> (Int,ConInfo) -> E (Int,Path,VExpr)
-boxedAlt vargs brs (i,con)
-  = do y <- fresh "y"
+-- The binder is the path to the alternative, which names its constructor (`Common.injAStep`).
+boxedAlt :: [AType] -> [C.Branch] -> Path -> (Int,ConInfo) -> E (Int,Path,VExpr)
+boxedAlt vargs brs z (i,con)
+  = do let y = child z (SInjA i (Con (conInfoName con)))
        e <- conBranch vargs con (Left y) (findBranch con brs)
        return (i,y,e)
 
@@ -795,12 +796,16 @@ elabValueCase :: DataInfo -> [AType] -> VVal -> [C.Branch] -> E VExpr
 elabValueCase info vargs v brs
   = case dataInfoConstrs info of
       [con] -> conBranch vargs con (Right v) (findBranch con brs)
-      cons  -> CaseV Owned v . map snd . sortOn fst <$> mapM (valueAlt vargs brs) (zip [0..] cons)
+      cons  -> CaseV Owned v . map snd . sortOn fst <$> mapM (valueAlt vargs brs v) (zip [0..] cons)
 
--- an alternative with the position of its branch in the source, to keep the order of the tests
-valueAlt :: [AType] -> [C.Branch] -> (Int,ConInfo) -> E (Int,(Int,Path,VExpr))
-valueAlt vargs brs (i,con)
-  = do y <- fresh "y"
+-- an alternative with the position of its branch in the source, to keep the order of the tests.
+-- The binder of a variable scrutinee is the path to the alternative, which names its constructor
+-- (`Common.injVStep`).
+valueAlt :: [AType] -> [C.Branch] -> VVal -> (Int,ConInfo) -> E (Int,(Int,Path,VExpr))
+valueAlt vargs brs v (i,con)
+  = do y <- case v of
+              Var z -> return (child z (SInjV i (Con (conInfoName con))))
+              _     -> fresh "y"
        b <- conBranch vargs con (Right (Var y)) (findBranch con brs)
        return (branchIndex con brs, (i,y,b))
 
