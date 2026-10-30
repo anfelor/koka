@@ -59,10 +59,10 @@ boxV t v
 fieldOf :: VType -> VVal -> E (K,VVal)
 fieldOf t v
   = case t of
-      VProd a b -> do x <- fresh "f"
-                      let (proj,s) = if null (leaves a) then (Snd,b) else (Fst,a)
-                      (k,w) <- fieldOf s (Var x)
-                      return (proj Owned v x . k, w)
+      VProd fs -> do x <- fresh "f"
+                     let i = leafField fs
+                     (k,w) <- fieldOf (snd (fs !! i)) (Var x)
+                     return (Proj Owned v i x . k, w)
       VExists tvs b -> do x <- fresh "f"
                           (k,w) <- fieldOf b (Var x)
                           return (Unpack Owned v tvs x . k, w)
@@ -73,15 +73,18 @@ fieldOf t v
 withField :: VType -> VVal -> VVal
 withField t w
   = case t of
-      VProd a b | null (leaves a) -> Pair (unitOf a) (withField b w)
-                | otherwise       -> Pair (withField a w) (unitOf b)
+      VProd fs -> Tuple [if j == leafField fs then withField s w else unitOf s | (j,(_,s)) <- zip [0..] fs]
       VExists tvs b -> Pack t (map (const atAny) tvs) (withField b w)
       _ -> w
   where
     unitOf s = case s of
-                 VProd a b -> Pair (unitOf a) (unitOf b)
+                 VProd fs -> Tuple (map (unitOf . snd) fs)
                  VExists tvs b -> Pack s (map (const atAny) tvs) (unitOf b)
                  _ -> UnitV
+
+-- the field of a product that holds its only leaf (`scalarField`)
+leafField :: [(Field,VType)] -> Int
+leafField = length . takeWhile (null . leaves . snd)
 
 -- the boxed leaf of `v : t` and its position in `shapeLeaves(t)`, given to the continuation in
 -- every alternative
@@ -107,7 +110,7 @@ boxLeaf t v
       VUnit       -> UnitA
       VSum _      -> Box v
       VPtr _      -> Box v
-      VProd _ _   -> Box v
+      VProd _     -> Box v
       VRaw _      -> Box v
       VExists _ _ -> Box v
       VReuse _ _ _  -> Box v
@@ -138,7 +141,7 @@ unboxAV t a
            return (Let r t body, Var r)
       VSum _      -> unbox Unbox
       VPtr _      -> unbox Unbox
-      VProd _ _   -> unbox Unbox
+      VProd _     -> unbox Unbox
       VRaw _      -> unbox Unscalar
       VExists _ _ -> unbox Unbox
       VReuse _ _ _  -> unbox Unbox

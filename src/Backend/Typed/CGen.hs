@@ -97,6 +97,7 @@ localName (Path x ss) = text ("x_" ++ encode (show x) ++ concat ["_p_" ++ encode
     stepName s = case s of
                    SInjA i _ -> "inj" ++ show i
                    SInjV i _ -> "inj" ++ show i
+                   SField i _ -> "field" ++ show i
                    _ -> show s
 
 encode :: String -> String
@@ -235,8 +236,8 @@ genV cx val
               return (stmtExpr ([text name <+> x <.> ";", x <.> "._tag = kk_value_tag(" <.> int (i+1) <.> ");"]
                                 ++ [x <.> "._cons._fields[" <.> int j <.> "] = kk_box_null();" | j <- [0..scan-2]]
                                 ++ [setAlt]) x)
-      Pair _ _ -> do t <- tyOf cx val
-                     genProd cx t (prodLeafVals val)
+      Tuple _ -> do t <- tyOf cx val
+                    genProd cx t (prodLeafVals val)
       Hole -> return "kk_box_null()"   -- the placeholder (`kk_cctx_hole`)
       Context b k -> genCtx cx b k
       Plug c v -> genV cx v >>= plug cx c
@@ -336,9 +337,9 @@ holeMember cx ct v
   where
     leaf v i = case v of
                  Hole -> return (i,Nothing)
-                 Pair x y | holes x == 1 -> leaf x i
-                          | otherwise -> do tx <- tyOf cx x
-                                            leaf y (i + length (leaves tx))
+                 Tuple ws -> do let (before,w:_) = break ((== 1) . holes) ws
+                                tws <- mapM (tyOf cx) before
+                                leaf w (i + sum (map (length . leaves) tws))
                  _ -> return (i,Just v)
 
 -- Injections only contain construction forms, so their tag can be passed down to
@@ -363,7 +364,7 @@ genAIn cx tag val
       Lam ps r e -> genLam cx ps r e
 
 prodLeafVals :: VVal -> [VVal]
-prodLeafVals (Pair v w) = prodLeafVals v ++ prodLeafVals w
+prodLeafVals (Tuple vs) = concatMap prodLeafVals vs
 prodLeafVals v = [v]
 
 -- construct an unboxed product from values for its components
@@ -482,12 +483,12 @@ genBox cx tag at v
                                return (stmtExpr ([cty ct <+> v <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> clear <.> ";",
                                                   setPath] ++ storeFrom v) box)
 
--- A projection of a place is a place: the selected component (`[fst]`, `[snd]`), read at its
--- uses. A projection of a local copies the component into a local.
-genProjection :: Ctx -> Dest -> VVal -> Step -> Path -> VExpr -> G [Doc]
-genProjection cx dest v s x e = do
+-- A projection of a place is a place: the selected field (`[proj]`), read at its uses. A
+-- projection of a local copies the field into a local.
+genProjection :: Ctx -> Dest -> VVal -> Int -> Path -> VExpr -> G [Doc]
+genProjection cx dest v j x e = do
   t <- tyOf cx v
-  (start,u) <- liftC (fieldRange t s)
+  (start,u) <- liftC (fieldRange t j)
   case v of
     Var z | Just (Place b w i _) <- M.lookup z (cxPlaces cx)
       -> genE (bindPlace cx x (Place b w (i + start) u)) dest e
@@ -502,13 +503,10 @@ genProjection cx dest v s x e = do
             body <- genE (bindVar cx x (V u)) dest e
             return (pre ++ [declare (cty ct) x p] ++ body)
 
--- the first leaf and the type of the component at the step of a projection
-fieldRange :: VType -> Step -> Either String (Int,VType)
-fieldRange (VProd a b) s
-  = case s of
-      SFst -> Right (0,a)
-      SSnd -> Right (length (leaves a),b)
-      _ -> Left "projection at a non-product step"
+-- the first leaf and the type of the field i of a product
+fieldRange :: VType -> Int -> Either String (Int,VType)
+fieldRange (VProd fs) i
+  | i < length fs = Right (sum (map (length . leaves . snd) (take i fs)), snd (fs !! i))
 fieldRange _ _ = Left "projection of a non-product"
 
 -- The tag and the scan size that the description of a credit records for its block, and for
@@ -534,8 +532,8 @@ reuseMatches rt t v
 leafValues :: VType -> VVal -> [(VVal,Int)]
 leafValues t v
   = case (t,v) of
-      (VProd a b, Pair x y) -> leafValues a x ++ leafValues b y
-      (VProd a b, Var x) -> leafValues a (Var (child x SFst)) ++ leafValues b (Var (child x SSnd))
+      (VProd fs, Tuple ws) -> concat (zipWith leafValues (map snd fs) ws)
+      (VProd _, Var x) -> concat [leafValues s (Var y) | (y,_,s) <- fieldsAt x t]
       (VExists _ s, Pack _ _ w) -> leafValues s w
       (VExists _ s, Var x) -> leafValues s (Var (child x SPack))
       _ -> [(collapse v,i) | i <- [0 .. length (leaves t) - 1]]
@@ -962,8 +960,7 @@ genE cx dest expr
               let call = "kk_function_call(" <.> cty rct <.> ",(kk_function_t" <.> hcat [", " <.> cty ct | ct <- pcts] <.> ", kk_context_t*),"
                          <.> fx <.> ",(" <.> fx <.> hcat [", " <.> a | a <- args] <.> ", _ctx),_ctx)"
               return [block (("kk_function_t" <+> fx <+> "= kk_datatype_unbox(" <.> localName f <.> ");") : assignTo dest rct call)]
-      Fst _ v x e -> genProjection cx dest v SFst x e
-      Snd _ v x e -> genProjection cx dest v SSnd x e
+      Proj _ v i x e -> genProjection cx dest v i x e
       Unpack _ v tvs x e
         -> do VExists bs body <- tyOf cx v
               let t = inst bs (map AVar tvs) body

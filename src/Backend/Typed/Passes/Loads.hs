@@ -62,8 +62,7 @@ readsAt :: VExpr -> S.Set Path
 readsAt expr
   = S.filter (isJust . placeOf) $
     case expr of
-      Fst _ (Var _) _ _ -> S.empty
-      Snd _ (Var _) _ _ -> S.empty
+      Proj _ (Var _) _ _ _ -> S.empty
       Unpack _ (Var _) _ _ _ -> S.empty
       _ -> getConst (descendE (const (Const S.empty)) (Const . fvV) (\_ _ -> Const S.empty) expr)
 

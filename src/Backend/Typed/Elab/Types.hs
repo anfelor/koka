@@ -70,7 +70,7 @@ recType name params body = AMu t params (foldA body) (map AVar params)
     foldV v = case v of
       VPtr a        -> VPtr (foldA a)
       VSum ts       -> VSum [(c,foldV s) | (c,s) <- ts]
-      VProd a b     -> VProd (foldV a) (foldV b)
+      VProd fs      -> VProd [(f,foldV s) | (f,s) <- fs]
       VExists vs b  -> VExists vs (foldV b)
       VCtx f a b    -> VCtx f (foldA a) (foldA b)
       VCell n a     -> VCell n (foldA a)

@@ -888,16 +888,14 @@ subBinder _              = Nothing
 
 -- Construct field getters without emitting reads. A variable occurrence asks
 -- for its getter in the expression that actually uses the field.
--- The fields are a right-nested product: the first at `fst` and the others in the product at
--- `snd` (`[fst]`, `[snd]`). Getters of different fields repeat the projections on the way,
--- which `Paths` merges where one is in scope.
+-- The fields are a product (`[proj]`), unless there is only one. Getters of different fields
+-- project the same product, which `Paths` merges where it is in scope.
 destructure :: [(Maybe TName,VType)] -> (K,VVal) -> E [(Name,(K,VVal))]
-destructure [] _ = return []
 destructure [(x,s)] getter = bindField x s getter
-destructure ((x,s):fields) (k,p)
-  = do y <- fresh "field"
-       rest <- fresh "fields"
-       (++) <$> bindField x s (k . Fst Borrowed p y,Var y) <*> destructure fields (k . Snd Borrowed p rest,Var rest)
+destructure fields (k,p)
+  = concat <$> sequence [do y <- fresh "field"
+                            bindField x s (k . Proj Borrowed p i y,Var y)
+                        | (i,(x,s)) <- zip [0..] fields]
 
 bindField :: Maybe TName -> VType -> (K,VVal) -> E [(Name,(K,VVal))]
 bindField Nothing _ _ = return []

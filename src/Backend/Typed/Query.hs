@@ -71,7 +71,7 @@ expectV _ expected actual
     forget (VReuse f _ p) (VReuse g n q) = VReuse (if f == MaybeEmpty then f else g) n (forgetDesc p q)
     forget (VCtx f _ _) (VCtx g a b) = VCtx (if f == MaybeEmpty then f else g) a b
     forget (VCell m _) (VCell n a) | m <= n = VCell m a
-    forget (VProd a b) (VProd c d) = VProd (forget a c) (forget b d)
+    forget (VProd fs) (VProd gs) | length fs == length gs = VProd (zipWith (\(f,t) (_,u) -> (f,forget t u)) fs gs)
     forget (VSum ts) (VSum us) | length ts == length us = VSum (zipWith (\(c,t) (_,u) -> (c,forget t u)) ts us)
     forget (VExists as a) (VExists bs b) | length as == length bs
       = VExists as (forget a (inst bs (map AVar as) b))
@@ -86,7 +86,7 @@ mapCredits :: (Fill -> Fill) -> (Maybe Contents -> Maybe Contents) -> VType -> V
 mapCredits f g t = case t of
   VReuse fl n p -> VReuse (f fl) n (g p)
   VCtx fl a b -> VCtx (f fl) a b
-  VProd a b -> VProd (mapCredits f g a) (mapCredits f g b)
+  VProd fs -> VProd [(l,mapCredits f g s) | (l,s) <- fs]
   VSum ts -> VSum [(c,mapCredits f g t) | (c,t) <- ts]
   VExists vs b -> VExists vs (mapCredits f g b)
   _ -> t
@@ -95,7 +95,7 @@ mapCredits f g t = case t of
 descriptions :: VType -> [Contents]
 descriptions t = case t of
   VReuse _ _ p -> maybe [] pure p
-  VProd a b -> descriptions a ++ descriptions b
+  VProd fs -> concatMap (descriptions . snd) fs
   VSum ts -> concatMap (descriptions . snd) ts
   VExists _ b -> descriptions b
   _ -> []
@@ -216,8 +216,7 @@ ftvCtx g e = concat [ftv t | x <- S.toList (fvE e), Just t <- [M.lookup x g]]
 altTypes :: Env -> Ty -> VExpr -> Q [[Ty]]
 altTypes env t expr
   = case (expr,t) of
-      (Fst{}, V (VProd a _)) -> return [[V a]]
-      (Snd{}, V (VProd _ b)) -> return [[V b]]
+      (Proj _ _ i _ _, V (VProd fs)) | 0 <= i, i < length fs -> return [[V (snd (fs !! i))]]
       (CaseV _ _ alts, V (VSum ts)) -> do
         let indices = [i | (i,_,_) <- alts]
         unless (S.fromList indices == S.fromList [0 .. length ts - 1] && length indices == length ts)
@@ -424,7 +423,8 @@ checkReuseTy ty = case ty of
                                                      m <- reuseSize s
                                                      unless (n == m) (Left "reuse contents do not match the block size")
     VPtr a -> checkReuseTy (A a)
-    VProd a b -> mapM_ inner [a,b]
+    VProd fs -> do when (null fs) (Left "a product without fields")
+                   mapM_ (inner . snd) fs
     VSum ts -> mapM_ (inner . snd) ts
     VExists _ b -> inner b
     VCtx _ a b -> checkReuseTy (A a) >> checkReuseTy (A b)
@@ -454,7 +454,7 @@ checkReuseTy ty = case ty of
     structural v = case v of
       Var _ -> return ()
       UnitV -> return ()
-      Pair a b -> structural a >> structural b
+      Tuple vs -> mapM_ structural vs
       Inj _ _ x -> structural x
       Pack _ _ x -> structural x
       TyApp x _ -> structural x
@@ -559,7 +559,8 @@ inferV env g val
       Inj i t v -> case t of
                      VSum ts | 0 <= i, i < length ts -> checkV env g v (snd (ts !! i)) >> return t
                      _ -> Left ("injection into " ++ ppr t)
-      Pair v w -> VProd <$> inferV env g v <*> inferV env g w
+      Tuple [] -> Left "a tuple without fields"
+      Tuple vs -> VProd . zip (map posField [0..]) <$> mapM (inferV env g) vs
       Ptr a v -> checkA env g v a >> return (VPtr a)
       Pack t tys v -> case t of
                         VExists bs b | length bs == length tys

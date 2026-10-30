@@ -219,8 +219,7 @@ percE pe owned expr
 consumedWith :: VExpr -> Path -> Path -> Bool
 consumedWith expr z x
   = case expr of
-      Fst{}      -> False
-      Snd{}      -> False
+      Proj{}     -> False
       Ret _      -> True
       Call _ _ _ -> True
       App f _    -> x /= f
@@ -253,7 +252,7 @@ settle pe owned expr z xs
        let owned' = S.delete z owned
        case [x | x <- xs, all keepsPtr (stepsFrom z x)] of
          _ | V v@VProd{} <- t -> do
-               let fields = [f | f@(_,_,s) <- halvesAt z v, not (trivialTy (peEnv pe) (V s))]
+               let fields = [f | f@(_,_,s) <- fieldsAt z v, not (trivialTy (peEnv pe) (V s))]
                    missing = [f | f@(y,_,_) <- fields, M.notMember y (peGamma pe)]
                if null missing
                  then percE pe (S.union owned' (S.fromList [y | (y,_,_) <- fields])) expr
@@ -436,8 +435,7 @@ hoistdupAll es k expr
       _ -> k expr
 
 productProjection :: VExpr -> Bool
-productProjection Fst{} = True
-productProjection Snd{} = True
+productProjection Proj{} = True
 productProjection _ = False
 
 -- destructuring
