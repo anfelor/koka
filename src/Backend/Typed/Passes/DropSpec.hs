@@ -72,36 +72,24 @@ dsE :: VExpr -> D VExpr
 dsE expr
   = do (_,g) <- ask
        case transferOf g expr of
-         Just (others,inside,z,s,n,e) | Just ways <- mapM (wayTo (child z SContents) [x | (x,_,_) <- inside] . (\(x,_,_) -> x)) inside
-           -> do bs <- mapM (\(x,y,_) -> (,) y <$> liftE (inferVar g x)) others
-                 compose [dupThrough id h x y | (x,y,h) <- others]
+         Just (others,inside,z,s,n,e) | Just ways <- mapM (wayTo (child z SContents) (map fst inside) . fst) inside
+           -> do bs <- mapM (\(x,y) -> (,) y <$> liftE (inferVar g x)) others
+                 compose [Dup x y | (x,y) <- others]
                    <$> bind bs (specialize (zip inside ways) z s n e)
          _ -> dsPlain expr
 
--- How a copy duplicates a variable `x` (`Perceus.copy`): itself, or a closure through its
--- dereference `x.deref`
-data Through = Itself | Bound
-
--- the copy `y` of `x` (with `tk` applied to the paths of the contents)
-dupThrough :: (Path -> Path) -> Through -> Path -> Path -> VExpr -> VExpr
-dupThrough tk h x y
-  = case h of
-      Itself -> Dup (tk x) y
-      Bound -> Dup (tk (child x SDeref)) y
-
 -- The copies of parts of the contents of a box `z` (among other copies) that Perceus makes
 -- before it drops `z`, with the type of the contents and the size of the block.
-transferOf :: Gamma -> VExpr -> Maybe ([(Path,Path,Through)],[(Path,Path,Through)],Path,VType,Int,VExpr)
+transferOf :: Gamma -> VExpr -> Maybe ([(Path,Path)],[(Path,Path)],Path,VType,Int,VExpr)
 transferOf g expr
   = do (cs,z,e) <- copiesThenDrop expr
-       let (inside,others) = partition (\(x,_,_) -> x `within` child z SContents) cs
+       let (inside,others) = partition (\(x,_) -> x `within` child z SContents) cs
        guard (not (null inside))
        s <- either (const Nothing) Just (inferAVar g z >>= boxContents)
        n <- either (const Nothing) Just (reuseSize s)
        return (others,inside,z,s,n,e)
   where
-    copiesThenDrop (Dup x y e) = (\(cs,z,r) -> (c:cs,z,r)) <$> copiesThenDrop e
-      where c = maybe (x,y,Itself) (\p -> (p,y,Bound)) (derefOf x)
+    copiesThenDrop (Dup x y e) = (\(cs,z,r) -> ((x,y):cs,z,r)) <$> copiesThenDrop e
     copiesThenDrop (Drop z e) = Just ([],z,e)
     copiesThenDrop _ = Nothing
 
@@ -124,7 +112,7 @@ wayTo p xs x
 
 -- In the unique branch, a part under a pointer is copied, and its box is dropped after the
 -- copies of its parts (so that the drop is specialized as well).
-specialize :: [((Path,Path,Through),Way)] -> Path -> VType -> Int -> VExpr -> D VExpr
+specialize :: [((Path,Path),Way)] -> Path -> VType -> Int -> VExpr -> D VExpr
 specialize parts z s n e
   = do (_,g) <- ask
        j <- state (freshNameFrom "dsj")
@@ -133,20 +121,20 @@ specialize parts z s n e
        let p = child z SContents
            payload = Just (Contents (Just (boxTag z)) (Var p) s)
            t = VReuse MaybeEmpty n payload
-           ps = [(y,Owned,ty) | ((x,y,_),_) <- parts, Just (V ty) <- [M.lookup x g]] ++ [(r,Owned,t)]
+           ps = [(y,Owned,ty) | ((x,y),_) <- parts, Just (V ty) <- [M.lookup x g]] ++ [(r,Owned,t)]
        -- the unique branch names the contents `z.taken`
        let tk = rebase z
-       uniqueCopies <- mapM (\((x,_,_),way) -> case way of Moved -> return (tk x); _ -> fresh "u") parts
-       let moved = [tk x | ((x,_,_),Moved) <- parts]
+       uniqueCopies <- mapM (\((x,_),way) -> case way of Moved -> return (tk x); _ -> fresh "u") parts
+       let moved = [tk x | ((x,_),Moved) <- parts]
            unders = [(tk q,tk b) | (_,Under q b) <- parts]
-           covered = [dupThrough tk h x c | (((x,_,h),Covered),c) <- zip parts uniqueCopies]
-           copies b = [dupThrough tk h x c | (((x,_,h),Under _ b'),c) <- zip parts uniqueCopies, tk b' == b]
+           covered = [Dup (tk x) c | (((x,_),Covered),c) <- zip parts uniqueCopies]
+           copies b = [Dup (tk x) c | (((x,_),Under _ b'),c) <- zip parts uniqueCopies, tk b' == b]
        g' <- liftE (unboxRuGamma g z r')
        taken <- withGamma g' (dropExcept (moved ++ nub (map fst unders)) (tk p) s
                   (compose covered (compose [compose (copies b) . Drop b | b <- nub (map snd unders)] (Jump j [] (map Var uniqueCopies ++ [Var r'])))))
        unique <- dsE (UnboxRu z r' taken)
        sharedCopies <- mapM (const (fresh "u")) parts
-       let shared = compose [dupThrough id h x c | (((x,_,h),_),c) <- zip parts sharedCopies]
+       let shared = compose [Dup x c | (((x,_),_),c) <- zip parts sharedCopies]
                       (Drop z (Jump j [] (map Var sharedCopies ++ [NoReuse n payload])))
        body <- bind [(y,V ty) | (y,_,ty) <- ps] (dsE (Free r e))
        return (Join j [] ps body (IsUnique z unique shared))
@@ -194,7 +182,7 @@ dsPlain expr
       IsUnique x e1 e2 -> do (_,g) <- ask
                              IsUnique x <$> withGamma (uniqueGamma g x) (dsE e1) <*> dsE e2
       Dup x y e -> do (_,g) <- ask
-                      t <- liftE (inferVar g x >>= dupType x)
+                      t <- liftE (inferVar g x >>= dupType)
                       Dup x y <$> bind [(y,t)] (dsE e)
       _ -> descendE pure dsV (\_ e -> dsE e) expr
 

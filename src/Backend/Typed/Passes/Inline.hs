@@ -172,7 +172,7 @@ reuseE expr
       IsUnique x e1 e2 -> do (env,g,facts,src) <- ask
                              IsUnique x <$> local (const (env,uniqueGamma g x,facts,src)) (reuseE e1) <*> reuseE e2
       Dup x y e -> do (_,g,_,_) <- ask
-                      t <- liftE (inferVar g x >>= dupType x)
+                      t <- liftE (inferVar g x >>= dupType)
                       Dup x y <$> bindReuse [(y,t)] (reuseE e)
       _ -> descendE pure reuseV (\_ -> reuseE) expr
 
