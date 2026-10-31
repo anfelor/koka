@@ -27,6 +27,7 @@ import Kind.Newtypes
 import Type.Type
 import Backend.Typed.Syntax
 import Backend.Typed.Types
+import Backend.Typed.Elab.Representation
 import Backend.Typed.Layout( CT(CBox), layout, blockSize )
 
 type Tr a = Either String a
