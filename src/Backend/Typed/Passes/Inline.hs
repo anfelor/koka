@@ -21,9 +21,8 @@
 
   In an enum alternative, a reused payload can name its old enum field instead of the
   equal constructor constant, or a variable with its bits (`sameBits`), such as a copy of
-  it. Only variables still in scope are used, and in a join body none in the contents of a
-  box, which a jump to it may have given up; enum values carry no
-  ownership. Descriptions and the checking rules stay unchanged.
+  it. Only variables still in scope are used; enum values carry no ownership. Descriptions
+  and the checking rules stay unchanged.
 
   Bindings that keep a literal dereference named are retained, preserving its operand
   path without introducing a fresh root, and so are those of values that are duplicated as
@@ -158,26 +157,22 @@ reuseE expr
       Let x t e1 e2 -> Let x t <$> reuseE e1 <*> bindReuse [(x,V t)] (reuseE e2)
       LetYield x t e1 e2 e3 -> LetYield x t <$> reuseE e1 <*> bindReuse [(x,V t)] (reuseE e2) <*> reuseE e3
       -- a jump may give up the contents of a box that the join body captures
-      Join j tvs ps e1 e2 -> Join j tvs ps <$> bindReuse [(x,V t) | (x,_,t) <- ps] (outOfContents (reuseE e1)) <*> reuseE e2
-      -- the facts follow the contents to `z.taken`
+      Join j tvs ps e1 e2 -> Join j tvs ps <$> bindReuse [(x,V t) | (x,_,t) <- ps] (reuseE e1) <*> reuseE e2
       UnboxRu z r e -> do (env,g,facts,src) <- ask
                           g' <- liftE (unboxRuGamma g z r)
-                          UnboxRu z r <$> local (const (env,g',M.mapKeys (rebase z) facts,src)) (reuseE e)
+                          UnboxRu z r <$> local (const (env,g',facts,src)) (reuseE e)
       CopyRu z r e -> do (env,g,facts,src) <- ask
                          g' <- liftE (copyRuGamma g z r)
                          CopyRu z r <$> local (const (env,g',facts,src)) (reuseE e)
       Lock z c e -> do (env,g,facts,src) <- ask
                        g' <- liftE (lockGamma g z c)
-                       Lock z c <$> local (const (env,g',M.mapKeys (rebase z) facts,src)) (reuseE e)
+                       Lock z c <$> local (const (env,g',facts,src)) (reuseE e)
       IsUnique x e1 e2 -> do (env,g,facts,src) <- ask
                              IsUnique x <$> local (const (env,uniqueGamma g x,facts,src)) (reuseE e1) <*> reuseE e2
       Dup x y e -> do (_,g,_,_) <- ask
                       t <- liftE (inferVar g x >>= dupType)
                       Dup x y <$> bindReuse [(y,t)] (reuseE e)
       _ -> descendE pure reuseV (\_ -> reuseE) expr
-
-outOfContents :: Reuse a -> Reuse a
-outOfContents = local (\(env,g,facts,src) -> (env,g,M.filterWithKey (\x _ -> not (inContents x)) facts,src))
 
 enumType :: VType -> Bool
 enumType (VSum ts) = not (null ts) && all ((== VUnit) . snd) ts

@@ -246,9 +246,9 @@ altTypes env t expr
                                        return (map (map V) fss ++ [[]])
       _ -> Left ("cannot destructure a value of type " ++ ppr t)
 
--- The context of the body of `[unbox-ru]`: the contents `z.contents` of the box, which must
--- have been read, and their parts are renamed to `z.taken` (`rebase`), and the binder is the
--- credit of the block, a new root, whose tag follows from the path of the box.
+-- The context of the body of `[unbox-ru]`: the contents `z.contents` of the box must have
+-- been read, and the binder is the credit of the block, a new root, whose tag follows from the
+-- path of the box.
 unboxRuGamma :: Gamma -> Path -> Path -> Q Gamma
 unboxRuGamma g z r
   = do s <- inferAVar g z >>= boxContents
@@ -257,7 +257,7 @@ unboxRuGamma g z r
        case M.lookup x g of
          Just (V s') | alphaEq s s' -> return ()
          _ -> Left ("taking the block of " ++ show z ++ " whose contents are not read")
-       return (M.insert r (V (VReuse Full n (Just (Contents (Just (boxTag z)) (Var x) s)))) (M.mapKeys (rebase z) g))
+       return (M.insert r (V (VReuse Full n (Just (Contents (Just (boxTag z)) (Var x) s)))) g)
 
 -- The context of the body of `[copy-ru]`: the binder is a credit with the description of the
 -- block of `z`, a new root.
@@ -268,7 +268,7 @@ copyRuGamma g z r
        return (M.insert r (V (VReuse Full n (Just (Contents (Just (boxTag z)) (Var (child z SContents)) s)))) g)
 
 -- The context of the body of `[lock]`: as for `[unbox-ru]`, the contents `z.contents` of the
--- box must have been read and are renamed to `z.taken`, and the binder is the cell of the
+-- box must have been read, and the binder is the cell of the
 -- block, a new root. The box is a thunk of a value `y` of a lazy type, also after `[split-a]`.
 lockGamma :: Gamma -> Path -> Path -> Q Gamma
 lockGamma g z c
@@ -281,7 +281,7 @@ lockGamma g z c
        case M.lookup (child z SContents) g of
          Just (V s') | alphaEq s s' -> return ()
          _ -> Left ("locking " ++ show z ++ " whose contents are not read")
-       return (M.insert c (V (VCell n t)) (M.mapKeys (rebase z) g))
+       return (M.insert c (V (VCell n t)) g)
 
 -- The context of the first branch of `[if-unique]`: a unique cell is a full credit.
 uniqueGamma :: Gamma -> Path -> Gamma

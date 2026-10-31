@@ -10,9 +10,7 @@
 {- Linearity checker for programs after Perceus.
 
   Variables of a trivial type (without pointers, also through named types: `trivialTy`) are
-  unrestricted. `UnboxRu` takes the contents of `z` out of its block and renames them to
-  `z.taken`. Every other variable is a path (see
-  `Syntax.Path`) and has the mode of its owner, the longest variable on its path that is a
+  unrestricted. Every other variable is a path (see `Syntax.Path`) and has the mode of its owner, the longest variable on its path that is a
   root (or, in the body of a join point, a variable it captures). An owned root holds one
   reference, which must be consumed exactly once on every path; a borrowed root (a borrowed
   parameter, or a binder of a borrowed destructuring of a value that is not a variable) holds
@@ -39,8 +37,7 @@
 
   A unique variable is owned and holds the only reference to its block, so `UnboxRu` may
   take its contents and keep its block as a credit, a new root that consumes the block
-  `z.credit` of `z` (the part of `z` beside its contents). Its body is checked with the
-  contents renamed (`rebase`), and its uses of `z.taken` are uses of `z.contents`. `CopyRu`
+  `z.credit` of `z` (the part of `z` beside its contents), which leaves the contents. `CopyRu`
   only reads the block of `z` and binds a copy of it as a new root. `Lock` is
   checked in the same way, but consumes an owned box, and its new root is a cell. A cell is
   linear: it is owned and not trivial, so it must be consumed (as `Check` rejects a dup or a
@@ -184,12 +181,6 @@ rollUp tr s
   = case [(p,qs) | p <- S.toList s, let qs = siblingsOf tr p, not (null qs), all (`S.member` s) qs] of
       ((p@(Path x ss),qs):_) -> rollUp tr (S.insert (key tr (Path x (init ss))) (foldr S.delete s (p:qs)))
       [] -> s
-
--- `[unbox-ru]` and `[lock]` of `z` rename the parts of its contents (`rebase`)
-rebaseParts :: Path -> Parts -> Parts
-rebaseParts z (Parts trivial fields)
-  = Parts (S.union trivial (S.map (rebase z) trivial))
-          (M.union fields (M.fromList [(rebase z p, map (rebase z) qs) | (p,qs) <- M.toList fields]))
 
 -- the variables of `a` that share a part with a variable of `b`
 overlapping :: Keys -> Keys -> [Path]
@@ -475,14 +466,12 @@ checkE env g js expr
                            u2 <- before (consume env g r) (checkE env g js e2)
                            before (readVar env g r) (branches [u1, u2])
       -- a unique use of `z` that consumes its block `z.credit` (leaving its contents) and binds
-      -- the block as a new root; the contents are taken out of the block and renamed
+      -- the block as a new root; the contents are taken out of the block
       UnboxRu z r e
         -> do g' <- liftE (unboxRuGamma g z r)
               u <- uniqueName env g z
               c <- keyOf (child z SCredit)
-              modify (rebaseParts z)
-              body <- local (M.mapKeys (rebase z)) (roots env Owned [(r,g' M.! r)] (checkE env g' js e))
-              before (return u{ uConsumed = S.singleton c }) (return (mapUse (unrebase z) body))
+              before (return u{ uConsumed = S.singleton c }) (roots env Owned [(r,g' M.! r)] (checkE env g' js e))
       -- a copy of the block of `z`, which only reads the block `z.credit`, as a new root
       CopyRu z r e
         -> do g' <- liftE (copyRuGamma g z r)
@@ -493,9 +482,7 @@ checkE env g js expr
         -> do g' <- liftE (lockGamma g z c)
               u <- consume env g z
               k <- keyOf (child z SCredit)
-              modify (rebaseParts z)
-              body <- local (M.mapKeys (rebase z)) (roots env Owned [(c,g' M.! c)] (checkE env g' js e))
-              before (return u{ uConsumed = S.singleton k }) (return (mapUse (unrebase z) body))
+              before (return u{ uConsumed = S.singleton k }) (roots env Owned [(c,g' M.! c)] (checkE env g' js e))
       CaseLit v alts def -> before (borrowedV env g v) (branches =<< mapM (checkE env g js) (def : map snd alts))
       _ -> fail "unexpected destructuring form"
   where
