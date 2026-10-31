@@ -760,15 +760,10 @@ data VExpr
   --  ──────────────────────────────────────── [dup]
   --   Γ, x :^ V ⊢ val y = dup x; e : W
   --
-  --         Γ, y : A* ⊢ e : W
-  --  ─────────────────────────────────── [dup-a]
-  --   Γ, x.deref :^ A ⊢ val y = dup x.deref; e : W
-  --
   -- Duplicate an unboxed variable (its pointers and contexts) into a new root `y`, the copy;
   -- a copy of a trivial variable only copies its bits.
   -- The parts of `x` in scope are not parts of `y`, which has none until it is
-  -- destructured. A boxed operand is duplicated only if it is the binder of `[deref]`: its
-  -- copy is a duplicate of the pointer it was dereferenced from (`Common.dupType`).
+  -- destructured. A boxed operand is duplicated through the pointer it was dereferenced from.
   | Dup Path Path VExpr
 
   --   Γ, x :! Box V ⊢ e₁ : W    Γ, x : Box V ⊢ e₂ : W    |V| defined

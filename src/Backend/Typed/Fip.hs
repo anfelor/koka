@@ -282,7 +282,7 @@ fipE expr
                 (require mayAlloc ("the variable " ++ show x ++ " is duplicated (causing sharing and preventing reuse)"))
               -- the copy of a borrowed function is only called
               let borrowCopy fe = if b && isFun t then fe{ fInfo = (fInfo fe){ iBorrowed = y : iBorrowed (fInfo fe) } } else fe
-              ty <- liftE (dupType x t)
+              ty <- liftE (dupType t)
               local borrowCopy (bind [(y,ty)] (fipE e))
       IsUnique x e1 _ -> local (\fe -> fe{ fGamma = uniqueGamma (fGamma fe) x }) (fipE e1)
       IfFull r e1 e2
