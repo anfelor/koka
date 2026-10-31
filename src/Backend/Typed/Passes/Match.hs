@@ -23,8 +23,8 @@ import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( child, descendE )
 import Backend.Typed.Passes.Common( mapLams, defGamma, typedChildren, Scope, bindScope, defScope, knownAlt, nameParts, perDef, renameE, reuseParts, scopeOf )
-import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, inferVar )
+import Backend.Typed.Query( Env, Gamma, envOf, inferVar
+                          , M, ask, evalM, liftE )
 import Backend.Typed.Layout( shapeIsHeap )
 
 type Match a = M (Env,Gamma) () a

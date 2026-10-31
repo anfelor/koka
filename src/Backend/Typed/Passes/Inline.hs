@@ -39,8 +39,8 @@ import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Traversal( descendA, descendAll, descendV, mapV )
 import Backend.Typed.Passes.Common( mapAll, defGamma, descendTyped, defScope, perBody, project, substEIn, substVType, valueAt )
-import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, inferVar, lamGamma )
+import Backend.Typed.Query( Env, Gamma, envOf, inferVar, lamGamma
+                          , M, ask, evalM, liftE, local )
 
 -- the structural values bound by lets
 type Values = M.Map Path VVal
