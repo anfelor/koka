@@ -41,13 +41,11 @@
   parts of a copy that it binds itself (`renameCopies`). Only the function of `[app]` is
   copied at a boxed type, by a `[dup]` of its pointer and a dereference of the copy.
 
-  A variable of a trivial type needs no references. Code generation copies it out of the
-  block of a box at `[bunbox]`, but in the IR, one in the contents of a box is still named
-  through the box, which `[unbox-ru]` and `[lock]` rename. It is therefore copied where its
-  owner is given up while it is still needed, like any other part.
+  A variable of a trivial type needs no references, also in the contents of a box, which
+  code generation copies out of the block at `[bunbox]`.
 
-  `[lock]` consumes an owned box like any consumer: its contents become owned under their new
-  name `z.taken`, and its cell is a new owned root. So `lazy-eval-locked` takes the fields of
+  `[lock]` consumes an owned box like any consumer: its contents `z.contents` become owned,
+  and its cell is a new owned root. So `lazy-eval-locked` takes the fields of
   the lazy value under evaluation without duplicating them, as Koka's Parc does. A cell is linear: it is never copied, and a
   dead cell is an error (it must be filled by `memoize`, or freed in the unique branch of a
   test, where it is a credit). The branches of `if-unique` own the same variables.
@@ -135,14 +133,8 @@ partsOf pe z
 -- the owner of a borrowed variable (see the top)
 ownerOf :: PEnv -> VarSet -> Path -> Maybe Path
 ownerOf pe owned x
-  | S.member x owned || maybe True (unrestricted x) (M.lookup x (peGamma pe)) = Nothing
+  | S.member x owned || maybe True (trivialTy (peEnv pe)) (M.lookup x (peGamma pe)) = Nothing
   | otherwise = listToMaybe [z | z <- reverse (prefixes x), S.member z owned]
-  where unrestricted = unrestrictedIn (peEnv pe)
-
--- A variable of a trivial type needs no references, unless it is in the contents of a box
--- (see the top).
-unrestrictedIn :: Env -> Path -> Ty -> Bool
-unrestrictedIn env x t = trivialTy env t && not (inContents x)
 
 pointer :: Ty -> Bool
 pointer t
@@ -345,9 +337,9 @@ percE' pe owned expr
       Lock z c e
         -> do unless (S.member z owned) (fail ("lock of a box that is not owned: " ++ show z))
               g' <- liftE (lockGamma (peGamma pe) z c)
-              let taken = [b | b@(x,_) <- M.toList g', x == child z STaken]
-                  owned' = S.map (rebase z) (S.delete z owned) `S.union` ownedOf pe ((c,g' M.! c) : taken)
-              Lock z c <$> percE pe{ peGamma = g', peBorrowed = S.map (rebase z) (peBorrowed pe) } owned' e
+              let contents = [b | b@(x,_) <- M.toList g', x == child z SContents]
+                  owned' = S.delete z owned `S.union` ownedOf pe ((c,g' M.! c) : contents)
+              Lock z c <$> percE pe{ peGamma = g' } owned' e
       Dup x y e -> do t <- tyOfVar pe x >>= liftE . dupType
                       Dup x y <$> percE (bind pe [(y,t)]) (S.union owned (ownedOf pe [(y,t)])) e
       CaseLit v alts def
@@ -361,13 +353,12 @@ percE' pe owned expr
 -- A copy of a variable for a use that takes it: a new root with a duplicate of the variable.
 -- A closure is a dereference: its duplicate is its pointer, which the copy dereferences again
 -- (a closure is not under a sum). It comes with the duplication, the variable, and the binders
--- of the copy. A variable of a trivial type is not copied, unless it is in the contents of a
--- box.
+-- of the copy. A variable of a trivial type is not copied.
 copy :: PEnv -> Path -> P (K,Path,Path,[(Path,Ty)])
 copy pe x
   = do t <- tyOfVar pe x
        case t of
-         _ | unrestrictedIn (peEnv pe) x t -> return (id,x,x,[])
+         _ | trivialTy (peEnv pe) t -> return (id,x,x,[])
          V (VCell _ _) -> fail ("duplication of a cell: " ++ show x)
          V _ -> do y <- fresh "u"
                    return (Dup x y,x,y,[(y,t)])

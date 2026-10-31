@@ -23,7 +23,7 @@
   parameter gets that description, so the join body can still omit the stores: for example,
   the shared continuation of two branches that both took the block of the same box. Its
   names must be in scope at the join point, as substitution does not follow a name out of
-  its scope (such as `z.taken` before the `[unbox-ru]` of `z`); `SinkJoins` moves a join
+  its scope (such as `z.contents` before the `[bunbox]` of `z`); `SinkJoins` moves a join
   into the branch that binds the box.
 -}
 module Backend.Typed.Passes.JoinArgs( joinArgsProgram ) where

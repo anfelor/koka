@@ -244,8 +244,7 @@ dropReuse x r n e
            desc = Just (Contents (Just (boxTag x)) (Var y) s)
            -- the contents are read once
            readY = if M.member y g then id else Unbox Borrowed x y
-       -- `[unbox-ru]` renames the contents to `x.taken`
-       body <- dropValue (trivialTy env) fresh (scopeOf (map (rebase x) (M.keys g))) (child x STaken) (V s) (Ret (Var r'))
+       body <- dropValue (trivialTy env) fresh (scopeOf (M.keys g)) y (V s) (Ret (Var r'))
        return (readY (Let r (VReuse MaybeEmpty n desc) (IsUnique x (UnboxRu x r' body)
                                                (Drop x (Ret (NoReuse n desc))))
                         e))

@@ -460,7 +460,6 @@ sibling s
   = case s of
       SContents -> Just SCredit
       SCredit   -> Just SContents
-      STaken    -> Just SCredit
       _         -> Nothing
 
 -- A part without a sibling is all of its parent (in its alternative), so a use of it is a use
@@ -485,27 +484,13 @@ within (Path x ss) (Path y ts) = x == y && ts `isPrefixOf` ss
 stepsFrom :: Path -> Path -> [Step]
 stepsFrom (Path _ ts) (Path _ ss) = drop (length ts) ss
 
--- whether a variable is in the contents of a box: after the last `contents` step on its
--- path, unless a `taken` step follows. A drop of the box gives it up, and `[unbox-ru]` and
--- `[lock]` rename it.
-inContents :: Path -> Bool
-inContents (Path _ ss) = case break (`elem` [SContents,STaken]) (reverse ss) of
-                           (_,SContents : _) -> True
-                           _ -> False
-
--- `[unbox-ru]` of `z` renames its contents `z.contents` and their parts to `z.taken`, and
--- the body's uses of them are uses of the old names outside (`unrebase`).
-rebase, unrebase :: Path -> Path -> Path
-rebase z = renamePrefix (child z SContents) (child z STaken)
-unrebase z = renamePrefix (child z STaken) (child z SContents)
-
 renamePrefix :: Path -> Path -> Path -> Path
 renamePrefix p q x
   | x `within` p = foldl child q (stepsFrom p x)
   | otherwise = x
 
--- `[unbox-ru]` and `[lock]` of a box `z` take its contents out of its block, rename them to
--- `z.taken`, and bind its block as a new root: the box, the root and the body
+-- `[unbox-ru]` and `[lock]` of a box `z` take its contents out of its block and bind its
+-- block as a new root: the box, the root and the body
 takesContents :: VExpr -> Maybe (Path,Path,VExpr)
 takesContents expr
   = case expr of
@@ -632,13 +617,8 @@ fvV val
       Var x -> S.singleton x
       _ -> getConst (descendV (Const . fvA) (Const . fvV) val)
 
--- the free variables of the body of `[unbox-ru]` or `[lock]` of `z` under `z.taken` are those
--- under `z.contents`
 fvE :: VExpr -> S.Set Path
-fvE expr
-  = case takesContents expr of
-      Just (z,r,e) -> S.insert z (S.map (unrebase z) (S.delete r (fvE e)))
-      Nothing -> getConst (descendE (Const . S.singleton) (Const . fvV) (\xs e -> Const (fvE e `S.difference` S.fromList xs)) expr)
+fvE expr = getConst (descendE (Const . S.singleton) (Const . fvV) (\xs e -> Const (fvE e `S.difference` S.fromList xs)) expr)
 
 -- substitution of unboxed values (their free variables must not be bound in the scope).
 -- A substitution at a named operand must itself be a variable; use a let for other values.
@@ -738,14 +718,10 @@ defScope d = case d of
   DefFun{ defArgs = ps } -> scopeOf [x | (x,_,_) <- ps]
   DefVal{} -> M.empty
 
--- the scope of a subexpression of `expr` that binds `xs`, where `[unbox-ru]` and `[lock]` also
--- rename the contents of their box
+-- the scope of a subexpression of `expr` that binds `xs`
 bindScope :: VExpr -> [Path] -> Scope -> Scope
-bindScope expr xs scope = M.union (M.fromList [(x,rest x) | x <- xs]) outer
+bindScope expr xs scope = M.union (M.fromList [(x,rest x) | x <- xs]) scope
   where
-    outer = case takesContents expr of
-      Just (z,_,_) -> M.mapKeys (rebase z) scope
-      Nothing -> scope
     rest x = case expr of
       CaseA _ z as _ | x == child z SRest -> Just [i | (i,_,_) <- as]
       _ -> Nothing
@@ -816,14 +792,7 @@ substStepWith renameRoot recur scope sub expr
     operands = runIdentity (descendB (Identity . substName sub) (Identity . substVWith renameRoot recur scope sub)
                              (\bs e -> Identity (map fst bs,e)) annotated)
     named bs = [(x,fromMaybe (renameRoot x) (pathOf (scrutVar operands) step)) | (x,step) <- bs]
-    under bs = bindSub bs (taken sub)
-    -- `[unbox-ru]` and `[lock]` rename the contents of their box: substitute its parts as the contents
-    taken = case (takesContents expr,takesContents operands) of
-      (Just (z,_,_),Just (z',_,_))
-        -> \s p -> if p `within` child z STaken
-                     then substV (Just . Var . rebase z') <$> s (unrebase z p)
-                     else s p
-      _ -> id
+    under bs = bindSub bs sub
     alts = getConst (descendB (const (Const [])) (const (Const [])) (\bs e -> Const [(bs,e)]) operands)
     namedOperands = runIdentity (descendB Identity Identity (\bs e -> Identity (map snd (named bs),e)) operands)
     chosen = do i <- knownAlt scope namedOperands
@@ -1028,8 +997,7 @@ keepsPointer expr
       Jump{}      -> False
 
 -- Where a variable gets the bits of another variable: a copy (`[dup]`) gets those
--- of its variable, the contents taken by `[unbox-ru]` or `[lock]` those of the old contents, and a parameter of
--- a join point those of its arguments.
+-- of its variable, and a parameter of a join point those of its arguments.
 data Source = Copy Path | Param [VVal]
 
 type Sources = M.Map Path Source
@@ -1039,7 +1007,6 @@ sources expr = M.union here (getConst (descendE (const (Const M.empty)) (Const .
   where
     here = case expr of
              Dup x y _ -> M.singleton y (Copy x)
-             _ | Just (z,_,_) <- takesContents expr -> M.singleton (child z STaken) (Copy (child z SContents))
              Join j _ ps _ e2 -> M.fromList [(y,Param [vs !! i | vs <- jumpArgs j e2]) | (i,(y,_,_)) <- zip [0..] ps]
              _ -> M.empty
     sourcesV = getConst . descendV (Const . sourcesA) (Const . sourcesV)

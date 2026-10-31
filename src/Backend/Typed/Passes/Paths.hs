@@ -103,13 +103,7 @@ renE global ren expr
        case known rests of
          Just (bs,e) -> do mapM_ (uncurry record) bs
                            renE global (M.union (M.fromList bs) ren) e
-         Nothing -> case expr of
-                      -- the contents of the box are renamed with it
-                      Lock z c e -> do let z' = look ren z
-                                           taken = M.fromList [(rebase z x, rebase z' x') | (x,x') <- M.toList ren, x `within` child z SContents]
-                                       c' <- bindRoot c
-                                       Lock z' c' <$> renE global (M.unions [M.singleton c c', taken, ren]) e
-                      _ -> descendB (pure . look ren) (renV global ren) alt annotated
+         Nothing -> descendB (pure . look ren) (renV global ren) alt annotated
   where
     -- an alternative whose binders are in scope
     known rests
