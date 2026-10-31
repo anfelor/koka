@@ -302,7 +302,6 @@ codeGenTyped term flags imports mod
                                   -- as the C backend (`Backend.C.FromCore.genTopGroup`)
                                   (S.fromList [Core.defName d | Core.DefNonRec d <- Core.coreProgDefs (fromJust (modCore mod)),
                                                                 Core.defInline d == InlineAlways || Core.isInlineable 5 d])
-                                  (typedEagerLoads flags)
                 (hdr,csrc,errs) = TC.cgenModule cenv tprog
             unless (null errs) $ raiseIO ("typed C generation failed: " ++ intercalate "\n" errs)
             writeFile (joinPath outDir (ktHeader (modName mod))) hdr

@@ -10,15 +10,8 @@
 {- Linearity checker for programs after Perceus.
 
   Variables of a trivial type (without pointers, also through named types: `trivialTy`) are
-  unrestricted, except that one in the contents of a box `z` (`boxOf`) is read from the
-  block of `z`: only `let^ load x.load = x` may read it. The binder `x.load` is not in the
-  block. Any read of a place of `z` (`placeOf`: also of a part that is not trivial, but not
-  of one under a `deref` or `load` step) reads the block `z.credit`, so it cannot follow the
-  `UnboxRu` or `Lock` that takes the block, also in a `let` body after a bound expression
-  that contains it. A case, a dereference, a dup and a use of a value as a whole never read
-  a block: they only take loaded values (`Loads`). `UnboxRu` takes the contents of `z` out of its block and renames
-  them to `z.taken`, which are not in a block. A projection or unpack of a place binds a
-  part without reading it, and descriptions do not read it. Every other variable is a path (see
+  unrestricted. `UnboxRu` takes the contents of `z` out of its block and renames them to
+  `z.taken`. Every other variable is a path (see
   `Syntax.Path`) and has the mode of its owner, the longest variable on its path that is a
   root (or, in the body of a join point, a variable it captures). An owned root holds one
   reference, which must be consumed exactly once on every path; a borrowed root (a borrowed
@@ -87,7 +80,6 @@ module Backend.Typed.Linear( checkLinear ) where
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad( unless, when, forM_, foldM )
-import Data.Maybe( isJust )
 import Data.Functor.Const( Const(..) )
 import Common.Name
 import Backend.Typed.Syntax
@@ -298,34 +290,13 @@ trivialVar env g x = maybe False (trivialTy env) (M.lookup x g)
 -- is owned (as unique if the mode is) and borrows the variable if `b`.
 useVar :: Env -> Gamma -> Mode -> Bool -> Path -> L Use
 useVar env g m b x
-  | trivialVar env g x = loaded x
+  | trivialVar env g x = return noUse
   | otherwise
   = do o <- ownerMode x
        when (m == Unique && o == Borrowed) (fail ("unique use of a variable that is not unique: " ++ show x))
        p <- keyOf x
-       n <- blockOf x
-       return (Use (if owning m then S.singleton p else S.empty) (S.insert p n) (if b then S.singleton p else S.empty)
+       return (Use (if owning m then S.singleton p else S.empty) (S.singleton p) (if b then S.singleton p else S.empty)
                    (if m == Unique then S.singleton p else S.empty) False)
-
--- A variable of a trivial type in the contents of a box is read from the block of the box, so
--- only a load may read it (`loadOf`).
-loaded :: Path -> L Use
-loaded x
-  = case boxOf x of
-      Just _ -> fail ("read of a trivial part of the contents of a box that is not loaded: " ++ show x)
-      Nothing -> return noUse
-
--- A read of a place of a box `z` (`placeOf`), at any mode and type, reads the block
--- `z.credit`, so it comes before `[unbox-ru]` or `[lock]` takes the block.
-blockOf :: Path -> L Keys
-blockOf x
-  = case placeOf x of
-      Just z -> S.singleton <$> keyOf (child z SCredit)
-      Nothing -> return S.empty
-
--- a load of a variable of a trivial type reads its block
-loadOf :: Path -> L Use
-loadOf x = (\n -> noUse{ uNeeded = n }) <$> blockOf x
 
 -- consume a reference
 consume, uniqueName :: Env -> Gamma -> Path -> L Use
@@ -339,15 +310,10 @@ readVar env g = useVar env g Borrowed False
 
 -- values
 
--- a value uses its variables as a whole, so they are not in the contents of a box (a
--- place is loaded first)
-whole :: Path -> L ()
-whole x = when (isJust (placeOf x)) (fail ("use of the contents of a box that is not loaded: " ++ show x))
-
 ownedV :: Env -> Gamma -> VVal -> L Use
 ownedV env g val
   = case val of
-      Var x -> whole x >> consume env g x
+      Var x -> consume env g x
       DupV _ -> liftE (inferV env g val) >> return noUse   -- a global
       Glob _ _ -> do t <- V <$> liftE (inferV env g val)
                      unless (trivialTy env t) (fail ("owned use of global " ++ show val))
@@ -380,7 +346,6 @@ ownedA env g val
               let caps = S.toList (fvA val)
               closed ([(x,Owned) | x <- caps, not (trivialVar env g x)] ++ params env ps)
                      (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) M.empty e)
-              mapM_ whole caps
               uses (map (consume env g) caps)
       UnitA -> return noUse
       InjA _ _ v -> ownedA env g v
@@ -396,7 +361,7 @@ ownedA env g val
 uniqueV :: Env -> Gamma -> VVal -> L Use
 uniqueV env g val
   = case val of
-      Var x -> whole x >> uniqueName env g x
+      Var x -> uniqueName env g x
       UnitV -> return noUse
       Lit _ -> do t <- V <$> liftE (inferV env g val)
                   unless (trivialTy env t) (fail ("unique use of a shared literal: " ++ show val))
@@ -412,7 +377,7 @@ uniqueV env g val
 borrowedV :: Env -> Gamma -> VVal -> L Use
 borrowedV env g val
   = case val of
-      Var x -> whole x >> inspect env g x
+      Var x -> inspect env g x
       Glob _ _ -> return noUse
       Lit _ -> return noUse
       UnitV -> return noUse
@@ -441,16 +406,6 @@ checkE env g js expr@(Unscalar m z x e)
 checkE _ _ _ expr
   | isRead expr, Just ds <- destructAOf expr, owning (dsMode ds)
   = fail ("owned read of the contents of a box: " ++ show (dsScrut ds))
--- a case, a dereference and a dup only read a loaded value
-checkE _ _ _ (CaseV _ (Var z) _)
-  | Just _ <- placeOf z
-  = fail ("case on the contents of a box that is not loaded: " ++ show z)
-checkE _ _ _ (Deref _ (Var z) _ _)
-  | Just _ <- placeOf z
-  = fail ("dereference of the contents of a box that is not loaded: " ++ show z)
-checkE _ _ _ (Dup z _ _)
-  | Just _ <- placeOf z
-  = fail ("dup of the contents of a box that is not loaded: " ++ show z)
 checkE env g js expr
   | Just ds <- destructAOf expr = destructE (liftE (inferVar g (dsScrut ds))) (dsMode ds) (Var (dsScrut ds)) (dsAlts ds)
   | Just ds <- destructVOf expr = destructE (V <$> liftE (inferV env g (dsScrut ds))) (dsMode ds) (dsScrut ds) (dsAlts ds)
@@ -460,7 +415,7 @@ checkE env g js expr
              (fail ("unique destructuring of a value that is not a pointer: " ++ show v))
            t <- infer
            tss <- liftE (altTypes env t expr)
-           destruct env g js m (bindsPart expr) v [(zip xs ts, e) | ((xs,e),ts) <- zip alts tss]
+           destruct env g js m v [(zip xs ts, e) | ((xs,e),ts) <- zip alts tss]
 checkE env g js expr
   = case expr of
       Ret v -> ownedV env g v
@@ -528,10 +483,11 @@ checkE env g js expr
               modify (rebaseParts z)
               body <- local (M.mapKeys (rebase z)) (roots env Owned [(r,g' M.! r)] (checkE env g' js e))
               before (return u{ uConsumed = S.singleton c }) (return (mapUse (unrebase z) body))
-      -- a copy of the block of `z`, which only reads the block, as a new root
+      -- a copy of the block of `z`, which only reads the block `z.credit`, as a new root
       CopyRu z r e
         -> do g' <- liftE (copyRuGamma g z r)
-              before (loadOf (child z SContents)) (roots env Owned [(r,g' M.! r)] (checkE env g' js e))
+              c <- keyOf (child z SCredit)
+              before (return noUse{ uNeeded = S.singleton c }) (roots env Owned [(r,g' M.! r)] (checkE env g' js e))
       -- the same for an owned box, whose block becomes a cell
       Lock z c e
         -> do g' <- liftE (lockGamma g z c)
@@ -562,20 +518,12 @@ checkE env g js expr
                    else if null (overlapping (uConsumed u) (S.singleton k)) then (x,Borrowed)
                    else (x,Owned))
 
--- a projection or an unpack binds a part of its scrutinee without reading it
-bindsPart :: VExpr -> Bool
-bindsPart expr
-  = case expr of
-      Proj{} -> True
-      Unpack{} -> True
-      _ -> False
-
 -- The binders of a destructuring of a variable are its parts, and an owned or unique
 -- destructuring consumes those of a trivial type. A unique destructuring consumes its
 -- scrutinee as unique, so its alternatives must consume the scrutinee. The binders of a
 -- destructuring of another value are new roots with the mode of the destructuring.
-destruct :: Env -> Gamma -> Joins -> Mode -> Bool -> VVal -> [([(Path,Ty)],VExpr)] -> L Use
-destruct env g js m part v alts
+destruct :: Env -> Gamma -> Joins -> Mode -> VVal -> [([(Path,Ty)],VExpr)] -> L Use
+destruct env g js m v alts
   = case v of
       Var z -> do zc <- keyOf z
                   rs <- sequence [alt zc bs e | (bs,e) <- alts]
@@ -596,10 +544,7 @@ destruct env g js m part v alts
                             use <- uniqueName env g z
                             return u{ uNeeded = S.union (uNeeded use) (uNeeded u), uUnique = S.union (uUnique use) (uUnique u) }
                   where
-                    -- a projection or an unpack of a place binds a sub-place without reading it,
-                    -- and a load of a trivial part of the contents of a box reads its block
-                    scrutinee | part, trivialVar env g z || isJust (placeOf z) = return noUse
-                              | trivialVar env g z = loadOf z
+                    scrutinee | trivialVar env g z = return noUse
                               | otherwise = readVar env g z
                     -- The parts of a trivial type need no references. A binder of a trivial type
                     -- that is all of `z` (see `key`) makes `z` trivial in its alternative.

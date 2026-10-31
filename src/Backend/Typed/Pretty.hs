@@ -203,7 +203,6 @@ prettyExpr expr
       Unroll m v x e -> letIn (mode m) (text "roll" <+> pv x) (pv v) e
       Unbox m v x e -> letIn (mode m) (text "box" <+> pv x) (pv v) e
       Unscalar m v x e -> letIn (mode m) (text "scalar" <+> pv x) (pv v) e
-      Load v x e -> letIn (mode Borrowed) (text "load" <+> pv x) (pv v) e
       Unpack m v vs x e -> letIn (mode m) (text "pack" <.> brackets (commaSep (map tv vs)) <+> pv x) (prettyVal v) e
       CaseLit v alts def -> caseOf (text "case") (prettyVal v) ([(prettyLit l, e) | (l,e) <- alts] ++ [(text "_", def)])
       Dup x y e -> text "val" <+> pv y <+> text "= dup" <+> pv x <.> semi <-> prettyExpr e
@@ -253,7 +252,8 @@ prettyProgram prog
 -- The program without the forms that have no operational meaning and whose binders follow
 -- from their paths: `[proj]`, `[deref]`, `[unroll]` and `[bunbox]` of a variable. Neither does
 -- it show `[roll]`, nor the steps of those forms in paths but that of `[proj]`, nor the halves
--- of a split before an alternative, so that a path reads like a field access in the source. For reading the IR; messages show the full program.
+-- of a split before an alternative, so that a path reads like a field access in the source.
+-- For reading the IR; messages show the full program.
 prettyElided :: Program -> Doc
 prettyElided prog
   = prettyProgram prog{ progDefs = map elideDef (progDefs prog) }

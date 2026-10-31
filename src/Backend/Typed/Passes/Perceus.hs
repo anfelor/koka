@@ -36,19 +36,15 @@
   inner block where the outer value is dead. Reading the contents of a box is always
   borrowed, while reading a dead owned scalar consumes it (`[unscalar]`).
 
-  A copy of a variable is a new root (`[dup]`), or the part `x.load` of a trivial `x`
-  (`[load]`), that replaces it in the code that takes the copy, which uses the copies of the
-  parts of the variable in scope that it needs, and the parts of a copy that it binds itself
-  (`renameCopies`). A part in the contents of a box is loaded before it is duplicated, so that
-  it is read before its reference count is incremented. Only the function of `[app]` is
+  A copy of a variable is a new root (`[dup]`) that replaces it in the code that takes the
+  copy, which uses the copies of the parts of the variable in scope that it needs, and the
+  parts of a copy that it binds itself (`renameCopies`). Only the function of `[app]` is
   copied at a boxed type, by `[dup-a]` and a dereference of the copy.
 
-  A variable of a trivial type needs no references, but one in the contents of a box is read
-  from the block of the box, which may be freed or reused once the box is consumed. `Loads`
-  loads every place where it is read (`[load]`, its copy `x.load`), and the copy is a part of
-  the place, borrowed like it: a pointer is duplicated where its owner is given up while it is
-  still needed, and a copy of a trivial type needs nothing. A load of a variable that is
-  already a copy is removed.
+  A variable of a trivial type needs no references. Code generation copies it out of the
+  block of a box at `[bunbox]`, but in the IR, one in the contents of a box is still named
+  through the box, which `[unbox-ru]` and `[lock]` rename. It is therefore copied where its
+  owner is given up while it is still needed, like any other part.
 
   `[lock]` consumes an owned box like any consumer: its contents become owned under their new
   name `z.taken`, and its cell is a new owned root. So `lazy-eval-locked` takes the fields of
@@ -139,13 +135,14 @@ partsOf pe z
 -- the owner of a borrowed variable (see the top)
 ownerOf :: PEnv -> VarSet -> Path -> Maybe Path
 ownerOf pe owned x
-  | S.member x owned || maybe True (unrestricted pe x) (M.lookup x (peGamma pe)) = Nothing
+  | S.member x owned || maybe True (unrestricted x) (M.lookup x (peGamma pe)) = Nothing
   | otherwise = listToMaybe [z | z <- reverse (prefixes x), S.member z owned]
+  where unrestricted = unrestrictedIn (peEnv pe)
 
--- A variable of a trivial type needs no references, unless it is in the contents of a box,
--- where it is read from the block (see `copy`).
-unrestricted :: PEnv -> Path -> Ty -> Bool
-unrestricted pe x t = trivialTy (peEnv pe) t && isNothing (boxOf x)
+-- A variable of a trivial type needs no references, unless it is in the contents of a box
+-- (see the top).
+unrestrictedIn :: Env -> Path -> Ty -> Bool
+unrestrictedIn env x t = trivialTy env t && not (inContents x)
 
 pointer :: Ty -> Bool
 pointer t
@@ -173,10 +170,6 @@ percE :: PEnv -> VarSet -> VExpr -> P VExpr
 -- control never gets here, so nothing needs to be dropped
 percE _ _ expr@Unreachable{}
   = return expr
--- a load of a variable that is no longer in a block (a copy of it was taken before)
-percE pe owned (Load x y e)
-  | Nothing <- boxOf x
-  = percE pe owned (renamePath y x e)
 -- Materialize a scheduled borrowed selection before settling its owner. The
 -- selected binding can then survive the transfer, rather than being read back
 -- from a backing snapshot afterward. A scalar read similarly copies trivial
@@ -189,9 +182,6 @@ percE pe owned expr@Unbox{}
   = percE' pe owned expr
 percE pe owned expr@(Deref _ (Var _) x (Unscalar _ z _ _))
   | x == z
-  = percE' pe owned expr
-percE pe owned expr@(Load _ y (Deref _ (Var y') x (Unscalar _ z _ _)))
-  | y == y', x == z
   = percE' pe owned expr
 percE pe owned expr
   | Just ds <- destructVOf expr, productProjection expr
@@ -279,9 +269,6 @@ tyOfVar :: PEnv -> Path -> P Ty
 tyOfVar pe x = maybe (fail ("unknown variable " ++ show x)) return (M.lookup x (peGamma pe))
 
 percE' :: PEnv -> VarSet -> VExpr -> P VExpr
-percE' pe owned (Load x y e)
-  | Nothing <- boxOf x
-  = percE' pe owned (renamePath y x e)
 -- the binder is a copy of trivial contents, so a dead owned scalar is consumed by the read
 percE' pe owned expr@(Unscalar _ z x e)
   = do t <- tyOfVar pe z
@@ -316,7 +303,7 @@ percE' pe owned expr
                   own1  = owned `S.difference` live2
               e1' <- percE pe{ peBorrowed = peBorrowed pe `S.union` own2 } own1 e1
               e2' <- percE (bind pe [(x,V t)]) (own2 `S.union` ownedOf pe [(x,V t)]) e2
-              return (hoistdupAll [e2'] (\e1'' -> Let x t e1'' e2') e1')
+              return (hoistdupAll (\e1'' -> Let x t e1'' e2') e1')
       -- like a `let`, whose continuation is one of two branches; `x` is only bound in `e2`
       LetYield x t e1 e2 e3
         -> do let live = needs (fvE e2 `S.union` fvE e3)
@@ -325,7 +312,7 @@ percE' pe owned expr
               e1' <- percE pe{ peBorrowed = peBorrowed pe `S.union` own2 } own1 e1
               e2' <- percE (bind pe [(x,V t)]) (own2 `S.union` ownedOf pe [(x,V t)]) e2
               e3' <- percE pe own2 e3
-              return (hoistdupAll [e2',e3'] (\e1'' -> LetYield x t e1'' e2' e3') e1')
+              return (hoistdupAll (\e1'' -> LetYield x t e1'' e2' e3') e1')
       Yielded _ -> return expr
       Unreachable _ -> return expr
       Call f tys vs
@@ -372,22 +359,16 @@ percE' pe owned expr
 -- copies
 
 -- A copy of a variable for a use that takes it: a new root with a duplicate of the variable.
--- A place is loaded first (`[load]`, unless its load is in scope), so that it is read before
--- its reference count is incremented; the copy of a trivial place is its load. A closure is
--- a dereference: its duplicate is its pointer, which the copy dereferences again (a closure
--- is not under a sum). It comes with the duplication, the variable, and the binders of the
--- copy. A variable of a trivial type is not copied, unless it is in the contents of a box.
+-- A closure is a dereference: its duplicate is its pointer, which the copy dereferences again
+-- (a closure is not under a sum). It comes with the duplication, the variable, and the binders
+-- of the copy. A variable of a trivial type is not copied, unless it is in the contents of a
+-- box.
 copy :: PEnv -> Path -> P (K,Path,Path,[(Path,Ty)])
 copy pe x
   = do t <- tyOfVar pe x
        case t of
-         _ | unrestricted pe x t -> return (id,x,x,[])
+         _ | unrestrictedIn (peEnv pe) x t -> return (id,x,x,[])
          V (VCell _ _) -> fail ("duplication of a cell: " ++ show x)
-         V _ | isJust (placeOf x)
-           -> do let l = child x SLoad
-                     (k,bs) = if M.member l (peGamma pe) then (id,[]) else (Load x l,[(l,t)])
-                 (d,_,y,bs') <- copy (bind pe bs) l
-                 return (k . d,x,y,bs ++ bs')
          V _ -> do y <- fresh "u"
                    return (Dup x y,x,y,[(y,t)])
          A _ -> do tq <- liftE (dupType x t)
@@ -425,13 +406,11 @@ renameCopies g ren
   = renameE (M.union (M.fromList ren) (M.fromList [(y,y) | y <- M.keys g, any (\(x,_) -> y /= x && y `within` x) ren]))
 
 -- the copies at the start of the bound expression of a `let` come before the `let`, so that
--- it binds a value where it can (such as a unique one), with the loads that they bind,
--- unless a continuation `es` binds them too
-hoistdupAll :: [VExpr] -> (VExpr -> VExpr) -> VExpr -> VExpr
-hoistdupAll es k expr
+-- it binds a value where it can (such as a unique one)
+hoistdupAll :: (VExpr -> VExpr) -> VExpr -> VExpr
+hoistdupAll k expr
   = case expr of
-      Dup x y e -> Dup x y (hoistdupAll es k e)
-      Load x l e@(Dup y _ _) | y == l, l `notElem` concatMap bindersE es -> Load x l (hoistdupAll es k e)
+      Dup x y e -> Dup x y (hoistdupAll k e)
       _ -> k expr
 
 productProjection :: VExpr -> Bool

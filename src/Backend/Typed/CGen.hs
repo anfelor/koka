@@ -48,7 +48,6 @@ data CEnv = CEnv{ ceModName   :: Name
                 , ceNewtypes  :: Newtypes
                 , ceDataInfos :: [DataInfo]
                 , ceInline    :: S.Set Name   -- small functions defined `static inline` in the header
-                , ceEagerLoads :: Bool        -- read the contents of a box at once, not in place (`--feager-loads`)
                 }
 
 -- generation monad
@@ -60,13 +59,8 @@ data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [Strin
 -- `cxJoins`: the label and the parameters of each join point in scope
 data Ctx = Ctx{ cxEnv :: Env, cxCEnv :: CEnv, cxGamma :: Gamma, cxSelf :: Maybe (Name,[Path])
               , cxJoins :: M.Map Name (Doc,[Path])
-              , cxPlaces :: M.Map Path Place  -- places, read through the pointer to their box (`genUnbox`)
               , cxShared :: S.Set Path     -- blocks known to be shared (the else branch of `IsUnique`, and its aliases)
               , cxSources :: Sources }     -- the copies and join parameters of the definition (`sameBits`)
-
--- A place: the lvalue of the contents of a box and their type, and a part of them, by its
--- first leaf and its type. Its leaves are members of the contents (`projLeaves`).
-data Place = Place Doc VType Int VType
 
 type G a = M () St a
 
@@ -210,7 +204,7 @@ pointerTest ve left right
 genV :: Ctx -> VVal -> G Doc
 genV cx val
   = case val of
-      Var x -> genVar cx x
+      Var x -> return (localName x)
       Glob x _ -> return (text (cName x))
       DupV v -> do t <- tyOf cx v
                    ct <- ctype t
@@ -483,25 +477,21 @@ genBox cx tag at v
                                return (stmtExpr ([cty ct <+> v <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> clear <.> ";",
                                                   setPath] ++ storeFrom v) box)
 
--- A projection of a place is a place: the selected field (`[proj]`), read at its uses. A
--- projection of a local copies the field into a local.
+-- A projection copies the field into a local.
 genProjection :: Ctx -> Dest -> VVal -> Int -> Path -> VExpr -> G [Doc]
 genProjection cx dest v j x e = do
   t <- tyOf cx v
   (start,u) <- liftC (fieldRange t j)
-  case v of
-    Var z | Just (Place b w i _) <- M.lookup z (cxPlaces cx)
-      -> genE (bindPlace cx x (Place b w (i + start) u)) dest e
-    _ -> do (base,pre) <- case v of
-              Var z -> return (localName z,[])
-              _ -> do ve <- genV cx v
-                      z <- fresh "product"
-                      ct <- ctype t
-                      return (z,[cty ct <+> z <+> "=" <+> ve <.> ";"])
-            p <- projLeaves t base start u
-            ct <- ctype u
-            body <- genE (bindVar cx x (V u)) dest e
-            return (pre ++ [declare (cty ct) x p] ++ body)
+  (base,pre) <- case v of
+    Var z -> return (localName z,[])
+    _ -> do ve <- genV cx v
+            z <- fresh "product"
+            ct <- ctype t
+            return (z,[cty ct <+> z <+> "=" <+> ve <.> ";"])
+  p <- projLeaves t base start u
+  ct <- ctype u
+  body <- genE (bindVar cx x (V u)) dest e
+  return (pre ++ [declare (cty ct) x p] ++ body)
 
 -- the first leaf and the type of the field i of a product
 fieldRange :: VType -> Int -> Either String (Int,VType)
@@ -550,20 +540,13 @@ genAlias cx dest ve x t e
   = do s <- genE (bindVar cx x t) dest e
        return ([declare "kk_box_t" x ve] ++ s)
 
--- The contents of a box are a place: they stay in its block and are read at their uses, while
--- the box is alive (Linear), through a pointer to the payload. Every read is a load with
--- `--feager-loads`, so that both semantics can be tested.
+-- The contents of a box are loaded at once, while the box is alive.
 genUnbox :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
 genUnbox cx dest v x e
   = do A a <- tyOfName cx v
        t <- liftC (boxContents a)
-       ct <- ctype t
        ue <- unboxBlock t (localName v)
-       if not (ceEagerLoads (cxCEnv cx)) && ct /= CUnit
-         then do p <- fresh "payload"
-                 s <- genE (bindPlace cx x (Place ("(*" <.> p <.> ")") t 0 t)) dest e
-                 return ((cty ct <.> "*" <+> p <+> "= &(" <.> ue <.> ");") : s)
-         else genRead cx dest x t ue e
+       genRead cx dest x t ue e
 
 -- An owned read lets the runtime release a heap-backed scalar.
 genUnscalar :: Ctx -> Dest -> Mode -> Path -> Path -> VExpr -> G [Doc]
@@ -594,10 +577,9 @@ genCopyRu cx dest z r e
   = do g' <- liftC (copyRuGamma (cxGamma cx) z r)
        ct <- liftC (inferAVar (cxGamma cx) z >>= boxContents) >>= ctype
        bt <- blockType ct
-       ze <- genVar cx z
        x <- fresh "copy"
        s <- genE cx{ cxGamma = g' } dest e
-       let old = "((" <.> bt <.> "*)kk_datatype_as_ptr(kk_datatype_unbox(" <.> ze <.> "),_ctx))"
+       let old = "((" <.> bt <.> "*)kk_datatype_as_ptr(kk_datatype_unbox(" <.> localName z <.> "),_ctx))"
        return ([bt <.> "*" <+> x <+> "= kk_block_alloc_as(" <.> bt <.> "," <.> int (scanOf ct) <.> ",(kk_tag_t)" <.> int (boxTag z) <.> ",_ctx);",
                 "memcpy(&" <.> x <.> "->p,&" <.> old <.> "->p,sizeof(" <.> x <.> "->p));",
                 declare "kk_reuse_t" r ("&" <.> x <.> "->_block")] ++ s)
@@ -610,28 +592,14 @@ genLock cx dest z c e
 
 -- The contents of `z` that are taken out of its block, with the declaration of the root that
 -- holds the block (in the context `g'` of the body). Each part of `z.taken` that the body uses
--- is declared as a local: a place in the block of `z` is loaded, and a local is copied from
--- its old name. The places in the blocks of inner boxes stay places under their new names.
+-- is declared as a local, copied from its old name.
 genTaken :: Ctx -> Dest -> Gamma -> Path -> VExpr -> Doc -> G [Doc]
 genTaken cx dest g' z e root
-  = do let taken = child z STaken
-           places = M.fromList [(rebase z p,d) | (p,d) <- M.toList (cxPlaces cx), boxOf p /= Just z]
-       locals <- forM [q | q <- S.toList (fvE e), q `within` taken, M.notMember q places] $ \q ->
+  = do locals <- forM [q | q <- S.toList (fvE e), q `within` child z STaken] $ \q ->
                    do ct <- liftC (inferVar g' q) >>= ctOf
-                      d <- genVar cx (unrebase z q)
-                      return (q,declare (cty ct) q d)
-       let cx' = cx{ cxGamma = g', cxPlaces = places, cxShared = S.map (rebase z) (cxShared cx) }
-       s <- genE cx' dest e
-       return (map snd locals ++ [root] ++ s)
-
--- A place is read from its members (a copy if it has more than one leaf), a local by its name.
-genVar :: Ctx -> Path -> G Doc
-genVar cx x = case M.lookup x (cxPlaces cx) of
-  Just (Place b w i t) -> projLeaves w b i t
-  Nothing -> return (localName x)
-
-bindPlace :: Ctx -> Path -> Place -> Ctx
-bindPlace cx x pl@(Place _ _ _ t) = let cx' = bindVar cx x (V t) in cx'{ cxPlaces = M.insert x pl (cxPlaces cx') }
+                      return (declare (cty ct) q (localName (unrebase z q)))
+       s <- genE cx{ cxGamma = g', cxShared = S.map (rebase z) (cxShared cx) } dest e
+       return (locals ++ [root] ++ s)
 
 -- Koka's `box` of a scalar
 genScalar :: Ctx -> VVal -> G Doc
@@ -733,7 +701,7 @@ genLam cx ps r e
        let structDef = sname <+> block ("struct kk_function_s _base;" : [cty ct <+> "c" <.> int i <.> ";" | (i,ct) <- fields]) <.> ";"
            g'  = M.union (M.fromList ([(x,V t) | (x,_,t) <- ps])) (cxGamma cx)
            cx' = cx{ cxGamma = g', cxSelf = Nothing, cxJoins = M.empty }
-       body <- genE cx'{ cxPlaces = M.empty } DReturn e
+       body <- genE cx' DReturn e
        -- Transfer captures from unique closures; shared closures retain their own references.
        let loads = [cty ct <+> localName (caps !! i) <+> "= _self->c" <.> int i <.> ";" | (i,ct) <- fields]
            dups = [x <+> "=" <+> dupExpr ct x <.> ";" | (i,ct) <- fields, needsRC ct, let x = localName (caps !! i)]
@@ -743,7 +711,7 @@ genLam cx ps r e
                                   ++ ["kk_drop_match(_self,{" <+> hsep dups <+> "},{},_ctx);"]
        emitDecl (vcat ([structDef | not (null caps)] ++ [sig <+> block (prologue ++ body)]))
        x <- fresh "c"
-       capVals <- mapM (genVar cx) caps
+       let capVals = map localName caps
        -- A capture-free closure can share a static function block.
        if null caps
          then return (stmtExpr ["kk_define_static_function(" <.> x <.> "," <.> fname <.> ",_ctx);"]
@@ -835,7 +803,7 @@ assignTo dest ct e
       DDiscard  -> ["(void)(" <.> e <.> ");"]
 
 bindVar :: Ctx -> Path -> Ty -> Ctx
-bindVar cx x t = cx{ cxGamma = M.insert x t (cxGamma cx), cxPlaces = M.delete x (cxPlaces cx) }
+bindVar cx x t = cx{ cxGamma = M.insert x t (cxGamma cx) }
 
 -- Declare the C variable of a binder. A path is bound at most once in a scope (`Check`).
 declare :: Doc -> Path -> Doc -> Doc
@@ -869,7 +837,7 @@ genE cx dest expr
       Drop x e
         | S.member x (cxShared cx)   -- like Koka's C backend: a shared block only needs a decrement
         -> do t <- tyOfName cx x
-              ve <- genVar cx x
+              let ve = localName x
               s <- genE cx dest e
               let f = case pointerShape (cxEnv cx) t of
                         Just a | shapeIsSmall a -> "kk_datatype_ptr_decref_small"
@@ -877,7 +845,7 @@ genE cx dest expr
               return ([f <.> "(kk_datatype_unbox(" <.> ve <.> "),_ctx);"] ++ s)
         | otherwise
         -> do t <- tyOfName cx x
-              ve <- genVar cx x
+              let ve = localName x
               d <- case t of
                      A (AScalar r) -> return (dropScalar r ve)
                      _ -> (`dropStmt` ve) <$> ctOf t
@@ -893,21 +861,14 @@ genE cx dest expr
       Dup x y e
         -> do t <- tyOfName cx x
               ct <- ctOf t
-              ve <- genVar cx x
+              let ve = localName x
               ty <- liftC (dupType x t)
               s <- genE (bindVar cx y ty) dest e
               return (declare (cty ct) y (dupAt cx x t ct ve) : s)
-      -- a copy of a value's bits; its references are still held by the block
-      Load x y e
-        -> do t <- tyOfName cx x
-              ct <- ctOf t
-              ve <- genVar cx x
-              s <- genE (bindVar cx y t) dest e
-              return (declare (cty ct) y ve : s)
       IsUnique x e1 e2
         -> do t <- liftC (inferVar (cxGamma cx) x)
               s1 <- genE cx{ cxGamma = uniqueGamma (cxGamma cx) x } dest e1
-              xe <- genVar cx x
+              let xe = localName x
               let blockOf = "kk_datatype_as_ptr(kk_datatype_unbox(" <.> xe <.> "),_ctx)"
               shared <- case t of
                           V (VCell _ _) -> return (S.insert x (cxShared cx))
@@ -964,11 +925,8 @@ genE cx dest expr
       Unpack _ v tvs x e
         -> do VExists bs body <- tyOf cx v
               let t = inst bs (map AVar tvs) body
-              case v of
-                Var y | Just (Place b w i _) <- M.lookup y (cxPlaces cx)
-                  -> genE (bindPlace cx x (Place b w i t)) dest e
-                _ -> do ve <- genV cx v
-                        genRead cx dest x t ve e
+              ve <- genV cx v
+              genRead cx dest x t ve e
       Deref _ v x e
         -> do VPtr a <- tyOf cx v
               ve <- genV cx v
@@ -1022,7 +980,7 @@ genE cx dest expr
                 ([(_,body)],Nothing) -> return [block body]
                 ([([tag],body)],Just other) -> return [block [tagDecl t tg ve, ifChain [(tg <+> "==" <+> int tag,body)] other]]
                 _ -> return [block [tagDecl t tg ve, switchCases tg brs fallback]]
-      -- the scrutinee is loaded (`[load]`): a variable is a local, another value is copied into one
+      -- a variable is a local, another value is copied into one
       CaseV _ v alts
         -> do t@(VSum ts) <- tyOf cx v
               ct <- ctype t
@@ -1310,14 +1268,14 @@ genDef env cenv def
         -> do pcts <- mapM (\(_,_,t) -> ctype t) args
               rct  <- ctype res
               let g  = M.fromList [(x,V t) | (x,_,t) <- args]
-                  cx = Ctx env cenv g (Just (f,[x | (x,_,_) <- args])) M.empty M.empty S.empty (sources body)
+                  cx = Ctx env cenv g (Just (f,[x | (x,_,_) <- args])) M.empty S.empty (sources body)
               ss <- genE cx DReturn body
               let sig = cty rct <+> text (cName f) <.> "(" <.> hcat [cty ct <+> localName x <.> ", " | ((x,_,_),ct) <- zip args pcts] <.> "kk_context_t* _ctx)"
                   label = ["kt_tailcall: ;" | "goto kt_tailcall;" `isInfixOf` show (vcat ss)]
               return (sig <.> ";", sig <+> block (label ++ ss), empty)
       DefVal x _ t body
         -> do ct <- ctype t
-              let cx = Ctx env cenv M.empty Nothing M.empty M.empty S.empty (sources body)
+              let cx = Ctx env cenv M.empty Nothing M.empty S.empty (sources body)
               ss <- genE cx DReturn body
               let name  = text (cName x)
                   initf = name <.> "_init"
@@ -1333,7 +1291,7 @@ genWrapper env cenv f
         -> do pcts <- mapM (ctype . snd) ps
               rct  <- ctype r
               let xs  = [root (newHiddenName ("p" ++ show i)) | i <- [0..length ps - 1]]
-                  cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) Nothing M.empty M.empty S.empty M.empty
+                  cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) Nothing M.empty S.empty M.empty
               body <- genCall cx DReturn f (map AVar tvs) (map Var xs)
               let sig = "static" <+> cty rct <+> text (cName f) <.> "_fun(kk_function_t _fself" <.> hcat [", " <.> cty ct <+> localName x | (x,ct) <- zip xs pcts] <.> ", kk_context_t* _ctx)"
               return (sig <.> ";", sig <+> block ("kk_function_static_drop(_fself,_ctx);" : body))
