@@ -13,6 +13,7 @@ import qualified Data.Map as M
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
+import Backend.Typed.Traversal( child )
 import Backend.Typed.Types
 import Backend.Typed.Layout( leaves, scalarField )
 import Backend.Typed.Elab.Monad
