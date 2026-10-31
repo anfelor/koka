@@ -26,8 +26,7 @@
   Finally, a case on a known value (an injection, or a value that the definition binds with
   `let x = ret v`, through the pointers and rolls of `v`) is replaced by its alternative if
   that does not use its binder. Inlining leaves such cases, mostly on constructors without
-  fields, and so does the specialisation of lazy evaluation to `recurse` (`Elab.Lazy`). The
-  bindings of values, pointers and rolls that are then unused are removed, except for values
+  fields. The bindings of values, pointers and rolls that are then unused are removed, except for values
   that memoize, which write over their cell.
 -}
 module Backend.Typed.Passes.Simplify( simplifyProgram ) where
