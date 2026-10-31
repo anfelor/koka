@@ -162,16 +162,14 @@ projAt s m v = case s of
                  SField i _ -> Proj m v i
                  _ -> error ("Backend.Typed.Common.projAt: not a step into a product: " ++ show s)
 
--- The duplication rule: the type of the copy of `x : t`. A boxed operand is duplicated into
--- a pointer, if it is the dereference of one (`[deref]`).
-dupType :: Path -> Ty -> Either String Ty
-dupType x t
+-- The duplication rule: the type of the copy of a variable of type `t`
+dupType :: Ty -> Either String Ty
+dupType t
   = case t of
       V (VReuse _ _ _) -> Left "dup of a reuse credit"
       V (VCell _ _) -> Left "dup of a cell"
       V _ -> Right t
-      A a | isJust (derefOf x) -> Right (V (VPtr a))
-          | otherwise -> Left "dup of a boxed value that is not a dereferenced pointer"
+      A _ -> Left "dup of a boxed value"
 
 -- the pointer that the binder of a `[deref]` is the dereference of
 derefOf :: Path -> Maybe Path
@@ -1030,7 +1028,7 @@ keepsPointer expr
       Jump{}      -> False
 
 -- Where a variable gets the bits of another variable: a copy (`[dup]`) gets those
--- of its variable (the pointer of a dereference), the contents taken by `[unbox-ru]` or `[lock]` those of the old contents, and a parameter of
+-- of its variable, the contents taken by `[unbox-ru]` or `[lock]` those of the old contents, and a parameter of
 -- a join point those of its arguments.
 data Source = Copy Path | Param [VVal]
 
@@ -1040,7 +1038,7 @@ sources :: VExpr -> Sources
 sources expr = M.union here (getConst (descendE (const (Const M.empty)) (Const . sourcesV) (\_ e -> Const (sources e)) expr))
   where
     here = case expr of
-             Dup x y _ -> M.singleton y (Copy (fromMaybe x (derefOf x)))
+             Dup x y _ -> M.singleton y (Copy x)
              _ | Just (z,_,_) <- takesContents expr -> M.singleton (child z STaken) (Copy (child z SContents))
              Join j _ ps _ e2 -> M.fromList [(y,Param [vs !! i | vs <- jumpArgs j e2]) | (i,(y,_,_)) <- zip [0..] ps]
              _ -> M.empty

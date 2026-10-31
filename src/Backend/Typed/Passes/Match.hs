@@ -80,7 +80,7 @@ matchE expr
               IsUnique x <$> local (const (env,uniqueGamma g x)) (matchE e1) <*> matchE e2
       Dup x y e
         -> do (_,g) <- ask
-              t <- liftE (inferVar g x >>= dupType x)
+              t <- liftE (inferVar g x >>= dupType)
               Dup x y <$> bind [(y,t)] (matchE e)
       _ -> descendE pure matchV (\_ -> matchE) expr
 

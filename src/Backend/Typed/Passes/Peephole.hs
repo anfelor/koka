@@ -75,7 +75,7 @@ expr e = case e of
     IsUnique x <$> local (const (env,uniqueGamma g x)) (expr a) <*> expr b
   Dup x y b -> do
     (_,g) <- ask
-    t <- liftE (inferVar g x >>= dupType x)
+    t <- liftE (inferVar g x >>= dupType)
     Dup x y <$> bind [(y,t)] (expr b)
   IfFull r a b -> do
     (_,g) <- ask

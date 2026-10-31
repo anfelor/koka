@@ -862,7 +862,7 @@ genE cx dest expr
         -> do t <- tyOfName cx x
               ct <- ctOf t
               let ve = localName x
-              ty <- liftC (dupType x t)
+              ty <- liftC (dupType t)
               s <- genE (bindVar cx y ty) dest e
               return (declare (cty ct) y (dupAt cx x t ct ve) : s)
       IsUnique x e1 e2

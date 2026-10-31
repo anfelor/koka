@@ -39,7 +39,7 @@
   A copy of a variable is a new root (`[dup]`) that replaces it in the code that takes the
   copy, which uses the copies of the parts of the variable in scope that it needs, and the
   parts of a copy that it binds itself (`renameCopies`). Only the function of `[app]` is
-  copied at a boxed type, by `[dup-a]` and a dereference of the copy.
+  copied at a boxed type, by a `[dup]` of its pointer and a dereference of the copy.
 
   A variable of a trivial type needs no references. Code generation copies it out of the
   block of a box at `[bunbox]`, but in the IR, one in the contents of a box is still named
@@ -348,7 +348,7 @@ percE' pe owned expr
               let taken = [b | b@(x,_) <- M.toList g', x == child z STaken]
                   owned' = S.map (rebase z) (S.delete z owned) `S.union` ownedOf pe ((c,g' M.! c) : taken)
               Lock z c <$> percE pe{ peGamma = g', peBorrowed = S.map (rebase z) (peBorrowed pe) } owned' e
-      Dup x y e -> do t <- tyOfVar pe x >>= liftE . dupType x
+      Dup x y e -> do t <- tyOfVar pe x >>= liftE . dupType
                       Dup x y <$> percE (bind pe [(y,t)]) (S.union owned (ownedOf pe [(y,t)])) e
       CaseLit v alts def
         -> do alts' <- mapM (\(l,e) -> (,) l <$> percE pe owned e) alts
@@ -371,10 +371,11 @@ copy pe x
          V (VCell _ _) -> fail ("duplication of a cell: " ++ show x)
          V _ -> do y <- fresh "u"
                    return (Dup x y,x,y,[(y,t)])
-         A _ -> do tq <- liftE (dupType x t)
-                   q <- fresh "u"
+         A a | Just p <- derefOf x
+             -> do q <- fresh "u"
                    let y = child q SDeref
-                   return (Dup x q . Deref Borrowed (Var q) y,x,y,[(q,tq),(y,t)])
+                   return (Dup p q . Deref Borrowed (Var q) y,x,y,[(q,V (VPtr a)),(y,t)])
+         A _ -> fail ("duplication of a boxed value that is not a dereferenced pointer: " ++ show x)
 
 -- Copy the variables `xs` for an expression, which takes the copies as owned; `k` comes
 -- between the copies and the expression. Only the outermost products among `xs` are copied:
