@@ -49,8 +49,8 @@ import Common.Name
 import Common.NamePrim( nameLazyMemoize, nameLazyMemoizeTarget, nameLazyIsWhnf, nameLazyPtrIsWhnf )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Passes.Common( NameSupply, altBodies, freshFor, freshPathFrom, renameE )
-import Backend.Typed.Traversal( child, descendA, descendE, descendV, fvE, fvV, injAStep, mapA, mapV )
+import Backend.Typed.Passes.Common( NameSupply, altBodies, freshFor, freshPathFrom, perDef, renameE )
+import Backend.Typed.Traversal( child, descendAll, descendE, fvE, fvV, injAStep, lamsV, mapA, mapV )
 import Backend.Typed.Monad
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Query( Env(..), envOf, unrollT, reuseSize, lazySides )
@@ -69,13 +69,9 @@ fresh s = state (\(ns,js) -> let (x,ns') = freshPathFrom ("lz" ++ s) ns in (x,(n
 
 lazyProgram :: Lazies -> Program -> (Program,[String])
 lazyProgram lazies prog
-  = let env    = envOf prog
-        run d  = case evalM (whnfDef d >>= lazyDef) (LEnv env lazies Nothing) (freshFor d, M.empty) of
-                   Right d' -> (d', [])
-                   Left err -> (d, [show (defName d) ++ ": " ++ err])
-        (defs,errs) = unzip (map run (progDefs prog))
-        cells  = M.fromList [(f,c) | DefFun f _ ((_,_,c@VCell{}):_) _ _ <- defs]
-    in (prog{ progDefs = defs, progSigs = M.mapWithKey (withCell cells) (progSigs prog) }, concat errs)
+  = let (prog',errs) = perDef (\d -> evalM (whnfDef d >>= lazyDef) (LEnv (envOf prog) lazies Nothing) (freshFor d, M.empty)) prog
+        cells = M.fromList [(f,c) | DefFun f _ ((_,_,c@VCell{}):_) _ _ <- progDefs prog']
+    in (prog'{ progSigs = M.mapWithKey (withCell cells) (progSigs prog) }, errs)
   where
     withCell cells f sig
       = case (M.lookup f cells, sig) of
@@ -181,13 +177,7 @@ lock (x,c,n,a) z b e
 
 -- the lambdas in a value have no cells
 cellV :: VVal -> L VVal
-cellV = descendV cellA cellV
-
-cellA :: AVal -> L AVal
-cellA val
-  = case val of
-      Lam ps r e -> Lam ps r <$> cellE M.empty e
-      _ -> descendA pure cellA cellV val
+cellV = lamsV (\_ _ -> cellE M.empty)
 
 -- `memoize(c, v)`: write the constructor of `v` over the cell if it fits
 memoize :: Path -> Int -> AType -> VVal -> L VExpr
@@ -265,11 +255,7 @@ whnfE ws expr
         -> whnfE ws (renameUses (M.singleton s' s) e1)
       _ -> descend
   where
-    descend = descendE pure whnfV (\_ -> whnfE ws) expr
-    whnfV = descendV whnfA whnfV
-    whnfA a = case a of
-                Lam ps r e -> Lam ps r <$> whnfE ws e
-                _ -> descendA pure whnfA whnfV a
+    descend = descendAll (\_ -> whnfE ws) expr
     -- the test of `x`, after the lets of its tag argument
     whnfTest e
       = case e of

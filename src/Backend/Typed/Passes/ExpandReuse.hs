@@ -57,7 +57,7 @@ import Data.Functor.Identity( Identity(..) )
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Traversal( descendA, descendE, descendV, mapA, mapV )
+import Backend.Typed.Traversal( descendA, descendE, descendV, lamsV, mapA, mapV )
 import Backend.Typed.Passes.Common( NameSupply, cloneE, freshFor, freshNameFrom, replaceA, replaceV )
 
 -- the credits in scope that are full
@@ -141,13 +141,7 @@ isStatement e
 
 -- closures get no credits
 exV :: VVal -> X VVal
-exV = descendV exA exV
-
-exA :: AVal -> X AVal
-exA val
-  = case val of
-      Lam ps r e -> Lam ps r <$> exE (fullOf [(x,t) | (x,_,t) <- ps]) e
-      _ -> descendA pure exA exV val
+exV = lamsV (\ps _ -> exE (fullOf [(x,t) | (x,_,t) <- ps]))
 
 -- Bind each allocation of a statement in a credit that may be empty by a join point.
 allocate :: Full -> VExpr -> X VExpr

@@ -30,7 +30,7 @@ import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types( dupType )
 import Backend.Typed.Traversal( boxTag, child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut )
-import Backend.Typed.Passes.Common( NameSupply, dropValue, freshFor, freshPathFrom, reuseParts, scopeOf )
+import Backend.Typed.Passes.Common( defGamma, NameSupply, dropValue, freshFor, freshPathFrom, perBody, reuseParts, scopeOf )
 import Backend.Typed.Monad
 import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize, inferE, noJoins, unrollT, trivialTy )
 
@@ -86,17 +86,7 @@ scope ask action
        return (x, rsAsked s')
 
 reuseProgram :: Program -> (Program,[String])
-reuseProgram prog
-  = let env = envOf prog
-        run d = case evalM (ruE (defBody d)) (REnv env (params d) M.empty) (RS (freshFor d) [] Nothing) of
-                  Right body -> (d{ defBody = body }, [])
-                  Left err   -> (d, [show (defName d) ++ ": " ++ err])
-        (defs,errs) = unzip (map run (progDefs prog))
-    in (prog{ progDefs = defs }, concat errs)
-  where
-    params d = case d of
-                 DefFun{} -> M.fromList [(x,V t) | (x,_,t) <- defArgs d]
-                 DefVal{} -> M.empty
+reuseProgram prog = perBody (\d -> evalM (ruE (defBody d)) (REnv (envOf prog) (defGamma d) M.empty) (RS (freshFor d) [] Nothing)) prog
 
 bind :: [(Path,Ty)] -> R a -> R a
 bind bs = local (\re -> re{ reGamma = bindAll bs (reGamma re) })

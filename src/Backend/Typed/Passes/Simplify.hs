@@ -33,12 +33,11 @@ module Backend.Typed.Passes.Simplify( simplifyProgram ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Data.Functor.Identity( Identity(..) )
 import Data.Functor.Const( Const(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Traversal( descendA, descendE, descendV, fvE, fvV, jumpArgs, mapA, mapV, stepsFrom, within )
-import Backend.Typed.Passes.Common( SubstExpr, defScope, project, substJump, substName, substStep, substTypesE, valueAt )
+import Backend.Typed.Traversal( descendA, descendV, fvE, fvV, jumpArgs, stepsFrom, within )
+import Backend.Typed.Passes.Common( mapAll, SubstExpr, defScope, project, substJump, substName, substStep, substTypesE, valueAt )
 import Backend.Typed.Types( Types(..) )
 
 simplifyProgram :: Program -> Program
@@ -61,16 +60,7 @@ inlineE expr
                 0 -> e2'
                 1 -> substJump j bindArgs e2'
                 _ -> Join j tvs ps e1' e2'
-      _ -> runIdentity (descendE Identity (Identity . inlineV) (\_ e -> Identity (inlineE e)) expr)
-
-inlineV :: VVal -> VVal
-inlineV = mapV inlineA inlineV
-
-inlineA :: AVal -> AVal
-inlineA val
-  = case val of
-      Lam ps r e -> Lam ps r (inlineE e)
-      _          -> mapA id inlineA inlineV val
+      _ -> mapAll (const inlineE) expr
 
 copyE :: SubstExpr
 copyE scope sub expr
@@ -112,8 +102,7 @@ freshE expr
   = case expr of
       Let x t (Ret k@(Context _ _)) e
         | Just e' <- appendFresh x k e -> freshE e'
-        | otherwise -> Let x t (Ret (freshV k)) (freshE e)
-      _ -> runIdentity (descendE Identity (Identity . freshV) (\_ e -> Identity (freshE e)) expr)
+      _ -> mapAll (const freshE) expr
 
 -- inline the fresh context `x = k` into an append that follows immediately and is its only use
 appendFresh :: Path -> VVal -> VExpr -> Maybe VExpr
@@ -125,15 +114,6 @@ appendFresh x k expr
   where
     append (Append c (CtxCopy (Var z))) | z == x, S.notMember x (fvV c) = Just (Append c k)
     append _ = Nothing
-
-freshV :: VVal -> VVal
-freshV = mapV freshA freshV
-
-freshA :: AVal -> AVal
-freshA val
-  = case val of
-      Lam ps r e -> Lam ps r (freshE e)
-      _          -> mapA id freshA freshV val
 
 -- cases of known values
 
@@ -165,7 +145,7 @@ knownE known expr
         -> if d == Whnf then taken x e1 else taken y e2
       _ -> descend
   where
-    descend = runIdentity (descendE Identity (Identity . knownV known) (\xs e -> Identity (knownE (shadow xs known) e)) expr)
+    descend = mapAll (\xs -> knownE (shadow xs known)) expr
     -- the taken alternative, unless it uses its binder
     taken x e = let e' = knownE (shadow [x] known) e
                 in if used x e' then descend else e'
@@ -209,12 +189,3 @@ knownAt known (Path x ss)
           (InjLazy Whnf _ b, SWhnf:as) -> insideA b as
           (InjLazy Delay _ b, SDelay:as) -> insideA b as
           _ -> Nothing
-
-knownV :: M.Map Path VVal -> VVal -> VVal
-knownV known = mapV (knownA known) (knownV known)
-
-knownA :: M.Map Path VVal -> AVal -> AVal
-knownA known val
-  = case val of
-      Lam ps r e -> Lam ps r (knownE (shadow [x | (x,_,_) <- ps] known) e)
-      _          -> mapA id (knownA known) (knownV known) val

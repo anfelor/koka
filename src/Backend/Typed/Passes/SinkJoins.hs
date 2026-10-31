@@ -28,12 +28,13 @@
 -}
 module Backend.Typed.Passes.SinkJoins( sinkJoinsProgram ) where
 
+import Backend.Typed.Passes.Common( mapAll )
 import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
 import Data.Functor.Identity( Identity(..) )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Traversal( descendE, fvE, jumpArgs, mapA, mapV )
+import Backend.Typed.Traversal( descendE, fvE, jumpArgs )
 
 sinkJoinsProgram :: Program -> Program
 sinkJoinsProgram prog = prog{ progDefs = [d{ defBody = sjE (defBody d) } | d <- progDefs prog] }
@@ -42,7 +43,7 @@ sjE :: VExpr -> VExpr
 sjE expr
   = case expr of
       Join j tvs ps e1 e2 -> sink j tvs ps (sjE e1) (sjE e2)
-      _ -> runIdentity (descendE Identity (Identity . sjV) (\_ e -> Identity (sjE e)) expr)
+      _ -> mapAll (const sjE) expr
 
 -- define `join j(ps) = e1` in the innermost subexpression of `e` that contains every jump to it
 sink :: Name -> [TVar] -> [(Path,Mode,VType)] -> VExpr -> VExpr -> VExpr
@@ -57,12 +58,3 @@ sink j tvs ps e1 e
     movable = case e of
                 Join k _ _ _ _ -> k /= j && null (jumpArgs k e1)
                 _ -> True
-
-sjV :: VVal -> VVal
-sjV = mapV sjA sjV
-
-sjA :: AVal -> AVal
-sjA val
-  = case val of
-      Lam ps r e -> Lam ps r (sjE e)
-      _          -> mapA id sjA sjV val

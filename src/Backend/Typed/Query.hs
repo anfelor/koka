@@ -11,7 +11,8 @@
 -- Keep inference in sync with the typing rules in Syntax.
 module Backend.Typed.Query( Env(..), Gamma, noJoins, yieldJoins, envOf, bindAll, checkE, inferE, inferA, inferV
                           , inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize
-                          , unrollT, lazySides, trivialTy, openFields, funSig, paramModes, altPattern, pointerShape ) where
+                          , unrollT, lazySides, trivialTy, openFields, funSig, paramModes, altPattern, pointerShape
+                          , lamGamma ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -246,6 +247,10 @@ altTypes env t expr
       (CaseOpen _ _ alts _, A a) -> do fss <- mapM (\(c,_,_) -> openFields env c a) alts
                                        return (map (map V) fss ++ [[]])
       _ -> Left ("cannot destructure a value of type " ++ ppr t)
+
+-- the context of the body of a lambda with parameters `ps`
+lamGamma :: [(Path,Mode,VType)] -> Gamma -> Gamma
+lamGamma ps g = bindAll [(x,V t) | (x,_,t) <- ps] (M.delete nameHole g)
 
 -- The context of the body of `[unbox-ru]`: the contents `z.contents` of the box must have
 -- been read, and the binder is the credit of the block, a new root, whose tag follows from the
@@ -527,7 +532,7 @@ inferA env g val
              _ -> Left ("unknown open constructor " ++ show c)
       Lam ps r e -> do when (any containsLinear [t | x <- S.toList (fvA val), Just t <- [M.lookup x g]])
                          (Left "cannot capture reuse credits or cells in a closure")
-                       checkE env (bindAll [(x,V t) | (x,_,t) <- ps] (M.delete nameHole g)) yieldJoins e r
+                       checkE env (lamGamma ps g) yieldJoins e r
                        return (AFun [(m,t) | (_,m,t) <- ps] r)
       BoxAt r v -> do tr <- inferV env g (Var r)
                       checkReuseTy (V tr)

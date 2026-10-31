@@ -49,7 +49,7 @@ import Common.Name
 import Common.NamePrim( nameYielding, nameYieldExtend, nameCoreHnd )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Traversal( descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut, fvE, mapA, mapV, within )
+import Backend.Typed.Traversal( descendE, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut, fvE, lamsV, mapA, mapV, within )
 import Backend.Typed.Passes.Common( NameSupply, altBodies, cloneE, freshFor, freshPathFrom, replaceA, replaceE, replaceV )
 import Backend.Typed.Types( Types(..), inst )
 
@@ -87,13 +87,7 @@ yE w dummy expr
                           (if dummy then yielded w else id) <$> yE w dummy e3'
 
 yV :: VVal -> Y VVal
-yV = descendV yA yV
-
-yA :: AVal -> Y AVal
-yA val
-  = case val of
-      Lam ps r e -> Lam ps r <$> yE r True e
-      _ -> descendA pure yA yV val
+yV = lamsV (\_ r -> yE r True)
 
 -- `let y = yielding() in case y of { inj0 _ -> e₂; inj1 _ -> e₃ }`: the test, its
 -- continuation, and its yielding branch, with whether it is a copy (that needs fresh roots).

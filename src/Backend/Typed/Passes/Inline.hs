@@ -35,29 +35,21 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Maybe( fromMaybe )
 import Data.Functor.Const( Const(..) )
-import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Types( dupType )
-import Backend.Typed.Traversal( descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut, mapA, mapV )
-import Backend.Typed.Passes.Common( defScope, project, substEIn, substVType, valueAt )
+import Backend.Typed.Traversal( descendA, descendAll, descendV, mapV )
+import Backend.Typed.Passes.Common( mapAll, defGamma, descendTyped, defScope, perBody, project, substEIn, substVType, valueAt )
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
+import Backend.Typed.Query( Env, Gamma, envOf, inferVar, lamGamma )
 
 -- the structural values bound by lets
 type Values = M.Map Path VVal
 
 inlineProgram :: Program -> (Program,[String])
 inlineProgram prog
-  = let inlined = prog{ progDefs = map inlineDef (progDefs prog) }
-        run d = case evalM (reuseE (defBody d)) (envOf inlined,params d,M.empty,sources (defBody d)) () of
-                  Right e -> (d{ defBody = e },[])
-                  Left err -> (d,[show (defName d) ++ ": " ++ err])
-        (defs,errs) = unzip (map run (progDefs inlined))
-    in (inlined{ progDefs = defs },concat errs)
+  = perBody (\d -> evalM (reuseE (defBody d)) (envOf inlined,defGamma d,M.empty,sources (defBody d)) ()) inlined
   where
-    params DefFun{ defArgs = ps } = M.fromList [(x,V t) | (x,_,t) <- ps]
-    params DefVal{} = M.empty
+    inlined = prog{ progDefs = map inlineDef (progDefs prog) }
 
 inlineDef :: Def -> Def
 inlineDef def
@@ -95,22 +87,13 @@ structural v
       _ -> False
 
 valuesE :: VExpr -> (Values,S.Set Path)
-valuesE expr = here <> getConst (descendE (const (Const mempty)) (Const . valuesV) (\_ e -> Const (valuesE e)) expr)
+valuesE expr = here <> getConst (descendAll (\_ e -> Const (valuesE e)) expr)
   where
     here = case expr of
              Let x _ (Ret v) _ | structural v -> (M.singleton x v,S.empty)
              Deref _ (Var x) _ _ -> (M.empty,S.singleton x)
              Dup x _ _ -> (M.empty,S.singleton x)
              _ -> mempty
-
-valuesV :: VVal -> (Values,S.Set Path)
-valuesV = getConst . descendV (Const . valuesA) (Const . valuesV)
-
-valuesA :: AVal -> (Values,S.Set Path)
-valuesA val
-  = case val of
-      Lam _ _ e -> valuesE e
-      _ -> getConst (descendA (const (Const mempty)) (Const . valuesA) (Const . valuesV) val)
 
 -- remove the lets of the inlined values, and the forms that use them as a whole
 inlineE :: Values -> VExpr -> VExpr
@@ -119,63 +102,22 @@ inlineE vals expr
       Let x _ _ e | M.member x vals -> inlineE vals e
       Proj _ (Var z) _ _ e | Just Tuple{} <- known vals z -> inlineE vals e
       CaseV _ (Var z) alts | Just (Inj i _ _) <- known vals z, (e:_) <- [e | (j,_,e) <- alts, j == i] -> inlineE vals e
-      _ -> runIdentity (descendE Identity (Identity . inlineV vals) (\_ e -> Identity (inlineE vals e)) expr)
-
-inlineV :: Values -> VVal -> VVal
-inlineV vals = mapV (inlineA vals) (inlineV vals)
-
-inlineA :: Values -> AVal -> AVal
-inlineA vals val
-  = case val of
-      Lam ps r e -> Lam ps r (inlineE vals e)
-      _ -> mapA id (inlineA vals) (inlineV vals) val
+      _ -> mapAll (\_ -> inlineE vals) expr
 
 -- The enum facts are local to a branch, unlike the structural lets above. The sources of
 -- the definition give the variables with the bits of others.
 type Reuse a = M (Env,Gamma,Values,Sources) () a
 
-bindReuse :: [(Path,Ty)] -> Reuse a -> Reuse a
-bindReuse bs = local (\(env,g,facts,src) -> (env,bindAll bs g,facts,src))
-
+-- In an alternative of a case on an enum, the enum is known.
 reuseE :: VExpr -> Reuse VExpr
 reuseE expr
-  | Just ds <- destructAOf expr
-  = do (env,g,_,_) <- ask
-       t <- liftE (inferVar g (dsScrut ds))
-       tss <- liftE (altTypes env t expr)
-       es <- sequence [bindReuse (zip xs ts) (reuseE e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
-       return (dsBuild ds (dsMode ds) (dsScrut ds) es)
-  | Just ds <- destructVOf expr
-  = do (env,g,_,_) <- ask
-       t <- liftE (inferV env g (dsScrut ds))
-       tss <- liftE (altTypes env (V t) expr)
-       let enumBranches = case expr of
-             CaseV _ (Var z) alts | enumType t -> [local (\(env,g,facts,src) -> (env,g,M.insert z (Inj i t UnitV) facts,src)) | (i,_,_) <- alts]
-             _ -> repeat id
-       v <- reuseV (dsScrut ds)
-       es <- sequence [bindReuse (zip xs ts) (enumBranch (reuseE e)) | (enumBranch,((xs,e),ts)) <- zip enumBranches (zip (dsAlts ds) tss)]
-       return (dsBuild ds (dsMode ds) v es)
-reuseE expr
-  = case expr of
-      Let x t e1 e2 -> Let x t <$> reuseE e1 <*> bindReuse [(x,V t)] (reuseE e2)
-      LetYield x t e1 e2 e3 -> LetYield x t <$> reuseE e1 <*> bindReuse [(x,V t)] (reuseE e2) <*> reuseE e3
-      -- a jump may give up the contents of a box that the join body captures
-      Join j tvs ps e1 e2 -> Join j tvs ps <$> bindReuse [(x,V t) | (x,_,t) <- ps] (reuseE e1) <*> reuseE e2
-      UnboxRu z r e -> do (env,g,facts,src) <- ask
-                          g' <- liftE (unboxRuGamma g z r)
-                          UnboxRu z r <$> local (const (env,g',facts,src)) (reuseE e)
-      CopyRu z r e -> do (env,g,facts,src) <- ask
-                         g' <- liftE (copyRuGamma g z r)
-                         CopyRu z r <$> local (const (env,g',facts,src)) (reuseE e)
-      Lock z c e -> do (env,g,facts,src) <- ask
-                       g' <- liftE (lockGamma g z c)
-                       Lock z c <$> local (const (env,g',facts,src)) (reuseE e)
-      IsUnique x e1 e2 -> do (env,g,facts,src) <- ask
-                             IsUnique x <$> local (const (env,uniqueGamma g x,facts,src)) (reuseE e1) <*> reuseE e2
-      Dup x y e -> do (_,g,_,_) <- ask
-                      t <- liftE (inferVar g x >>= dupType)
-                      Dup x y <$> bindReuse [(y,t)] (reuseE e)
-      _ -> descendE pure reuseV (\_ -> reuseE) expr
+  = do (env,g,facts,src) <- ask
+       let under g' = local (const (env,g',facts,src)) . reuseE
+       case expr of
+         CaseV m (Var z) alts | Right (V t) <- inferVar g z, enumType t
+           -> CaseV m (Var z) <$> sequence [(,,) i x <$> local (const (env,M.insert x (V VUnit) g,M.insert z (Inj i t UnitV) facts,src)) (reuseE e)
+                                           | (i,x,e) <- alts]
+         _ -> descendTyped env g reuseV under expr
 
 enumType :: VType -> Bool
 enumType (VSum ts) = not (null ts) && all ((== VUnit) . snd) ts
@@ -193,8 +135,7 @@ reuseA val
                       return (BoxAt r (case t of
                         V (VReuse _ _ (Just (Contents _ old _))) -> restore g facts src old v'
                         _ -> v'))
-      Lam ps r e -> Lam ps r <$> bindReuse [(x,V t) | (x,_,t) <- ps]
-                                  (local (\(env,g,_,src) -> (env,g,M.empty,src)) (reuseE e))
+      Lam ps r e -> Lam ps r <$> local (\(env,g,_,src) -> (env,lamGamma ps g,M.empty,src)) (reuseE e)
       _ -> descendA pure reuseA reuseV val
 
 -- Prefer the old field's variable, or one with its bits, only where the branch proves it

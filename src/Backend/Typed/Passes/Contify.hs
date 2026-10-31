@@ -19,10 +19,10 @@ import Data.Functor.Identity( Identity(..) )
 import Common.Name
 import Common.NamePrim( nameOpenNone )
 import Backend.Typed.Syntax
-import Backend.Typed.Passes.Common( NameSupply, freshFor, freshNameFrom, renameE )
-import Backend.Typed.Traversal( bindersE, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut, fvA, fvE, fvV )
+import Backend.Typed.Passes.Common( defGamma, descendTyped, lamsTyped, NameSupply, freshFor, freshNameFrom, perBody, renameE )
+import Backend.Typed.Traversal( bindersE, descendE, fvA, fvE, fvV )
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, lockGamma )
+import Backend.Typed.Query( Env, Gamma, envOf, inferVar )
 
 type P a = M () NameSupply a
 
@@ -30,20 +30,12 @@ fresh :: String -> P Name
 fresh s = state (freshNameFrom ("cont" ++ s))
 
 contifyProgram :: Program -> (Program,[String])
-contifyProgram prog
-  = let run d = case evalM (contifyE (envOf prog) (gamma d) (defBody d)) () (freshFor d) of
-                  Right body -> (d{ defBody = body },[])
-                  Left err -> (d,[show (defName d) ++ ": " ++ err])
-        (defs,errs) = unzip (map run (progDefs prog))
-    in (prog{ progDefs = defs },concat errs)
-  where
-    gamma DefFun{ defArgs = ps } = M.fromList [(x,V t) | (x,_,t) <- ps]
-    gamma DefVal{} = M.empty
+contifyProgram prog = perBody (\d -> evalM (contifyE (envOf prog) (defGamma d) (defBody d)) () (freshFor d)) prog
 
 contifyE :: Env -> Gamma -> VExpr -> P VExpr
 contifyE env g expr
   = case expr of
-      Let f t (Ret (Ptr a lam@(Lam ps _ body))) rest
+      Let f _ (Ret (Ptr _ lam@(Lam ps _ body))) rest
         | tailOnly f rest
         , let captures = S.toList (fvA lam)
         , all (`notElem` bindersE rest) (f:captures)
@@ -57,32 +49,10 @@ contifyE env g expr
                               body' <- contifyE env (M.fromList [(x,V v) | (x,_,v) <- params]) closed
                               rest' <- contifyE env g (redirect f j (map Var captures) rest)
                               return (Join j [] params body' rest')
-                Nothing -> Let f t <$> contifyE env g (Ret (Ptr a lam)) <*> contifyE env (M.insert f (V t) g) rest
-      Let x t e1 e2 -> Let x t <$> contifyE env g e1 <*> contifyE env (M.insert x (V t) g) e2
-      Join j tvs ps e1 e2 -> Join j tvs ps <$> contifyE env (M.fromList [(x,V t) | (x,_,t) <- ps]) e1 <*> contifyE env g e2
-      Lock z c e -> do g' <- liftE (lockGamma g z c)
-                       Lock z c <$> contifyE env g' e
-      _ | Just ds <- destructAOf expr
-        -> do t <- liftE (inferVar g (dsScrut ds))
-              destruct t (dsAlts ds) (dsBuild ds (dsMode ds) (dsScrut ds))
-        | Just ds <- destructVOf expr
-        -> do v <- contifyV env g (dsScrut ds)
-              t <- liftE (inferV env g v)
-              destruct (V t) (dsAlts ds) (dsBuild ds (dsMode ds) v)
+                Nothing -> descend
       _ -> descend
   where
-    descend = descendE pure (contifyV env g) (\_ -> contifyE env g) expr
-    destruct t alts build
-      = do tss <- liftE (altTypes env t expr)
-           es <- sequence [contifyE env (bindAll (zip xs ts) g) e | ((xs,e),ts) <- zip alts tss]
-           return (build es)
-
-contifyV :: Env -> Gamma -> VVal -> P VVal
-contifyV env g = descendV (contifyA env g) (contifyV env g)
-
-contifyA :: Env -> Gamma -> AVal -> P AVal
-contifyA env g (Lam ps r e) = Lam ps r <$> contifyE env (bindAll [(x,V t) | (x,_,t) <- ps] g) e
-contifyA env g a = descendA pure (contifyA env g) (contifyV env g) a
+    descend = descendTyped env g (lamsTyped g (contifyE env)) (contifyE env) expr
 
 -- Elaboration applies a closure by dereferencing it into a boxed operand.
 callOf :: Path -> VExpr -> Maybe [VVal]
