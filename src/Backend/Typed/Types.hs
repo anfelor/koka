@@ -9,13 +9,14 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents, collapse
                           , unrollMu, rep, boxrep, boxA, shapeA, shapeLeaves, leafCons, isPtr, varV, forallA, prodV, prodFields, sumTypes, sumAlts, sumOf
+                          , dupType, isTrivialWith, isShape, containsLinear
                           , applyA, vtInt, vtString, vtChar, vtFloat, atAny
                           ) where
 
 import Data.Functor.Identity( Identity(..) )
 import qualified Data.Map as M
 import Control.Monad( foldM )
-import Common.NamePrim( nameTpInt, nameTpString, nameTpAny )
+import Common.NamePrim( nameTpInt, nameTpString, nameTpAny, nameTpReuse )
 import Backend.Typed.Syntax
 import Backend.Typed.Layout( scalarField )
 
@@ -447,3 +448,84 @@ matchAWith tvs sub pat t
                  Just s' -> if eqA s s' then Just sub else Nothing
     matchAs sb ps ts | length ps == length ts = foldM (\sb' (p,s) -> matchAWith tvs sb' p s) sb (zip ps ts)
                      | otherwise = Nothing
+
+-- The duplication rule: the type of the copy of a variable of type `t`
+dupType :: Ty -> Either String Ty
+dupType t
+  = case t of
+      V (VReuse _ _ _) -> Left "dup of a reuse credit"
+      V (VCell _ _) -> Left "dup of a cell"
+      V _ -> Right t
+      A _ -> Left "dup of a boxed value"
+
+-- values of these types need no reference counting, where `unroll` gives the body of a
+-- named type if it is known (a type with a single constructor without fields, for example)
+isTrivialWith :: (AType -> Maybe AType) -> Ty -> Bool
+isTrivialWith unroll t
+  = case t of
+      V v -> trivialV v
+      A a -> trivialA a
+  where
+    trivialV v = case v of
+                   VRaw _       -> True
+                   VUnit        -> True
+                   VProd fs     -> all (trivialV . snd) fs
+                   VSum ts      -> all (trivialV . snd) ts
+                   VExists _ b  -> trivialV b
+                   VPtr a       -> trivialA a
+                   VReuse _ _ _   -> False
+                   VCtx _ _ _   -> False
+                   VCell _ _    -> False
+    trivialA a = case a of
+                   AUnit     -> True
+                   ASum ts   -> all (trivialA . snd) ts
+                   ACon n _  -> n == nameTpReuse || maybe False trivialA (unroll a)
+                   ALazy l b -> trivialA l && trivialA b
+                   AMu _ _ _ _ -> maybe False trivialA (unroll a)
+                   ABox _    -> False
+                   AScalar _ -> False
+                   AFun _ _  -> False
+                   AForall _ _ -> False
+                   AVar _    -> False
+                   AApp _ _  -> False
+                   ALam _ _  -> False
+
+-- Boxed sum alternatives must have a tag determined by their construction: sums are flat and
+-- their tags are increasing.
+isShape :: AType -> Bool
+isShape a = case a of
+  ASum ts -> not (null ts) && all (\(i,t) -> i >= 1 && isAlt t) ts
+             && and [i < j | ((i,_),(j,_)) <- zip ts (drop 1 ts)]
+  _ -> isAlt a
+  where
+    isAlt t = case t of
+                AUnit -> True
+                ABox _ -> True
+                _ -> False
+
+-- Credits and cells have ownership but no reference count: duplication cannot create another
+-- owner, so they are not stored in a heap block or captured by a closure.
+containsLinear :: Ty -> Bool
+containsLinear (V v) = case v of
+  VPtr a -> containsLinear (A a)
+  VProd fs -> any (containsLinear . V . snd) fs
+  VSum ts -> any (containsLinear . V . snd) ts
+  VExists _ b -> containsLinear (V b)
+  VUnit -> False
+  VRaw _ -> False
+  VReuse _ _ _ -> True
+  VCtx _ _ _ -> False
+  VCell _ _ -> True
+containsLinear (A a) = case a of
+  ABox v -> containsLinear (V v)
+  AScalar _ -> False
+  ASum ts -> any (containsLinear . A . snd) ts
+  AForall _ b -> containsLinear (A b)
+  ALam _ b -> containsLinear (A b)
+  ALazy l b -> containsLinear (A l) || containsLinear (A b)
+  AMu _ _ b ts -> any (containsLinear . A) (b : ts)
+  ACon _ ts -> any (containsLinear . A) ts
+  AApp _ ts -> any (containsLinear . A) ts
+  AVar _ -> False
+  AFun _ _ -> False
+  AUnit -> False

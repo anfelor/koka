@@ -80,10 +80,9 @@ import Control.Monad( unless, when, forM_, foldM )
 import Data.Functor.Const( Const(..) )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Common
-import Backend.Typed.Traversal( child, descendV, prefixes, sibling, within )
+import Backend.Typed.Traversal( child, descendV, destructAOf, destructVOf, dsAlts, dsMode, dsScrut, fieldsAt, fvA, fvE, isRead, jumpArgs, keepsPointer, prefixes, sibling, within )
 import Backend.Typed.Monad
-import Backend.Typed.Types( prodV )
+import Backend.Typed.Types( dupType, prodV )
 import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, paramModes, trivialTy )
 
 -- the mode of the variables at and below each owner: the roots in scope, and in the body of a

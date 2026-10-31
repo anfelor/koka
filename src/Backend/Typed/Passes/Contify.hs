@@ -19,9 +19,8 @@ import Data.Functor.Identity( Identity(..) )
 import Common.Name
 import Common.NamePrim( nameOpenNone )
 import Backend.Typed.Syntax
-import Backend.Typed.Common
 import Backend.Typed.Passes.Common( NameSupply, freshFor, freshNameFrom, renameE )
-import Backend.Typed.Traversal( descendA, descendE, descendV )
+import Backend.Typed.Traversal( bindersE, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut, fvA, fvE, fvV )
 import Backend.Typed.Monad
 import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, lockGamma )
 

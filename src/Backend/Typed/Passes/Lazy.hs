@@ -50,7 +50,7 @@ import Common.NamePrim( nameLazyMemoize, nameLazyMemoizeTarget, nameLazyIsWhnf, 
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Passes.Common( NameSupply, altBodies, freshFor, freshPathFrom, renameE )
-import Backend.Typed.Traversal( child, descendA, descendE, descendV, injAStep, mapA, mapV )
+import Backend.Typed.Traversal( child, descendA, descendE, descendV, fvE, fvV, injAStep, mapA, mapV )
 import Backend.Typed.Monad
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Query( Env(..), envOf, unrollT, reuseSize, lazySides )

@@ -40,7 +40,8 @@ import Control.Monad( foldM, guard )
 import Data.List( nub, partition )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Traversal( boxTag, child, descendA, descendE, descendV, stepsFrom, within )
+import Backend.Typed.Types( dupType )
+import Backend.Typed.Traversal( boxTag, child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut, fieldsAt, stepsFrom, within )
 import Backend.Typed.Passes.Common( NameSupply, dropValue, freshFor, freshNameFrom, freshPathFrom, projectAll, scopeOf )
 import Backend.Typed.Monad
 import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferAVar, inferV, altTypes, unboxRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize, trivialTy )

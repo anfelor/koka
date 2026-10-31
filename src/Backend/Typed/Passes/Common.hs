@@ -20,7 +20,6 @@ import Control.Monad( foldM )
 import Backend.Typed.Syntax
 import Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents )
 import Backend.Typed.Traversal
-import Backend.Typed.Common
 import Common.Name( Name, newHiddenName )
 
 -- A fresh-name supply belongs to one definition, shared by all of a pass's

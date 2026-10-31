@@ -64,11 +64,11 @@ import Data.Maybe( isJust, isNothing, listToMaybe )
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Traversal( child, descendA, descendV, prefixes, stepsFrom, within )
+import Backend.Typed.Traversal( Destruct(..), child, descendA, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut, fieldsAt, fvA, fvE, fvV, isRead, prefixes, scrutVar, stepsFrom, takesContents, within )
 import Backend.Typed.Passes.Common( NameSupply, derefOf, dropValue, freshFor, freshPathFrom, nameParts, partAt, projAt, projectAll, renameE, renamePrefix, scopeOf )
 import Backend.Typed.Monad
 import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, altTypes, lockGamma, uniqueGamma, paramModes, trivialTy )
-import Backend.Typed.Types( inst, isPtr )
+import Backend.Typed.Types( dupType, inst, isPtr )
 
 type VarSet = S.Set Path
 

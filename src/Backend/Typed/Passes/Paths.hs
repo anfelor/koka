@@ -35,8 +35,7 @@ import Data.Maybe( listToMaybe )
 import Data.Functor.Const( Const(..) )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Common
-import Backend.Typed.Traversal( child, descendA, descendB, descendV, pathOf )
+import Backend.Typed.Traversal( child, descendA, descendB, descendV, destructAOf, destructVOf, dsMode, pathOf, scrutVar )
 import Backend.Typed.Passes.Common( replaceAType, replaceContents, replaceVType )
 
 -- the new names of the variables in scope

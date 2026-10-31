@@ -33,8 +33,7 @@ import Data.Functor.Const( Const(..) )
 import Data.Functor.Identity( Identity(..) )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Common
-import Backend.Typed.Traversal( descendE, mapA, mapV )
+import Backend.Typed.Traversal( descendE, fvE, jumpArgs, mapA, mapV )
 
 sinkJoinsProgram :: Program -> Program
 sinkJoinsProgram prog = prog{ progDefs = [d{ defBody = sjE (defBody d) } | d <- progDefs prog] }

@@ -34,8 +34,7 @@ import Data.List( transpose )
 import Data.Functor.Const( Const(..) )
 import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
-import Backend.Typed.Common
-import Backend.Typed.Traversal( descendA, descendE, descendV, mapA, mapV )
+import Backend.Typed.Traversal( bindersE, descendA, descendE, descendV, fvV, jumpArgs, mapA, mapV )
 import Backend.Typed.Passes.Common( Scope, bindScope, defScope, scopeOf, substEIn, substJump, valueAt )
 
 joinArgsProgram :: Program -> Program
