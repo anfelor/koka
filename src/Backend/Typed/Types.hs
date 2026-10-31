@@ -8,16 +8,16 @@
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents, collapse
-                          , unrollMu, rep, boxrep, boxA, shapeA, shapeLeaves, leafCons, isPtr, varV, forallA, prodV, prodFields, sumTypes, sumAlts, sumOf
-                          , leaves, isEnum, scalarField
+                          , unrollMu, isPtr, forallA, prodV, prodFields
+                          , leaves, isEnum
                           , dupType, isTrivialWith, isShape, containsLinear
-                          , applyA, vtInt, vtString, vtChar, vtFloat, atAny
+                          , applyA, vtInt, vtString, vtChar, vtFloat
                           ) where
 
 import Data.Functor.Identity( Identity(..) )
 import qualified Data.Map as M
 import Control.Monad( foldM )
-import Common.NamePrim( nameTpInt, nameTpString, nameTpAny, nameTpReuse )
+import Common.NamePrim( nameTpInt, nameTpString, nameTpReuse )
 import Backend.Typed.Syntax
 
 type Sub = M.Map TVar AType
@@ -95,29 +95,9 @@ traverseReuseContents f = goV
 unrollMu :: AType -> TVar -> [TVar] -> AType -> [AType] -> AType
 unrollMu f t vs a bs = inst (t:vs) (f:bs) a
 
--- a value at a type variable: `a*`
-varV :: TVar -> VType
-varV v = VPtr (AVar v)
-
 forallA :: [TVar] -> AType -> AType
 forallA [] a  = a
 forallA tvs a = AForall tvs a
-
--- the alternatives of a boxed sum (a singleton datatype has no sum wrapper)
-sumTypes :: AType -> [AType]
-sumTypes a
-  = case a of
-      ASum ts -> map snd ts
-      _ -> [a]
-
--- The index of an alternative is its runtime tag (Koka's tags start at 1), not its position
--- in the list. Filtering alternatives therefore preserves their tags.
-sumAlts :: [AType] -> [(Int,AType)]
-sumAlts ts = zip [1..] ts
-
-sumOf :: [AType] -> AType
-sumOf [a] = a
-sumOf ts = ASum (sumAlts ts)
 
 -- the product of fields named by their position (`prodFields`)
 prodV :: [VType] -> VType
@@ -134,9 +114,6 @@ vtInt    = VPtr (ACon nameTpInt [])
 vtString = VPtr (ACon nameTpString [])
 vtChar   = VRaw RChar
 vtFloat  = VRaw RFloat64
-
-atAny :: AType
-atAny = ACon nameTpAny []
 
 substV :: Sub -> VType -> VType
 substV sub t
@@ -222,46 +199,6 @@ isPtr t
       VCtx _ _ _  -> False
       VCell _ _   -> False
 
--- the boxed type that instantiates a type variable for a Koka type argument of type `V` (Koka's
--- `box`); a closure there takes and returns `boxrep`s of its types (Koka's `boxedFunType`).
--- `rep` is idempotent (`rep (VPtr (rep t)) == rep t`), so that
--- `list<() -> a>[a := rep float64]` is `list<rep (() -> float64)>` without a deep coercion.
-rep :: VType -> AType
-rep t
-  = case t of
-      VPtr a -> boxFunA a
-      _      -> boxA t
-
--- the representation of a value of type `V` at a type variable
-boxrep :: VType -> VType
-boxrep t = VPtr (rep t)
-
-boxFunA :: AType -> AType
-boxFunA a
-  = case a of
-      AFun ps r     -> AFun [(m,boxrep p) | (m,p) <- ps] (boxrep r)
-      AForall tvs b -> AForall tvs (boxFunA b)
-      ABox _        -> a
-      AScalar _     -> a
-      AUnit         -> a
-      ASum _        -> a
-      AVar _        -> a
-      AApp _ _      -> a
-      ACon _ _      -> a
-      ALam _ _      -> a
-      ALazy _ _     -> a
-      AMu _ _ _ _   -> a
-
--- Koka's `box`: a raw value is boxed by itself, any other value as a shape, and a product of a
--- single raw value or enumeration (`scalarField`) like that field
-boxA :: VType -> AType
-boxA t
-  = case t of
-      VSum [(_,s)] -> boxA s
-      VRaw r   -> AScalar r
-      _ | Just s <- scalarField t -> boxA s
-        | otherwise -> shapeA t
-
 -- leaves of a product
 leaves :: VType -> [VType]
 leaves t
@@ -286,41 +223,6 @@ isEnum t
     isUnitT (VProd fs) = all (isUnitT . snd) fs
     isUnitT (VExists _ b) = isUnitT b
     isUnitT _ = False
-
--- the only field of a product of a raw value or an enumeration and units, which Koka boxes like
--- that field: as `Scalar raw`, or as the shape of the enumeration
-scalarField :: VType -> Maybe VType
-scalarField t
-  = case (t, leaves t) of
-      (VSum _, _)      -> Nothing
-      (VRaw _, _)      -> Nothing
-      (_, [s@(VRaw _)]) -> Just s
-      (_, [s]) | isEnum s -> Just s
-      _                -> Nothing
-
--- the shape of a boxed value: a flat sum of its leaves, which have tags
-shapeA :: VType -> AType
-shapeA t = sumOf (shapeLeaves t)
-
--- the constructors of the leaves of a value sum (`shapeLeaves`): those of a nested sum are its own
-leafCons :: [(Con,VType)] -> [Con]
-leafCons ts = concat [case s of { VSum us@(_:_) -> leafCons us; _ -> [c] } | (c,s) <- ts]
-
--- the alternatives of a value, where those of nested sums are spliced in, in order
-shapeLeaves :: VType -> [AType]
-shapeLeaves t
-  = case t of
-      VUnit   -> [AUnit]
-      VSum [(_,s)] -> shapeLeaves s
-      VSum ts | not (null ts) -> concatMap (shapeLeaves . snd) ts
-      VSum _      -> [ABox t]
-      VPtr _      -> [ABox t]
-      VProd _     -> [ABox t]
-      VRaw _      -> [ABox t]
-      VExists _ _ -> [ABox t]
-      VReuse _ _ _  -> [ABox t]
-      VCtx _ _ _  -> [ABox t]
-      VCell _ _   -> [ABox t]
 
 eqV :: VType -> VType -> Bool
 eqV s t
