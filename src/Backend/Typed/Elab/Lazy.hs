@@ -42,7 +42,7 @@
   passes it, and the tests of it are cases of a known value (`Simplify`).
   Only `lazy-eval`, which other modules may call, remains, and dispatches to its copies. The binders of a lock have the names that
   `[lock]` requires before `Paths`: the box `y.roll.delay.injⱼ` of the lazy value `y`, and its
-  contents `y.roll.delay.injⱼ.contents`, which the lock renames to `y.roll.delay.injⱼ.taken`.
+  contents `y.roll.delay.injⱼ.contents`.
 
   Before all of this, Koka's tests of WHNF become `[if-whnf]` (`whnfE`).
 -}
@@ -218,11 +218,11 @@ cellE cs expr
     operands e = getConst (descendE (Const . S.singleton) (Const . fvV) (\_ _ -> Const S.empty) e)
 
 -- Lock the box `z` (the binder `b`) of a lazy alternative of the lazy value `x` in `e`, whose
--- uses of `x`, `b` and the contents of `b` become uses of the cell, `z` and `z.taken`.
+-- uses of `x`, `b` and the contents of `b` become uses of the cell, `z` and `z.contents`.
 lock :: (Path,Path,Int,AType) -> Path -> Path -> VExpr -> L VExpr
 lock (x,c,n,a) z b e
   = do let (contents,body) = case e of
-                               Unbox _ b' p e' | b' == b -> ([(p,child z STaken)],e')
+                               Unbox _ b' p e' | b' == b -> ([(p,child z SContents)],e')
                                _ -> ([],e)
        body' <- cellE (M.singleton c (n,a)) (renameUses (M.fromList ((x,c) : (b,z) : contents)) body)
        return (Unbox Borrowed z (child z SContents) (Lock z c body'))

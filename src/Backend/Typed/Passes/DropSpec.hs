@@ -20,14 +20,11 @@
   takes the parts and the credit:
 
     join j(y₁,..,yₙ,r : ◇n[k; z.contents : V]) = free r; e
-    if-unique z then (let @ r' = z in drop ..; jump j(x₁',..,xₙ',r'))
+    if-unique z then (let @ r' = z in drop ..; jump j(x₁,..,xₙ,r'))
     else (val y₁' = dup x₁; ..; val yₙ' = dup xₙ; drop z; jump j(y₁',..,yₙ',no-reuse n [k; z.contents : V]))
 
-  In the unique branch the contents are renamed to `z.taken` (`[unbox-ru]`), so xᵢ' is the
-  part of `z.taken` at the steps of xᵢ from `z.contents`. A trivial part is copied too
-  (`Perceus.copy`), so that `e` does not name the contents. The description of the credit
-  names the contents and the tag k of the block, which follows from the path of `z`. The
-  empty credit of the shared branch has the same description, so that the jumps agree on it
+  The description of the credit names the contents and the tag k of the block, which
+  follows from the path of `z`. The empty credit of the shared branch has the same description, so that the jumps agree on it
   (and `FillCredits` may fill it with a copy of the block). The shared branch is the
   original code. Freeing the credit releases the block, unless `Reuse` uses it for an
   allocation in `e`.
@@ -122,15 +119,13 @@ specialize parts z s n e
            payload = Just (Contents (Just (boxTag z)) (Var p) s)
            t = VReuse MaybeEmpty n payload
            ps = [(y,Owned,ty) | ((x,y),_) <- parts, Just (V ty) <- [M.lookup x g]] ++ [(r,Owned,t)]
-       -- the unique branch names the contents `z.taken`
-       let tk = rebase z
-       uniqueCopies <- mapM (\((x,_),way) -> case way of Moved -> return (tk x); _ -> fresh "u") parts
-       let moved = [tk x | ((x,_),Moved) <- parts]
-           unders = [(tk q,tk b) | (_,Under q b) <- parts]
-           covered = [Dup (tk x) c | (((x,_),Covered),c) <- zip parts uniqueCopies]
-           copies b = [Dup (tk x) c | (((x,_),Under _ b'),c) <- zip parts uniqueCopies, tk b' == b]
+       uniqueCopies <- mapM (\((x,_),way) -> case way of Moved -> return x; _ -> fresh "u") parts
+       let moved = [x | ((x,_),Moved) <- parts]
+           unders = [(q,b) | (_,Under q b) <- parts]
+           covered = [Dup x c | (((x,_),Covered),c) <- zip parts uniqueCopies]
+           copies b = [Dup x c | (((x,_),Under _ b'),c) <- zip parts uniqueCopies, b' == b]
        g' <- liftE (unboxRuGamma g z r')
-       taken <- withGamma g' (dropExcept (moved ++ nub (map fst unders)) (tk p) s
+       taken <- withGamma g' (dropExcept (moved ++ nub (map fst unders)) p s
                   (compose covered (compose [compose (copies b) . Drop b | b <- nub (map snd unders)] (Jump j [] (map Var uniqueCopies ++ [Var r'])))))
        unique <- dsE (UnboxRu z r' taken)
        sharedCopies <- mapM (const (fresh "u")) parts

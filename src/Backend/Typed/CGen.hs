@@ -561,12 +561,13 @@ genRead cx dest x t ue e
        s <- genE (bindVar cx x (V t)) dest e
        return ([declare (cty ct) x ue] ++ s)
 
--- `[unbox-ru]` of `z` takes its block as a credit, which may then be freed or written, and
--- renames its contents to `z.taken`.
+-- `[unbox-ru]` of `z` takes its block as a credit, which may then be freed or written. Its
+-- contents were already loaded at `[bunbox]`.
 genUnboxRu :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
 genUnboxRu cx dest z r e
   = do g' <- liftC (unboxRuGamma (cxGamma cx) z r)
-       genTaken cx dest g' z e (declare "kk_reuse_t" r ("kk_datatype_as_ptr(kk_datatype_unbox(" <.> localName z <.> "),_ctx)"))
+       s <- genE cx{ cxGamma = g' } dest e
+       return (declare "kk_reuse_t" r ("kk_datatype_as_ptr(kk_datatype_unbox(" <.> localName z <.> "),_ctx)") : s)
 
 -- `[copy-ru]` of `z` allocates a block with the header of `z` and copies its payload. The
 -- header is not copied: the reference count of `z` may change concurrently if `z` is
@@ -588,18 +589,8 @@ genCopyRu cx dest z r e
 genLock :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
 genLock cx dest z c e
   = do g' <- liftC (lockGamma (cxGamma cx) z c)
-       genTaken cx dest g' z e (declare "kk_box_t" c (localName z))
-
--- The contents of `z` that are taken out of its block, with the declaration of the root that
--- holds the block (in the context `g'` of the body). Each part of `z.taken` that the body uses
--- is declared as a local, copied from its old name.
-genTaken :: Ctx -> Dest -> Gamma -> Path -> VExpr -> Doc -> G [Doc]
-genTaken cx dest g' z e root
-  = do locals <- forM [q | q <- S.toList (fvE e), q `within` child z STaken] $ \q ->
-                   do ct <- liftC (inferVar g' q) >>= ctOf
-                      return (declare (cty ct) q (localName (unrebase z q)))
-       s <- genE cx{ cxGamma = g', cxShared = S.map (rebase z) (cxShared cx) } dest e
-       return (locals ++ [root] ++ s)
+       s <- genE cx{ cxGamma = g' } dest e
+       return (declare "kk_box_t" c (localName z) : s)
 
 -- Koka's `box` of a scalar
 genScalar :: Ctx -> VVal -> G Doc

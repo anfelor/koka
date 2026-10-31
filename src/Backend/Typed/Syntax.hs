@@ -47,9 +47,8 @@
 
     - Variables of a trivial type are unrestricted: they may be weakened and contracted at either
       mode, and used owned or borrowed. They need no `dup` or `drop`. (Not in the paper.)
-      This includes those in the contents of a box, which code generation copies out of the
-      block at `[bunbox]`. Perceus still copies one (`[dup]`) that is needed after its box is
-      consumed, as `[unbox-ru]` and `[lock]` rename the contents.
+      This includes those in the contents of a box, also after the box is consumed, as code
+      generation copies them out of the block at `[bunbox]`.
     - A unique variable `x :! t` is owned and holds the only reference to its block. It may be used
       as an owned one. Any borrowed use of `x`, or of a variable on its path, may duplicate the
       reference and demotes it to `x : t`; branches agree on the weaker status.
@@ -60,7 +59,7 @@
       particular a borrowed argument of a call cannot be one that is passed owned.
     - The parts of an owned variable are owned: consuming a part takes it out of its parent, and
       the parent is consumed once all of its parts are: all fields of a product, the contents
-      `z.contents` (or `z.taken`) and the block `z.credit` of a box (neither of the latter
+      `z.contents` and the block `z.credit` of a box (neither of the latter
       is a binder, see `[unbox-ru]`), or the binder of any other destructuring. The binder of `[case-a]`,
       `[split-a]`, `[if-whnf]`, `[deref]` or `[unroll]` at a boxed type is the parent's pointer, and that of
       `[unpack]` (a no-op) is the parent itself: consuming it, or testing it with `[if-unique]`, consumes or tests the parent (so it is unique
@@ -259,7 +258,6 @@ data Step = SField Int Field       -- [proj]
           | SLo | SHi              -- [split-a]
           | SWhnf | SDelay         -- [if-whnf]
           | SContents | SCredit    -- [bunbox]: the contents, and the rest of the block (not a binder)
-          | STaken                 -- [unbox-ru], [lock]: the contents, taken out of the block (not a binder)
           | SOpen Name             -- [case-open]
           deriving (Eq,Ord)
 
@@ -281,7 +279,6 @@ instance Show Step where
              SDelay    -> "delay"
              SContents -> "contents"
              SCredit   -> "credit"
-             STaken    -> "taken"
              SOpen c   -> show c
 
 -- the constructor of an alternative of a sum, for reading the IR: steps and types compare by tag
@@ -744,7 +741,7 @@ data VExpr
   -- from `[if-unique]` and `[unbox-ru]` (`Reuse.dropReuse`):
   --
   --   let r = drop-reuse x in e  ≜  let^ box x.contents = x in
-  --                                 let r = (if-unique x then (let @ r' = x in discard x.taken; ret r')
+  --                                 let r = (if-unique x then (let @ r' = x in discard x.contents; ret r')
   --                                          else (drop x; ret no-reuse n)) in e
   | Drop Path VExpr
 
@@ -788,18 +785,16 @@ data VExpr
   -- and empty in the second, where nothing is left to consume.
   | IfFull Path VExpr VExpr
 
-  --   Γ[z.taken / z.contents], r : ◆n[tag(z); z.contents : V] ⊢ e : W    |V| = n
+  --   Γ, r : ◆n[tag(z); z.contents : V] ⊢ e : W    |V| = n
   --  ──────────────────────────────────────────────────────────────── [unbox-ru]
   --   Γ, z :! Box V ⊢ let @ r = z in e : W                  (z.contents :^ V ∈ Γ)
   --
   -- A unique `Box V` whose contents were read (`[bunbox]`) splits into its contents and its
   -- block, the inverse of `[box-at]`: the contents are taken out of the block without
   -- reference counting, and the block becomes the credit `r`, a new root. The contents are
-  -- the part of `z` that is left (the credit consumes the block `z.credit`), renamed to
-  -- `z.taken`: `Γ[z.taken / z.contents]` replaces the prefix `z.contents` of every variable
-  -- of Γ and keeps the rest of its path (`Common.rebase`), so the parts in scope stay in
-  -- scope, but are no longer in the block. The description of
-  -- `r` still names the old contents. With `[if-unique]` it makes `drop-reuse` of a box derivable. The block of `z`
+  -- the part of `z` that is left (the credit consumes the block `z.credit`); they keep their
+  -- names, as code generation loaded them at `[bunbox]`. The description of `r` names them
+  -- too, as the block still holds them until it is written. With `[if-unique]` it makes `drop-reuse` of a box derivable. The block of `z`
   -- has tag tag(z).
   | UnboxRu Path Path VExpr
 
@@ -816,14 +811,14 @@ data VExpr
   -- (`FillCredits`).
   | CopyRu Path Path VExpr
 
-  --   Γ[z.taken / z.contents], c : cell_|V|⟨τ⟩ | J ⊢ e : W
+  --   Γ, c : cell_|V|⟨τ⟩ | J ⊢ e : W
   --  ──────────────────────────────────────────────────────── [lock]
   --   Γ, z : Box V | J ⊢ let lock c = z in e : W
   --                 (z = y.roll.delay.p.injⱼ with y : τ, p ∈ {lo,hi}*; z.contents :^ V ∈ Γ)
   --
   -- The counterpart of `[unbox-ru]` for an owned, possibly shared, thunk (the `delay` step shows
   -- that z is one): its contents are taken
-  -- out of the block without reference counting and renamed to `z.taken`, as there, and its block becomes the cell `c`, a new root, which must be filled by `[memoize]` (or freed if it
+  -- out of the block without reference counting, as there, and its block becomes the cell `c`, a new root, which must be filled by `[memoize]` (or freed if it
   -- turns out to be unique, `[if-unique-cell]`). Consuming `z` consumes the pointer it was
   -- matched from (see "Structural rules").
   | Lock Path Path VExpr
