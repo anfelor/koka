@@ -12,6 +12,7 @@ module Backend.Typed.Passes.Peephole( peepholeProgram ) where
 import qualified Data.Map as M
 import Backend.Typed.Syntax
 import Backend.Typed.Common
+import Backend.Typed.Passes.Common( NameSupply, freshFor, freshPathFrom )
 import Backend.Typed.Traversal( descendA, descendE, descendV, within )
 import Backend.Typed.Monad
 import Backend.Typed.Query
