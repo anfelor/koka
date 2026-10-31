@@ -121,7 +121,7 @@ owning m
 --   allocates (such as a large `float64`). It has no tag, so it is not a shape, and it is not
 --   reused. Nothing relies on its uniqueness: `[if-unique]` and `[unbox-ru]` do not apply to it.
 --   `boxA` chooses it for a raw value outside a sum, and for a product whose only field is one
---   (`Layout.scalarField`), which Koka boxes like that field; an enumeration there is boxed as
+--   (`Types.scalarField`), which Koka boxes like that field; an enumeration there is boxed as
 --   its shape.
 -- - `a`, `a⟨B̄⟩` and `T⟨B̄⟩` without a definition are opaque: a value of such a type can only be
 --   passed around.
