@@ -45,7 +45,7 @@ import Data.Functor.Const( Const(..) )
 import Data.Monoid( Any(..), All(..) )
 import Control.Monad.State
 import Backend.Typed.Syntax
-import Backend.Typed.Traversal( child, descendA, descendE, descendV, fvE, fvV )
+import Backend.Typed.Traversal( child, descendA, descendAll, descendE, descendV, fvE, fvV )
 import Backend.Typed.Passes.Common( NameSupply, freshFor, freshPathFrom, substJump, yieldingAlts )
 
 type C a = State NameSupply a
@@ -69,7 +69,7 @@ fillE expr
         -> do c <- state (freshPathFrom "fc")
               u' <- fillE u
               Let r (VReuse Full n p) (IsUnique z u' (CopyRu z c (Drop z (Ret (Var c))))) <$> fillE e
-      _ -> descendE pure fillV (\_ -> fillE) expr
+      _ -> descendAll (\_ -> fillE) expr
 
 -- the description of a credit for the block of `z`
 describes :: Path -> Maybe Contents -> Bool
@@ -77,15 +77,6 @@ describes z p
   = case p of
       Just (Contents _ (Var x) _) -> x == child z SContents
       _ -> False
-
-fillV :: VVal -> C VVal
-fillV = descendV fillA fillV
-
-fillA :: AVal -> C AVal
-fillA val
-  = case val of
-      Lam ps r e -> Lam ps r <$> fillE e
-      _ -> descendA pure fillA fillV val
 
 -- Lean's `consumed`: every path consumes the credit directly, by an allocation in it or (if
 -- `freeing`) a `free`, and not by passing it on to a join point, function or result. Unlike in

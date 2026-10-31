@@ -11,9 +11,8 @@
 -- let out of its bound computation cannot capture a variable in its continuation.
 module Backend.Typed.Passes.Anf( anfProgram ) where
 
-import Data.Functor.Identity( Identity(..) )
+import Backend.Typed.Passes.Common( mapAll )
 import Backend.Typed.Syntax
-import Backend.Typed.Traversal( descendE, mapA, mapV )
 
 anfProgram :: Program -> Program
 anfProgram prog = prog{ progDefs = [d{ defBody = anfE (defBody d) } | d <- progDefs prog] }
@@ -21,15 +20,8 @@ anfProgram prog = prog{ progDefs = [d{ defBody = anfE (defBody d) } | d <- progD
 anfE :: VExpr -> VExpr
 anfE expr = case expr of
   Let x t e1 e2 -> bind x t (anfE e1) (anfE e2)
-  _ -> runIdentity (descendE Identity (Identity . anfV) (\_ -> Identity . anfE) expr)
+  _ -> mapAll (const anfE) expr
 
 bind :: Path -> VType -> VExpr -> VExpr -> VExpr
 bind x t (Let y s e1 e2) body = Let y s e1 (bind x t e2 body)
 bind x t e body = Let x t e body
-
-anfV :: VVal -> VVal
-anfV = mapV anfA anfV
-
-anfA :: AVal -> AVal
-anfA (Lam ps r e) = Lam ps r (anfE e)
-anfA a = mapA id anfA anfV a

@@ -17,10 +17,25 @@ import Data.Functor.Identity( Identity(..) )
 import Data.List( sortOn )
 import Data.Maybe( listToMaybe, fromMaybe )
 import Control.Monad( foldM )
+import Control.Monad.State( runState, state )
 import Backend.Typed.Syntax
-import Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents )
+import Backend.Typed.Types( Sub, Types(..), dupType, inst, mapReuseContents, traverseReuseContents )
 import Backend.Typed.Traversal
+import Backend.Typed.Query( Env, Gamma, bindAll, inferVar, inferV, altTypes, lamGamma
+                          , uniqueGamma, unboxRuGamma, copyRuGamma, lockGamma
+                          )
+import Backend.Typed.Monad( M, ask, local )
+import Backend.Typed.Pretty( ppr )
 import Common.Name( Name, newHiddenName )
+
+-- Run a pass on each definition; a definition that fails is kept, with its error.
+perDef :: (Def -> Either String Def) -> Program -> (Program,[String])
+perDef f prog = (prog{ progDefs = map fst results },concatMap snd results)
+  where
+    results = [either (\err -> (d,[show (defName d) ++ ": " ++ err])) (\d' -> (d',[])) (f d) | d <- progDefs prog]
+
+perBody :: (Def -> Either String VExpr) -> Program -> (Program,[String])
+perBody f = perDef (\d -> (\e -> d{ defBody = e }) <$> f d)
 
 -- A fresh-name supply belongs to one definition, shared by all of a pass's
 -- nested scopes. Reserve description names too: they can outlive their binders.
@@ -449,3 +464,67 @@ renameE = replaceE . M.map Var
 -- rename a variable and its parts, also where they are bound
 renamePath :: Path -> Path -> VExpr -> VExpr
 renamePath x y = renameE (M.singleton x y)
+
+mapLams :: ([(Path,Mode,VType)] -> VType -> VExpr -> VExpr) -> VVal -> VVal
+mapLams f = runIdentity . lamsV (\ps r e -> Identity (f ps r e))
+
+mapAll :: ([Path] -> VExpr -> VExpr) -> VExpr -> VExpr
+mapAll fe = runIdentity . descendAll (\xs -> Identity . fe xs)
+
+-- replace the subexpressions of an expression, in the order of `descendE`
+withSubexprs :: VExpr -> [VExpr] -> VExpr
+withSubexprs expr es = fst (runState (descendE pure pure (\_ _ -> state next) expr) es)
+  where
+    next (e:rest) = (e,rest)
+    next [] = error "Backend.Typed.Passes.Common.withSubexprs: too few subexpressions"
+
+-- The context of each subexpression of an expression (in the order of `descendE`), as in its
+-- typing rule.
+subGammas :: Env -> Gamma -> VExpr -> Either String [Gamma]
+subGammas env g expr
+  | Just ds <- destructAOf expr = inferVar g (dsScrut ds) >>= alts (dsAlts ds)
+  | Just ds <- destructVOf expr = inferV env g (dsScrut ds) >>= alts (dsAlts ds) . V
+  | otherwise
+  = case expr of
+      Let x t _ _ -> return [g, M.insert x (V t) g]
+      LetYield x t _ _ _ -> return [g, M.insert x (V t) g, g]
+      Join _ _ ps _ _ -> return [bindAll [(x,V t) | (x,_,t) <- ps] g, g]
+      Dup x y _ -> do t <- inferVar g x >>= dupType
+                      return [M.insert y t g]
+      IsUnique x _ _ -> return [uniqueGamma g x, g]
+      IfFull r _ _ -> do t <- inferV env g (Var r)
+                         case t of
+                           VReuse _ n p -> return [M.insert r (V (VReuse Full n p)) g, M.delete r g]
+                           _ -> Left ("test of a non-credit: " ++ ppr t)
+      UnboxRu z r _ -> pure <$> unboxRuGamma g z r
+      CopyRu z r _ -> pure <$> copyRuGamma g z r
+      Lock z c _ -> pure <$> lockGamma g z c
+      _ -> return (map (const g) (subexprs expr))
+  where
+    alts as t = do tss <- altTypes env t expr
+                   return [bindAll (zip xs ts) g | ((xs,_),ts) <- zip as tss]
+
+-- the context of the body of a definition
+defGamma :: Def -> Gamma
+defGamma d = case d of
+  DefFun{ defArgs = ps } -> M.fromList [(x,V t) | (x,_,t) <- ps]
+  DefVal{} -> M.empty
+
+-- One layer of a traversal that keeps the context: the operands, then each subexpression
+-- under its context.
+descendTyped :: MonadFail m => Env -> Gamma -> (VVal -> m VVal) -> (Gamma -> VExpr -> m VExpr) -> VExpr -> m VExpr
+descendTyped env g fv fe expr
+  = do gs <- either fail return (subGammas env g expr)
+       expr' <- descendE pure fv (\_ e -> pure e) expr
+       withSubexprs expr' <$> sequence (zipWith fe gs (subexprs expr'))
+
+-- the lambdas in a value, with their bodies under their contexts
+lamsTyped :: Applicative m => Gamma -> (Gamma -> VExpr -> m VExpr) -> VVal -> m VVal
+lamsTyped g fe = lamsV (\ps _ e -> fe (lamGamma ps g) e)
+
+-- `descendTyped` for a pass that keeps the context in its environment, also into lambdas
+typedChildren :: (VExpr -> M (Env,Gamma) s VExpr) -> VExpr -> M (Env,Gamma) s VExpr
+typedChildren f expr
+  = do (env,g) <- ask
+       let under g' = local (const (env,g')) . f
+       descendTyped env g (lamsTyped g under) under expr

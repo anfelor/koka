@@ -21,70 +21,28 @@ import qualified Data.Map as Map
 import Data.List( sortOn )
 import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
-import Backend.Typed.Types( dupType )
-import Backend.Typed.Traversal( child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut, mapA, mapV )
-import Backend.Typed.Passes.Common( Scope, bindScope, defScope, knownAlt, nameParts, renameE, reuseParts, scopeOf )
+import Backend.Typed.Traversal( child, descendE )
+import Backend.Typed.Passes.Common( mapLams, defGamma, typedChildren, Scope, bindScope, defScope, knownAlt, nameParts, perDef, renameE, reuseParts, scopeOf )
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, lockGamma, uniqueGamma )
+import Backend.Typed.Query( Env, Gamma, envOf, inferVar )
 import Backend.Typed.Layout( shapeIsHeap )
 
 type Match a = M (Env,Gamma) () a
 
 matchProgram :: Program -> (Program,[String])
-matchProgram prog
-  = let run d = case evalM (matchE (defBody d)) (envOf prog,params d)
-                          () of
-                  Right e -> (d{ defBody = reuseEstablished (defScope d) e },[])
-                  Left err -> (d,[show (defName d) ++ ": " ++ err])
-        (defs,errs) = unzip (map run (progDefs prog))
-    in (prog{ progDefs = defs },concat errs)
-  where
-    params DefFun{ defArgs = ps } = Map.fromList [(x,V t) | (x,_,t) <- ps]
-    params DefVal{} = Map.empty
-
-bind :: [(Path,Ty)] -> Match a -> Match a
-bind bs = local (\(env,g) -> (env,bindAll bs g))
+matchProgram prog = perDef (\d -> (\e -> d{ defBody = reuseEstablished (defScope d) e }) <$> evalM (matchE (defBody d)) (envOf prog,defGamma d) ()) prog
 
 matchE :: VExpr -> Match VExpr
 matchE expr
-  | Just ds <- destructAOf expr
-  = do (env,g) <- ask
-       t <- liftE (inferVar g (dsScrut ds))
-       tss <- liftE (altTypes env t expr)
-       es <- sequence [bind (zip xs ts) (matchE e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
-       let result = dsBuild ds (dsMode ds) (dsScrut ds) es
-       case (result,t) of
-         (CaseA m v alts def,A (ASum ts))
-           -> partition m v ts (sortOn (\(i,_,_) -> i) alts) def
-         _ -> return result
-  | Just ds <- destructVOf expr
-  = do (env,g) <- ask
-       t <- liftE (inferV env g (dsScrut ds))
-       tss <- liftE (altTypes env (V t) expr)
-       v <- matchV (dsScrut ds)
-       es <- sequence [bind (zip xs ts) (matchE e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
-       return (dsBuild ds (dsMode ds) v es)
-matchE expr
-  = case expr of
-      Let x t e1 e2 -> Let x t <$> matchE e1 <*> bind [(x,V t)] (matchE e2)
-      LetYield x t e1 e2 e3 -> LetYield x t <$> matchE e1 <*> bind [(x,V t)] (matchE e2) <*> matchE e3
-      Join j tvs ps e1 e2 -> Join j tvs ps <$> bind [(x,V t) | (x,_,t) <- ps] (matchE e1) <*> matchE e2
-      UnboxRu v r e
-        -> do (env,g) <- ask
-              g' <- liftE (unboxRuGamma g v r)
-              UnboxRu v r <$> local (const (env,g')) (matchE e)
-      Lock z c e
-        -> do (env,g) <- ask
-              g' <- liftE (lockGamma g z c)
-              Lock z c <$> local (const (env,g')) (matchE e)
-      IsUnique x e1 e2
-        -> do (env,g) <- ask
-              IsUnique x <$> local (const (env,uniqueGamma g x)) (matchE e1) <*> matchE e2
-      Dup x y e
-        -> do (_,g) <- ask
-              t <- liftE (inferVar g x >>= dupType)
-              Dup x y <$> bind [(y,t)] (matchE e)
-      _ -> descendE pure matchV (\_ -> matchE) expr
+  = do e <- typedChildren matchE expr
+       case e of
+         CaseA m v alts def
+           -> do (_,g) <- ask
+                 t <- liftE (inferVar g v)
+                 case t of
+                   A (ASum ts) -> partition m v ts (sortOn (\(i,_,_) -> i) alts) def
+                   _ -> return e
+         _ -> return e
 
 partition :: Mode -> Path -> [(Int,AType)] -> [(Int,Path,VExpr)] -> Maybe (Path,VExpr) -> Match VExpr
 partition _ v _ [] (Just (d,e)) = return (renameE (Map.singleton d v) e)
@@ -126,13 +84,6 @@ splitAtIndex ts
   where balanced | length ts > 2 = Just (fst (ts !! (length ts `div` 2)))
                  | otherwise = Nothing
 
-matchV :: VVal -> Match VVal
-matchV = descendV matchA matchV
-
-matchA :: AVal -> Match AVal
-matchA (Lam ps r e) = Lam ps r <$> bind [(x,V t) | (x,_,t) <- ps] (matchE e)
-matchA a = descendA pure matchA matchV a
-
 -- Partitioning changes the paths of branch binders. A continuation may already
 -- destructure that same part; select its established alternative instead of
 -- binding the path twice. Unique eliminations must retain their ownership use.
@@ -142,7 +93,4 @@ reuseEstablished scope e
   | otherwise = runIdentity (descendE Identity (Identity . value) branch e)
   where
     branch xs b = Identity (reuseEstablished (bindScope e xs scope) b)
-    value = mapV atom value
-    atom (Lam ps r b) = Lam ps r (reuseEstablished (lambdaScope ps) b)
-    atom a = mapA id atom value a
-    lambdaScope ps = Map.union (scopeOf [x | (x,_,_) <- ps]) scope
+    value = mapLams (\ps _ b -> reuseEstablished (Map.union (scopeOf [x | (x,_,_) <- ps]) scope) b)
