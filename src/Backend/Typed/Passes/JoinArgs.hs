@@ -32,10 +32,9 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.List( transpose )
 import Data.Functor.Const( Const(..) )
-import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
-import Backend.Typed.Traversal( bindersE, descendA, descendE, descendV, fvV, jumpArgs, mapA, mapV )
-import Backend.Typed.Passes.Common( Scope, bindScope, defScope, scopeOf, substEIn, substJump, valueAt )
+import Backend.Typed.Traversal( bindersE, descendAll, fvV, jumpArgs )
+import Backend.Typed.Passes.Common( mapAll, Scope, bindScope, defScope, scopeOf, substEIn, substJump, valueAt )
 
 joinArgsProgram :: Program -> Program
 joinArgsProgram prog = prog{ progDefs = [d{ defBody = jaE (declared (defBody d)) (defScope d) (defBody d) } | d <- progDefs prog] }
@@ -45,16 +44,12 @@ joinArgsProgram prog = prog{ progDefs = [d{ defBody = jaE (declared (defBody d))
 type Declared = M.Map Path (Maybe Contents)
 
 declared :: VExpr -> Declared
-declared expr = M.union here (getConst (descendE (const (Const M.empty)) (Const . declaredV) (\_ e -> Const (declared e)) expr))
+declared expr = M.union here (getConst (descendAll (\_ e -> Const (declared e)) expr))
   where
     here = case expr of
              Join _ _ ps _ _ -> M.fromList [(x,p) | (x,_,VReuse _ _ p) <- ps]
              Let x (VReuse _ _ p) _ _ -> M.singleton x p
              _ -> M.empty
-    declaredV = getConst . descendV (Const . declaredA) (Const . declaredV)
-    declaredA a = case a of
-                    Lam _ _ e -> declared e
-                    _ -> getConst (descendA (const (Const M.empty)) (Const . declaredA) (Const . declaredV) a)
 
 jaE :: Declared -> Scope -> VExpr -> VExpr
 jaE decl scope expr
@@ -85,13 +80,4 @@ jaE decl scope expr
                inScope (Contents _ v _) = all (`M.member` scope) (fvV v)
                ps' = kept (zipWith describe ps args)
            in Join j tvs ps' (substEIn (M.union (scopeOf [x | (x,_,_) <- ps']) scope) (valueAt sub) e1') (substJump j (\ts -> Jump j ts . kept) e2')
-      _ -> runIdentity (descendE Identity (Identity . jaV decl scope) (\xs e -> Identity (jaE decl (bindScope expr xs scope) e)) expr)
-
-jaV :: Declared -> Scope -> VVal -> VVal
-jaV decl scope = mapV (jaA decl scope) (jaV decl scope)
-
-jaA :: Declared -> Scope -> AVal -> AVal
-jaA decl scope val
-  = case val of
-      Lam ps r e -> Lam ps r (jaE decl (M.union (scopeOf [x | (x,_,_) <- ps]) scope) e)
-      _          -> mapA id (jaA decl scope) (jaV decl scope) val
+      _ -> mapAll (\xs -> jaE decl (bindScope expr xs scope)) expr

@@ -69,9 +69,27 @@ mapA fn fa fv = runIdentity . descendA (Identity . fn) (Identity . fa) (Identity
 mapV :: (AVal -> AVal) -> (VVal -> VVal) -> VVal -> VVal
 mapV fa fv = runIdentity . descendV (Identity . fa) (Identity . fv)
 
+-- the bodies of the lambdas in a value (but not in their bodies), with their parameters and
+-- result types
+lamsV :: Applicative f => ([(Path,Mode,VType)] -> VType -> VExpr -> f VExpr) -> VVal -> f VVal
+lamsV f = goV
+  where
+    goV = descendV goA goV
+    goA (Lam ps r e) = Lam ps r <$> f ps r e
+    goA a = descendA pure goA goV a
+
 -- the operands and subexpressions of an expression, with the variables bound in each subexpression
 descendE :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([Path] -> VExpr -> f VExpr) -> VExpr -> f VExpr
 descendE fn fv fe = descendB fn fv (\bs e -> let xs = map fst bs in (,) xs <$> fe xs e)
+
+-- `descendE` that also applies `fe` to the bodies of the lambdas in the operands, with their
+-- parameters
+descendAll :: Applicative f => ([Path] -> VExpr -> f VExpr) -> VExpr -> f VExpr
+descendAll fe = descendE pure (lamsV (\ps _ -> fe [x | (x,_,_) <- ps])) fe
+
+-- the subexpressions of an expression, in the order of `descendE`
+subexprs :: VExpr -> [VExpr]
+subexprs = getConst . descendE (const (Const [])) (const (Const [])) (\_ e -> Const [e])
 
 -- Like `descendE`, but each binder comes with its steps from the scrutinee, and `fb` gives new
 -- binders for a subexpression. The binders of a `let`, a dup, a join point, the credit of

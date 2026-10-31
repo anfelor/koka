@@ -40,11 +40,10 @@ import Control.Monad( foldM, guard )
 import Data.List( nub, partition )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Types( dupType )
-import Backend.Typed.Traversal( boxTag, child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut, fieldsAt, stepsFrom, within )
-import Backend.Typed.Passes.Common( NameSupply, dropValue, freshFor, freshNameFrom, freshPathFrom, projectAll, scopeOf )
+import Backend.Typed.Traversal( boxTag, child, fieldsAt, stepsFrom, within )
+import Backend.Typed.Passes.Common( defGamma, typedChildren, NameSupply, dropValue, freshFor, freshNameFrom, freshPathFrom, perBody, projectAll, scopeOf )
 import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferAVar, inferV, altTypes, unboxRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize, trivialTy )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferAVar, unboxRuGamma, boxContents, reuseSize, trivialTy )
 
 type D a = M (Env,Gamma) NameSupply a
 
@@ -58,15 +57,7 @@ withGamma :: Gamma -> D a -> D a
 withGamma g = local (\(env,_) -> (env,g))
 
 dropSpecProgram :: Program -> (Program,[String])
-dropSpecProgram prog
-  = let run d = case evalM (dsE (defBody d)) (envOf prog,params d) (freshFor d) of
-                  Right e -> (d{ defBody = e },[])
-                  Left err -> (d,[show (defName d) ++ ": " ++ err])
-        (defs,errs) = unzip (map run (progDefs prog))
-    in (prog{ progDefs = defs },concat errs)
-  where
-    params DefFun{ defArgs = ps } = M.fromList [(x,V t) | (x,_,t) <- ps]
-    params DefVal{} = M.empty
+dropSpecProgram prog = perBody (\d -> evalM (dsE (defBody d)) (envOf prog,defGamma d) (freshFor d)) prog
 
 dsE :: VExpr -> D VExpr
 dsE expr
@@ -76,7 +67,7 @@ dsE expr
            -> do bs <- mapM (\(x,y) -> (,) y <$> liftE (inferVar g x)) others
                  compose [Dup x y | (x,y) <- others]
                    <$> bind bs (specialize (zip inside ways) z s n e)
-         _ -> dsPlain expr
+         _ -> typedChildren dsE expr
 
 -- The copies of parts of the contents of a box `z` (among other copies) that Perceus makes
 -- before it drops `z`, with the type of the contents and the size of the block.
@@ -150,43 +141,3 @@ dropExcept xs v t e
          _ -> case [(y,s) | (y,V s) <- M.toList g, y `within` v, length (stepsFrom v y) == 1, any (`within` y) xs] of
                 [(y,s)] -> dropExcept xs y s e
                 _ -> fail ("cannot drop the rest of " ++ show v)
-
-dsPlain :: VExpr -> D VExpr
-dsPlain expr
-  | Just ds <- destructAOf expr
-  = do (env,g) <- ask
-       t <- liftE (inferVar g (dsScrut ds))
-       tss <- liftE (altTypes env t expr)
-       es <- sequence [bind (zip xs ts) (dsE e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
-       return (dsBuild ds (dsMode ds) (dsScrut ds) es)
-  | Just ds <- destructVOf expr
-  = do (env,g) <- ask
-       t <- liftE (inferV env g (dsScrut ds))
-       tss <- liftE (altTypes env (V t) expr)
-       v <- dsV (dsScrut ds)
-       es <- sequence [bind (zip xs ts) (dsE e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
-       return (dsBuild ds (dsMode ds) v es)
-dsPlain expr
-  = case expr of
-      Let x t e1 e2 -> Let x t <$> dsE e1 <*> bind [(x,V t)] (dsE e2)
-      LetYield x t e1 e2 e3 -> LetYield x t <$> dsE e1 <*> bind [(x,V t)] (dsE e2) <*> dsE e3
-      Join j tvs ps e1 e2 -> Join j tvs ps <$> bind [(x,V t) | (x,_,t) <- ps] (dsE e1) <*> dsE e2
-      UnboxRu v r e -> do (_,g) <- ask
-                          g' <- liftE (unboxRuGamma g v r)
-                          UnboxRu v r <$> withGamma g' (dsE e)
-      Lock z c e -> do (_,g) <- ask
-                       g' <- liftE (lockGamma g z c)
-                       Lock z c <$> withGamma g' (dsE e)
-      IsUnique x e1 e2 -> do (_,g) <- ask
-                             IsUnique x <$> withGamma (uniqueGamma g x) (dsE e1) <*> dsE e2
-      Dup x y e -> do (_,g) <- ask
-                      t <- liftE (inferVar g x >>= dupType)
-                      Dup x y <$> bind [(y,t)] (dsE e)
-      _ -> descendE pure dsV (\_ e -> dsE e) expr
-
-dsV :: VVal -> D VVal
-dsV = descendV dsA dsV
-
-dsA :: AVal -> D AVal
-dsA (Lam ps r e) = Lam ps r <$> bind [(x,V t) | (x,_,t) <- ps] (dsE e)
-dsA v = descendA pure dsA dsV v

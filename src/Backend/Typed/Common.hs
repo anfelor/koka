@@ -96,16 +96,12 @@ data Source = Copy Path | Param [VVal]
 type Sources = M.Map Path Source
 
 sources :: VExpr -> Sources
-sources expr = M.union here (getConst (descendE (const (Const M.empty)) (Const . sourcesV) (\_ e -> Const (sources e)) expr))
+sources expr = M.union here (getConst (descendAll (\_ e -> Const (sources e)) expr))
   where
     here = case expr of
              Dup x y _ -> M.singleton y (Copy x)
              Join j _ ps _ e2 -> M.fromList [(y,Param [vs !! i | vs <- jumpArgs j e2]) | (i,(y,_,_)) <- zip [0..] ps]
              _ -> M.empty
-    sourcesV = getConst . descendV (Const . sourcesA) (Const . sourcesV)
-    sourcesA a = case a of
-                   Lam _ _ e -> sources e
-                   _ -> getConst (descendA (const (Const M.empty)) (Const . sourcesA) (Const . sourcesV) a)
 
 -- The variable whose bits a variable has, through the longest prefix of its path that has a
 -- source: a join parameter has the bits of its arguments if they are the same.
