@@ -47,6 +47,7 @@ library
       Backend.Typed.Monad
       Backend.Typed.Names
       Backend.Typed.Passes.Anf
+      Backend.Typed.Passes.Common
       Backend.Typed.Passes.Contify
       Backend.Typed.Passes.FillCredits
       Backend.Typed.Passes.JoinArgs
@@ -64,6 +65,7 @@ library
       Backend.Typed.Pretty
       Backend.Typed.Query
       Backend.Typed.Syntax
+      Backend.Typed.Traversal
       Backend.Typed.Typed
       Backend.Typed.Types
       Common.ColorScheme

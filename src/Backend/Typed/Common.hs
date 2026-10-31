@@ -7,7 +7,7 @@
 -----------------------------------------------------------------------------
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
--- Traversals and derived rules for the typed intermediate language.
+-- Shared construction, analysis and substitution for the typed IR.
 module Backend.Typed.Common where
 
 import qualified Data.Map as M
@@ -15,13 +15,13 @@ import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
 import Data.Monoid( Sum(..) )
 import Data.Functor.Identity( Identity(..) )
-import Data.List( isPrefixOf, sortOn )
-import Data.Maybe( listToMaybe, fromMaybe, isJust )
-import Control.Monad( foldM )
+import Data.List( sortOn )
+import Data.Maybe( listToMaybe, fromMaybe )
 import Common.Name
 import Common.NamePrim( nameTpReuse )
 import Backend.Typed.Syntax
 import Backend.Typed.Types( Sub, Types(..), inst, sumAlts, sumOf, mapReuseContents, traverseReuseContents )
+import Backend.Typed.Traversal
 
 -- A continuation that wraps an expression.
 type K = VExpr -> VExpr
@@ -90,77 +90,12 @@ mentionedA a = case a of
           OpenCon _ ts _ -> concatMap (mentionedT . VPtr) ts
           _ -> []
 
--- Discard an owned value by destructuring it down to boxed operands and credits.
--- Parts use their canonical paths, reusing those already in scope. Sequencing
--- a sum or existential drop needs a fresh root from the caller. Parts of a trivial
--- type (`Query.trivialTy`) are not discarded.
-dropValue :: Monad m => (Ty -> Bool) -> m Path -> Scope -> Path -> Ty -> VExpr -> m VExpr
-dropValue trivial _ _ _ t e
-  | trivial t = return e
-dropValue trivial fresh scope x t e
-  = case t of
-      A _ -> return (Drop x e)
-      V v -> case v of
-        VPtr a -> do let y = child x SDeref
-                     return (reuseParts scope (Deref Owned (Var x) y (Drop y e)))
-        VProd{} -> do let fields = [f | f@(_,_,s) <- fieldsAt x v, not (trivial (V s))]
-                          parts = M.union (scopeOf [y | (y,_,_) <- fields]) scope
-                      body <- foldM (\rest (y,_,s) -> dropValue trivial fresh parts y (V s) rest) e (reverse fields)
-                      return (projectAll scope Owned x fields body)
-        VSum ts -> do u <- fresh
-                      alts <- mapM dropAlt (zip [0..] ts)
-                      -- A continuation can bind roots. Keep it outside the case,
-                      -- rather than copying its binders into every alternative.
-                      return (Let u VUnit (reuseParts scope (CaseV Owned (Var x) alts)) e)
-          where
-            dropAlt (i,(c,s)) = do let y = child x (SInjV i c)
-                                   body <- dropValue trivial fresh (M.insert y Nothing scope) y (V s) (Ret UnitV)
-                                   return (i,y,body)
-        VExists tvs s
-          -> do let y = child x SPack
-                u <- fresh
-                -- Keep the continuation outside the existential's scope.
-                -- Fresh types only need to avoid the payload's free variables.
-                let start = minimum (0 : tvs ++ ftv s) - 1
-                    bs = take (length tvs) [start,start-1 ..]
-                    s' = inst tvs (map AVar bs) s
-                body <- dropValue trivial fresh (M.insert y Nothing scope) y (V s') (Ret UnitV)
-                return (Let u VUnit (reuseParts scope (Unpack Owned (Var x) bs y body)) e)
-        VReuse _ _ _ -> return (Free x e)
-        VCtx _ _ _ -> return (Drop x e)
-        -- a cell is linear and never dropped, which `Check` rejects
-        VCell _ _ -> return (Drop x e)
-        VUnit -> return e
-        VRaw _ -> return e
-
--- the steps from the scrutinee of a `[case-open]` alternative for `c` to its binders: the
--- fields of the product `v.C` (`[proj]`), or `v.C` itself if there is one field
-openSteps :: Name -> [Path] -> [[Step]]
-openSteps c [_] = [[SOpen c]]
-openSteps c xs = [[SOpen c, projStep i x] | (i,x) <- zip [0..] xs]
-
--- the type at steps into a product
-partAt :: VType -> [Step] -> Maybe VType
-partAt t [] = Just t
-partAt (VProd fs) (SField i _ : ss) | i < length fs = partAt (snd (fs !! i)) ss
-partAt _ _ = Nothing
-
 -- the fields of a product variable (`[proj]`), named by their paths
 fieldsAt :: Path -> VType -> [(Path,Int,VType)]
 fieldsAt x t
   = case t of
       VProd fs -> [(child x (SField i f),i,s) | (i,(f,s)) <- zip [0..] fs]
       _ -> []
-
--- project fields of a product variable around an expression, reusing those in scope
-projectAll :: Scope -> Mode -> Path -> [(Path,Int,VType)] -> VExpr -> VExpr
-projectAll scope m x fields body = foldr (\(y,i,_) e -> reuseParts scope (Proj m (Var x) i y e)) body fields
-
--- the projection at a step into a product
-projAt :: Step -> Mode -> VVal -> Path -> VExpr -> VExpr
-projAt s m v = case s of
-                 SField i _ -> Proj m v i
-                 _ -> error ("Backend.Typed.Common.projAt: not a step into a product: " ++ show s)
 
 -- The duplication rule: the type of the copy of a variable of type `t`
 dupType :: Ty -> Either String Ty
@@ -170,13 +105,6 @@ dupType t
       V (VCell _ _) -> Left "dup of a cell"
       V _ -> Right t
       A _ -> Left "dup of a boxed value"
-
--- the pointer that the binder of a `[deref]` is the dereference of
-derefOf :: Path -> Maybe Path
-derefOf (Path x ss)
-  = case reverse ss of
-      SDeref : rest -> Just (Path x (reverse rest))
-      _ -> Nothing
 
 -- values of these types need no reference counting, where `unroll` gives the body of a
 -- named type if it is known (a type with a single constructor without fields, for example)
@@ -314,181 +242,6 @@ caseSum cons shapes a branch
                                      return (tag,y,e)) [0 .. length shapes - 1]
               return (CaseA Owned a alts Nothing)
 
--- one-level traversals
-
--- Names are operands, not values: a traversal must preserve their variable form.
--- Lambda bodies are handled separately from the values directly inside a value.
-descendA :: Applicative f => (Path -> f Path) -> (AVal -> f AVal) -> (VVal -> f VVal) -> AVal -> f AVal
-descendA fn fa fv val
-  = case val of
-      InjA i a v     -> InjA i a <$> fa v
-      Roll a v       -> Roll a <$> fa v
-      InjLazy d a v  -> InjLazy d a <$> fa v
-      Box v          -> Box <$> fv v
-      Scalar v       -> Scalar <$> fv v
-      OpenCon c ts vs -> OpenCon c ts <$> traverse fv vs
-      BoxAt r v      -> BoxAt <$> fn r <*> fv v
-      Fun _          -> pure val
-      UnitA          -> pure val
-      Lam _ _ _      -> pure val
-
-descendV :: Applicative f => (AVal -> f AVal) -> (VVal -> f VVal) -> VVal -> f VVal
-descendV fa fv val
-  = case val of
-      Inj i t v      -> Inj i t <$> fv v
-      Tuple vs       -> Tuple <$> traverse fv vs
-      Ptr a v        -> Ptr a <$> fa v
-      Pack t ts v    -> Pack t ts <$> fv v
-      TyApp v ts     -> (`TyApp` ts) <$> fv v
-      DupV v         -> DupV <$> fv v
-      Context b v    -> Context b <$> fv v
-      Plug c v       -> Plug <$> fv c <*> fv v
-      CtxCopy v      -> CtxCopy <$> fv v
-      Append c d     -> Append <$> fv c <*> fv d
-      Memoize c d k v -> Memoize <$> fv c <*> pure d <*> pure k <*> fv v
-      Hole           -> pure val
-      Var _          -> pure val
-      Glob _ _       -> pure val
-      UnitV          -> pure val
-      Lit _          -> pure val
-      NoReuse _ _    -> pure val   -- a description is not an operand
-
-mapA :: (Path -> Path) -> (AVal -> AVal) -> (VVal -> VVal) -> AVal -> AVal
-mapA fn fa fv = runIdentity . descendA (Identity . fn) (Identity . fa) (Identity . fv)
-
-mapV :: (AVal -> AVal) -> (VVal -> VVal) -> VVal -> VVal
-mapV fa fv = runIdentity . descendV (Identity . fa) (Identity . fv)
-
--- the operands and subexpressions of an expression, with the variables bound in each subexpression
-descendE :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([Path] -> VExpr -> f VExpr) -> VExpr -> f VExpr
-descendE fn fv fe = descendB fn fv (\bs e -> let xs = map fst bs in (,) xs <$> fe xs e)
-
--- Like `descendE`, but each binder comes with its steps from the scrutinee, and `fb` gives new
--- binders for a subexpression. The binders of a `let`, a dup, a join point, the credit of
--- `[unbox-ru]` and `[copy-ru]`, and the cell of `[lock]` have no steps, and neither has that of `[unscalar]`,
--- which copies the contents of a scalar.
-descendB :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([(Path,[Step])] -> VExpr -> f ([Path],VExpr)) -> VExpr -> f VExpr
-descendB fn fv fb expr
-  = case expr of
-      Ret v                 -> Ret <$> fv v
-      Let x t e1 e2         -> (\e1' (x',e2') -> Let x' t e1' e2') <$> plain e1 <*> one x [] e2
-      LetYield x t e1 e2 e3 -> (\e1' (x',e2') e3' -> LetYield x' t e1' e2' e3') <$> plain e1 <*> one x [] e2 <*> plain e3
-      Yielded _             -> pure expr
-      Unreachable _         -> pure expr
-      Call f ts vs          -> Call f ts <$> traverse fv vs
-      App f vs              -> App <$> fn f <*> traverse fv vs
-      Proj m v i x e        -> (\v' (x',e') -> Proj m v' i x' e') <$> fv v <*> one x [projStep i x] e
-      CaseV m v alts        -> CaseV m <$> fv v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x [injVStep i x] e) alts
-      CaseA m v alts def    -> CaseA m <$> fn v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x [injAStep i x] e) alts
-                                       <*> traverse (\(x,e) -> one x [SRest] e) def
-      SplitA m v k (x,e1) (y,e2) -> SplitA m <$> fn v <*> pure k <*> one x [SLo] e1 <*> one y [SHi] e2
-      IfWhnf m v (x,e1) (y,e2) -> IfWhnf m <$> fn v <*> one x [SWhnf] e1 <*> one y [SDelay] e2
-      Deref m v x e         -> (\v' (x',e') -> Deref m v' x' e') <$> fv v <*> one x [SDeref] e
-      Unroll m v x e        -> (\v' (x',e') -> Unroll m v' x' e') <$> fn v <*> one x [SRoll] e
-      Unbox m v x e         -> (\v' (x',e') -> Unbox m v' x' e') <$> fn v <*> one x [SContents] e
-      Unscalar m v x e      -> (\v' (x',e') -> Unscalar m v' x' e') <$> fn v <*> one x [] e
-      Unpack m v tvs x e    -> (\v' (x',e') -> Unpack m v' tvs x' e') <$> fv v <*> one x [SPack] e
-      CaseLit v alts def    -> CaseLit <$> fv v <*> traverse (\(l,e) -> (,) l <$> plain e) alts <*> plain def
-      CaseOpen m v alts def -> CaseOpen m <$> fn v <*> traverse (\(c,xs,e) -> (\(xs',e') -> (c,xs',e')) <$> fb (zip xs (openSteps c xs)) e) alts
-                                          <*> plain def
-      Gen tvs e             -> Gen tvs <$> plain e
-      Drop x e              -> Drop <$> fn x <*> plain e
-      Free r e              -> Free <$> fn r <*> plain e
-      Dup x y e             -> (\x' (y',e') -> Dup x' y' e') <$> fn x <*> one y [] e
-      IsUnique x e1 e2      -> IsUnique <$> fn x <*> plain e1 <*> plain e2
-      IfFull r e1 e2        -> IfFull <$> fn r <*> plain e1 <*> plain e2
-      UnboxRu v r e         -> (\v' (r',e') -> UnboxRu v' r' e') <$> fn v <*> one r [] e
-      CopyRu v r e          -> (\v' (r',e') -> CopyRu v' r' e') <$> fn v <*> one r [] e
-      Lock z c e            -> (\z' (c',e') -> Lock z' c' e') <$> fn z <*> one c [] e
-      Join j tvs ps e1 e2   -> (\(xs,e1') e2' -> Join j tvs [(x',m,t) | (x',(_,m,t)) <- zip xs ps] e1' e2')
-                                 <$> fb [(x,[]) | (x,_,_) <- ps] e1 <*> plain e2
-      Jump j ts vs          -> Jump j ts <$> traverse fv vs
-  where
-    plain e = snd <$> fb [] e
-    one x s e = (\(xs,e') -> (single xs,e')) <$> fb [(x,s)] e
-    single xs = case xs of
-                  [x] -> x
-                  _   -> error "Backend.Typed.Common.descendB: expecting one binder"
-
--- A `[let-yield]` as the `let` that is taken if no effect yields, and its yielding branch,
--- which is cold.
-yieldingAlts :: VExpr -> Maybe (VExpr,VExpr)
-yieldingAlts expr
-  = case expr of
-      LetYield x t e1 e2 e3 -> Just (Let x t e1 e2,e3)
-      _ -> Nothing
-
--- the binder at a step from a variable
-child :: Path -> Step -> Path
-child (Path x ss) s = Path x (ss ++ [s])
-
--- tag(z): the tag of the block of a box `z`, the alternative of a sum that it was reached
--- through (`[case-a]`), or 1 if it is the only one
-boxTag :: Path -> Int
-boxTag (Path _ ss)
-  = case reverse ss of
-      (SInjA i _ : _) -> i
-      _ -> 1
-
--- the step to the alternative i of a `[case]` from its binder x, which names its constructor if
--- it is a path to that alternative (`FromCore.valueAlt`): not if the scrutinee is not a variable
-injVStep :: Int -> Path -> Step
-injVStep i (Path _ ss)
-  = case reverse ss of
-      (SInjV _ c : _) -> SInjV i c
-      _ -> SInjV i (tagCon i)
-
--- the step to the field i of a product from its binder x, which names the field if it is a
--- path to that field: not if the scrutinee is not a variable
-projStep :: Int -> Path -> Step
-projStep i (Path _ ss)
-  = case reverse ss of
-      (SField _ f : _) -> SField i f
-      _ -> SField i (posField i)
-
--- the step to the alternative i of a `[case-a]` from its binder x, which is a path to that
--- alternative and so names its constructor (`FromCore.boxedAlt`)
-injAStep :: Int -> Path -> Step
-injAStep i (Path x ss)
-  = case reverse ss of
-      (SInjA _ c : _) -> SInjA i c
-      _ -> error ("Backend.Typed.Common.injAStep: the binder " ++ show (Path x ss) ++ " is not an alternative")
-
--- the other part of the parent of a part of a box
-sibling :: Step -> Maybe Step
-sibling s
-  = case s of
-      SContents -> Just SCredit
-      SCredit   -> Just SContents
-      _         -> Nothing
-
--- A part without a sibling is all of its parent (in its alternative), so a use of it is a use
--- of the parent. A field of a product has siblings, as products have at least two fields where
--- elaboration generates them (`[proj]`).
-canonical :: Path -> Path
-canonical (Path x ss) = Path x (reverse (dropWhile (not . hasSibling) (reverse ss)))
-  where
-    hasSibling s = case s of
-                     SField _ _ -> True
-                     _ -> isJust (sibling s)
-
--- the variables on the path to a variable, from its root
-prefixes :: Path -> [Path]
-prefixes (Path x ss) = [Path x (take k ss) | k <- [0 .. length ss - 1]]
-
--- `x` is `y` or one of its parts
-within :: Path -> Path -> Bool
-within (Path x ss) (Path y ts) = x == y && ts `isPrefixOf` ss
-
--- the steps from a variable to one of its parts
-stepsFrom :: Path -> Path -> [Step]
-stepsFrom (Path _ ts) (Path _ ss) = drop (length ts) ss
-
-renamePrefix :: Path -> Path -> Path -> Path
-renamePrefix p q x
-  | x `within` p = foldl child q (stepsFrom p x)
-  | otherwise = x
-
 -- `[unbox-ru]` and `[lock]` of a box `z` take its contents out of its block and bind its
 -- block as a new root: the box, the root and the body
 takesContents :: VExpr -> Maybe (Path,Path,VExpr)
@@ -529,12 +282,6 @@ valueAt vals (Path x ss)
       (w:_) -> Just w
       [] -> Nothing
 
--- The path of a binder with steps (`descendB`) from the scrutinee `scrutVar`; the other
--- binders are roots.
-pathOf :: Maybe Path -> [Step] -> Maybe Path
-pathOf _ [] = Nothing
-pathOf z ss = (\x -> foldl child x ss) <$> z
-
 -- the arguments of each jump to a join point; jumps are never inside values, and an inner
 -- join of the same name shadows it
 jumpArgs :: Name -> VExpr -> [[VVal]]
@@ -543,53 +290,6 @@ jumpArgs j expr
       Jump k _ vs | k == j -> [vs]
       Join k _ _ e1 _ | k == j -> jumpArgs j e1
       _ -> getConst (descendE (const (Const [])) (const (Const [])) (\_ e -> Const (jumpArgs j e)) expr)
-
--- replace each jump to a join point
-substJump :: Name -> ([AType] -> [VVal] -> VExpr) -> VExpr -> VExpr
-substJump j f expr
-  = case expr of
-      Jump k ts vs | k == j -> f ts vs
-      Join k tvs ps e1 e2 | k == j -> Join k tvs ps (substJump j f e1) e2
-      _ -> runIdentity (descendE Identity Identity (\_ e -> Identity (substJump j f e)) expr)
-
--- substitute types for type variables, which the expression does not bind again
-substTypesE :: Sub -> VExpr -> VExpr
-substTypesE sub expr
-  = runIdentity (descendE Identity (Identity . substTypesV sub) (\_ e -> Identity (substTypesE sub e)) annotated)
-  where
-    annotated = case expr of
-      Let x t e1 e2         -> Let x (subst sub t) e1 e2
-      LetYield x t e1 e2 e3 -> LetYield x (subst sub t) e1 e2 e3
-      Yielded t             -> Yielded (subst sub t)
-      Unreachable t         -> Unreachable (subst sub t)
-      Call f ts vs          -> Call f (map (subst sub) ts) vs
-      Join j tvs ps e1 e2   -> Join j tvs [(x,m,subst sub t) | (x,m,t) <- ps] e1 e2
-      Jump j ts vs          -> Jump j (map (subst sub) ts) vs
-      _                     -> expr
-
-substTypesV :: Sub -> VVal -> VVal
-substTypesV sub val
-  = mapV (substTypesA sub) (substTypesV sub) annotated
-  where
-    annotated = case val of
-      Glob x ts   -> Glob x (map (subst sub) ts)
-      Inj i t v   -> Inj i (subst sub t) v
-      Ptr a v     -> Ptr (subst sub a) v
-      Pack t ts v -> Pack (subst sub t) (map (subst sub) ts) v
-      TyApp v ts  -> TyApp v (map (subst sub) ts)
-      Context b v -> Context (subst sub b) v
-      NoReuse n c -> NoReuse n ((\(Contents k p t) -> Contents k (substTypesV sub p) (subst sub t)) <$> c)
-      _           -> val
-
-substTypesA :: Sub -> AVal -> AVal
-substTypesA sub val
-  = case val of
-      Lam ps r e      -> Lam [(x,m,subst sub t) | (x,m,t) <- ps] (subst sub r) (substTypesE sub e)
-      InjA i a v      -> InjA i (subst sub a) (substTypesA sub v)
-      Roll a v        -> Roll (subst sub a) (substTypesA sub v)
-      InjLazy d a v   -> InjLazy d (subst sub a) (substTypesA sub v)
-      OpenCon c ts vs -> OpenCon c (map (subst sub) ts) (map (substTypesV sub) vs)
-      _               -> mapA id (substTypesA sub) (substTypesV sub) val
 
 varOf :: VVal -> Path
 varOf (Var y) = y
@@ -619,23 +319,6 @@ fvV val
 
 fvE :: VExpr -> S.Set Path
 fvE expr = getConst (descendE (Const . S.singleton) (Const . fvV) (\xs e -> Const (fvE e `S.difference` S.fromList xs)) expr)
-
--- substitution of unboxed values (their free variables must not be bound in the scope).
--- A substitution at a named operand must itself be a variable; use a let for other values.
-replaceA :: M.Map Path VVal -> AVal -> AVal
-replaceA = substA . valueAt
-
-replaceV :: M.Map Path VVal -> VVal -> VVal
-replaceV = substV . valueAt
-
-replaceVType :: M.Map Path VVal -> VType -> VType
-replaceVType = substVType . valueAt
-
-replaceContents :: M.Map Path VVal -> Contents -> Contents
-replaceContents = substContents . valueAt
-
-replaceAType :: M.Map Path VVal -> AType -> AType
-replaceAType = substAType . valueAt
 
 replaceE :: M.Map Path VVal -> VExpr -> VExpr
 replaceE sub expr
@@ -713,11 +396,6 @@ type Scope = M.Map Path (Maybe [Int])
 scopeOf :: [Path] -> Scope
 scopeOf xs = M.fromList [(x,Nothing) | x <- xs]
 
-defScope :: Def -> Scope
-defScope d = case d of
-  DefFun{ defArgs = ps } -> scopeOf [x | (x,_,_) <- ps]
-  DefVal{} -> M.empty
-
 -- the scope of a subexpression of `expr` that binds `xs`
 bindScope :: VExpr -> [Path] -> Scope -> Scope
 bindScope expr xs scope = M.union (M.fromList [(x,rest x) | x <- xs]) scope
@@ -739,21 +417,6 @@ knownAlt scope expr = do
   listToMaybe [i | m /= Unique, (i,(bs@(_:_),_)) <- zip [0..] alts, let ss = map snd bs, all (not . null) ss
                 , all (\s -> M.member (foldl child z s) scope) ss
                 , [SRest] `notElem` ss || M.lookup (child z SRest) scope == Just (Just indices)]
-
--- Reuse parts while constructing a destructuring form.
-reuseParts :: Scope -> VExpr -> VExpr
-reuseParts scope expr = case knownAlt scope expr of
-  Just i -> snd (getConst (descendB (const (Const [])) (const (Const [])) (\bs e -> Const [(bs,e)]) expr) !! i)
-  Nothing -> expr
-
--- Retarget a newly constructed destructuring and its continuation. Existing root
--- binders (including those of non-variable scrutinees) keep their identity.
-nameParts :: VExpr -> VExpr
-nameParts expr = runIdentity (descendB Identity Identity branch expr)
-  where
-    branch bs e = let xs = [fromMaybe x (pathOf (scrutVar expr) step) | (x,step) <- bs]
-                      ren = M.fromList [(x,y) | ((x,_),y) <- zip bs xs, x /= y]
-                  in Identity (xs,renameE ren e)
 
 substE :: Subst -> VExpr -> VExpr
 substE sub expr = substEIn (scopeFor sub (fvE expr)) sub expr
@@ -809,31 +472,8 @@ bindSub bs sub p = case [(x,y) | (x,y) <- bs, p `within` x] of
   ((x,y):_) -> project (Var y) (stepsFrom x p)
   [] -> sub p
 
--- Copy an expression without duplicating its root binders. Free variables keep
--- their identities; descriptions of bound variables are renamed even out of scope.
-cloneE :: Monad m => m Path -> VExpr -> m VExpr
-cloneE fresh expr = do
-  let xs = S.toList (S.fromList [x | x@(Path _ []) <- bindersE expr])
-  ys <- mapM (const fresh) xs
-  let ren = M.fromList (zip xs ys)
-      renameRoot x = M.findWithDefault x x ren
-      sub = valueAt (M.map Var ren)
-      go = substStepWith renameRoot go
-  return (if null xs then expr else go (scopeFor sub (fvE expr)) sub expr)
-
--- renaming includes boxed operands as well as unboxed variables
-renameA :: M.Map Path Path -> AVal -> AVal
-renameA = replaceA . M.map Var
-
-renameV :: M.Map Path Path -> VVal -> VVal
-renameV = replaceV . M.map Var
-
 renameE :: M.Map Path Path -> VExpr -> VExpr
 renameE = replaceE . M.map Var
-
--- rename a variable and its parts, also where they are bound
-renamePath :: Path -> Path -> VExpr -> VExpr
-renamePath x y = renameE (M.singleton x y)
 
 -- all bound variables (with repetitions)
 bindersE :: VExpr -> [Path]

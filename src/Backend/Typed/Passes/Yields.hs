@@ -49,6 +49,8 @@ import Common.Name
 import Common.NamePrim( nameYielding, nameYieldExtend, nameCoreHnd )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
+import Backend.Typed.Traversal( descendA, descendE, descendV, mapA, mapV, within )
+import Backend.Typed.Passes.Common( cloneE, replaceA, replaceV )
 import Backend.Typed.Types( Types(..), inst )
 
 type Y a = State NameSupply a

@@ -38,6 +38,8 @@ import Data.Functor.Const( Const(..) )
 import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
+import Backend.Typed.Traversal( descendA, descendE, descendV, mapA, mapV )
+import Backend.Typed.Passes.Common( defScope )
 import Backend.Typed.Monad
 import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 

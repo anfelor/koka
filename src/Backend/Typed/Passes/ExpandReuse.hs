@@ -57,6 +57,8 @@ import Data.Functor.Identity( Identity(..) )
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
+import Backend.Typed.Traversal( descendA, descendE, descendV, mapA, mapV )
+import Backend.Typed.Passes.Common( cloneE, replaceA, replaceV )
 
 -- the credits in scope that are full
 type Full = S.Set Path

@@ -27,6 +27,7 @@ import Core.Pretty()
 import qualified Type.TypeVar as TV
 import Backend.Typed.Syntax
 import Backend.Typed.Common
+import Backend.Typed.Traversal( child )
 import Backend.Typed.Elab.Types( typeDefs )
 import Backend.Typed.Elab.TypeInfo
 import Backend.Typed.Types

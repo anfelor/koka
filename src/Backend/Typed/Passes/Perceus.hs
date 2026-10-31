@@ -64,6 +64,8 @@ import Data.Maybe( isJust, isNothing, listToMaybe )
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
+import Backend.Typed.Traversal( child, descendA, descendV, prefixes, stepsFrom, within )
+import Backend.Typed.Passes.Common( derefOf, dropValue, nameParts, partAt, projAt, projectAll, renamePrefix )
 import Backend.Typed.Monad
 import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, altTypes, lockGamma, uniqueGamma, paramModes, trivialTy )
 import Backend.Typed.Types( inst, isPtr )

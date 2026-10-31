@@ -81,6 +81,7 @@ import Data.Functor.Const( Const(..) )
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
+import Backend.Typed.Traversal( child, descendV, prefixes, sibling, within )
 import Backend.Typed.Monad
 import Backend.Typed.Types( prodV )
 import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, paramModes, trivialTy )
