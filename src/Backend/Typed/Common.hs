@@ -16,7 +16,6 @@ import Data.Functor.Const( Const(..) )
 import Data.Monoid( Sum(..) )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Types( sumAlts, sumOf )
 import Backend.Typed.Traversal
 
 -- A continuation that wraps an expression.
@@ -67,27 +66,6 @@ prodVal :: [VVal] -> VVal
 prodVal []  = UnitV
 prodVal [v] = v
 prodVal vs  = Tuple vs
-
-tapp :: VVal -> [AType] -> VVal
-tapp v []  = v
-tapp v tys = TyApp v tys
-
-injA :: [AType] -> Int -> AVal -> AVal
-injA [_] 0 v = v
-injA ss i v = InjA (fst (sumAlts ss !! i)) (sumOf ss) v
-
--- a case on each alternative of a boxed sum `a`; the branch gets the alternative, a variable at a
--- boxed type that it may only destructure. `cons` are the constructors of the alternatives.
-caseSum :: MonadFail m => [Con] -> [AType] -> Path -> (Int -> Path -> m VExpr) -> m VExpr
-caseSum cons shapes a branch
-  = case shapes of
-      [] -> fail "empty case"
-      [_] -> branch 0 a
-      _ -> do alts <- mapM (\i -> do let tag = fst (sumAlts shapes !! i)
-                                         y = child a (SInjA tag (cons !! i))
-                                     e <- branch i y
-                                     return (tag,y,e)) [0 .. length shapes - 1]
-              return (CaseA Owned a alts Nothing)
 
 -- Where a variable gets the bits of another variable: a copy (`[dup]`) gets those
 -- of its variable, and a parameter of a join point those of its arguments.

@@ -39,6 +39,7 @@ library
       Backend.Typed.Elab.Lazy
       Backend.Typed.Elab.Match
       Backend.Typed.Elab.Monad
+      Backend.Typed.Elab.Representation
       Backend.Typed.Elab.TypeInfo
       Backend.Typed.Elab.Types
       Backend.Typed.Fip
