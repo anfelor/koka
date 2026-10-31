@@ -12,7 +12,6 @@ module Backend.Typed.Passes.Peephole( peepholeProgram ) where
 import Backend.Typed.Syntax
 import Backend.Typed.Passes.Common( defGamma, typedChildren, NameSupply, freshFor, freshPathFrom, perBody )
 import Backend.Typed.Traversal( fvE, within )
-import Backend.Typed.Monad
 import Backend.Typed.Query
 
 type H a = M (Env,Gamma) NameSupply a

@@ -21,8 +21,8 @@ import Common.NamePrim( nameOpenNone )
 import Backend.Typed.Syntax
 import Backend.Typed.Passes.Common( defGamma, descendTyped, lamsTyped, NameSupply, freshFor, freshNameFrom, perBody, renameE )
 import Backend.Typed.Traversal( bindersE, descendE, fvA, fvE, fvV )
-import Backend.Typed.Monad
-import Backend.Typed.Query( Env, Gamma, envOf, inferVar )
+import Backend.Typed.Query( Env, Gamma, envOf, inferVar
+                          , M, evalM, liftE, state )
 
 type P a = M () NameSupply a
 

@@ -6,12 +6,15 @@
 -- found in the LICENSE file at the root of this distribution.
 -----------------------------------------------------------------------------
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module Backend.Typed.Elab.Monad( Env(..), St(..), E
                               , runE, failE, tr, env, withLocals, withFields, withTVars, withHole, inClosure
                               , fresh, freshName, recordSig, note, vt
                               ) where
 
+import Control.Monad.Reader
+import Control.Monad.State
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Common.Name
@@ -20,7 +23,6 @@ import Kind.Newtypes
 import Backend.Typed.Common( K )
 import Backend.Typed.Syntax
 import Backend.Typed.Elab.TypeInfo
-import Backend.Typed.Monad
 
 -- `envHoles`: the variables bound to the parts of a constructor context under construction:
 -- a value that contains the hole, or (`Nothing`) the address of the hole. They are not bound
@@ -32,16 +34,21 @@ data Env = Env{ envNT :: Newtypes, envLocals :: S.Set Name, envTVars :: S.Set TV
 
 data St = St{ stUniq :: Int, stSigs :: Sigs, stNotes :: [String] }
 
-type E a = M Env St a
+-- Elaboration owns its environment, state and failure independently of IR passes.
+newtype E a = E (ReaderT Env (StateT St (Either String)) a)
+            deriving (Functor, Applicative, Monad, MonadReader Env, MonadState St)
+
+instance MonadFail E where
+  fail msg = E (lift (lift (Left msg)))
 
 runE :: E a -> Env -> St -> Either String (a,St)
-runE = runM
+runE (E m) e st = runStateT (runReaderT m e) st
 
 failE :: String -> E a
 failE = fail
 
 tr :: Tr a -> E a
-tr = liftE
+tr = either failE return
 
 env :: E Env
 env = ask

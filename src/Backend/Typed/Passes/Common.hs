@@ -21,10 +21,9 @@ import Control.Monad.State( runState, state )
 import Backend.Typed.Syntax
 import Backend.Typed.Types( Sub, Types(..), dupType, inst, mapReuseContents, traverseReuseContents )
 import Backend.Typed.Traversal
-import Backend.Typed.Query( Env, Gamma, bindAll, inferVar, inferV, altTypes, lamGamma
+import Backend.Typed.Query( Env, Gamma, M, bindAll, inferVar, inferV, altTypes, lamGamma
                           , uniqueGamma, unboxRuGamma, copyRuGamma, lockGamma
-                          )
-import Backend.Typed.Monad( M, ask, local )
+                          , ask, local )
 import Backend.Typed.Pretty( ppr )
 import Common.Name( Name, newHiddenName )
 
