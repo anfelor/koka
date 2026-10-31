@@ -35,7 +35,7 @@ import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Traversal( boxTag, canonical, child, fieldsAt, fvA, within )
-import Backend.Typed.Types( Types(..), collapse, dupType, inst )
+import Backend.Typed.Types( Types(..), collapse, dupType, inst, leaves, isEnum )
 import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, unrollT, openFields, boxContents, reuseSize, pointerShape )
 import Backend.Typed.Layout hiding( dupExpr, dropStmt )
 import Backend.Typed.Monad
