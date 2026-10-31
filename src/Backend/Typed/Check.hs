@@ -16,8 +16,7 @@ import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Common
-import Backend.Typed.Traversal( descendA, descendB, descendE, descendV, pathOf )
+import Backend.Typed.Traversal( descendA, descendB, descendE, descendV, pathOf, scrutVar )
 import Backend.Typed.Types( Types(..) )
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Query( Env, envOf, checkE, yieldJoins )
@@ -52,6 +51,60 @@ checkLayoutProgram p = concatMap check (programTypes p)
       ACon _ ts -> concatMap atomic ts
       AApp _ ts -> concatMap atomic ts
       _ -> []
+
+-- All the types that a program mentions.
+programTypes :: Program -> [VType]
+programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (progDefs prog)
+                    ++ concatMap (\d -> vars (tdefParams d) ++ maybe [] at (tdefBody d)) (M.elems (progTypes prog))
+  where
+    vars = map (VPtr . AVar)
+    sig s = case s of
+      SigFun vs ps r -> vars vs ++ (r : map snd ps)
+      SigVal vs t -> vars vs ++ [t]
+      SigCon vs ts _ -> vars vs ++ ts
+    def d = case d of
+      DefFun _ vs ps r e -> vars vs ++ (r : map (\(_,_,t) -> t) ps ++ et e)
+      DefVal _ vs t e -> vars vs ++ (t : et e)
+    at a = case a of
+      ABox t -> [t]
+      ASum ts -> concatMap (at . snd) ts
+      AFun ps r -> r : map snd ps
+      AForall _ b -> at b
+      ALam _ b -> at b
+      ALazy l b -> at l ++ at b
+      AMu _ _ b ts -> concatMap at (b : ts)
+      ACon _ ts -> concatMap at ts
+      AApp _ ts -> concatMap at ts
+      _ -> []
+    et e = here ++ getConst (descendE (const (Const [])) (Const . vt) (\_ b -> Const (et b)) e)
+      where here = case e of
+                     Let _ t _ _ -> [t]
+                     LetYield _ t _ _ _ -> [t]
+                     Yielded t -> [t]
+                     Unreachable t -> [t]
+                     Join _ _ ps _ _ -> map (\(_,_,t) -> t) ps
+                     Jump _ ts _ -> concatMap at ts
+                     Call _ ts _ -> concatMap at ts
+                     Gen vs _ -> map (VPtr . AVar) vs
+                     Unpack _ _ vs _ _ -> map (VPtr . AVar) vs
+                     _ -> []
+    vt v = here ++ getConst (descendV (Const . avTypes) (Const . vt) v)
+      where here = case v of
+                     Glob _ ts -> concatMap at ts
+                     TyApp _ ts -> concatMap at ts
+                     Context a _ -> at a
+                     Ptr a _ -> at a
+                     Inj _ t _ -> [t]
+                     Pack t ts _ -> t : concatMap at ts
+                     NoReuse _ p -> maybe [] (\(Contents _ _ t) -> [t]) p
+                     _ -> []
+    avTypes a = case a of
+      Lam ps r e -> r : map (\(_,_,t) -> t) ps ++ et e
+      Roll t w -> at t ++ avTypes w
+      InjA _ t w -> at t ++ avTypes w
+      InjLazy _ t w -> at t ++ avTypes w
+      OpenCon _ ts ws -> concatMap at ts ++ concatMap vt ws
+      _ -> getConst (descendA (const (Const [])) (Const . avTypes) (Const . vt) a)
 
 -- The typing rules hold before the variables are named by their paths, so the
 -- elaborated program is checked for types only.

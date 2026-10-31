@@ -20,7 +20,7 @@ import Common.Name
 import Lib.PPrint( Pretty )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Traversal( boxTag, child )
+import Backend.Typed.Traversal( bindersE, boxTag, child, destructAOf, destructVOf, dsAlts, dsScrut, fvA, fvE, fvV, isGlob, jumpArgs )
 import Backend.Typed.Types
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Layout( layout, blockSize, isBlock )

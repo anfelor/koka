@@ -21,8 +21,8 @@ import qualified Data.Map as Map
 import Data.List( sortOn )
 import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
-import Backend.Typed.Common
-import Backend.Typed.Traversal( child, descendA, descendE, descendV, mapA, mapV )
+import Backend.Typed.Types( dupType )
+import Backend.Typed.Traversal( child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut, mapA, mapV )
 import Backend.Typed.Passes.Common( Scope, bindScope, defScope, knownAlt, nameParts, renameE, reuseParts, scopeOf )
 import Backend.Typed.Monad
 import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, lockGamma, uniqueGamma )
