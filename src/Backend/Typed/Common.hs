@@ -397,7 +397,6 @@ descendB fn fv fb expr
       Drop x e              -> Drop <$> fn x <*> plain e
       Free r e              -> Free <$> fn r <*> plain e
       Dup x y e             -> (\x' (y',e') -> Dup x' y' e') <$> fn x <*> one y [] e
-      Load x y e            -> (\x' (y',e') -> Load x' y' e') <$> fn x <*> one y [SLoad] e
       IsUnique x e1 e2      -> IsUnique <$> fn x <*> plain e1 <*> plain e2
       IfFull r e1 e2        -> IfFull <$> fn r <*> plain e1 <*> plain e2
       UnboxRu v r e         -> (\v' (r',e') -> UnboxRu v' r' e') <$> fn v <*> one r [] e
@@ -488,31 +487,18 @@ within (Path x ss) (Path y ts) = x == y && ts `isPrefixOf` ss
 stepsFrom :: Path -> Path -> [Step]
 stepsFrom (Path _ ts) (Path _ ss) = drop (length ts) ss
 
--- the box whose block holds a variable in its contents: the variable before the last
--- `contents` step on its path, unless a `taken` step (`[unbox-ru]` took the contents out of
--- their block) or a `load` step (`[load]` copied the part out of it) follows it
-boxOf :: Path -> Maybe Path
-boxOf (Path x ss)
-  = case break (`elem` [SContents,STaken,SLoad]) (reverse ss) of
-      (_,SContents : rest) -> Just (Path x (reverse rest))
-      _ -> Nothing
-
--- the box whose block a variable is a place of: as `boxOf`, unless a `deref` step follows the
--- last `contents` step (`[deref]` read the pointer out of the block)
-placeOf :: Path -> Maybe Path
-placeOf (Path x ss)
-  = case break (`elem` [SContents,STaken,SLoad,SDeref]) (reverse ss) of
-      (_,SContents : rest) -> Just (Path x (reverse rest))
-      _ -> Nothing
+-- whether a variable is in the contents of a box: after the last `contents` step on its
+-- path, unless a `taken` step follows. A drop of the box gives it up, and `[unbox-ru]` and
+-- `[lock]` rename it.
+inContents :: Path -> Bool
+inContents (Path _ ss) = case break (`elem` [SContents,STaken]) (reverse ss) of
+                           (_,SContents : _) -> True
+                           _ -> False
 
 -- `[unbox-ru]` of `z` renames its contents `z.contents` and their parts to `z.taken`, and
--- the body's uses of them are uses of the old names outside (`unrebase`). The parts loaded
--- out of the block (on a path with a `load` step after `z.contents`) keep their names.
+-- the body's uses of them are uses of the old names outside (`unrebase`).
 rebase, unrebase :: Path -> Path -> Path
-rebase z x
-  | x `within` p && SLoad `elem` stepsFrom p x = x
-  | otherwise = renamePrefix p (child z STaken) x
-  where p = child z SContents
+rebase z = renamePrefix (child z SContents) (child z STaken)
 unrebase z = renamePrefix (child z STaken) (child z SContents)
 
 renamePrefix :: Path -> Path -> Path -> Path
@@ -912,7 +898,6 @@ destructAOf expr
       Unroll m v x e        -> Just (Destruct m v [([x],e)] (\m' v' es -> Unroll m' v' x (head es)))
       Unbox m v x e         -> Just (Destruct m v [([x],e)] (\m' v' es -> Unbox m' v' x (head es)))
       Unscalar m v x e      -> Just (Destruct m v [([x],e)] (\m' v' es -> Unscalar m' v' x (head es)))
-      Load v x e            -> Just (Destruct Borrowed v [([x],e)] (\_ v' es -> Load v' x (head es)))
       CaseOpen m v alts def -> Just (Destruct m v ([(xs,e) | (_,xs,e) <- alts] ++ [([],def)])
                                        (\m' v' es -> CaseOpen m' v' [(c,xs,e) | ((c,xs,_),e) <- zip alts es] (last es)))
       Proj{} -> Nothing
@@ -951,7 +936,6 @@ destructVOf expr
       Unroll{} -> Nothing
       Unbox{} -> Nothing
       Unscalar{} -> Nothing
-      Load{} -> Nothing
       CaseOpen{} -> Nothing
       Ret{} -> Nothing
       Let{} -> Nothing
@@ -974,14 +958,13 @@ destructVOf expr
       Join{} -> Nothing
       Jump{} -> Nothing
 
--- reading the contents of a box (or loading a part of them) never moves them
+-- reading the contents of a box never moves them
 isRead :: VExpr -> Bool
 isRead expr
   = case expr of
       SplitA{}    -> False
       Unbox{}     -> True
       Unscalar{}  -> False
-      Load{}      -> True
       CaseOpen{}  -> True
       Proj{}      -> False
       CaseV{}     -> False
@@ -1025,7 +1008,6 @@ keepsPointer expr
       CaseV{}     -> False
       Unbox{}     -> False
       Unscalar{}  -> False
-      Load{}      -> False
       CaseOpen{}  -> False
       Ret{}       -> False
       Let{}       -> False
@@ -1047,7 +1029,7 @@ keepsPointer expr
       Join{}      -> False
       Jump{}      -> False
 
--- Where a variable gets the bits of another variable: a copy (`[dup]` or `[load]`) gets those
+-- Where a variable gets the bits of another variable: a copy (`[dup]`) gets those
 -- of its variable (the pointer of a dereference), the contents taken by `[unbox-ru]` or `[lock]` those of the old contents, and a parameter of
 -- a join point those of its arguments.
 data Source = Copy Path | Param [VVal]
@@ -1059,7 +1041,6 @@ sources expr = M.union here (getConst (descendE (const (Const M.empty)) (Const .
   where
     here = case expr of
              Dup x y _ -> M.singleton y (Copy (fromMaybe x (derefOf x)))
-             Load x y _ -> M.singleton y (Copy x)
              _ | Just (z,_,_) <- takesContents expr -> M.singleton (child z STaken) (Copy (child z SContents))
              Join j _ ps _ e2 -> M.fromList [(y,Param [vs !! i | vs <- jumpArgs j e2]) | (i,(y,_,_)) <- zip [0..] ps]
              _ -> M.empty

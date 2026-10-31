@@ -20,13 +20,14 @@
   after `JoinArgs`, so that a captured variable is inlined into the join body as well.
 
   In an enum alternative, a reused payload can name its old enum field instead of the
-  equal constructor constant, or a variable with its bits (`sameBits`), such as the copy
-  that Perceus loads it into. Only variables still in scope are used; enum values carry no
+  equal constructor constant, or a variable with its bits (`sameBits`), such as a copy of
+  it. Only variables still in scope are used, and in a join body none in the contents of a
+  box, which a jump to it may have given up; enum values carry no
   ownership. Descriptions and the checking rules stay unchanged.
 
   Bindings that keep a literal dereference named are retained, preserving its operand
-  path without introducing a fresh root, and so are those of values that are duplicated or
-  loaded as a whole (`[dup]` and `[load]` take a variable). Existentials are not inlined: unpacking a known
+  path without introducing a fresh root, and so are those of values that are duplicated as
+  a whole (`[dup]` takes a variable). Existentials are not inlined: unpacking a known
   `pack` would substitute its types.
 -}
 module Backend.Typed.Passes.Inline( inlineProgram ) where
@@ -98,7 +99,6 @@ valuesE expr = here <> getConst (descendE (const (Const mempty)) (Const . values
              Let x _ (Ret v) _ | structural v -> (M.singleton x v,S.empty)
              Deref _ (Var x) _ _ -> (M.empty,S.singleton x)
              Dup x _ _ -> (M.empty,S.singleton x)
-             Load x _ _ -> (M.empty,S.singleton x)
              _ -> mempty
 
 valuesV :: VVal -> (Values,S.Set Path)
@@ -157,7 +157,8 @@ reuseE expr
   = case expr of
       Let x t e1 e2 -> Let x t <$> reuseE e1 <*> bindReuse [(x,V t)] (reuseE e2)
       LetYield x t e1 e2 e3 -> LetYield x t <$> reuseE e1 <*> bindReuse [(x,V t)] (reuseE e2) <*> reuseE e3
-      Join j tvs ps e1 e2 -> Join j tvs ps <$> bindReuse [(x,V t) | (x,_,t) <- ps] (reuseE e1) <*> reuseE e2
+      -- a jump may give up the contents of a box that the join body captures
+      Join j tvs ps e1 e2 -> Join j tvs ps <$> bindReuse [(x,V t) | (x,_,t) <- ps] (outOfContents (reuseE e1)) <*> reuseE e2
       -- the facts follow the contents to `z.taken`
       UnboxRu z r e -> do (env,g,facts,src) <- ask
                           g' <- liftE (unboxRuGamma g z r)
@@ -174,6 +175,9 @@ reuseE expr
                       t <- liftE (inferVar g x >>= dupType x)
                       Dup x y <$> bindReuse [(y,t)] (reuseE e)
       _ -> descendE pure reuseV (\_ -> reuseE) expr
+
+outOfContents :: Reuse a -> Reuse a
+outOfContents = local (\(env,g,facts,src) -> (env,g,M.filterWithKey (\x _ -> not (inContents x)) facts,src))
 
 enumType :: VType -> Bool
 enumType (VSum ts) = not (null ts) && all ((== VUnit) . snd) ts
