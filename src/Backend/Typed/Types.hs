@@ -9,6 +9,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents, collapse
                           , unrollMu, rep, boxrep, boxA, shapeA, shapeLeaves, leafCons, isPtr, varV, forallA, prodV, prodFields, sumTypes, sumAlts, sumOf
+                          , leaves, isEnum, scalarField
                           , dupType, isTrivialWith, isShape, containsLinear
                           , applyA, vtInt, vtString, vtChar, vtFloat, atAny
                           ) where
@@ -18,7 +19,6 @@ import qualified Data.Map as M
 import Control.Monad( foldM )
 import Common.NamePrim( nameTpInt, nameTpString, nameTpAny, nameTpReuse )
 import Backend.Typed.Syntax
-import Backend.Typed.Layout( scalarField )
 
 type Sub = M.Map TVar AType
 
@@ -261,6 +261,42 @@ boxA t
       VRaw r   -> AScalar r
       _ | Just s <- scalarField t -> boxA s
         | otherwise -> shapeA t
+
+-- leaves of a product
+leaves :: VType -> [VType]
+leaves t
+  = case t of
+      VProd fs -> concatMap (leaves . snd) fs
+      VExists _ b -> leaves b
+      VUnit -> []
+      VPtr _ -> [t]
+      VSum _ -> [t]
+      VRaw _ -> [t]
+      VReuse _ _ _ -> [t]
+      VCtx _ a b -> [VPtr a, VPtr b]
+      VCell _ _ -> [t]
+
+isEnum :: VType -> Bool
+isEnum t
+  = case t of
+      VSum ts -> length ts > 1 && all (isUnitT . snd) ts
+      _ -> False
+  where
+    isUnitT VUnit = True
+    isUnitT (VProd fs) = all (isUnitT . snd) fs
+    isUnitT (VExists _ b) = isUnitT b
+    isUnitT _ = False
+
+-- the only field of a product of a raw value or an enumeration and units, which Koka boxes like
+-- that field: as `Scalar raw`, or as the shape of the enumeration
+scalarField :: VType -> Maybe VType
+scalarField t
+  = case (t, leaves t) of
+      (VSum _, _)      -> Nothing
+      (VRaw _, _)      -> Nothing
+      (_, [s@(VRaw _)]) -> Just s
+      (_, [s]) | isEnum s -> Just s
+      _                -> Nothing
 
 -- the shape of a boxed value: a flat sum of its leaves, which have tags
 shapeA :: VType -> AType

@@ -18,9 +18,9 @@
   Structs are named by a hash of their layout so modules agree on them.
 -}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Layout( CT(..), EnumSize(..), layout, leaves, leafSlots, isEnum, orderFields, shapeIsHeap, shapeIsSmall
+module Backend.Typed.Layout( CT(..), EnumSize(..), layout, leafSlots, orderFields, shapeIsHeap, shapeIsSmall
                            , checkLayout, ctName, scanOf, rawOf, needsRC
-                           , structDefs, blockName, blockDef, blockSize, isBlock, scalarField
+                           , structDefs, blockName, blockDef, blockSize, isBlock
                            , dupExpr, dropStmt, dupFun, dropFun, primBox, scalarHeapSize, fnv
                            ) where
 
@@ -31,6 +31,7 @@ import Data.List( intercalate, foldl', sortOn )
 import Data.Ord( Down(..) )
 import qualified Numeric
 import Backend.Typed.Syntax
+import Backend.Typed.Types( leaves, isEnum )
 
 data CT = CBox
         | CPrim Raw
@@ -99,36 +100,11 @@ layout t
                     CUnit -> Nothing
                     ct    -> Just ct
 
--- leaves of a product
-leaves :: VType -> [VType]
-leaves t
-  = case t of
-      VProd fs -> concatMap (leaves . snd) fs
-      VExists _ b -> leaves b
-      VUnit -> []
-      VPtr _ -> [t]
-      VSum _ -> [t]
-      VRaw _ -> [t]
-      VReuse _ _ _ -> [t]
-      VCtx _ a b -> [VPtr a, VPtr b]
-      VCell _ _ -> [t]
-
 enumSize :: Int -> EnumSize
 enumSize n
   | n <= 256   = Enum8
   | n <= 65536 = Enum16
   | otherwise  = Enum32
-
-isEnum :: VType -> Bool
-isEnum t
-  = case t of
-      VSum ts -> length ts > 1 && all (isUnitT . snd) ts
-      _ -> False
-  where
-    isUnitT VUnit = True
-    isUnitT (VProd fs) = all (isUnitT . snd) fs
-    isUnitT (VExists _ b) = isUnitT b
-    isUnitT _ = False
 
 -- scanned fields first (pointers before mixed ones), then raw fields by decreasing alignment
 -- (so that small fields share a word, as in Koka); units take no space
@@ -295,17 +271,6 @@ isBlock ct
       CEnum _   -> True
       CUnit     -> False
       CReuse    -> False
-
--- the only field of a product of a raw value or an enumeration and units, which Koka boxes like
--- that field: as `Scalar raw`, or as the shape of the enumeration
-scalarField :: VType -> Maybe VType
-scalarField t
-  = case (t, leaves t) of
-      (VSum _, _)      -> Nothing
-      (VRaw _, _)      -> Nothing
-      (_, [s@(VRaw _)]) -> Just s
-      (_, [s]) | isEnum s -> Just s
-      _                -> Nothing
 
 sizeAlign :: CT -> (Int,Int)
 sizeAlign ct
