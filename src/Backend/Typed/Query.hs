@@ -7,13 +7,19 @@
 -----------------------------------------------------------------------------
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 -- Type inference and environment queries shared by typed IR consumers.
 -- Keep inference in sync with the typing rules in Syntax.
 module Backend.Typed.Query( Env(..), Gamma, noJoins, yieldJoins, envOf, bindAll, checkE, inferE, inferA, inferV
                           , inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize
                           , unrollT, lazySides, trivialTy, openFields, funSig, paramModes, altPattern, pointerShape
-                          , lamGamma ) where
+                          , lamGamma
+                          , M, runM, evalM, liftE
+                          , module Control.Monad.Reader, module Control.Monad.State
+                          ) where
 
+import Control.Monad.Reader
+import Control.Monad.State
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad( zipWithM_, unless, when, forM_ )
@@ -25,6 +31,22 @@ import Backend.Typed.Traversal( bindersE, boxTag, child, destructAOf, destructVO
 import Backend.Typed.Types
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Layout( layout, blockSize, isBlock )
+
+-- The monad for typed IR consumers: an environment, state and failure message.
+newtype M r s a = M (ReaderT r (StateT s (Either String)) a)
+                deriving (Functor, Applicative, Monad, MonadReader r, MonadState s)
+
+instance MonadFail (M r s) where
+  fail msg = M (lift (lift (Left msg)))
+
+runM :: M r s a -> r -> s -> Either String (a,s)
+runM (M m) r s = runStateT (runReaderT m r) s
+
+evalM :: M r s a -> r -> s -> Either String a
+evalM m r s = fst <$> runM m r s
+
+liftE :: Either String a -> M r s a
+liftE = either fail return
 
 type Gamma = M.Map Path Ty
 
