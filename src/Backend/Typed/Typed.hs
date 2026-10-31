@@ -22,7 +22,7 @@ import Backend.Typed.Passes.Contify( contifyProgram )
 import Backend.Typed.Elab.Match( matchCore )
 import Backend.Typed.Passes.Anf( anfProgram )
 import Backend.Typed.Elab.FromCore( elabProgram )
-import Backend.Typed.Elab.Lazy( lazyProgram, lazyCopies )
+import Backend.Typed.Elab.Lazy( lazyProgram )
 import Backend.Typed.Check( checkProgram, checkTypes )
 import Backend.Typed.Passes.Simplify( simplifyProgram )
 import Backend.Typed.Passes.Yields( yieldsProgram )
@@ -51,8 +51,7 @@ typedFromCore enableReuse nt imports uniq core
                                    ++ concat [[("fillcredits",Linear,pure' fillCreditsProgram),("expandreuse",Linear,pure' expandReuseProgram)] | enableReuse] ++ [("inline",Linear,inlineProgram)]
         (dsprog,msgs)          = runPasses eprog (label "check" (checkTypes eprog)) passes
         -- without reuse every constructor allocates
-        copies                 = lazyCopies nt (progTypes eprog)
-        fipMsgs                = if enableReuse && null msgs then label "fip" (checkFip (withCopies copies (fipsOf (core:imports))) (copyGroups copies (groupsOf core)) dsprog) else []
+        fipMsgs                = if enableReuse && null msgs then label "fip" (checkFip (fipsOf (core:imports)) (groupsOf core) dsprog) else []
         (final,peepholeMsgs)   = if null elabErrs && null msgs then runPasses dsprog [] [("peephole",Linear,peepholeProgram)] else (dsprog,[])
     in (final, label "elab" elabErrs ++ msgs ++ fipMsgs ++ peepholeMsgs ++ label "note" notes)
   where
@@ -70,16 +69,6 @@ fipsOf cores
 groupsOf :: C.Core -> M.Map Name (S.Set Name)
 groupsOf core
   = M.fromList [(C.defName d, names) | C.DefRec ds <- C.coreProgDefs core, let names = S.fromList (map C.defName ds), d <- ds]
-
--- the copies of functions (`lazyCopies`) have the annotations of their originals
-withCopies :: [(Name,(Name,Bool))] -> M.Map Name a -> M.Map Name a
-withCopies copies m = M.union m (M.fromList [(c,a) | (c,(f,_)) <- copies, Just a <- [M.lookup f m]])
-
--- and their recursive groups consist of the copies with the same value of `recurse`
-copyGroups :: [(Name,(Name,Bool))] -> M.Map Name (S.Set Name) -> M.Map Name (S.Set Name)
-copyGroups copies groups = M.union groups (M.fromList [(c,S.map (copyOf b) gs) | (c,(f,b)) <- copies, Just gs <- [M.lookup f groups]])
-  where
-    copyOf b g = M.findWithDefault g (g,b) (M.fromList [(o,c) | (c,o) <- copies])
 
 -- a pass on the typed IR: its name, what its result must satisfy, and the pass
 type Pass = (String, Checks, Program -> (Program,[String]))
