@@ -52,6 +52,7 @@ import Kind.Newtypes
 import Type.Type( lazyName, conInfoName )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
+import Backend.Typed.Passes.Common( NameSupply, freshFor, freshPathFrom, renameE, altBodies )
 import Backend.Typed.Traversal( child, descendA, descendE, descendV, injAStep, mapA, mapV )
 import Backend.Typed.Monad
 import Backend.Typed.Pretty( ppr )

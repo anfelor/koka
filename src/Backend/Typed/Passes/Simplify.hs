@@ -38,7 +38,7 @@ import Data.Functor.Const( Const(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Traversal( descendA, descendE, descendV, mapA, mapV, stepsFrom, within )
-import Backend.Typed.Passes.Common( defScope, substJump, substTypesE )
+import Backend.Typed.Passes.Common( SubstExpr, defScope, project, substJump, substName, substStep, substTypesE, valueAt )
 import Backend.Typed.Types( Types(..) )
 
 simplifyProgram :: Program -> Program

@@ -36,7 +36,7 @@ import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Traversal( descendA, descendE, descendV, mapA, mapV )
-import Backend.Typed.Passes.Common( defScope, substJump )
+import Backend.Typed.Passes.Common( Scope, bindScope, defScope, scopeOf, substEIn, substJump, valueAt )
 
 joinArgsProgram :: Program -> Program
 joinArgsProgram prog = prog{ progDefs = [d{ defBody = jaE (declared (defBody d)) (defScope d) (defBody d) } | d <- progDefs prog] }
