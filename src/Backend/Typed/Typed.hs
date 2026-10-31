@@ -22,7 +22,8 @@ import Backend.Typed.Passes.Contify( contifyProgram )
 import Backend.Typed.Elab.Match( matchCore )
 import Backend.Typed.Passes.Anf( anfProgram )
 import Backend.Typed.Elab.FromCore( elabProgram )
-import Backend.Typed.Elab.Lazy( lazyProgram )
+import Backend.Typed.Elab.Lazy( lazyFuns )
+import Backend.Typed.Passes.Lazy( lazyProgram )
 import Backend.Typed.Check( checkProgram, checkTypes )
 import Backend.Typed.Passes.Simplify( simplifyProgram )
 import Backend.Typed.Passes.Yields( yieldsProgram )
@@ -45,19 +46,24 @@ typedFromCore :: Bool -> Newtypes -> [C.Core] -> Int -> C.Core -> (Program,[(Str
 typedFromCore enableReuse nt imports uniq core
   = let (acore,_)              = runUnique uniq (matchCore nt core)
         (eprog,elabErrs,notes) = elabProgram nt imports acore
-        passes                 = [("lazy",Unchecked,named (lazyProgram nt)), ("anf",Unchecked,pure' anfProgram), ("contify",Unchecked,contifyProgram), ("simplify",Unchecked,pure' simplifyProgram), ("yields",Unchecked,pure' yieldsProgram), ("perceus",Linear,perceusProgram)
+        lazies                 = lazyFuns nt (progTypes eprog)
+        passes                 = [("lazy",TypesOnly,lazyProgram lazies)
+                                  ,("paths",WellFormed,pure' pathsProgram)
+                                  ,("anf",WellFormed,pure' anfProgram)
+                                  ,("contify",WellFormed,contifyProgram)
+                                  ,("simplify",WellFormed,pure' simplifyProgram)
+                                  ,("yields",WellFormed,pure' yieldsProgram)
+                                  ,("perceus",Linear,perceusProgram)
                                    ,("dropspec",Linear,dropSpecProgram)] ++ [("reuse",Linear,reuseProgram) | enableReuse]
                                    ++ [("match",Linear,matchProgram), ("sinkjoins",Linear,pure' sinkJoinsProgram), ("joinargs",Linear,pure' joinArgsProgram)]
                                    ++ concat [[("fillcredits",Linear,pure' fillCreditsProgram),("expandreuse",Linear,pure' expandReuseProgram)] | enableReuse] ++ [("inline",Linear,inlineProgram)]
-        (dsprog,msgs)          = runPasses eprog (label "check" (checkTypes eprog)) passes
+        (dsprog,msgs)          = runPasses eprog (label "check before lazy" (checkTypes eprog)) passes
         -- without reuse every constructor allocates
         fipMsgs                = if enableReuse && null msgs then label "fip" (checkFip (fipsOf (core:imports)) (groupsOf core) dsprog) else []
         (final,peepholeMsgs)   = if null elabErrs && null msgs then runPasses dsprog [] [("peephole",Linear,peepholeProgram)] else (dsprog,[])
     in (final, label "elab" elabErrs ++ msgs ++ fipMsgs ++ peepholeMsgs ++ label "note" notes)
   where
     pure' f prog = (f prog,[])
-    -- Lazy completes elaboration; the paths are named once, after it
-    named f prog = let (prog',errs) = f prog in (pathsProgram prog',errs)
 
 -- the FIP annotations of the functions
 fipsOf :: [C.Core] -> M.Map Name Fip
@@ -73,10 +79,11 @@ groupsOf core
 -- a pass on the typed IR: its name, what its result must satisfy, and the pass
 type Pass = (String, Checks, Program -> (Program,[String]))
 
--- Beyond the types, the result of a pass may need to be linear.
-data Checks = Unchecked | Linear
+-- Lazy runs before path naming, so only its types are checked. After Paths,
+-- every pass preserves path names; later passes also produce linear code.
+data Checks = TypesOnly | WellFormed | Linear
 
--- Each pass preserves path naming; validate its result directly, and check linearity
+-- Validate each result before running the next pass, and check linearity
 -- if the pass produces linear code. Stop at the first error so that later passes
 -- never run on invalid input and the message identifies the pass responsible.
 runPasses :: Program -> [(String,String)] -> [Pass] -> (Program,[(String,String)])
@@ -84,11 +91,12 @@ runPasses prog msgs _ | not (null msgs) = (prog,msgs)
 runPasses prog msgs [] = (prog,msgs)
 runPasses prog msgs ((name,checks,pass):passes)
   = let (prog',errs) = pass prog
-        checkErrs    = label ("check after " ++ name) (checkProgram prog')
+        checkErrs    = label ("check after " ++ name) (case checks of
+                         TypesOnly -> checkTypes prog'
+                         _ -> checkProgram prog')
         linErrs      = case checks of
-                         Unchecked -> []
-                         _ | not (null checkErrs) -> []
-                         Linear -> label ("linear after " ++ name) (checkLinear prog')
+                         Linear | null checkErrs -> label ("linear after " ++ name) (checkLinear prog')
+                         _ -> []
         msgs'        = msgs ++ label name errs
     in runPasses prog' (msgs' ++ (if null msgs' then checkErrs ++ linErrs else [])) passes
 

@@ -11,7 +11,7 @@
 module Backend.Typed.Elab.TypeInfo( Tr
                                   , elabType, elabFunType, elabScheme
                                   , isValueInfo, elabArgs
-                                  , conIndex, conFieldTypes, conFieldNames, schemeFieldTypes, conCount, conShape, conExists, padFields
+                                  , conIndex, conFieldTypes, conFieldNames, schemeFieldTypes, conCount, conShape, conExists
                                   , isLazyInfo, refShape, refInj
                                   , dataInfoOf, valueBody
                                   , tvarStar
@@ -157,7 +157,7 @@ conFields nt vargs con = prodFields . zip (conFieldNames con) <$> conFieldTypes 
 -- The fields of a constructor. A thunk is padded after its fields if its block would be
 -- smaller than that of an indirection `Box(τ*)`, so that `[memoize]` can write one over it.
 -- Such fields are raw and fit in 4 bytes (with the header, a block is a multiple of 4
--- bytes), so a `char` (zero, see `padFields`) makes the block exactly as large.
+-- bytes), so a `char` (zero, see `Common.padFields`) makes the block exactly as large.
 conFieldTypes :: Newtypes -> [AType] -> ConInfo -> Tr [VType]
 conFieldTypes nt vargs con = pad <$> schemeFieldTypes nt vargs (conInfoType con)
   where
@@ -169,10 +169,6 @@ conFieldTypes nt vargs con = pad <$> schemeFieldTypes nt vargs (conInfoType con)
 conFieldNames :: ConInfo -> [Field]
 conFieldNames con
   = [if nameIsNil n then posField i else Field n | (i,(n,_)) <- zip [0..] (conInfoParams con)] ++ [Field (newName "padding")]
-
--- the values of the fields of a constructor `fields`, followed by those of its padding
-padFields :: [VType] -> [VVal] -> [VVal]
-padFields fields vs = vs ++ [Lit (LitChar '\0') | _ <- drop (length vs) fields]
 
 schemeFieldTypes :: Newtypes -> [AType] -> Type -> Tr [VType]
 schemeFieldTypes nt vargs scheme

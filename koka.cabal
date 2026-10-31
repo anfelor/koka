@@ -51,6 +51,7 @@ library
       Backend.Typed.Passes.FillCredits
       Backend.Typed.Passes.JoinArgs
       Backend.Typed.Passes.Inline
+      Backend.Typed.Passes.Lazy
       Backend.Typed.Passes.DropSpec
       Backend.Typed.Passes.ExpandReuse
       Backend.Typed.Passes.Match
