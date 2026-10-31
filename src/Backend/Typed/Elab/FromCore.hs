@@ -33,8 +33,7 @@ import Backend.Typed.Elab.TypeInfo
 import Backend.Typed.Types
 import Backend.Typed.Elab.Monad
 import Backend.Typed.Elab.Coerce
-import Backend.Typed.Names( nameUnreachable, isJoinName )
-import Backend.Typed.Elab.Common( isValue, linearContexts, isLinearContextPrim )
+import Backend.Typed.Elab.Common( isValue, linearContexts, isLinearContextPrim, nameUnreachable, isJoinName )
 import Backend.Typed.Pretty( ppr )
 
 -- programs
