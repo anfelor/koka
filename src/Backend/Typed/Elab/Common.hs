@@ -7,8 +7,8 @@
 -----------------------------------------------------------------------------
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
--- Structural queries shared by the Core-to-typed-IR passes.
-module Backend.Typed.Elab.Common( isValue, isConExpr, linearContexts, isLinearContextPrim ) where
+-- Internal names and structural queries shared by the Core-to-typed-IR passes.
+module Backend.Typed.Elab.Common( isValue, isConExpr, linearContexts, isLinearContextPrim, nameUnreachable, isJoinName ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -16,7 +16,13 @@ import Data.List( isInfixOf )
 import Common.Name
 import Common.NamePrim( nameCCtxApply, nameCCtxExtend )
 import Core.Core( Expr(..), TName(..), VarInfo(..), Branch(..), Guard(..), Def(..), DefGroup(..), flattenDefGroups )
-import Backend.Typed.Names( isJoinName )
+
+-- marks an impossible alternative in Core; elaboration turns it into `[unreachable]`
+nameUnreachable :: Name
+nameUnreachable = newHiddenName "typed-unreachable"
+
+isJoinName :: Name -> Bool
+isJoinName x = hiddenNameStartsWith x "join"
 
 isValue :: Expr -> Bool
 isValue expr

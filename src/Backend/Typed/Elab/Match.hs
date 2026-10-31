@@ -25,7 +25,7 @@ module Backend.Typed.Elab.Match( matchCore ) where
 import Data.List( nubBy, findIndex, partition )
 import qualified Data.Set as S
 import Common.Name
-import Backend.Typed.Names
+import Backend.Typed.Elab.Common( nameUnreachable, isJoinName )
 import Common.Unique
 import Kind.Newtypes( Newtypes, newtypesLookupAny )
 import Type.Type
