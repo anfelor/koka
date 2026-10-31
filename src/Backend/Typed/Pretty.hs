@@ -14,7 +14,7 @@ import Lib.PPrint
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Types( mapReuseContents )
-import Backend.Typed.Common( child, descendB, descendE, mapA, mapV, projStep )
+import Backend.Typed.Traversal( child, descendB, descendE, mapA, mapV, projStep )
 
 nm :: Name -> Doc
 nm n = text (show n)

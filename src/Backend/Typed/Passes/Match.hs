@@ -22,6 +22,8 @@ import Data.List( sortOn )
 import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
+import Backend.Typed.Traversal( child, descendA, descendE, descendV, mapA, mapV )
+import Backend.Typed.Passes.Common( defScope, nameParts, reuseParts )
 import Backend.Typed.Monad
 import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, lockGamma, uniqueGamma )
 import Backend.Typed.Layout( shapeIsHeap )

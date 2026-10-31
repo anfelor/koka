@@ -46,6 +46,8 @@ import Data.Monoid( Any(..), All(..) )
 import Control.Monad.State
 import Backend.Typed.Syntax
 import Backend.Typed.Common
+import Backend.Typed.Traversal( child, descendA, descendE, descendV )
+import Backend.Typed.Passes.Common( substJump, yieldingAlts )
 
 type C a = State NameSupply a
 

@@ -50,6 +50,7 @@ import Common.NamePrim( nameTpInt, nameYielding, nameCoreDebug, nameCoreHnd, nam
 import Common.Syntax( Fip(..), FipAlloc(..), fipAlloc, isFipTop )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
+import Backend.Typed.Traversal( descendA, descendE, descendV, stepsFrom, within )
 import Backend.Typed.Monad
 import Backend.Typed.Layout( layout, isBlock )
 import Backend.Typed.Pretty( ppr )

@@ -13,7 +13,7 @@ module Backend.Typed.Passes.Anf( anfProgram ) where
 
 import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
-import Backend.Typed.Common
+import Backend.Typed.Traversal( descendE, mapA, mapV )
 
 anfProgram :: Program -> Program
 anfProgram prog = prog{ progDefs = [d{ defBody = anfE (defBody d) } | d <- progDefs prog] }
