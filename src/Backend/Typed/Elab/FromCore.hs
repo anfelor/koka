@@ -33,6 +33,7 @@ import Backend.Typed.Elab.TypeInfo
 import Backend.Typed.Types
 import Backend.Typed.Elab.Monad
 import Backend.Typed.Elab.Coerce
+import Backend.Typed.Elab.Lazy( whnfTests )
 import Backend.Typed.Elab.Common( isValue, linearContexts, isLinearContextPrim, nameUnreachable, isJoinName )
 import Backend.Typed.Pretty( ppr )
 
@@ -63,10 +64,12 @@ isContextAccessor def = C.defName def `elem` [newLocallyQualified "std/core/type
 
 elabDef :: C.Def -> E (Def,Sig)
 elabDef def
-  = case splitLam (C.defExpr def) of
-      Just (_,pars,body) | isDefFun (C.defSort def) -> elabFunDef def pars body
-      Nothing | isDefFun (C.defSort def) -> failE "function definition is not a lambda"
-      _ -> elabValDef def
+  = do (d,sig) <- case splitLam (C.defExpr def) of
+                    Just (_,pars,body) | isDefFun (C.defSort def) -> elabFunDef def pars body
+                    Nothing | isDefFun (C.defSort def) -> failE "function definition is not a lambda"
+                    _ -> elabValDef def
+       body <- whnfTests (defBody d)
+       return (d{ defBody = body },sig)
 
 elabFunDef :: C.Def -> [TName] -> C.Expr -> E (Def,Sig)
 elabFunDef def pars body

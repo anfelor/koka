@@ -7,7 +7,7 @@
 -----------------------------------------------------------------------------
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
-{- Establish path names at the Core-to-typed-IR boundary, after `Lazy`.
+{- Establish path names at the Core-to-typed-IR boundary, right after elaboration.
 
   The binder of a destructuring of a variable `z` becomes `z` followed by the step of the
   destructuring form (`descendB`), so that its name says where it comes from. Every other

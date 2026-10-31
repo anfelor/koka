@@ -47,8 +47,8 @@ typedFromCore enableReuse nt imports uniq core
   = let (acore,_)              = runUnique uniq (matchCore nt core)
         (eprog,elabErrs,notes) = elabProgram nt imports acore
         lazies                 = lazyFuns nt (progTypes eprog)
-        passes                 = [("lazy",TypesOnly,lazyProgram lazies)
-                                  ,("paths",WellFormed,pure' pathsProgram)
+        passes                 = [("paths",WellFormed,pure' pathsProgram)
+                                  ,("lazy",WellFormed,lazyProgram lazies)
                                   ,("anf",WellFormed,pure' anfProgram)
                                   ,("contify",WellFormed,contifyProgram)
                                   ,("simplify",WellFormed,pure' simplifyProgram)
@@ -57,7 +57,7 @@ typedFromCore enableReuse nt imports uniq core
                                    ,("dropspec",Linear,dropSpecProgram)] ++ [("reuse",Linear,reuseProgram) | enableReuse]
                                    ++ [("match",Linear,matchProgram), ("sinkjoins",Linear,pure' sinkJoinsProgram), ("joinargs",Linear,pure' joinArgsProgram)]
                                    ++ concat [[("fillcredits",Linear,pure' fillCreditsProgram),("expandreuse",Linear,pure' expandReuseProgram)] | enableReuse] ++ [("inline",Linear,inlineProgram)]
-        (dsprog,msgs)          = runPasses eprog (label "check before lazy" (checkTypes eprog)) passes
+        (dsprog,msgs)          = runPasses eprog (label "check after elab" (checkTypes eprog)) passes
         -- without reuse every constructor allocates
         fipMsgs                = if enableReuse && null msgs then label "fip" (checkFip (fipsOf (core:imports)) (groupsOf core) dsprog) else []
         (final,peepholeMsgs)   = if null elabErrs && null msgs then runPasses dsprog [] [("peephole",Linear,peepholeProgram)] else (dsprog,[])
@@ -79,9 +79,9 @@ groupsOf core
 -- a pass on the typed IR: its name, what its result must satisfy, and the pass
 type Pass = (String, Checks, Program -> (Program,[String]))
 
--- Lazy runs before path naming, so only its types are checked. After Paths,
+-- Elaboration does not name paths, so only its types are checked. After Paths,
 -- every pass preserves path names; later passes also produce linear code.
-data Checks = TypesOnly | WellFormed | Linear
+data Checks = WellFormed | Linear
 
 -- Validate each result before running the next pass, and check linearity
 -- if the pass produces linear code. Stop at the first error so that later passes
@@ -91,9 +91,7 @@ runPasses prog msgs _ | not (null msgs) = (prog,msgs)
 runPasses prog msgs [] = (prog,msgs)
 runPasses prog msgs ((name,checks,pass):passes)
   = let (prog',errs) = pass prog
-        checkErrs    = label ("check after " ++ name) (case checks of
-                         TypesOnly -> checkTypes prog'
-                         _ -> checkProgram prog')
+        checkErrs    = label ("check after " ++ name) (checkProgram prog')
         linErrs      = case checks of
                          Linear | null checkErrs -> label ("linear after " ++ name) (checkLinear prog')
                          _ -> []

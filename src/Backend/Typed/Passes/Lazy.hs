@@ -7,7 +7,7 @@
 -----------------------------------------------------------------------------
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
-{- Lazy values under evaluation as cells (right after elaboration, before `Paths`).
+{- Lazy values under evaluation as cells (right after `Paths`).
 
   Koka evaluates a lazy type `T` (`Kind.Infer`) with private functions that pass the lazy
   value under evaluation `@lazy : T⟨B̄⟩*` around:
@@ -33,24 +33,22 @@
   - a branch without the cell is the thunks of a match on a forced value, which are
     `unreachable` (`[unreachable]` consumes the cell).
   Any other use of a cell, and any other use of `memoize`, is an error. The functions are
-  found by `Kind.Infer`'s naming (`lazyName`). The binders of a lock have the names that
-  `[lock]` requires before `Paths`: the box `y.roll.delay.injⱼ` of the lazy value `y`, and its
-  contents `y.roll.delay.injⱼ.contents`.
-
-  Before all of this, Koka's tests of WHNF become `[if-whnf]` (`whnfE`).
+  found by `Kind.Infer`'s naming (`lazyName`). `Paths` has already named the binders of a lock
+  as `[lock]` requires: the box `y.roll.delay.injⱼ` of the lazy value `y`, and its contents
+  `y.roll.delay.injⱼ.contents`. Elaboration has made Koka's tests of WHNF `[if-whnf]`
+  (`Elab.Lazy.whnfTests`).
 -}
 module Backend.Typed.Passes.Lazy( lazyProgram ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
-import Data.Functor.Identity( Identity(..) )
 import Common.Name
-import Common.NamePrim( nameLazyMemoize, nameLazyMemoizeTarget, nameLazyIsWhnf, nameLazyPtrIsWhnf )
+import Common.NamePrim( nameLazyMemoize, nameLazyMemoizeTarget )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Passes.Common( NameSupply, altBodies, freshFor, freshPathFrom, perDef, renameE )
-import Backend.Typed.Traversal( child, descendAll, descendE, fvE, fvV, injAStep, lamsV, mapA, mapV )
+import Backend.Typed.Passes.Common( NameSupply, freshFor, freshPathFrom, perDef, substE )
+import Backend.Typed.Traversal( child, descendE, fvE, fvV, lamsV )
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Query( Env(..), envOf, unrollT, reuseSize, lazySides
                           , M, asks, evalM, gets, liftE, local, modify, state )
@@ -69,7 +67,7 @@ fresh s = state (\(ns,js) -> let (x,ns') = freshPathFrom ("lz" ++ s) ns in (x,(n
 
 lazyProgram :: Lazies -> Program -> (Program,[String])
 lazyProgram lazies prog
-  = let (prog',errs) = perDef (\d -> evalM (whnfDef d >>= lazyDef) (LEnv (envOf prog) lazies Nothing) (freshFor d, M.empty)) prog
+  = let (prog',errs) = perDef (\d -> evalM (lazyDef d) (LEnv (envOf prog) lazies Nothing) (freshFor d, M.empty)) prog
         cells = M.fromList [(f,c) | DefFun f _ ((_,_,c@VCell{}):_) _ _ <- progDefs prog']
     in (prog'{ progSigs = M.mapWithKey (withCell cells) (progSigs prog) }, errs)
   where
@@ -112,19 +110,16 @@ cellE cs expr
            | Just (x',a) <- locked, x == x', y' == y, z' == z, l' == l, M.null cs
            -> do ind <- indirectOf a
                  (thunks,_) <- sidesOf a
-                 let r = child y SRoll
-                     d = child r SDelay
-                     lockAlt (i,b,e)
+                 let lockAlt (i,b,e)
                        | i /= ind, Just (ABox w) <- lookup i thunks
                        = do n <- liftE (reuseSize w)
                             c <- fresh "cell"
-                            let y = child d (injAStep i b)
-                            (,,) i y <$> lock (x,c,n,a) y b e
+                            (,,) i b <$> lock (x,c,n,a) b e
                        | otherwise = (,,) i b <$> cellE cs e
                  e1' <- cellE cs e1
                  alts' <- mapM lockAlt alts
                  def' <- traverse (\(u,e) -> (,) u <$> cellE cs e) def
-                 return (Deref m (Var x) y (Unroll m' y r (IfWhnf m1 r (s,e1') (d,CaseA m'' d alts' def'))))
+                 return (Deref m (Var x) y (Unroll m' y z (IfWhnf m1 z (s,e1') (l,CaseA m'' l alts' def'))))
          Let _ _ (Call f _ (Var c : _)) e
            | f == nameLazyMemoizeTarget, M.member c cs -> cellE cs e
          Call f _ [Var c, v]
@@ -165,15 +160,15 @@ cellE cs expr
   where
     operands e = getConst (descendE (Const . S.singleton) (Const . fvV) (\_ _ -> Const S.empty) e)
 
--- Lock the box `z` (the binder `b`) of a lazy alternative of the lazy value `x` in `e`, whose
--- uses of `x`, `b` and the contents of `b` become uses of the cell, `z` and `z.contents`.
-lock :: (Path,Path,Int,AType) -> Path -> Path -> VExpr -> L VExpr
-lock (x,c,n,a) z b e
-  = do let (contents,body) = case e of
-                               Unbox _ b' p e' | b' == b -> ([(p,child z SContents)],e')
-                               _ -> ([],e)
-       body' <- cellE (M.singleton c (n,a)) (renameE (M.fromList ((x,c) : (b,z) : contents)) body)
-       return (Unbox Borrowed z (child z SContents) (Lock z c body'))
+-- Lock the box `b` of a lazy alternative of the lazy value `x` in `e`, whose uses of `x` become
+-- uses of the cell `c`. The box is a part of `x`, so only `x` itself is renamed.
+lock :: (Path,Path,Int,AType) -> Path -> VExpr -> L VExpr
+lock (x,c,n,a) b e
+  = do let body = case e of
+                    Unbox _ b' _ e' | b' == b -> e'
+                    _ -> e
+       body' <- cellE (M.singleton c (n,a)) (substE (\y -> if y == x then Just (Var c) else Nothing) body)
+       return (Unbox Borrowed b (child b SContents) (Lock b c body'))
 
 -- the lambdas in a value have no cells
 cellV :: VVal -> L VVal
@@ -223,62 +218,3 @@ indirectOf a
        case a of
          ACon n _ | Just i <- M.lookup n inds -> return i
          _ -> fail ("not a lazy type: " ++ ppr (A a))
-
--- Tests of WHNF (`[if-whnf]`). Koka tests a lazy value `x` with `datatype-(ptr-)is-whnf(x, tag)`,
--- after the lets of its tag argument, and a case on the result, with the join points of its
--- match in between. The test becomes `[if-whnf]` on `x`. In its first branch, `x` is in WHNF
--- with the strict alternatives `s` (`ws`): a match on `x` there is a match on `s`, and another
--- test of `x` is its first branch.
-whnfDef :: Def -> L Def
-whnfDef def = (\body -> def{ defBody = body }) <$> whnfE M.empty (defBody def)
-
-whnfE :: M.Map Path Path -> VExpr -> L VExpr
-whnfE ws expr
-  = case expr of
-      Let b _ e body
-        | Just (x,pre) <- whnfTest e
-        , Just (joins,b',alts) <- joinsTo body, b == b', [e0,e1] <- altBodies alts
-        -> do test <- case M.lookup x ws of
-                        Just _ -> whnfE ws e1
-                        Nothing -> do d <- fresh "d"
-                                      r <- fresh "r"
-                                      s <- fresh "whnf"
-                                      l <- fresh "delay"
-                                      e1' <- whnfE (M.insert x s ws) e1
-                                      e0' <- whnfE ws e0
-                                      return (Deref Owned (Var x) d (Unroll Owned d r (IfWhnf Owned r (s,e1') (l,e0'))))
-              joins' <- mapM (\(j,tvs,ps,e2) -> Join j tvs ps <$> whnfE ws e2) joins
-              let expr' = pre (foldr ($) test joins')
-              if S.member b (fvE expr') then descend else return expr'
-      Deref _ (Var x) d (Unroll _ d' r (IfWhnf _ r' (s',e1) _))
-        | Just s <- M.lookup x ws, d == d', r == r'
-        -> whnfE ws (renameUses (M.singleton s' s) e1)
-      _ -> descend
-  where
-    descend = descendAll (\_ -> whnfE ws) expr
-    -- the test of `x`, after the lets of its tag argument
-    whnfTest e
-      = case e of
-          Call f [_] [Var x, _] | f == nameLazyIsWhnf || f == nameLazyPtrIsWhnf -> Just (x,id)
-          Let y t e1 e2 -> (\(x,pre) -> (x,Let y t e1 . pre)) <$> whnfTest e2
-          _ -> Nothing
-    -- the join points before the case on the result of the test
-    joinsTo e
-      = case e of
-          Join j tvs ps e1 e2 -> (\(js,y,alts) -> ((j,tvs,ps,e1) : js,y,alts)) <$> joinsTo e2
-          CaseV _ (Var y) alts -> Just ([],y,alts)
-          _ -> Nothing
-
--- Rename the uses of roots and their parts. The binders of elaborated code are roots, and the
--- renamed ones are not bound again.
-renameUses :: M.Map Path Path -> VExpr -> VExpr
-renameUses ren = goE
-  where
-    goE = runIdentity . descendE (Identity . goP) (Identity . goV) (\_ -> Identity . goE)
-    goV v = case v of
-              Var x -> Var (goP x)
-              _ -> mapV goA goV v
-    goA a = case a of
-              Lam ps r e -> Lam ps r (goE e)
-              _ -> mapA goP goA goV a
-    goP x@(Path n ss) = maybe x (\y -> foldl child y ss) (M.lookup (root n) ren)
