@@ -7,7 +7,7 @@
 -----------------------------------------------------------------------------
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
--- Shared construction, analysis for the typed IR.
+-- Shared construction, analysis and lazy metadata for the typed IR.
 module Backend.Typed.Common where
 
 import qualified Data.Map as M
@@ -484,3 +484,12 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
       OpenCon _ ts ws -> concatMap at ts ++ concatMap vt ws
       _ -> getConst (descendA (const (Const [])) (Const . avTypes) (Const . vt) a)
 
+-- The `lazy-C` functions with the tag of their constructor, the size of its cell and its
+-- fields (with the padding, see `Elab.TypeInfo.conFieldTypes`), the
+-- `lazy-eval-locked` functions, and the tag of the indirection ι of each lazy type.
+data Lazies = Lazies{ lzCons :: M.Map Name (Int,Int,[VType]), lzLocked :: S.Set Name
+                    , lzIndirect :: M.Map Name Int }
+
+-- the values of the fields of a constructor `fields`, followed by those of its padding
+padFields :: [VType] -> [VVal] -> [VVal]
+padFields fields vs = vs ++ [Lit (LitChar '\0') | _ <- drop (length vs) fields]
