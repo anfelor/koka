@@ -28,7 +28,8 @@ import Data.Maybe( fromMaybe )
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Traversal( boxTag, child, descendA, descendE, descendV )
+import Backend.Typed.Types( dupType )
+import Backend.Typed.Traversal( boxTag, child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut )
 import Backend.Typed.Passes.Common( NameSupply, dropValue, freshFor, freshPathFrom, reuseParts, scopeOf )
 import Backend.Typed.Monad
 import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize, inferE, noJoins, unrollT, trivialTy )

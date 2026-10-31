@@ -7,9 +7,11 @@
 -----------------------------------------------------------------------------
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
--- One-level traversals and path operations for the typed IR.
+-- Traversals, structural queries and path operations for the typed IR.
 module Backend.Typed.Traversal where
 
+import qualified Data.Set as S
+import Data.Functor.Const( Const(..) )
 import Data.Functor.Identity( Identity(..) )
 import Data.List( isPrefixOf )
 import Data.Maybe( isJust )
@@ -189,3 +191,223 @@ stepsFrom (Path _ ts) (Path _ ss) = drop (length ts) ss
 pathOf :: Maybe Path -> [Step] -> Maybe Path
 pathOf _ [] = Nothing
 pathOf z ss = (\x -> foldl child x ss) <$> z
+
+-- the fields of a product variable (`[proj]`), named by their paths
+fieldsAt :: Path -> VType -> [(Path,Int,VType)]
+fieldsAt x t
+  = case t of
+      VProd fs -> [(child x (SField i f),i,s) | (i,(f,s)) <- zip [0..] fs]
+      _ -> []
+
+-- `[unbox-ru]` and `[lock]` of a box `z` take its contents out of its block and bind its
+-- block as a new root: the box, the root and the body
+takesContents :: VExpr -> Maybe (Path,Path,VExpr)
+takesContents expr
+  = case expr of
+      UnboxRu z r e -> Just (z,r,e)
+      Lock z c e -> Just (z,c,e)
+      _ -> Nothing
+
+-- the variable that a destructuring form destructures
+scrutVar :: VExpr -> Maybe Path
+scrutVar expr
+  = case expr of
+      _ | Just (z,_,_) <- takesContents expr -> Just z
+        | Just ds <- destructAOf expr -> Just (dsScrut ds)
+        | Just ds <- destructVOf expr, Var z <- dsScrut ds -> Just z
+        | otherwise -> Nothing
+
+-- the arguments of each jump to a join point; jumps are never inside values, and an inner
+-- join of the same name shadows it
+jumpArgs :: Name -> VExpr -> [[VVal]]
+jumpArgs j expr
+  = case expr of
+      Jump k _ vs | k == j -> [vs]
+      Join k _ _ e1 _ | k == j -> jumpArgs j e1
+      _ -> getConst (descendE (const (Const [])) (const (Const [])) (\_ e -> Const (jumpArgs j e)) expr)
+
+-- a top-level value, possibly instantiated (`[dup-glob]`)
+isGlob :: VVal -> Bool
+isGlob v
+  = case v of
+      Glob _ _ -> True
+      TyApp w _ -> isGlob w
+      _ -> False
+
+-- free variables
+
+fvA :: AVal -> S.Set Path
+fvA val
+  = case val of
+      Lam ps _ e -> fvE e `S.difference` S.fromList [x | (x,_,_) <- ps]
+      _ -> getConst (descendA (Const . S.singleton) (Const . fvA) (Const . fvV) val)
+
+fvV :: VVal -> S.Set Path
+fvV val
+  = case val of
+      Var x -> S.singleton x
+      _ -> getConst (descendV (Const . fvA) (Const . fvV) val)
+
+fvE :: VExpr -> S.Set Path
+fvE expr = getConst (descendE (Const . S.singleton) (Const . fvV) (\xs e -> Const (fvE e `S.difference` S.fromList xs)) expr)
+
+-- all bound variables (with repetitions)
+bindersE :: VExpr -> [Path]
+bindersE = getConst . descendE (const (Const [])) (Const . bindersV) (\xs e -> Const (xs ++ bindersE e))
+
+bindersA :: AVal -> [Path]
+bindersA val
+  = case val of
+      Lam ps _ e -> [x | (x,_,_) <- ps] ++ bindersE e
+      _ -> getConst (descendA (const (Const [])) (Const . bindersA) (Const . bindersV) val)
+
+bindersV :: VVal -> [Path]
+bindersV = getConst . descendV (Const . bindersA) (Const . bindersV)
+
+-- destructuring forms: the mode, the scrutinee, the alternatives with their binders, and a rebuild function.
+-- Boxed scrutinees are names; unboxed scrutinees are values.
+data Destruct v = Destruct{ dsMode :: Mode, dsScrut :: v, dsAlts :: [([Path],VExpr)], dsBuild :: Mode -> v -> [VExpr] -> VExpr }
+
+destructAOf :: VExpr -> Maybe (Destruct Path)
+destructAOf expr
+  = case expr of
+      SplitA m v k (x,e1) (y,e2) -> Just (Destruct m v [([x],e1),([y],e2)]
+                                      (\m' v' es -> SplitA m' v' k (x,head es) (y,last es)))
+      IfWhnf m v (x,e1) (y,e2) -> Just (Destruct m v [([x],e1),([y],e2)]
+                                    (\m' v' es -> IfWhnf m' v' (x,head es) (y,last es)))
+      CaseA m v alts def -> Just (Destruct m v ([([x],e) | (_,x,e) <- alts] ++ maybe [] (\(x,e) -> [([x],e)]) def)
+                                  (\m' v' es -> CaseA m' v' [(i,x,e) | ((i,x,_),e) <- zip alts es]
+                                    (fmap (\(x,_) -> (x,last es)) def)))
+      Unroll m v x e        -> Just (Destruct m v [([x],e)] (\m' v' es -> Unroll m' v' x (head es)))
+      Unbox m v x e         -> Just (Destruct m v [([x],e)] (\m' v' es -> Unbox m' v' x (head es)))
+      Unscalar m v x e      -> Just (Destruct m v [([x],e)] (\m' v' es -> Unscalar m' v' x (head es)))
+      CaseOpen m v alts def -> Just (Destruct m v ([(xs,e) | (_,xs,e) <- alts] ++ [([],def)])
+                                       (\m' v' es -> CaseOpen m' v' [(c,xs,e) | ((c,xs,_),e) <- zip alts es] (last es)))
+      Proj{} -> Nothing
+      CaseV{} -> Nothing
+      Deref{} -> Nothing
+      Unpack{} -> Nothing
+      Ret{} -> Nothing
+      Let{} -> Nothing
+      LetYield{} -> Nothing
+      Yielded{} -> Nothing
+      Unreachable{} -> Nothing
+      Call{} -> Nothing
+      App{} -> Nothing
+      CaseLit{} -> Nothing
+      Gen{} -> Nothing
+      Dup{} -> Nothing
+      Drop{} -> Nothing
+      Free{} -> Nothing
+      IsUnique{} -> Nothing
+      IfFull{} -> Nothing
+      UnboxRu{} -> Nothing
+      CopyRu{} -> Nothing
+      Lock{} -> Nothing
+      Join{} -> Nothing
+      Jump{} -> Nothing
+
+destructVOf :: VExpr -> Maybe (Destruct VVal)
+destructVOf expr
+  = case expr of
+      SplitA{} -> Nothing
+      Proj m v i x e        -> Just (Destruct m v [([x],e)] (\m' v' es -> Proj m' v' i x (head es)))
+      CaseV m v alts        -> Just (Destruct m v [([x],e) | (_,x,e) <- alts] (\m' v' es -> CaseV m' v' [(i,x,e) | ((i,x,_),e) <- zip alts es]))
+      Deref m v x e         -> Just (Destruct m v [([x],e)] (\m' v' es -> Deref m' v' x (head es)))
+      Unpack m v tvs x e    -> Just (Destruct m v [([x],e)] (\m' v' es -> Unpack m' v' tvs x (head es)))
+      CaseA{} -> Nothing
+      Unroll{} -> Nothing
+      Unbox{} -> Nothing
+      Unscalar{} -> Nothing
+      CaseOpen{} -> Nothing
+      Ret{} -> Nothing
+      Let{} -> Nothing
+      LetYield{} -> Nothing
+      Yielded{} -> Nothing
+      Unreachable{} -> Nothing
+      Call{} -> Nothing
+      App{} -> Nothing
+      CaseLit{} -> Nothing
+      Gen{} -> Nothing
+      Dup{} -> Nothing
+      Drop{} -> Nothing
+      Free{} -> Nothing
+      IsUnique{} -> Nothing
+      IfWhnf{} -> Nothing
+      IfFull{} -> Nothing
+      UnboxRu{} -> Nothing
+      CopyRu{} -> Nothing
+      Lock{} -> Nothing
+      Join{} -> Nothing
+      Jump{} -> Nothing
+
+-- reading the contents of a box never moves them
+isRead :: VExpr -> Bool
+isRead expr
+  = case expr of
+      SplitA{}    -> False
+      Unbox{}     -> True
+      Unscalar{}  -> False
+      CaseOpen{}  -> True
+      Proj{}      -> False
+      CaseV{}     -> False
+      CaseA{}     -> False
+      Deref{}     -> False
+      Unroll{}    -> False
+      Unpack{}    -> False
+      Ret{}       -> False
+      Let{}       -> False
+      LetYield{}  -> False
+      Yielded{}   -> False
+      Unreachable{} -> False
+      Call{}      -> False
+      App{}       -> False
+      CaseLit{}   -> False
+      Gen{}       -> False
+      Dup{}       -> False
+      Drop{}      -> False
+      Free{}      -> False
+      IsUnique{}  -> False
+      IfWhnf{}    -> False
+      IfFull{}    -> False
+      UnboxRu{}   -> False
+      CopyRu{}    -> False
+      Lock{}      -> False
+      Join{}      -> False
+      Jump{}      -> False
+
+-- the binders of these destructuring forms are the scrutinee's pointer (the scrutinee itself
+-- for `[unpack]`), so they may be unique
+keepsPointer :: VExpr -> Bool
+keepsPointer expr
+  = case expr of
+      SplitA{}    -> True
+      IfWhnf{}    -> True
+      CaseA{}     -> True
+      Deref{}     -> True
+      Unroll{}    -> True
+      Unpack{}    -> True
+      Proj{}      -> False
+      CaseV{}     -> False
+      Unbox{}     -> False
+      Unscalar{}  -> False
+      CaseOpen{}  -> False
+      Ret{}       -> False
+      Let{}       -> False
+      LetYield{}  -> False
+      Yielded{}   -> False
+      Unreachable{} -> False
+      Call{}      -> False
+      App{}       -> False
+      CaseLit{}   -> False
+      Gen{}       -> False
+      Dup{}       -> False
+      Drop{}      -> False
+      Free{}      -> False
+      IsUnique{}  -> False
+      IfFull{}    -> False
+      UnboxRu{}   -> False
+      CopyRu{}    -> False
+      Lock{}      -> False
+      Join{}      -> False
+      Jump{}      -> False
