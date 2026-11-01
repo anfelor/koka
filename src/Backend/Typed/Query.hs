@@ -12,7 +12,7 @@
 -- Keep inference in sync with the typing rules in Syntax.
 module Backend.Typed.Query( Env(..), Gamma, noJoins, yieldJoins, envOf, bindAll, checkE, inferE, inferA, inferV
                           , inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize
-                          , unrollT, lazySides, trivialTy, openFields, funSig, paramModes, altPattern, pointerShape
+                          , unrollT, lazySides, trivialTy, openFields, funSig, paramModes, pointerShape
                           , lamGamma
                           , M, runM, evalM, liftE
                           , module Control.Monad.Reader, module Control.Monad.State
@@ -217,13 +217,6 @@ inferDestruct env g js expr t alts
          _ -> return ()
        return r
 
--- The scrutinee of an unboxed destructuring in its selected alternative, in terms of its binders.
-altPattern :: VExpr -> Ty -> Int -> [Path] -> Maybe VVal
-altPattern expr t i xs = case (expr,t,xs) of
-  (CaseV _ _ alts, V s, [a]) | (j,_,_):_ <- drop i alts -> Just (Inj j s (Var a))
-  (Unpack _ _ tvs _ _, V s, [a]) -> Just (Pack s (map AVar tvs) (Var a))
-  _ -> Nothing
-
 -- type variables bound by `gen` and `unpack` must not occur free in the context (or the result)
 unbound :: [TVar] -> [TVar] -> Q ()
 unbound tvs free
@@ -269,6 +262,27 @@ altTypes env t expr
       (CaseOpen _ _ alts _, A a) -> do fss <- mapM (\(c,_,_) -> openFields env c a) alts
                                        return (map (map V) fss ++ [[]])
       _ -> Left ("cannot destructure a value of type " ++ ppr t)
+
+-- the one-hole values `K` of `[ctx]`: the hole occurs once, in a field of a block that `K`
+-- allocates, or `K` is the hole itself (the empty context)
+isCtxValue :: VVal -> Bool
+isCtxValue k
+  = holes k == 1 && (k == Hole || path k)
+  where
+    path v = case v of
+               Ptr _ a -> block a
+               _ -> False
+    block a = case a of
+                Roll _ b -> block b
+                InjA _ _ b -> block b
+                InjLazy _ _ b -> block b
+                Box v -> field v
+                BoxAt _ v -> field v
+                _ -> False
+    field v = case v of
+                Hole -> True
+                Tuple ws -> any field [w | w <- ws, holes w == 1]
+                _ -> path v
 
 -- the context of the body of a lambda with parameters `ps`
 lamGamma :: [(Path,Mode,VType)] -> Gamma -> Gamma

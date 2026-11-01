@@ -11,8 +11,8 @@
 -- let out of its bound computation cannot capture a variable in its continuation.
 module Backend.Typed.Passes.Anf( anfProgram ) where
 
-import Backend.Typed.Passes.Common( mapAll )
 import Backend.Typed.Syntax
+import Backend.Typed.Passes.Common( mapAll )
 
 anfProgram :: Program -> Program
 anfProgram prog = prog{ progDefs = [d{ defBody = anfE (defBody d) } | d <- progDefs prog] }

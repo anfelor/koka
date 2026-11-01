@@ -28,27 +28,6 @@ compose = foldr (.) id
 nameHole :: Path
 nameHole = root (newHiddenName "hole")
 
--- the one-hole values `K` of `[ctx]`: the hole occurs once, in a field of a block that `K`
--- allocates, or `K` is the hole itself (the empty context)
-isCtxValue :: VVal -> Bool
-isCtxValue k
-  = holes k == 1 && (k == Hole || path k)
-  where
-    path v = case v of
-               Ptr _ a -> block a
-               _ -> False
-    block a = case a of
-                Roll _ b -> block b
-                InjA _ _ b -> block b
-                InjLazy _ _ b -> block b
-                Box v -> field v
-                BoxAt _ v -> field v
-                _ -> False
-    field v = case v of
-                Hole -> True
-                Tuple ws -> any field [w | w <- ws, holes w == 1]
-                _ -> path v
-
 -- the occurrences of the hole, except in nested contexts and closures (which do not bind it)
 holes :: VVal -> Int
 holes = getSum . holesV
@@ -95,12 +74,6 @@ sameBits src x@(Path r ss)
     extend (Path y ts) rest = Path y (ts ++ rest)
     sameOf (Var y) = Just (sameBits src y)
     sameOf _ = Nothing
-
-sameBitsV :: Sources -> VVal -> VVal
-sameBitsV src v
-  = case v of
-      Var x -> Var (sameBits src x)
-      _ -> mapV id (sameBitsV src) v
 
 -- The `lazy-C` functions with the tag of their constructor, the size of its cell and its
 -- fields (with the padding, see `Elab.TypeInfo.conFieldTypes`), the
