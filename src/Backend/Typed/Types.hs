@@ -16,32 +16,26 @@ module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReus
 
 import Data.Functor.Identity( Identity(..) )
 import qualified Data.Map as M
-import Control.Monad( foldM )
 import Common.NamePrim( nameTpInt, nameTpString, nameTpReuse )
 import Backend.Typed.Syntax
 
 type Sub = M.Map TVar AType
 
--- substitution, free variables, alpha-equivalence and first-order matching
+-- substitution, free variables and alpha-equivalence
 class Types t where
   subst   :: Sub -> t -> t
   ftv     :: t -> [TVar]
   alphaEq :: t -> t -> Bool
-  match   :: [TVar] -> t -> t -> Maybe Sub
-  match tvs = matchWith tvs M.empty
-  matchWith :: [TVar] -> Sub -> t -> t -> Maybe Sub
 
 instance Types VType where
   subst     = substV
   ftv       = ftvV
   alphaEq   = eqV
-  matchWith = matchVWith
 
 instance Types AType where
   subst     = substA
   ftv       = ftvA
   alphaEq   = eqA
-  matchWith = matchAWith
 
 instance Types Ty where
   subst sub (A a) = A (substA sub a)
@@ -51,9 +45,6 @@ instance Types Ty where
   alphaEq (A a) (A b) = eqA a b
   alphaEq (V a) (V b) = eqV a b
   alphaEq _ _ = False
-  matchWith tvs sub (A a) (A b) = matchAWith tvs sub a b
-  matchWith tvs sub (V a) (V b) = matchVWith tvs sub a b
-  matchWith _ _ _ _ = Nothing
 
 -- instantiate type variables
 inst :: Types t => [TVar] -> [AType] -> t -> t
@@ -314,78 +305,6 @@ eqA s t
       (AMu x as a ss, AMu y bs b ts) | length as == length bs
         -> eqA a (inst (y:bs) (map AVar (x:as)) b) && eqAs ss ts
       _ -> s == t
-
-matchVWith :: [TVar] -> Sub -> VType -> VType -> Maybe Sub
-matchVWith tvs sub pat t
-  = case (pat,t) of
-      (VPtr p, VPtr s)       -> matchAWith tvs sub p s
-      (VSum ps, VSum ts) | length ps == length ts
-        -> foldM (\sb (p,s) -> matchVWith tvs sb p s) sub (zip (map snd ps) (map snd ts))
-      (VProd ps, VProd ts) | length ps == length ts
-        -> foldM (\sb (p,s) -> matchVWith tvs sb p s) sub (zip (map snd ps) (map snd ts))
-      (VCtx f p q, VCtx g s u) | f == g -> matchAWith tvs sub p s >>= \sub' -> matchAWith tvs sub' q u
-      (VCell n p, VCell m s) | n == m -> matchAWith tvs sub p s
-      (VExists as p, VExists bs s) | length as == length bs
-        -> matchVWith tvs sub p (inst bs (map AVar as) s)
-      _ -> if pat == t then Just sub else Nothing
-
-matchAWith :: [TVar] -> Sub -> AType -> AType -> Maybe Sub
-matchAWith tvs sub pat t
-  = case pat of
-      AVar v | v `elem` tvs -> bind v t
-      AApp v ps | v `elem` tvs, Just f <- M.lookup v sub ->
-        if eqA (applyA f (map (substA sub) ps)) t then Just sub else Nothing
-      AApp v ps | v `elem` tvs ->
-        case t of
-          ACon n ts | length ts >= length ps
-            -> let (hs,rest) = splitAt (length ts - length ps) ts
-               in bind v (ACon n hs) >>= \sub' -> matchAs sub' ps rest
-          AApp w ts | length ts >= length ps
-            -> let (hs,rest) = splitAt (length ts - length ps) ts
-               in bind v (applyA (AVar w) hs) >>= \sub' -> matchAs sub' ps rest
-          _ -> Nothing
-      AApp v ps -> case t of
-                     AApp w ts | v == w -> matchAs sub ps ts
-                     _ -> Nothing
-      ACon n ps -> case t of
-                     ACon m ts | n == m -> matchAs sub ps ts
-                     _ -> Nothing
-      ABox p    -> case t of
-                     ABox s -> matchVWith tvs sub p s
-                     _ -> Nothing
-      AScalar p -> case t of
-                     AScalar s | p == s -> Just sub
-                     _ -> Nothing
-      ASum ps   -> case t of
-                     ASum ts | map fst ps == map fst ts -> matchAs sub (map snd ps) (map snd ts)
-                     _ -> Nothing
-      AFun ps r -> case t of
-                     AFun qs s | length ps == length qs
-                       -> foldM (\sb (p,q) -> matchVWith tvs sb p q) sub (zip (map snd ps ++ [r]) (map snd qs ++ [s]))
-                     _ -> Nothing
-      AForall as p -> case t of
-                        AForall bs s | length as == length bs
-                          -> matchAWith tvs sub p (inst bs (map AVar as) s)
-                        _ -> Nothing
-      ALam as p -> case t of
-                     ALam bs s | length as == length bs
-                       -> matchAWith tvs sub p (inst bs (map AVar as) s)
-                     _ -> Nothing
-      ALazy l p -> case t of
-                     ALazy k s -> matchAWith tvs sub l k >>= \sub' -> matchAWith tvs sub' p s
-                     _ -> Nothing
-      AMu x as p ps -> case t of
-                         AMu y bs s ts | length as == length bs
-                           -> matchAWith tvs sub p (inst (y:bs) (map AVar (x:as)) s) >>= \sub' -> matchAs sub' ps ts
-                         _ -> Nothing
-      AVar _    -> if pat == t then Just sub else Nothing
-      AUnit     -> if pat == t then Just sub else Nothing
-  where
-    bind v s = case M.lookup v sub of
-                 Nothing -> Just (M.insert v s sub)
-                 Just s' -> if eqA s s' then Just sub else Nothing
-    matchAs sb ps ts | length ps == length ts = foldM (\sb' (p,s) -> matchAWith tvs sb' p s) sb (zip ps ts)
-                     | otherwise = Nothing
 
 -- The duplication rule: the type of the copy of a variable of type `t`
 dupType :: Ty -> Either String Ty

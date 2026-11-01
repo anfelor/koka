@@ -41,6 +41,7 @@ library
       Backend.Typed.Elab.Monad
       Backend.Typed.Elab.Representation
       Backend.Typed.Elab.TypeInfo
+      Backend.Typed.Elab.TypeMatch
       Backend.Typed.Elab.Types
       Backend.Typed.Fip
       Backend.Typed.Layout
