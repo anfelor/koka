@@ -15,6 +15,7 @@ import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Traversal( child )
 import Backend.Typed.Types
+import Backend.Typed.Elab.TypeMatch( match )
 import Backend.Typed.Elab.Representation
 import Backend.Typed.Elab.Monad
 import Backend.Typed.Pretty( ppr )
