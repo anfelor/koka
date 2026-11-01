@@ -34,7 +34,7 @@ import Kind.Newtypes
 import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Traversal( boxTag, canonical, child, fieldsAt, fvA, within )
+import Backend.Typed.Traversal( boxTag, canonical, child, fieldsAt, fvA, mapV, within )
 import Backend.Typed.Types( Types(..), collapse, dupType, inst, leaves, isEnum )
 import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, unrollT, openFields, boxContents, reuseSize, pointerShape
                           , M, get, gets, liftE, modify, put, runM, state )
@@ -499,6 +499,12 @@ fieldRange :: VType -> Int -> Either String (Int,VType)
 fieldRange (VProd fs) i
   | i < length fs = Right (sum (map (length . leaves . snd) (take i fs)), snd (fs !! i))
 fieldRange _ _ = Left "projection of a non-product"
+
+sameBitsV :: Sources -> VVal -> VVal
+sameBitsV src v
+  = case v of
+      Var x -> Var (sameBits src x)
+      _ -> mapV id (sameBitsV src) v
 
 -- The tag and the scan size that the description of a credit records for its block, and for
 -- each leaf of the new payload whether its C slot already holds its bits: the old payload has
