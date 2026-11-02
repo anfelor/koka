@@ -20,7 +20,7 @@ module Backend.Typed.CGen( CEnv(..), External(..), cgenModule, runtimeHeader, cN
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Data.Char( isAlphaNum, ord, isDigit )
+import Data.Char( isAlphaNum, ord )
 import Data.List( isInfixOf, zip4 )
 import Data.Maybe( fromMaybe )
 import qualified Numeric
@@ -40,8 +40,8 @@ import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, 
                           , M, get, gets, liftE, modify, put, runM, state )
 import Backend.Typed.Layout
 import Backend.Typed.CLayout hiding( dupExpr, dropStmt )
-
-data External = External{ extFormat :: String, extType :: Type }
+import Backend.Typed.CGen.Koka hiding( conInfoOf, conFieldNames )
+import qualified Backend.Typed.CGen.Koka as Koka
 
 data CEnv = CEnv{ ceModName   :: Name
                 , ceIncludes  :: [String]     -- headers to include
@@ -112,17 +112,6 @@ ktFileName modName = "kt_" ++ encode (show modName)
 
 ktInitName :: Name -> String
 ktInitName modName = cName modName ++ "__init"
-
--- Koka's C names (see Backend.C.FromCore)
-kokaName :: Name -> String
-kokaName name
-  | isQualified name = "kk_" ++ kokaEncode True (show (qualifier name)) ++ "_" ++ asciiEncode False (show (unqualify name))
-  | otherwise        = kokaEncode False (show name)
-  where
-    kokaEncode isModule s = asciiEncode isModule s
-
-kokaTypeName :: Name -> String
-kokaTypeName name = kokaName (prependRaw "@" name)
 
 -- C syntax
 
@@ -752,50 +741,10 @@ openConFields cx c tys
       _ -> failG ("unknown open constructor " ++ show c)
 
 conInfoOf :: Ctx -> Name -> G ConInfo
-conInfoOf cx c
-  = case [ci | di <- ceDataInfos (cxCEnv cx), ci <- dataInfoConstrs di, conInfoName ci == c] of
-      (ci:_) -> return ci
-      [] -> failG ("unknown constructor " ++ show c)
+conInfoOf cx c = liftC (Koka.conInfoOf (ceDataInfos (cxCEnv cx)) c)
 
--- conversions between our C types and Koka's C types
-
-kokaCType :: Type -> String
-kokaCType tp
-  = case tp of
-      TForall _ t -> kokaCType t
-      TFun _ _ _ -> "kk_function_t"
-      TApp t _ -> kokaCType t
-      TVar _ -> "kk_box_t"
-      TSyn _ _ t -> kokaCType t
-      TCon c -> let n = typeConName c
-                in maybe (kokaTypeName n) id (lookup n kokaPrimTypes)
-
-kokaPrimTypes :: [(Name,String)]
-kokaPrimTypes
-  = [(nameTpInt,"kk_integer_t"),(nameTpString,"kk_string_t"),(nameTpBytes,"kk_bytes_t"),(nameTpVector,"kk_vector_t")
-    ,(nameTpEvv,"kk_evv_t"),(nameTpChar,"kk_char_t"),(nameTpSSizeT,"kk_ssize_t"),(nameTpIntPtrT,"intptr_t")
-    ,(nameTpFloat,"double"),(nameTpBool,"bool"),(nameTpUnit,"kk_unit_t"),(nameTpInt64,"int64_t"),(nameTpByte,"uint8_t")
-    ,(nameTpInt8,"int8_t"),(nameTpInt16,"int16_t"),(nameTpInt32,"int32_t"),(nameTpMarker,"int32_t")
-    ,(nameTpFloat32,"float"),(nameTpFloat16,"float"),(nameTpRef,"kk_ref_t"),(nameTpLocalVar,"kk_ref_t")
-    ,(nameTpBox,"kk_box_t"),(nameTpAny,"kk_box_t"),(nameTpReuse,"kk_reuse_t"),(nameTpFieldAddr,"kk_field_addr_t")]
-
-toKoka :: CT -> String -> Doc -> Doc
-toKoka ct kt e
-  | ctName ct == kt = e
-  | otherwise
-  = case ct of
-      CEnum _ -> "((" <.> text kt <.> ")(" <.> e <.> "))"
-      CPrim _ -> "((" <.> text kt <.> ")(" <.> e <.> "))"
-      _ -> "kt_pun(" <.> text kt <.> "," <.> e <.> ")"
-
-fromKoka :: String -> CT -> Doc -> Doc
-fromKoka kt ct e
-  | ctName ct == kt = e
-  | otherwise
-  = case ct of
-      CEnum _ -> "((" <.> cty ct <.> ")(" <.> e <.> "))"
-      CPrim _ -> "((" <.> cty ct <.> ")(" <.> e <.> "))"
-      _ -> "kt_pun(" <.> cty ct <.> "," <.> e <.> ")"
+conFieldNames :: Ctx -> Name -> G [String]
+conFieldNames cx c = liftC (Koka.conFieldNames (ceDataInfos (cxCEnv cx)) c)
 
 -- expressions
 
@@ -1091,19 +1040,6 @@ openTypeArgs cx v
          A (ACon _ args) -> return args
          _ -> return []
 
-conFieldNames :: Ctx -> Name -> G [String]
-conFieldNames cx c
-  = do ci <- conInfoOf cx c
-       return [kokaLocal (unqualify n) | (n,_) <- conInfoParams ci]
-
-kokaLocal :: Name -> String
-kokaLocal n
-  = let s = asciiEncode False (show n)
-    in if take 3 s == "kk_" || null s || isDigit (head s) || s `elem` cReserved then "kkloc_" ++ s else s
-
-cReserved :: [String]
-cReserved = ["bool","toString","arguments","eval","char","int","intptr_t","long","short","signed","size_t","ssize_t","intptr_t","uintptr_t","unsigned","uint8_t","double","auto","extern","float","goto","inline","restrict","sizeof","static","volatile","async","await","break","case","catch","class","continue","const","debugger","default","delete","do","else","finally","for","function","if","in","instanceof","new","return","register","switch","struct","this","throw","try","typeof","typedef","union","var","void","while","with","yield","class","enum","export","extends","import","super","errno","exception_info","or","timezone"]
-
 -- calls
 
 genCall :: Ctx -> Dest -> Name -> [AType] -> [VVal] -> G [Doc]
@@ -1154,7 +1090,7 @@ genExtern cx dest f tys vs ext
        args <- forM (zip3 vs ps (kpars ++ repeat (TVar (TypeVar 0 kindStar Bound)))) $ \(v,p,kp) ->
                  do e <- genV cx v
                     ct <- ctype p
-                    return (toKoka ct (externCType kp p) e, externCType kp p)
+                    return (toKoka ct (externCType f kp p) e, externCType f kp p)
        let fmt   = extFormat ext
            named = [(n,a) | (n,a) <- zip (kokaParamNames (extType ext)) args, n `elem` cIdents fmt]
            call | isComment fmt = empty
@@ -1164,57 +1100,7 @@ genExtern cx dest f tys vs ext
        case r of
          VUnit | isEmptyDoc call -> return (assignTo dest CUnit "kk_Unit")
          VUnit -> return (("(void)(" <.> call <.> ");") : assignTo dest CUnit "kk_Unit")
-         _ -> return (assignTo dest rct (fromKoka (externCType kres r) rct call))
-  where
-    -- Koka passes type variables of its lazy internals at their instance (see `Backend.C.Box`)
-    externCType kt t
-      = case (kt,t) of
-          (TVar _, VPtr (ACon n _)) | f `elem` unboxedInternals -> maybe (kokaTypeName n) id (lookup n kokaPrimTypes)
-          _ -> kokaCType kt
-
-unboxedInternals :: [Name]
-unboxedInternals
-  = [nameLazyEnter, nameLazyLeave, nameLazyIsWhnf, nameLazyPtrIsWhnf
-    ,nameDataTypePtrIsThreadShared, nameDataTypePtrIsUnique, nameLazyIndirectCompress]
-
-kokaFunType :: Type -> ([Type],Type)
-kokaFunType tp
-  = case tp of
-      TForall _ t -> kokaFunType t
-      TSyn _ _ t -> kokaFunType t
-      TFun ps _ r -> (map snd ps, r)
-      _ -> ([],tp)
-
--- the identifiers in a piece of C code
-cIdents :: String -> [String]
-cIdents s = case dropWhile (not . isIdent) s of
-              "" -> []
-              s' -> let (w,rest) = span isIdent s' in w : cIdents rest
-  where isIdent c = isAlphaNum c || c == '_'
-
-kokaParamNames :: Type -> [String]
-kokaParamNames tp
-  = case tp of
-      TForall _ t -> kokaParamNames t
-      TSyn _ _ t  -> kokaParamNames t
-      TFun ps _ _ -> [show n | (n,_) <- ps]
-      _           -> []
-
-isComment :: String -> Bool
-isComment fmt = case dropWhile (== ' ') fmt of
-                  ('/':'*':_) -> True
-                  ""          -> True
-                  _           -> False
-
-substFormat :: String -> [Doc] -> Doc
-substFormat fmt args = go fmt
-  where
-    go [] = empty
-    go ('\\':'#':xs) = "#" <.> go xs
-    go ('#':d:xs) | isDigit d && d /= '0' = let i = fromEnum d - fromEnum '1'
-                                            in (if i < length args then "(" <.> args !! i <.> ")" else "/*missing*/") <.> go xs
-    -- Raw C newlines must not add indentation inside backslash-continued strings.
-    go (x:xs) = text [x] <.> go xs
+         _ -> return (assignTo dest rct (fromKoka (externCType f kres r) rct call))
 
 -- definitions
 
