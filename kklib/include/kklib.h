@@ -1498,6 +1498,7 @@ typedef kk_box_t kk_field_addr_t;
 #include "kklib/process.h"    // Process info (memory usage, run time etc.)
 #include "kklib/random.h"
 #include "kklib/thread.h"
+#include "kklib/typed.h"
 
 
 
