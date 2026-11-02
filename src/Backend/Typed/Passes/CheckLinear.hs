@@ -72,7 +72,7 @@
   This checks the modes of the typing rules in `Syntax` (the types are checked by `Check`).
   Keep it in sync with the rules: a change here must be reflected there, and vice versa.
 -}
-module Backend.Typed.Linear( checkLinear ) where
+module Backend.Typed.Passes.CheckLinear( checkLinear ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -82,7 +82,8 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( child, descendV, destructAOf, destructVOf, dsAlts, dsMode, dsScrut, fieldsAt, fvA, fvE, isRead, jumpArgs, keepsPointer, prefixes, sibling, within )
 import Backend.Typed.Types( dupType, prodV )
-import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, paramModes, trivialTy
+import Backend.Typed.Passes.Common( paramModes, trivialTy )
+import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma
                           , M, ask, evalM, get, gets, liftE, local, modify )
 
 -- the mode of the variables at and below each owner: the roots in scope, and in the body of a

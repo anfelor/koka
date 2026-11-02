@@ -23,7 +23,7 @@ import Type.Type
 import Kind.Newtypes
 import Backend.Typed.Syntax
 import Backend.Typed.Layout( CT(..) )
-import Backend.Typed.CLayout( ctName )
+import Backend.Typed.CGen.Layout( ctName )
 
 data External = External{ extFormat :: String, extType :: Type }
 
