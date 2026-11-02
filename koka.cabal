@@ -33,6 +33,7 @@ library
       Backend.Typed.CGen.CGen
       Backend.Typed.CGen.Koka
       Backend.Typed.CGen.Layout
+      Backend.Typed.CGen.ReuseSlots
       Backend.Typed.Common
       Backend.Typed.Elab.Coerce
       Backend.Typed.Elab.Common
