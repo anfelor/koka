@@ -41,19 +41,6 @@ static inline __attribute__((always_inline)) kk_box_t kt_datatype_dup_inline(kk_
 static inline __attribute__((always_inline)) kk_box_t kt_datatype_ptr_dup_inline(kk_box_t b, kk_context_t* ctx) {
   return kk_datatype_box(kk_datatype_ptr_dup(kk_datatype_unbox(b),ctx));
 }
-// plug the hole of a unique context (`kk_cctx_apply_linear`); an empty context has no hole
-static inline kk_box_t kt_ctx_plug(kk_box_t res, kk_box_t hole, kk_box_t child, kk_context_t* _ctx) {
-  if kk_likely(!kk_box_eq(hole,kk_box_null())) {
-    kk_assert_internal(kk_block_is_unique(kk_ptr_unbox(res,_ctx)));
-    *kk_internal_ptr_unbox(hole,_ctx) = child;
-    return res;
-  }
-  return child;
-}
-// append a unique context to a unique one: plug its `res` into the hole and keep its hole
-static inline void kt_ctx_append(kk_box_t* res, kk_box_t* hole, kk_box_t res2, kk_box_t hole2, kk_context_t* _ctx) {
-  if (!kk_box_eq(hole2,kk_box_null())) { *res = kt_ctx_plug(*res,*hole,res2,_ctx); *hole = hole2; }
-}
 // copy the path of a shared context (`kk_cctx_copy`), which consumes the shared `res`
 static inline void kt_ctx_copy(kk_box_t* res, kk_box_t* hole, kk_context_t* _ctx) {
   if (!kk_box_eq(*hole,kk_box_null()) && !kk_block_is_unique(kk_ptr_unbox(*res,_ctx))) {
@@ -61,15 +48,6 @@ static inline void kt_ctx_copy(kk_box_t* res, kk_box_t* hole, kk_context_t* _ctx
     *res = kk_cctx_copy(*res,kk_internal_ptr_unbox(*hole,_ctx),&h,_ctx);
     *hole = kk_internal_ptr_box(h,_ctx);
   }
-}
-// plug the hole of a context that may be shared (`kk_cctx_apply`): copy its path if it is
-static inline kk_box_t kt_ctx_copy_plug(kk_box_t res, kk_box_t hole, kk_box_t child, kk_context_t* _ctx) {
-  if kk_unlikely(kk_box_eq(hole,kk_box_null())) return child;
-  if kk_likely(kk_block_is_unique(kk_ptr_unbox(res,_ctx))) {
-    *kk_internal_ptr_unbox(hole,_ctx) = child;
-    return res;
-  }
-  return kk_cctx_copy_apply(res,kk_internal_ptr_unbox(hole,_ctx),child,_ctx);
 }
 static inline kk_block_t* kt_block_clear(kk_block_t* b, kk_ssize_t scan_fsize, kk_tag_t tag, kk_context_t* _ctx) {
   b->header.scan_fsize = (uint8_t)scan_fsize; b->header.tag = tag;

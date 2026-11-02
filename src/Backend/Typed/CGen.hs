@@ -233,21 +233,24 @@ genV cx val
                       return (stmtExpr [cty ct <+> x <+> "=" <+> ce <.> ";", "kt_ctx_copy(&" <.> x <.> ".f0,&" <.> x <.> ".f1,_ctx);"] x)
       Memoize c _ k v -> genBox cx k (In c) v
 
--- a context is `res` and the address of its hole; the empty context has neither
+-- Contexts have the same two-box layout as Koka's `cctx`; convert at the boundary.
+toCctx :: Doc -> Doc
+toCctx e = "kt_pun(kk_std_core_types__cctx," <.> e <.> ")"
+
+fromCctx :: CT -> Doc -> Doc
+fromCctx ct e = "kt_pun(" <.> cty ct <.> "," <.> e <.> ")"
+
+-- Construct a context with `kk_cctx_empty` or `kk_cctx_create`.
 genCtx :: Ctx -> AType -> VVal -> G Doc
 genCtx cx b k
   = do ct <- tyOf cx (Context b k) >>= ctype
        case k of
-         Hole -> makeCtx ct ([],"kk_box_null()","kk_box_null()")
-         _ -> genHolePath (bindVar cx nameHole (V (VPtr b))) k >>= makeCtx ct
-
-makeCtx :: CT -> ([Doc],Doc,Doc) -> G Doc
-makeCtx ct (ss,res,hole)
-  = do x <- fresh "ctx"
-       return (stmtExpr (ss ++ [cty ct <+> x <.> ";", x <.> ".f0 =" <+> res <.> ";", x <.> ".f1 =" <+> hole <.> ";"]) x)
+         Hole -> return (fromCctx ct "kk_cctx_empty(_ctx)")
+         _ -> do (ss,res,hole) <- genHolePath (bindVar cx nameHole (V (VPtr b))) k
+                 return (stmtExpr ss (fromCctx ct ("kk_cctx_create(" <.> res <.> "," <.> hole <.> ",_ctx)")))
 
 -- Appending a nonempty context plugs its `res` into the hole and keeps its hole
--- (`kk_cctx_extend_linear`); otherwise the runtime tests whether the second context is empty.
+-- (`kk_cctx_extend_linear`); `kk_cctx_compose_linear` handles a possibly empty second context.
 genAppend :: Ctx -> VVal -> VVal -> G Doc
 genAppend cx c d
   = do ct <- tyOf cx (Append c d) >>= ctype
@@ -256,26 +259,21 @@ genAppend cx c d
        case td of
          VCtx Full _ _
            -> do y <- fresh "c"
-                 res <- plug cx c (y <.> ".f0")
-                 makeCtx ct ([cty ct <+> y <+> "=" <+> de <.> ";"],res,y <.> ".f1")
+                 ce <- genV cx c
+                 return (stmtExpr ["kk_std_core_types__cctx" <+> y <+> "=" <+> toCctx de <.> ";"]
+                           (fromCctx ct ("kk_cctx_extend_linear(" <.> toCctx ce <.> "," <.> y <.> ".res," <.> y <.> ".holeptr,_ctx)")))
          _ -> do ce <- genV cx c
-                 x <- fresh "c"
-                 y <- fresh "c"
-                 return (stmtExpr [cty ct <+> x <+> "=" <+> ce <.> ";",
-                                   cty ct <+> y <+> "=" <+> de <.> ";",
-                                   "kt_ctx_append(&" <.> x <.> ".f0,&" <.> x <.> ".f1," <.> y <.> ".f0," <.> y <.> ".f1,_ctx);"] x)
+                 return (fromCctx ct ("kk_cctx_compose_linear(" <.> toCctx ce <.> "," <.> toCctx de <.> ",_ctx)"))
 
 -- fill the hole of a unique context in place (`kk_cctx_apply_linear`); a copy of a context
 -- is filled in place if it is unique and copied with the child otherwise (`kk_cctx_apply`)
 plug :: Ctx -> VVal -> Doc -> G Doc
 plug cx c ve
   = do let (fill,c') = case c of
-                         CtxCopy c0 -> ("kt_ctx_copy_plug",c0)
-                         _          -> ("kt_ctx_plug",c)
-       ct <- tyOf cx c' >>= ctype
+                         CtxCopy c0 -> ("kk_cctx_apply",c0)
+                         _          -> ("kk_cctx_apply_linear",c)
        ce <- genV cx c'
-       x <- fresh "c"
-       return (stmtExpr [cty ct <+> x <+> "=" <+> ce <.> ";"] (fill <.> "(" <.> x <.> ".f0," <.> x <.> ".f1," <.> ve <.> ",_ctx)"))
+       return (fill <.> "(" <.> toCctx ce <.> "," <.> ve <.> ",_ctx)")
 
 -- Allocate a one-hole value (`genBox` records the context path in the header of each block on
 -- the path to the hole): the statements, `res` and the address of the hole (`kk_field_addr_t`).
