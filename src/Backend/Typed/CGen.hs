@@ -38,7 +38,8 @@ import Backend.Typed.Traversal( boxTag, canonical, child, fieldsAt, fvA, mapV, w
 import Backend.Typed.Types( Types(..), collapse, dupType, inst, leaves, isEnum )
 import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, unrollT, openFields, boxContents, reuseSize, pointerShape
                           , M, get, gets, liftE, modify, put, runM, state )
-import Backend.Typed.Layout hiding( dupExpr, dropStmt )
+import Backend.Typed.Layout
+import Backend.Typed.CLayout hiding( dupExpr, dropStmt )
 
 data External = External{ extFormat :: String, extType :: Type }
 
@@ -221,14 +222,14 @@ genV cx val
         | isEnum t -> do ct <- ctype t
                          return ("((" <.> cty ct <.> ")" <.> int i <.> ")")
         | otherwise
-        -> do ct@(CSum name alts) <- ctype t
+        -> do ct@(CSum alts) <- ctype t
               let scan = scanOf ct
               x <- fresh "v"
               e <- genV cx v
               let setAlt = case alts !! i of
                              Just _ -> x <.> "._cons.c" <.> int i <+> "=" <+> e <.> ";"
                              Nothing -> empty
-              return (stmtExpr ([text name <+> x <.> ";", x <.> "._tag = kk_value_tag(" <.> int (i+1) <.> ");"]
+              return (stmtExpr ([cty ct <+> x <.> ";", x <.> "._tag = kk_value_tag(" <.> int (i+1) <.> ");"]
                                 ++ [x <.> "._cons._fields[" <.> int j <.> "] = kk_box_null();" | j <- [0..scan-2]]
                                 ++ [setAlt]) x)
       Tuple _ -> do t <- tyOf cx val
@@ -326,7 +327,7 @@ holeMember :: Ctx -> CT -> VVal -> G (Doc,Maybe VVal)
 holeMember cx ct v
   = do (j,inner) <- leaf v 0
        let member = case ct of
-                      CProd _ _ -> "p.f" <.> int j
+                      CProd _ -> "p.f" <.> int j
                       _ -> "p"
        return (member,inner)
   where
@@ -367,14 +368,14 @@ genProd :: Ctx -> VType -> [VVal] -> G Doc
 genProd cx t vs
   = do ct <- ctype t
        case ct of
-         CProd name fs
+         CProd fs
            -> do -- each value covers some leaves
                  parts <- forM vs $ \v -> do tv <- tyOf cx v
                                              e <- genV cx v
                                              return (e, length (leaves tv), tv)
                  x <- fresh "p"
                  assigns <- assignLeaves x (zip [0..] fs) parts 0
-                 return (stmtExpr ((text name <+> x <.> ";") : assigns) x)
+                 return (stmtExpr ((cty ct <+> x <.> ";") : assigns) x)
          -- at most one value has a leaf
          _ -> do ts <- mapM (tyOf cx) vs
                  case [v | (v,s) <- zip vs ts, not (null (leaves s))] of
@@ -403,8 +404,8 @@ projLeaves whole e start part
        case (n, wct) of
          _ | start == 0 && ct == wct -> return e
          (0,_) -> return "kk_Unit"
-         (_,CProd _ _) | n == 1 -> return ("(" <.> e <.> ").f" <.> int start)
-         (_,CProd _ _)
+         (_,CProd _) | n == 1 -> return ("(" <.> e <.> ").f" <.> int start)
+         (_,CProd _)
            -> do y <- fresh "q"
                  return (stmtExpr ((cty ct <+> y <.> ";") : [y <.> ".f" <.> int j <+> "= (" <.> e <.> ").f" <.> int (start+j) <.> ";" | j <- [0..n-1]]) y)
          _ -> return e
@@ -438,7 +439,7 @@ genBox cx tag at v
            -- padding, from a temporary on the stack
            storeFrom y = case ct of
                            CUnit -> []
-                           CProd _ fs -> [x <.> "->p.f" <.> int i <+> "=" <+> y <.> ".f" <.> int i <.> ";" | (i,_) <- fs]
+                           CProd fs -> [x <.> "->p.f" <.> int i <+> "=" <+> y <.> ".f" <.> int i <.> ";" | (i,_) <- fs]
                            _ -> [x <.> "->p =" <+> y <.> ";"]
            store = do y <- fresh "p"
                       return ((cty ct <+> y <+> "=" <+> e <.> ";") : storeFrom y)
@@ -451,7 +452,7 @@ genBox cx tag at v
                        V (VReuse Full _ _)
                          -> do y <- fresh "reuse_payload"
                                let field i = case ct of
-                                               CProd _ _ -> ".f" <.> int i
+                                               CProd _ -> ".f" <.> int i
                                                _ -> empty
                                    writes matches = [x <.> "->p" <.> field i <+> "=" <+> y <.> field i <.> ";"
                                                     | (i,same) <- zip [0..] matches, not same]
@@ -998,7 +999,7 @@ genE cx dest expr
                        do let ti = snd (ts !! i)
                           cti <- ctype ti
                           let payload = case ct of
-                                CSum _ alts' | Just _ <- alts' !! i -> z <.> "._cons.c" <.> int i
+                                CSum alts' | Just _ <- alts' !! i -> z <.> "._cons.c" <.> int i
                                 _ -> "kk_Unit"
                           body <- genE (bindVar cx x (V ti)) dest e
                           return ([i], declare (cty cti) x payload : body)
@@ -1282,7 +1283,7 @@ cgenModule cenv prog
                   guardN = text ("KT_" ++ encode (show modName) ++ "_H")
                   initf  = "void" <+> text (ktInitName modName) <.> "(kk_context_t* _ctx)"
                   include h = "#include \"" <.> text h <.> "\""
-                  -- `Layout` writes its definitions as lines that end in a newline
+                  -- `CLayout` writes its definitions as lines that end in a newline
                   layoutDef s = string (init s)
                   hdr   = vcat (["#ifndef" <+> guardN, "#define" <+> guardN]
                                 ++ map include (take 1 (ceIncludes cenv))
