@@ -30,7 +30,7 @@ import Backend.Typed.Common
 import Backend.Typed.Traversal( bindersE, boxTag, child, destructAOf, destructVOf, dsAlts, dsScrut, fvA, fvE, fvV, isGlob, jumpArgs )
 import Backend.Typed.Types
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Layout( layout, blockSize, isBlock )
+import Backend.Typed.Layout( layout, blockSize )
 
 -- The monad for typed IR consumers: an environment, state and failure message.
 newtype M r s a = M (ReaderT r (StateT s (Either String)) a)
@@ -425,11 +425,11 @@ boxContents t
       ABox v -> return v
       _ -> Left ("not a box: " ++ ppr t)
 
--- the size `|V|` of the block of a box `Box V` that is always allocated on the heap
+-- The size `|V|` of a box block. Heap contents cannot contain linear resources.
 reuseSize :: VType -> Q Int
 reuseSize v
-  | isBlock (layout v) = return (blockSize (layout v))
-  | otherwise          = Left ("no reusable block: " ++ ppr (A (ABox v)))
+  = do noHeapCredit v
+       return (blockSize (layout v))
 
 litType :: Lit -> VType
 litType lit

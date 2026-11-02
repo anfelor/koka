@@ -16,7 +16,7 @@
   branch of `if-full`, and where it is the result of such a branch (through a `let` or a
   jump). On these paths:
 
-  - `box` allocates (unless its contents need no block), as do `box@r` for a credit that may
+  - `box` allocates, as do `box@r` for a credit that may
     be empty and open constructors. A box that is not the payload of a constructor (below
     `roll`) boxes a value for polymorphism, which Koka's frontend does not count. The count
     follows the frontend: the maximum over branches, the sum in sequence, and an allocation
@@ -52,7 +52,6 @@ import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Types( dupType )
 import Backend.Typed.Traversal( descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsScrut, stepsFrom, within )
-import Backend.Typed.Layout( layout, isBlock )
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, trivialTy
                           , M, ask, asks, gets, liftE, local, modify, runM, state )
@@ -424,13 +423,10 @@ fipV v
 fipA :: Maybe AType -> AVal -> F Cost
 fipA ptr val
   = case val of
-      Box w -> do c <- fipV w
-                  b <- boxing w
-                  return (c <> b)
+      Box w -> (<> boxing) <$> fipV w
       BoxAt r w -> do c <- fipV w
                       full <- isFull r
-                      b <- boxing w
-                      return (if full then c else c <> b)
+                      return (if full then c else c <> boxing)
       Roll _ a -> fipA Nothing a
       InjA _ _ a -> fipA ptr a
       InjLazy _ _ a -> fipA ptr a
@@ -440,8 +436,4 @@ fipA ptr val
                        fst <$> local enter (fipE e)
       _ -> mconcat <$> sequence (getConst (descendA (const (Const [])) (\a -> Const [fipA Nothing a]) (\w -> Const [fipV w]) val))
   where
-    boxing w
-      = do fe <- ask
-           t <- liftE (inferV (fEnv fe) (fGamma fe) w)
-           return (if not (isBlock (layout t)) then mempty
-                   else maybe allocation (\a -> allocation{ cBoxed = S.singleton (ppr (A a)) }) ptr)
+    boxing = maybe allocation (\a -> allocation{ cBoxed = S.singleton (ppr (A a)) }) ptr

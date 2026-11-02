@@ -28,7 +28,7 @@ import Type.Type
 import Backend.Typed.Syntax
 import Backend.Typed.Types
 import Backend.Typed.Elab.Representation
-import Backend.Typed.Layout( CT(CBox), layout, blockSize )
+import Backend.Typed.Layout( CT(CBox,CUnit), layout, blockSize )
 
 type Tr a = Either String a
 
@@ -157,13 +157,15 @@ conFields nt vargs con = prodFields . zip (conFieldNames con) <$> conFieldTypes 
 
 -- The fields of a constructor. A thunk is padded after its fields if its block would be
 -- smaller than that of an indirection `Box(τ*)`, so that `[memoize]` can write one over it.
--- Such fields are raw and fit in 4 bytes (with the header, a block is a multiple of 4
--- bytes), so a `char` (zero, see `Common.padFields`) makes the block exactly as large.
+-- A unit payload needs an 8-byte padding field; other small payloads need only a
+-- 4-byte char. `Common.padFields` supplies zero values for these fields.
 conFieldTypes :: Newtypes -> [AType] -> ConInfo -> Tr [VType]
 conFieldTypes nt vargs con = pad <$> schemeFieldTypes nt vargs (conInfoType con)
   where
-    pad fs | conInfoIsLazy con && not (null fs) && blockSize (layout (prodV fs)) < blockSize CBox = fs ++ [vtChar]
+    pad fs | conInfoIsLazy con && not (null fs) && blockSize ct < blockSize CBox
+           = fs ++ [case ct of { CUnit -> vtFloat; _ -> vtChar }]
            | otherwise = fs
+      where ct = layout (prodV fs)
 
 -- the names of the fields of a constructor in the source, followed by that of its padding (as
 -- `conFieldTypes`)

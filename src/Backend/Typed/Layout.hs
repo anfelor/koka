@@ -20,7 +20,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Layout( CT(..), EnumSize(..), layout, leafSlots, orderFields, shapeIsHeap, shapeIsSmall
                            , checkLayout, ctName, scanOf, rawOf, needsRC
-                           , structDefs, blockName, blockDef, blockSize, isBlock
+                           , structDefs, blockName, blockDef, blockSize
                            , dupExpr, dropStmt, dupFun, dropFun, primBox, scalarHeapSize, fnv
                            ) where
 
@@ -56,7 +56,7 @@ enumBytes size
 -- either a mixture of heap blocks and immediates or an opaque representation.
 shapeIsHeap :: AType -> Maybe Bool
 shapeIsHeap AUnit = Just False
-shapeIsHeap (ABox t) = Just (case layout t of { CUnit -> False; _ -> True })
+shapeIsHeap (ABox _) = Just True
 shapeIsHeap (ASum ((_,t):ts))
   = do b <- shapeIsHeap t
        bs <- mapM (shapeIsHeap . snd) ts
@@ -246,10 +246,15 @@ blockName ct = "kt_b" ++ Numeric.showHex (fnv ("B:" ++ canonCT ct)) ""
 blockDef :: CT -> (String,String)
 blockDef ct
   = let name = blockName ct
-    in (name, guarded name ("struct " ++ name ++ " { kk_block_t _block; " ++ ctName ct ++ " p; };\n"))
+    in (name, guarded name ("struct " ++ name ++ " { kk_block_t _block;" ++ payload ++ " };\n"))
+  where
+    payload = case ct of
+                CUnit -> ""
+                _ -> " " ++ ctName ct ++ " p;"
 
 -- The size in bytes of the block of a box (checked by the C compiler where it is reused).
 blockSize :: CT -> Int
+blockSize CUnit = 8
 blockSize ct = fst (structSize [(8,4), sizeAlign ct])
 
 -- the offset and layout of each leaf of a payload, in the order of `leaves`
@@ -259,18 +264,6 @@ leafSlots ct
       CProd _ fs -> map snd (sortOn fst (zip (map fst fs) (zip (fieldOffsets (map (sizeAlign . snd) fs)) (map snd fs))))
       CUnit -> []
       _ -> [(0,ct)]
-
--- a box of this payload is a heap block (a box of unit is its tag)
-isBlock :: CT -> Bool
-isBlock ct
-  = case ct of
-      CProd _ _ -> True
-      CSum _ _  -> True
-      CBox      -> True
-      CPrim _   -> True
-      CEnum _   -> True
-      CUnit     -> False
-      CReuse    -> False
 
 sizeAlign :: CT -> (Int,Int)
 sizeAlign ct

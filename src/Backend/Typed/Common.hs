@@ -83,4 +83,7 @@ data Lazies = Lazies{ lzCons :: M.Map Name (Int,Int,[VType]), lzLocked :: S.Set 
 
 -- the values of the fields of a constructor `fields`, followed by those of its padding
 padFields :: [VType] -> [VVal] -> [VVal]
-padFields fields vs = vs ++ [Lit (LitChar '\0') | _ <- drop (length vs) fields]
+padFields fields vs = vs ++ map zero (drop (length vs) fields)
+  where
+    zero (VRaw RFloat64) = Lit (LitFloat 0)
+    zero _ = Lit (LitChar '\0')
