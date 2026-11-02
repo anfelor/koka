@@ -1109,23 +1109,6 @@ genCall cx dest f tys vs
   = do (_,r) <- callSig cx f tys
        rct <- ctype r
        return (assignTo dest rct (fromKoka kt rct lit))
-  | Just (v,i,neq) <- smallIntComparison f vs
-  = do (_,r) <- callSig cx f tys
-       rct <- ctype r
-       e <- genV cx v
-       let arg = "kt_unbox_integer(" <.> e <.> ")"
-           test = case i of
-                    0  -> "kk_integer_is_zero_borrow(" <.> arg <.> ")"
-                    1  -> "kk_integer_is_one_borrow(" <.> arg <.> ")"
-                    -1 -> "kk_integer_is_minus_one_borrow(" <.> arg <.> ")"
-                    _  -> "kk_integer_eq_borrow(kk_integer_from_small(" <.> integer i <.> ")," <.> arg <.> ",_ctx)"
-       return (assignTo dest rct (fromKoka "bool" rct (if neq then "!(" <.> test <.> ")" else test)))
-  | Just (v,i) <- smallIntArithmetic f vs
-  = do (_,r) <- callSig cx f tys
-       rct <- ctype r
-       e <- genV cx v
-       let call = "kk_integer_add_small_const(kt_unbox_integer(" <.> e <.> ")," <.> integer i <.> ",_ctx)"
-       return (assignTo dest rct (fromKoka "kk_integer_t" rct call))
   | Just ext <- M.lookup f (ceExterns (cxCEnv cx)) = genExtern cx dest f tys vs ext
   | otherwise
   = do (ps,r) <- callSig cx f tys
@@ -1139,35 +1122,6 @@ genCall cx dest f tys vs
                                 ++ [localName p <+> "=" <+> t <.> ";" | (p,t) <- zip params tmps]
                                 ++ ["goto kt_tailcall;"])]
          _ -> return (assignTo dest rct (text (cName f) <.> "(" <.> hcat [a <.> ", " | a <- args] <.> "_ctx)"))
-
--- A small constant cannot equal a bigint. Put it first for the general equality
--- helper, whose fast rejection tests its first operand; common values have predicates.
-smallIntComparison :: Name -> [VVal] -> Maybe (VVal,Integer,Bool)
-smallIntComparison f vs
-  | f `elem` [eq,neq]
-  = do (v,i) <- case vs of
-                  [v,Lit (LitInt i)] | isSmallInt i -> Just (v,i)
-                  [Lit (LitInt i),v] | isSmallInt i -> Just (v,i)
-                  _ -> Nothing
-       return (v,i,f == neq)
-  | otherwise = Nothing
-  where
-    eq  = newQualified "std/core/int" "=="
-    neq = newQualified "std/core/int" "!="
-
-isSmallInt :: Integer -> Bool
-isSmallInt i = i >= -8192 && i <= 8191
-
--- Keep the signed increment small on every target, including after negating
--- a subtraction constant. The runtime helper still handles big integers and overflow.
-smallIntArithmetic :: Name -> [VVal] -> Maybe (VVal,Integer)
-smallIntArithmetic f vs
-  = do (v,i) <- case vs of
-                  [v,Lit (LitInt i)] | f == nameIntAdd -> Just (v,i)
-                  [Lit (LitInt i),v] | f == nameIntAdd -> Just (v,i)
-                  [v,Lit (LitInt i)] | f == nameIntSub -> Just (v,-i)
-                  _ -> Nothing
-       if isSmallInt i then Just (v,i) else Nothing
 
 -- Conversions of small integer literals to fixed-width integers become C literals
 -- (as in `Backend.C.FromCore.genAppSpecial`); `ssize_t` and `intptr_t` stay within 32 bits
