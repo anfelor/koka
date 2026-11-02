@@ -16,7 +16,7 @@
 
   The C code is a `Doc`: string literals are documents, and a list of documents is a list of statements.
 -}
-module Backend.Typed.CGen( CEnv(..), External(..), cgenModule, runtimeHeader, cName, ktInitName, ktFileName ) where
+module Backend.Typed.CGen( CEnv(..), External(..), cgenModule, cName, ktInitName, ktFileName ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -287,9 +287,8 @@ genHolePath cx k
        ke <- genV cx k
        fields <- pathFields k
        bs <- mapM (const (fresh "b")) fields
-       let parents = ("kk_datatype_unbox(" <.> r <.> ")") :
-                     ["kk_datatype_unbox(((" <.> bt <.> "*)" <.> x <.> ")->" <.> f <.> ")" | (x,(bt,f)) <- zip bs fields]
-           steps = ["kk_block_t*" <+> x <+> "= kk_datatype_as_ptr(" <.> parent <.> ",_ctx);" | (x,parent) <- zip bs parents]
+       let parents = r : ["((" <.> bt <.> "*)" <.> x <.> ")->" <.> f | (x,(bt,f)) <- zip bs fields]
+           steps = ["kk_block_t*" <+> x <+> "= kt_box_as_ptr(" <.> parent <.> ",_ctx);" | (x,parent) <- zip bs parents]
            (bt,f) = last fields
            hole = "kk_box_t" <+> h <+> "= kk_internal_ptr_box(&((" <.> bt <.> "*)" <.> last bs <.> ")->" <.> f <.> ",_ctx);"
        return (("kk_box_t" <+> r <+> "=" <+> ke <.> ";") : steps ++ [hole], r, h)
@@ -418,7 +417,7 @@ genBox cx tag at v
                   else return Nothing
        let scan = int (scanOf ct)
            path = fromMaybe "0" cpath
-           box  = "kk_datatype_box(kk_datatype_from_base(" <.> x <.> ",_ctx))"
+           box  = "kt_box_from_block(&" <.> x <.> "->_block,_ctx)"
            allocAt r = "kk_block_alloc_at_as(" <.> bt <.> "," <.> r <.> "," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
            allocFresh = case cpath of
                           Nothing -> "kk_block_alloc_as(" <.> bt <.> "," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
@@ -463,7 +462,7 @@ genBox cx tag at v
                                return (stmtExpr ([check, bt <.> "*" <+> x <+> "=" <+> allocAt (localName r) <.> ";"] ++ s) box)
          In y  -> do v <- fresh "v"
                      ye <- genV cx y
-                     let clear = "kt_block_clear(kk_datatype_as_ptr(kk_datatype_unbox(" <.> ye <.> "),_ctx)," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
+                     let clear = "kt_block_clear(kt_box_as_ptr(" <.> ye <.> ",_ctx)," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
                      return (stmtExpr ([cty ct <+> v <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> clear <.> ";",
                                         setPath] ++ storeFrom v) box)
 
@@ -563,7 +562,7 @@ genUnboxRu :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
 genUnboxRu cx dest z r e
   = do g' <- liftC (unboxRuGamma (cxGamma cx) z r)
        s <- genE cx{ cxGamma = g' } dest e
-       return (declare "kk_reuse_t" r ("kk_datatype_as_ptr(kk_datatype_unbox(" <.> localName z <.> "),_ctx)") : s)
+       return (declare "kk_reuse_t" r ("kt_box_as_ptr(" <.> localName z <.> ",_ctx)") : s)
 
 -- `[copy-ru]` of `z` allocates a block with the header of `z` and copies its payload. The
 -- header is not copied: the reference count of `z` may change concurrently if `z` is
@@ -576,7 +575,7 @@ genCopyRu cx dest z r e
        bt <- blockType ct
        x <- fresh "copy"
        s <- genE cx{ cxGamma = g' } dest e
-       let old = "((" <.> bt <.> "*)kk_datatype_as_ptr(kk_datatype_unbox(" <.> localName z <.> "),_ctx))"
+       let old = "((" <.> bt <.> "*)kt_box_as_ptr(" <.> localName z <.> ",_ctx))"
        return ([bt <.> "*" <+> x <+> "= kk_block_alloc_as(" <.> bt <.> "," <.> int (scanOf ct) <.> ",(kk_tag_t)" <.> int (boxTag z) <.> ",_ctx);",
                 copyPayload ct x old,
                 declare "kk_reuse_t" r ("&" <.> x <.> "->_block")] ++ s)
@@ -621,7 +620,7 @@ unboxBlock t e
        case ct of
          CUnit -> return "kk_Unit"
          _ -> do bt <- blockType ct
-                 return ("((" <.> bt <.> "*)kk_datatype_as_ptr(kk_datatype_unbox(" <.> e <.> "),_ctx))->p")
+                 return ("((" <.> bt <.> "*)kt_box_as_ptr(" <.> e <.> ",_ctx))->p")
 
 -- The dummy value of a yield: Koka's `box-any` in every pointer, which the runtime may drop
 -- (`kcompose`), as `kk_valuetype_unbox_from_any` makes it.
@@ -630,9 +629,7 @@ yieldedValue ct
   = case ct of
       CUnit -> return "kk_Unit"
       CBox -> return "kk_box_any(_ctx)"
-      _ -> do x <- fresh "yd"
-              return (stmtExpr [cty ct <+> x <+> "= {0};",
-                                "kk_valuetype_unbox_from_any((kk_box_t*)&" <.> x <.> ",sizeof(" <.> cty ct <.> "),kk_box_any(_ctx),KK_OWNED,_ctx);"] x)
+      _ -> return ("kt_yielded(" <.> cty ct <.> ")")
 
 -- literals
 
@@ -714,7 +711,7 @@ genLam cx ps r e
          else return (stmtExpr ([sname <.> "*" <+> x <+> "= kk_function_alloc_as(" <.> sname <.> "," <.> int scan <.> ",_ctx);",
                                  x <.> "->_base.fun = kk_kkfun_ptr_box(&" <.> fname <.> ",_ctx);"]
                                 ++ [x <.> "->c" <.> int i <+> "=" <+> (capVals !! i) <.> ";" | (i,_) <- fields])
-                               ("kk_datatype_box(kk_datatype_from_base(&" <.> x <.> "->_base,_ctx))"))
+                               ("kt_box_from_block(&" <.> x <.> "->_base._block,_ctx)"))
 
 lamFree :: [(Path,Mode,VType)] -> VExpr -> S.Set Path
 lamFree ps e = fvA (Lam ps VUnit e)
@@ -795,9 +792,9 @@ genE cx dest expr
               let ve = localName x
               s <- genE cx dest e
               let f = case pointerShape (cxEnv cx) t of
-                        Just a | shapeIsSmall a -> "kk_datatype_ptr_decref_small"
-                        _ -> "kk_datatype_ptr_decref"
-              return ([f <.> "(kk_datatype_unbox(" <.> ve <.> "),_ctx);"] ++ s)
+                        Just a | shapeIsSmall a -> "kk_block_decref_small"
+                        _ -> "kk_block_decref"
+              return ([f <.> "(kt_box_as_ptr(" <.> ve <.> ",_ctx),_ctx);"] ++ s)
         | otherwise
         -> do t <- tyOfName cx x
               let ve = localName x
@@ -824,7 +821,7 @@ genE cx dest expr
         -> do t <- liftC (inferVar (cxGamma cx) x)
               s1 <- genE cx{ cxGamma = uniqueGamma (cxGamma cx) x } dest e1
               let xe = localName x
-              let blockOf = "kk_datatype_as_ptr(kk_datatype_unbox(" <.> xe <.> "),_ctx)"
+              let blockOf = "kt_box_as_ptr(" <.> xe <.> ",_ctx)"
               shared <- case t of
                           V (VCell _ _) -> return (S.insert x (cxShared cx))
                           V _ -> failG ("uniqueness test of an unboxed value: " ++ show x)
@@ -1004,10 +1001,9 @@ genSumBranch cx dest v x t e
 tagDecl :: Ty -> Doc -> Doc -> Doc
 tagDecl t tg ve = "kk_tag_t" <+> tg <+> "=" <+> tagRead <.> ";"
   where
-    d = "kk_datatype_unbox(" <.> ve <.> ")"
-    tagRead = case t of
-                A a | shapeIsHeap a == Just True -> "kk_block_tag(kk_datatype_as_ptr(" <.> d <.> ",_ctx))"
-                _ -> "kk_datatype_tag(" <.> d <.> ",_ctx)"
+    tagRead = (case t of
+                 A a | shapeIsHeap a == Just True -> "kt_heap_tag"
+                 _ -> "kt_tag") <.> "(" <.> ve <.> ",_ctx)"
 
 -- The final arm of an exhaustive boxed case is the default, so that the switch
 -- needs no unreachable case (without emitting its body twice).
@@ -1191,83 +1187,12 @@ cgenModule cenv prog
               in (show hdr ++ "\n", show csrc ++ "\n", errs)
 
 
--- runtime support
+-- warning pragmas for generated typed C
 
 runtimeHeader :: Doc
 runtimeHeader = vcat
-  [ "#ifndef KT_RUNTIME_H"
-  , "#define KT_RUNTIME_H"
-  , "#include <string.h>"
-  , "#pragma clang diagnostic ignored \"-Wreturn-type\""
+  [ "#pragma clang diagnostic ignored \"-Wreturn-type\""
   , "#pragma clang diagnostic ignored \"-Wsometimes-uninitialized\""
   , "#pragma clang diagnostic ignored \"-Wunused-function\""
   , "#pragma clang diagnostic ignored \"-Wshadow\""
-  , "#define kt_pun(T,x) ({ __typeof__(x) _kt_x = (x); T _kt_y; _Static_assert(sizeof(T)==sizeof(_kt_x),\"kt_pun\"); memcpy(&_kt_y,&_kt_x,sizeof(T)); _kt_y; })"
-  , "#define kt_box_integer(i)  kt_pun(kk_box_t,i)"
-  , "#define kt_unbox_integer(b) kt_pun(kk_integer_t,b)"
-  , "#define kt_box_string(s)   kt_pun(kk_box_t,s)"
-  , "#define kt_unbox_string(b) kt_pun(kk_string_t,b)"
-  , "#define kt_box_datatype(d) kk_datatype_box(d)"
-  , "#define kt_unbox_datatype(b) kk_datatype_unbox(b)"
-  , "#define kt_unreachable() kk_fatal_error(EFAULT,\"typed backend: unreachable\")"
-  , "static inline __attribute__((always_inline)) kk_box_t kt_box_dup_inline(kk_box_t b, kk_context_t* ctx) {"
-  , "  return kk_box_dup(b,ctx);"
-  , "}"
-  , "static inline __attribute__((always_inline)) kk_box_t kt_datatype_dup_inline(kk_box_t b, kk_context_t* ctx) {"
-  , "  return kk_datatype_box(kk_datatype_dup(kk_datatype_unbox(b),ctx));"
-  , "}"
-  , "static inline __attribute__((always_inline)) kk_box_t kt_datatype_ptr_dup_inline(kk_box_t b, kk_context_t* ctx) {"
-  , "  return kk_datatype_box(kk_datatype_ptr_dup(kk_datatype_unbox(b),ctx));"
-  , "}"
-  , "// plug the hole of a unique context (`kk_cctx_apply_linear`); an empty context has no hole"
-  , "static inline kk_box_t kt_ctx_plug(kk_box_t res, kk_box_t hole, kk_box_t child, kk_context_t* _ctx) {"
-  , "  if kk_likely(!kk_box_eq(hole,kk_box_null())) {"
-  , "    kk_assert_internal(kk_block_is_unique(kk_ptr_unbox(res,_ctx)));"
-  , "    *kk_internal_ptr_unbox(hole,_ctx) = child;"
-  , "    return res;"
-  , "  }"
-  , "  return child;"
-  , "}"
-  , "// append a unique context to a unique one: plug its `res` into the hole and keep its hole"
-  , "static inline void kt_ctx_append(kk_box_t* res, kk_box_t* hole, kk_box_t res2, kk_box_t hole2, kk_context_t* _ctx) {"
-  , "  if (!kk_box_eq(hole2,kk_box_null())) { *res = kt_ctx_plug(*res,*hole,res2,_ctx); *hole = hole2; }"
-  , "}"
-  , "// copy the path of a shared context (`kk_cctx_copy`), which consumes the shared `res`"
-  , "static inline void kt_ctx_copy(kk_box_t* res, kk_box_t* hole, kk_context_t* _ctx) {"
-  , "  if (!kk_box_eq(*hole,kk_box_null()) && !kk_block_is_unique(kk_ptr_unbox(*res,_ctx))) {"
-  , "    kk_box_t* h = NULL;"
-  , "    *res = kk_cctx_copy(*res,kk_internal_ptr_unbox(*hole,_ctx),&h,_ctx);"
-  , "    *hole = kk_internal_ptr_box(h,_ctx);"
-  , "  }"
-  , "}"
-  , "// plug the hole of a context that may be shared (`kk_cctx_apply`): copy its path if it is"
-  , "static inline kk_box_t kt_ctx_copy_plug(kk_box_t res, kk_box_t hole, kk_box_t child, kk_context_t* _ctx) {"
-  , "  if kk_unlikely(kk_box_eq(hole,kk_box_null())) return child;"
-  , "  if kk_likely(kk_block_is_unique(kk_ptr_unbox(res,_ctx))) {"
-  , "    *kk_internal_ptr_unbox(hole,_ctx) = child;"
-  , "    return res;"
-  , "  }"
-  , "  return kk_cctx_copy_apply(res,kk_internal_ptr_unbox(hole,_ctx),child,_ctx);"
-  , "}"
-  , "static inline kk_block_t* kt_block_clear(kk_block_t* b, kk_ssize_t scan_fsize, kk_tag_t tag, kk_context_t* _ctx) {"
-  , "  b->header.scan_fsize = (uint8_t)scan_fsize; b->header.tag = tag;"
-  , "  // hide that the result is `b`: otherwise clang infers that a `lazy-C` function returns its"
-  , "  // cell, and `lazy-eval-locked` returns the cell itself instead of tail calling `lazy-C`"
-  , "  #if defined(__GNUC__) || defined(__clang__)"
-  , "  __asm__(\"\" : \"+r\"(b));"
-  , "  #endif"
-  , "  return b;"
-  , "}"
-  , "// credits come from box blocks, which are always allocated with `kk_malloc_small`"
-  , "static inline void kt_reuse_drop(kk_reuse_t r, kk_context_t* _ctx) {"
-  , "  if (r != kk_reuse_null) { kk_assert_internal(kk_block_is_unique(r)); kk_free_small(r,_ctx); }"
-  , "}"
-  , "static inline void kt_reuse_free(kk_reuse_t r, kk_context_t* _ctx) {"
-  , "  kk_assert_internal(r != kk_reuse_null && kk_block_is_unique(r)); kk_free_small(r,_ctx);"
-  , "}"
-  , "static inline bool kt_open_is(kk_box_t b, kk_string_t tag, kk_context_t* _ctx) {"
-  , "  struct kt_open_s { kk_block_t _block; kk_string_t _tag; };"
-  , "  return kk_string_ptr_eq_borrow(((struct kt_open_s*)kk_datatype_as_ptr(kk_datatype_unbox(b),_ctx))->_tag, tag);"
-  , "}"
-  , "#endif"
   ]
