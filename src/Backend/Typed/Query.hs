@@ -12,7 +12,7 @@
 -- Keep inference in sync with the typing rules in Syntax.
 module Backend.Typed.Query( Env(..), Gamma, noJoins, yieldJoins, envOf, bindAll, checkE, inferE, inferA, inferV
                           , inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize
-                          , unrollT, lazySides, trivialTy, openFields, funSig, paramModes, pointerShape
+                          , unrollT, lazySides, openFields, funSig
                           , lamGamma
                           , M, runM, evalM, liftE
                           , module Control.Monad.Reader, module Control.Monad.State
@@ -354,13 +354,6 @@ funSig env f tys
       Just sig -> Left ("call of " ++ show f ++ " with " ++ show (length tys) ++ " type arguments: " ++ show sig)
       Nothing  -> Left ("unknown function: " ++ show f)
 
--- the modes of the parameters of a call with n arguments
-paramModes :: Env -> Name -> Int -> [Mode]
-paramModes env f n
-  = case M.lookup f (envSigs env) of
-      Just (SigFun _ ps _) -> map fst ps ++ replicate (n - length ps) Owned
-      _ -> replicate n Owned
-
 checkArgs :: Env -> Gamma -> [VType] -> [VVal] -> Q ()
 checkArgs env g ps vs
   | length ps == length vs = zipWithM_ (\p v -> checkV env g v p) ps vs
@@ -388,27 +381,6 @@ lazySides env t
        case b of
          ALazy (ASum l) (ASum s) -> return (l,s)
          _ -> Left ("not a lazy type: " ++ ppr (A t))
-
--- values of these types need no references, also through named types
-trivialTy :: Env -> Ty -> Bool
-trivialTy env = isTrivialWith (either (const Nothing) Just . unrollT env)
-
--- The constructor shape of a pointer, unfolding named types but not their
--- payloads. Opaque representations supply no such evidence. Guard alias
--- unfolding as well: a recursive name alone has no known representation.
-pointerShape :: Env -> Ty -> Maybe AType
-pointerShape env t
-  = case t of
-      V (VPtr a) -> shape S.empty a
-      A a -> shape S.empty a
-      _ -> Nothing
-  where
-    shape _ a | isShape a = Just a
-    shape seen a = case a of
-      ACon n _ | not (S.member n seen)
-               , Just TypeDef{} <- M.lookup n (envTypes env)
-               , Right b <- unrollT env a -> shape (S.insert n seen) b
-      _ -> Nothing
 
 -- the fields of an open constructor at an instance `T⟨B̄⟩` of its type
 openFields :: Env -> Name -> AType -> Q [VType]

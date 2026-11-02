@@ -43,7 +43,7 @@ import Backend.CSharp.FromCore    ( csharpFromCore )
 import Backend.JavaScript.FromCore( javascriptFromCore )
 import Backend.C.FromCore         ( cFromCore )
 import Backend.Typed.Typed        ( typedFromCore )
-import qualified Backend.Typed.CGen as TC
+import qualified Backend.Typed.CGen.CGen as TC
 import qualified Data.Map as M
 import qualified Data.Set as S
 import qualified Common.NameMap as NM

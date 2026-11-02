@@ -9,7 +9,7 @@
 -- C names, declarations and runtime operations for the shared memory layouts.
 -- Struct names are hashes of their canonical layouts so modules agree on them.
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.CLayout( ctName, structDefs, blockName, blockDef, leafSlots
+module Backend.Typed.CGen.Layout( ctName, structDefs, blockName, blockDef, leafSlots
                             , needsRC, dupExpr, dropStmt, dupFun, dropFun
                             , primBox, scalarHeapSize, shapeIsSmall, fnv
                             ) where

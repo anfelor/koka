@@ -38,7 +38,7 @@
   end in a pattern match failure. The frontend does not report on
   `std/core/debug`, and neither does this check.
 -}
-module Backend.Typed.Fip( checkFip ) where
+module Backend.Typed.Passes.CheckFip( checkFip ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -53,7 +53,8 @@ import Backend.Typed.Common
 import Backend.Typed.Types( dupType )
 import Backend.Typed.Traversal( descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsScrut, stepsFrom, within )
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, trivialTy
+import Backend.Typed.Passes.Common( trivialTy )
+import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma
                           , M, ask, asks, gets, liftE, local, modify, runM, state )
 
 -- The allocations of the most allocating path; whether there are allocations, calls to the
