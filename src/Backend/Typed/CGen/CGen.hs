@@ -34,14 +34,15 @@ import Kind.Newtypes
 import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Traversal( boxTag, canonical, child, fieldsAt, fvA, mapV, within )
-import Backend.Typed.Types( Types(..), collapse, dupType, inst, leaves, isEnum, isShape )
+import Backend.Typed.Traversal( boxTag, canonical, fvA, within )
+import Backend.Typed.Types( Types(..), dupType, inst, leaves, isEnum, isShape )
 import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, unrollT, openFields, boxContents, reuseSize
                           , M, get, gets, liftE, modify, put, runM, state )
 import Backend.Typed.Layout
 import Backend.Typed.CGen.Layout hiding( dupExpr, dropStmt )
 import Backend.Typed.CGen.Koka hiding( conInfoOf, conFieldNames )
 import qualified Backend.Typed.CGen.Koka as Koka
+import Backend.Typed.CGen.ReuseSlots( keptLeaves )
 
 data CEnv = CEnv{ ceModName   :: Name
                 , ceIncludes  :: [String]     -- headers to include
@@ -466,7 +467,7 @@ genBox cx tag at v
                                    -- A described credit is a unique block of its described payload,
                                    -- so its header only needs the new tag and scan size, where they differ,
                                    -- and only the fields that change are stored. Dups still run, in `y`.
-                                   update = case reuseMatches rt t (sameBitsV (cxSources cx) v) of
+                                   update = case keptLeaves (cxSources cx) rt t v of
                                               Just (k,oldScan,matches) -> [setTag k, setScan oldScan, setPath] ++ writes matches
                                               Nothing -> ("kk_block_init(&" <.> x <.> "->_block,sizeof(" <.> bt <.> ")," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ");")
                                                          : storeFrom y
@@ -502,41 +503,6 @@ fieldRange :: VType -> Int -> Either String (Int,VType)
 fieldRange (VProd fs) i
   | i < length fs = Right (sum (map (length . leaves . snd) (take i fs)), snd (fs !! i))
 fieldRange _ _ = Left "projection of a non-product"
-
-sameBitsV :: Sources -> VVal -> VVal
-sameBitsV src v
-  = case v of
-      Var x -> Var (sameBits src x)
-      _ -> mapV id (sameBitsV src) v
-
--- The tag and the scan size that the description of a credit records for its block, and for
--- each leaf of the new payload whether its C slot already holds its bits: the old payload has
--- a leaf at the same offset, with the same layout and the same value (`Inline` makes equal
--- values syntactically equal, so the payload names the variables of the description or their
--- copies, `sameBits`).
--- Payloads of different types can thus share slots. A dup preserves a field's bits, but its
--- reference-count effect must still run.
-reuseMatches :: Ty -> VType -> VVal -> Maybe (Maybe Int,Int,[Bool])
-reuseMatches rt t v
-  = case rt of
-      V (VReuse _ _ (Just (Contents k old ot)))
-        -> let slots s w = zip (leafSlots (layout s)) (leafValues s w)
-               kept = slots ot old
-           in Just (k, scanOf (layout ot), [leaf `elem` kept | leaf <- slots t v])
-      _ -> Nothing
-
--- The value of each leaf of a value of type `t`, as a value in normal form (`collapse`) and
--- the index of a leaf in it: equal descriptions have equal bits. A variable of a product or
--- existential type is expanded into the variables at its parts. Sums stay whole fields, so
--- their inactive slots are kept safe.
-leafValues :: VType -> VVal -> [(VVal,Int)]
-leafValues t v
-  = case (t,v) of
-      (VProd fs, Tuple ws) -> concat (zipWith leafValues (map snd fs) ws)
-      (VProd _, Var x) -> concat [leafValues s (Var y) | (y,_,s) <- fieldsAt x t]
-      (VExists _ s, Pack _ _ w) -> leafValues s w
-      (VExists _ s, Var x) -> leafValues s (Var (child x SPack))
-      _ -> [(collapse v,i) | i <- [0 .. length (leaves t) - 1]]
 
 -- `[deref]` and `[unroll]` keep the pointer
 -- `x` is the same block as `y`, so it is shared if `y` is
