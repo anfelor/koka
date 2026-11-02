@@ -420,63 +420,62 @@ genBox cx tag at v
   = do t <- tyOf cx v
        ct <- ctype t
        e <- genV cx v
-       case ct of
-         CUnit -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" <.> int tag <.> "))")
-         _ -> do bt <- blockType ct
-                 x <- fresh "b"
-                 cpath <- if holes v == 1
-                            then do (member,_) <- holeMember cx ct v
-                                    return (Just ("(uint8_t)kk_field_index_of(" <.> bt <.> "," <.> member <.> ")"))
-                            else return Nothing
-                 let scan = int (scanOf ct)
-                     path = fromMaybe "0" cpath
-                     box  = "kk_datatype_box(kk_datatype_from_base(" <.> x <.> ",_ctx))"
-                     allocAt r = "kk_block_alloc_at_as(" <.> bt <.> "," <.> r <.> "," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
-                     allocFresh = case cpath of
-                                    Nothing -> "kk_block_alloc_as(" <.> bt <.> "," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
-                                    Just _ -> allocAt "kk_reuse_null"
-                     setPath = maybe empty (\i -> x <.> "->_block.header._field_idx =" <+> i <.> ";") cpath
-                     -- store a product field by field: a whole struct copy can also copy its
-                     -- padding, from a temporary on the stack
-                     storeFrom y = case ct of
-                                     CProd _ fs -> [x <.> "->p.f" <.> int i <+> "=" <+> y <.> ".f" <.> int i <.> ";" | (i,_) <- fs]
-                                     _ -> [x <.> "->p =" <+> y <.> ";"]
-                     store = do y <- fresh "p"
-                                return ((cty ct <+> y <+> "=" <+> e <.> ";") : storeFrom y)
-                 case at of
-                   Fresh -> do s <- store
-                               return (stmtExpr ((bt <.> "*" <+> x <+> "=" <+> allocFresh <.> ";") : s) box)
-                   At r  -> do rt <- tyOfName cx r
-                               let check = "_Static_assert(sizeof(" <.> bt <.> ") ==" <+> int (blockSize ct) <.> ",\"kt_reuse\");"
-                               case rt of
-                                 V (VReuse Full _ _)
-                                   -> do y <- fresh "reuse_payload"
-                                         let field i = case ct of
-                                                         CProd _ _ -> ".f" <.> int i
-                                                         _ -> empty
-                                             writes matches = [x <.> "->p" <.> field i <+> "=" <+> y <.> field i <.> ";"
-                                                              | (i,same) <- zip [0..] matches, not same]
-                                             setTag k | k == Just tag = empty
-                                                      | otherwise = x <.> "->_block.header.tag = (kk_tag_t)" <.> int tag <.> ";"
-                                             setScan oldScan | oldScan == scanOf ct = empty
-                                                             | otherwise = x <.> "->_block.header.scan_fsize =" <+> int (scanOf ct) <.> ";"
-                                             -- A described credit is a unique block of its described payload,
-                                             -- so its header only needs the new tag and scan size, where they differ,
-                                             -- and only the fields that change are stored. Dups still run, in `y`.
-                                             update = case reuseMatches rt t (sameBitsV (cxSources cx) v) of
-                                                        Just (k,oldScan,matches) -> [setTag k, setScan oldScan, setPath] ++ writes matches
-                                                        Nothing -> ("kk_block_init(&" <.> x <.> "->_block,sizeof(" <.> bt <.> ")," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ");")
-                                                                   : storeFrom y
-                                         return (stmtExpr ([check, cty ct <+> y <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> localName r <.> ";"]
-                                                           ++ update) box)
-                                 -- a credit that may be empty, which `ExpandReuse` did not test
-                                 _ -> do s <- store
-                                         return (stmtExpr ([check, bt <.> "*" <+> x <+> "=" <+> allocAt (localName r) <.> ";"] ++ s) box)
-                   In y  -> do v <- fresh "v"
-                               ye <- genV cx y
-                               let clear = "kt_block_clear(kk_datatype_as_ptr(kk_datatype_unbox(" <.> ye <.> "),_ctx)," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
-                               return (stmtExpr ([cty ct <+> v <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> clear <.> ";",
-                                                  setPath] ++ storeFrom v) box)
+       bt <- blockType ct
+       x <- fresh "b"
+       cpath <- if holes v == 1
+                  then do (member,_) <- holeMember cx ct v
+                          return (Just ("(uint8_t)kk_field_index_of(" <.> bt <.> "," <.> member <.> ")"))
+                  else return Nothing
+       let scan = int (scanOf ct)
+           path = fromMaybe "0" cpath
+           box  = "kk_datatype_box(kk_datatype_from_base(" <.> x <.> ",_ctx))"
+           allocAt r = "kk_block_alloc_at_as(" <.> bt <.> "," <.> r <.> "," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
+           allocFresh = case cpath of
+                          Nothing -> "kk_block_alloc_as(" <.> bt <.> "," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
+                          Just _ -> allocAt "kk_reuse_null"
+           setPath = maybe empty (\i -> x <.> "->_block.header._field_idx =" <+> i <.> ";") cpath
+           -- store a product field by field: a whole struct copy can also copy its
+           -- padding, from a temporary on the stack
+           storeFrom y = case ct of
+                           CUnit -> []
+                           CProd _ fs -> [x <.> "->p.f" <.> int i <+> "=" <+> y <.> ".f" <.> int i <.> ";" | (i,_) <- fs]
+                           _ -> [x <.> "->p =" <+> y <.> ";"]
+           store = do y <- fresh "p"
+                      return ((cty ct <+> y <+> "=" <+> e <.> ";") : storeFrom y)
+       case at of
+         Fresh -> do s <- store
+                     return (stmtExpr ((bt <.> "*" <+> x <+> "=" <+> allocFresh <.> ";") : s) box)
+         At r  -> do rt <- tyOfName cx r
+                     let check = "_Static_assert(sizeof(" <.> bt <.> ") ==" <+> int (blockSize ct) <.> ",\"kt_reuse\");"
+                     case rt of
+                       V (VReuse Full _ _)
+                         -> do y <- fresh "reuse_payload"
+                               let field i = case ct of
+                                               CProd _ _ -> ".f" <.> int i
+                                               _ -> empty
+                                   writes matches = [x <.> "->p" <.> field i <+> "=" <+> y <.> field i <.> ";"
+                                                    | (i,same) <- zip [0..] matches, not same]
+                                   setTag k | k == Just tag = empty
+                                            | otherwise = x <.> "->_block.header.tag = (kk_tag_t)" <.> int tag <.> ";"
+                                   setScan oldScan | oldScan == scanOf ct = empty
+                                                   | otherwise = x <.> "->_block.header.scan_fsize =" <+> int (scanOf ct) <.> ";"
+                                   -- A described credit is a unique block of its described payload,
+                                   -- so its header only needs the new tag and scan size, where they differ,
+                                   -- and only the fields that change are stored. Dups still run, in `y`.
+                                   update = case reuseMatches rt t (sameBitsV (cxSources cx) v) of
+                                              Just (k,oldScan,matches) -> [setTag k, setScan oldScan, setPath] ++ writes matches
+                                              Nothing -> ("kk_block_init(&" <.> x <.> "->_block,sizeof(" <.> bt <.> ")," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ");")
+                                                         : storeFrom y
+                               return (stmtExpr ([check, cty ct <+> y <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> localName r <.> ";"]
+                                                 ++ update) box)
+                       -- a credit that may be empty, which `ExpandReuse` did not test
+                       _ -> do s <- store
+                               return (stmtExpr ([check, bt <.> "*" <+> x <+> "=" <+> allocAt (localName r) <.> ";"] ++ s) box)
+         In y  -> do v <- fresh "v"
+                     ye <- genV cx y
+                     let clear = "kt_block_clear(kk_datatype_as_ptr(kk_datatype_unbox(" <.> ye <.> "),_ctx)," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
+                     return (stmtExpr ([cty ct <+> v <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> clear <.> ";",
+                                        setPath] ++ storeFrom v) box)
 
 -- A projection copies the field into a local.
 genProjection :: Ctx -> Dest -> VVal -> Int -> Path -> VExpr -> G [Doc]
@@ -589,8 +588,11 @@ genCopyRu cx dest z r e
        s <- genE cx{ cxGamma = g' } dest e
        let old = "((" <.> bt <.> "*)kk_datatype_as_ptr(kk_datatype_unbox(" <.> localName z <.> "),_ctx))"
        return ([bt <.> "*" <+> x <+> "= kk_block_alloc_as(" <.> bt <.> "," <.> int (scanOf ct) <.> ",(kk_tag_t)" <.> int (boxTag z) <.> ",_ctx);",
-                "memcpy(&" <.> x <.> "->p,&" <.> old <.> "->p,sizeof(" <.> x <.> "->p));",
+                copyPayload ct x old,
                 declare "kk_reuse_t" r ("&" <.> x <.> "->_block")] ++ s)
+  where
+    copyPayload CUnit _ _ = empty
+    copyPayload _ x old = "memcpy(&" <.> x <.> "->p,&" <.> old <.> "->p,sizeof(" <.> x <.> "->p));"
 
 -- `[lock]` of `z` takes its block as a cell, the pointer to the block, which is then written.
 genLock :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]

@@ -113,7 +113,7 @@ owning m
 -- boxed types A, B: what a pointer points to.
 --
 -- - Shapes `Box V`, `1` and `⊕ᵢ Aᵢ` have known tags and can be destructured by `[case]` and
---   `[unbox]`. A `Box V` is a heap block with a header (unless V has no contents, `𝟙`).
+--   `[unbox]`. A `Box V` is always a heap block with a header, even when V is `𝟙`.
 --   Sums are flat: their alternatives are `Box V` or `1` (`a + 1` or `T⟨B̄⟩ + 1` has no known
 --   tags), indexed by their runtime tags, which are increasing and start at 1 as in Koka.
 --   A sub-sum keeps the tags of its alternatives, with gaps for those it excludes.
@@ -173,9 +173,9 @@ data Side = Whnf | Delay
 -- - `ctx⟨A,B⟩` is an abstract pair of a pointer and a field address (see "Constructor
 --   contexts" above). It is not trivial and has the layout of `A* ⊗ B*`. A nonempty context
 --   `ctx⁺⟨A,B⟩` is also a context `ctx⟨A,B⟩`, as a full credit is also a credit.
--- - `|V|` is the size of the heap block of a `Box V` (`Layout.blockSize`); it is only defined when
---   V has contents (`Layout.isBlock`). It is the size with the fields in memory order, so it
---   does not depend on the order in which a product is written.
+-- - `|V|` is the size of the heap block of a `Box V` (`Layout.blockSize`). Unit has a
+--   header-only block. Fields are in memory order, so the size does not depend on the
+--   order in which a product is written. Heap contents cannot contain reuse credits or cells.
 -- - A cell `cell_n⟨τ⟩` is the n-byte block of a lazy value under evaluation (the paper's
 --   locked location): its contents were taken out (`[lock]`), it holds one reference to the
 --   block, and other references to the block must see a τ once it is filled. It is not
