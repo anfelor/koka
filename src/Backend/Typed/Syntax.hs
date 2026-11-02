@@ -167,7 +167,7 @@ data Side = Whnf | Delay
 -- - `A*` is the only pointer-sized type (`Types.isPtr`): it holds a pointer to an `A` (or, for a
 --   shape, an immediate value with its tag).
 -- - Types are equal up to renaming of bound variables and β-reduction of type lambdas.
--- - A type is trivial (`Query.trivialTy`) if it contains no pointers: `𝟙`, raw types, sums,
+-- - A type is trivial (`Passes.Common.trivialTy`) if it contains no pointers: `𝟙`, raw types, sums,
 --   products and existentials of trivial types, `@reuse*` (a named type that is not
 --   reference counted), and named types whose body is trivial.
 -- - `ctx⟨A,B⟩` is an abstract pair of a pointer and a field address (see "Constructor

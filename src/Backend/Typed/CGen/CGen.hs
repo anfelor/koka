@@ -16,7 +16,7 @@
 
   The C code is a `Doc`: string literals are documents, and a list of documents is a list of statements.
 -}
-module Backend.Typed.CGen( CEnv(..), External(..), cgenModule, cName, ktInitName, ktFileName ) where
+module Backend.Typed.CGen.CGen( CEnv(..), External(..), cgenModule, cName, ktInitName, ktFileName ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -35,11 +35,11 @@ import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Traversal( boxTag, canonical, child, fieldsAt, fvA, mapV, within )
-import Backend.Typed.Types( Types(..), collapse, dupType, inst, leaves, isEnum )
-import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, unrollT, openFields, boxContents, reuseSize, pointerShape
+import Backend.Typed.Types( Types(..), collapse, dupType, inst, leaves, isEnum, isShape )
+import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, unrollT, openFields, boxContents, reuseSize
                           , M, get, gets, liftE, modify, put, runM, state )
 import Backend.Typed.Layout
-import Backend.Typed.CLayout hiding( dupExpr, dropStmt )
+import Backend.Typed.CGen.Layout hiding( dupExpr, dropStmt )
 import Backend.Typed.CGen.Koka hiding( conInfoOf, conFieldNames )
 import qualified Backend.Typed.CGen.Koka as Koka
 
@@ -128,6 +128,23 @@ stmtExpr ss e = "({" <+> align (vcat (ss ++ [e <.> ";"])) <+> "})"
 
 dupExpr :: CT -> Doc -> Doc
 dupExpr ct e = maybe e (\f -> text f <.> "(" <.> e <.> ",_ctx)") (dupFun ct)
+
+-- The constructor shape of a pointer, unfolding named types but not their
+-- payloads. Opaque representations supply no such evidence. Guard alias
+-- unfolding as well: a recursive name alone has no known representation.
+pointerShape :: Env -> Ty -> Maybe AType
+pointerShape env t
+  = case t of
+      V (VPtr a) -> shape S.empty a
+      A a -> shape S.empty a
+      _ -> Nothing
+  where
+    shape _ a | isShape a = Just a
+    shape seen a = case a of
+      ACon n _ | not (S.member n seen)
+               , Just TypeDef{} <- M.lookup n (envTypes env)
+               , Right b <- unrollT env a -> shape (S.insert n seen) b
+      _ -> Nothing
 
 -- Like aggregate dup helpers, keep field dups inline: a call can spill another
 -- live field and enlarge even the unique path's stack frame. Root dups may be

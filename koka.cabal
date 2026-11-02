@@ -30,10 +30,9 @@ library
       Backend.C.ParcReuseSpec
       Backend.CSharp.FromCore
       Backend.JavaScript.FromCore
-      Backend.Typed.CGen
+      Backend.Typed.CGen.CGen
       Backend.Typed.CGen.Koka
-      Backend.Typed.Check
-      Backend.Typed.CLayout
+      Backend.Typed.CGen.Layout
       Backend.Typed.Common
       Backend.Typed.Elab.Coerce
       Backend.Typed.Elab.Common
@@ -45,10 +44,11 @@ library
       Backend.Typed.Elab.TypeInfo
       Backend.Typed.Elab.TypeMatch
       Backend.Typed.Elab.Types
-      Backend.Typed.Fip
       Backend.Typed.Layout
-      Backend.Typed.Linear
       Backend.Typed.Passes.Anf
+      Backend.Typed.Passes.CheckFip
+      Backend.Typed.Passes.CheckLinear
+      Backend.Typed.Passes.CheckTypes
       Backend.Typed.Passes.Common
       Backend.Typed.Passes.Contify
       Backend.Typed.Passes.DropSpec

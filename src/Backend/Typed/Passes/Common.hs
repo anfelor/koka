@@ -19,13 +19,24 @@ import Data.Maybe( listToMaybe, fromMaybe )
 import Control.Monad( foldM )
 import Control.Monad.State( runState, state )
 import Backend.Typed.Syntax
-import Backend.Typed.Types( Sub, Types(..), dupType, inst, mapReuseContents, traverseReuseContents )
+import Backend.Typed.Types( Sub, Types(..), dupType, inst, isTrivialWith, mapReuseContents, traverseReuseContents )
 import Backend.Typed.Traversal
-import Backend.Typed.Query( Env, Gamma, M, bindAll, inferVar, inferV, altTypes, lamGamma
-                          , uniqueGamma, unboxRuGamma, copyRuGamma, lockGamma
+import Backend.Typed.Query( Env(..), Gamma, M, bindAll, inferVar, inferV, altTypes, lamGamma
+                          , uniqueGamma, unboxRuGamma, copyRuGamma, lockGamma, unrollT
                           , ask, local )
 import Backend.Typed.Pretty( ppr )
 import Common.Name( Name, newHiddenName )
+
+-- the modes of the parameters of a call with n arguments
+paramModes :: Env -> Name -> Int -> [Mode]
+paramModes env f n
+  = case M.lookup f (envSigs env) of
+      Just (SigFun _ ps _) -> map fst ps ++ replicate (n - length ps) Owned
+      _ -> replicate n Owned
+
+-- values of these types need no references, also through named types
+trivialTy :: Env -> Ty -> Bool
+trivialTy env = isTrivialWith (either (const Nothing) Just . unrollT env)
 
 -- Run a pass on each definition; a definition that fails is kept, with its error.
 perDef :: (Def -> Either String Def) -> Program -> (Program,[String])
@@ -100,7 +111,7 @@ mentionedA a = case a of
 -- Discard an owned value by destructuring it down to boxed operands and credits.
 -- Parts use their canonical paths, reusing those already in scope. Sequencing
 -- a sum or existential drop needs a fresh root from the caller. Parts of a trivial
--- type (`Query.trivialTy`) are not discarded.
+-- type (`trivialTy`) are not discarded.
 dropValue :: Monad m => (Ty -> Bool) -> m Path -> Scope -> Path -> Ty -> VExpr -> m VExpr
 dropValue trivial _ _ _ t e
   | trivial t = return e

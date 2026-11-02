@@ -9,7 +9,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 -- Whole-program type validation; Query implements the typing rules.
-module Backend.Typed.Check( checkProgram, checkTypes ) where
+module Backend.Typed.Passes.CheckTypes( checkProgram, checkTypes ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S

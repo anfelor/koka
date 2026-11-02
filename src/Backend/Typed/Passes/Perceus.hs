@@ -65,8 +65,8 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Common
 import Backend.Typed.Traversal( Destruct(..), child, descendA, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut, fieldsAt, fvA, fvE, fvV, isRead, prefixes, scrutVar, stepsFrom, takesContents, within )
-import Backend.Typed.Passes.Common( NameSupply, derefOf, dropValue, freshFor, perDef, freshPathFrom, nameParts, partAt, projAt, projectAll, renameE, renamePrefix, scopeOf )
-import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, altTypes, lockGamma, uniqueGamma, paramModes, trivialTy
+import Backend.Typed.Passes.Common( paramModes, trivialTy, NameSupply, derefOf, dropValue, freshFor, perDef, freshPathFrom, nameParts, partAt, projAt, projectAll, renameE, renamePrefix, scopeOf )
+import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, altTypes, lockGamma, uniqueGamma
                           , M, evalM, get, gets, lift, liftE, put, state, StateT, runStateT )
 import Backend.Typed.Types( dupType, inst, isPtr )
 
