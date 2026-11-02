@@ -21,7 +21,7 @@ module Backend.Typed.CGen.CGen( CEnv(..), External(..), cgenModule, cName, ktIni
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Char( isAlphaNum, ord )
-import Data.List( isInfixOf, zip4 )
+import Data.List( zip4 )
 import Data.Maybe( fromMaybe )
 import qualified Numeric
 import Control.Monad( forM, when )
@@ -56,7 +56,7 @@ data CEnv = CEnv{ ceModName   :: Name
 
 -- `stLocal`: whether the current definition uses declarations of the C file (static functions)
 data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [String], stDecls :: [Doc], stWrappers :: S.Set Name
-            , stLocal :: Bool }
+            , stLocal :: Bool, stTailCall :: Bool }
 
 -- `cxJoins`: the label and the parameters of each join point in scope
 data Ctx = Ctx{ cxEnv :: Env, cxCEnv :: CEnv, cxGamma :: Gamma, cxSelf :: Maybe (Name,[Path])
@@ -1066,12 +1066,17 @@ genCall cx dest f tys vs
        args <- mapM (genV cx) vs
        case (dest, cxSelf cx) of
          (DReturn, Just (self,params)) | self == f && length params == length args
-           -> do tmps <- mapM (const (fresh "a")) args
-                 pcts <- mapM ctype ps
-                 return [block ([cty ct <+> t <+> "=" <+> a <.> ";" | (t,a,ct) <- zip3 tmps args pcts]
-                                ++ [localName p <+> "=" <+> t <.> ";" | (p,t) <- zip params tmps]
-                                ++ ["goto kt_tailcall;"])]
+           -> genSelfCall params ps args
          _ -> return (assignTo dest rct (text (cName f) <.> "(" <.> hcat [a <.> ", " | a <- args] <.> "_ctx)"))
+
+genSelfCall :: [Path] -> [VType] -> [Doc] -> G [Doc]
+genSelfCall params ps args
+  = do modify (\st -> st{ stTailCall = True })
+       tmps <- mapM (const (fresh "a")) args
+       pcts <- mapM ctype ps
+       return [block ([cty ct <+> t <+> "=" <+> a <.> ";" | (t,a,ct) <- zip3 tmps args pcts]
+                      ++ [localName p <+> "=" <+> t <.> ";" | (p,t) <- zip params tmps]
+                      ++ ["goto kt_tailcall;"])]
 
 -- Conversions of small integer literals to fixed-width integers become C literals
 -- (as in `Backend.C.FromCore.genAppSpecial`); `ssize_t` and `intptr_t` stay within 32 bits
@@ -1123,9 +1128,11 @@ genDef env cenv def
               rct  <- ctype res
               let g  = M.fromList [(x,V t) | (x,_,t) <- args]
                   cx = Ctx env cenv g (Just (f,[x | (x,_,_) <- args])) M.empty S.empty (sources body)
+              modify (\st -> st{ stTailCall = False })
               ss <- genE cx DReturn body
+              tailCall <- gets stTailCall
               let sig = cty rct <+> text (cName f) <.> "(" <.> hcat [cty ct <+> localName x <.> ", " | ((x,_,_),ct) <- zip args pcts] <.> "kk_context_t* _ctx)"
-                  label = ["kt_tailcall: ;" | "goto kt_tailcall;" `isInfixOf` show (vcat ss)]
+                  label = ["kt_tailcall: ;" | tailCall]
               return (sig <.> ";", sig <+> block (label ++ ss), empty)
       DefVal x _ t body
         -> do ct <- ctype t
@@ -1171,7 +1178,7 @@ cgenModule cenv prog
                     ws <- gets (S.toList . stWrappers)
                     wdefs <- mapM (genWrapper env cenv) ws
                     return (rs,wdefs)
-    in case runM genAll () (St 0 M.empty [] [] S.empty False) of
+    in case runM genAll () (St 0 M.empty [] [] S.empty False False) of
          Left err -> ("","",[err])
          Right ((rs,wdefs),st)
            -> let ok    = [x | Right x <- rs]
