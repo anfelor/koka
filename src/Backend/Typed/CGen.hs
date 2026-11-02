@@ -649,9 +649,7 @@ yieldedValue ct
 genLit :: Lit -> G Doc
 genLit lit
   = case lit of
-      LitInt i | i >= -8191 && i <= 8191 -> return ("kt_box_integer(kk_integer_from_small(" <.> integer i <.> "))")
-               | i >= -2147483647 && i <= 2147483647 -> return ("kt_box_integer(kk_integer_from_int(" <.> integer i <.> ",_ctx))")
-               | otherwise -> return ("kt_box_integer(kk_integer_from_str(\"" <.> integer i <.> "\",_ctx))")
+      LitInt i -> return ("kt_box_integer(" <.> intLit i <.> ")")
       LitFloat d -> return (text (showHFloat d ""))
       LitChar c -> return ("((kk_char_t)" <.> int (fromEnum c) <.> ")")
       LitString "" -> return "kt_box_string(kk_string_empty())"
@@ -659,6 +657,13 @@ genLit lit
                         let (cstr,clen) = cstring s
                         return (stmtExpr ["kk_define_string_literal(static," <.> x <.> "," <.> int clen <.> "," <.> text cstr <.> ",_ctx);"]
                                          ("kt_box_string(kk_string_dup(" <.> x <.> ",_ctx))"))
+
+-- Use a C literal when it fits; exclude the signed minimum, which is not a valid C literal.
+intLit :: Integer -> Doc
+intLit i
+  | i >= -8191 && i <= 8191 = "kk_integer_from_small(" <.> integer i <.> ")"
+  | abs i < 2^63 = "kk_integer_from_int64(KK_I64(" <.> integer i <.> "),_ctx)"
+  | otherwise = "kk_integer_from_str(\"" <.> integer i <.> "\",_ctx)"
 
 cstring :: String -> (String,Int)
 cstring s
@@ -1077,9 +1082,6 @@ litTest ve lit
       LitString s -> "(kk_string_cmp_cstr_borrow(kt_unbox_string(" <.> ve <.> ")," <.> text (fst (cstring s)) <.> ",_ctx) == 0)"
       LitChar c -> "(" <.> ve <+> "==" <+> int (fromEnum c) <.> ")"
       LitFloat d -> "(" <.> ve <+> "==" <+> text (showHFloat d "") <.> ")"
-  where
-    intLit i | i >= -8191 && i <= 8191 = "kk_integer_from_small(" <.> integer i <.> ")"
-             | otherwise = "kk_integer_from_str(\"" <.> integer i <.> "\",_ctx)"
 
 openTypeArgs :: Ctx -> Path -> G [AType]
 openTypeArgs cx v
