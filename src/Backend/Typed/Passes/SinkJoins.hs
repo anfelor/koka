@@ -20,10 +20,11 @@
     case^ z of { injᵢ y -> join j(x) = e1 in ... jump j(y) ... jump j(y) ...; ... }
 
   so that `JoinArgs` can make the invariant argument `y` a capture (and a credit keeps its
-  description in the join body).
+  description in the join body). A recursive join point is sunk in the same way, so that
+  `JoinArgs` can capture a borrowed variable that the branch of its entry jumps binds.
 
   The join body is closed except for the variables that `JoinArgs` captures, which it
-  introduces last. It stays outside the binders of its free variables and outside a join
+  introduces later. It stays outside the binders of its free variables and outside a join
   that it jumps to or that shadows it.
 -}
 module Backend.Typed.Passes.SinkJoins( sinkJoinsProgram ) where

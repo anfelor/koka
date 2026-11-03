@@ -15,10 +15,11 @@
     fun f⟨ā⟩(x̄ :q̄ V̄) : W = e   ~>   fun f⟨ā⟩(ȳ :q̄ V̄) : W = join rec j⟨b̄⟩(x̄ :q̄ V̄) : W = e' in jump j[b̄](ȳ)
 
   where e' replaces the self tail calls `f[B̄](v̄)` of e by `jump j[B̄ restricted to b̄](v̄)`.
-  The join point quantifies over the type parameters b̄ of f that do not occur in W
-  (`[join-rec]` requires b̄ ∉ ftv(W)), so a call can only become a jump if it passes the
-  others unchanged. The body of the function only has its parameters in scope, so the join
-  point is closed.
+  The join point quantifies over the type parameters b̄ of f that the calls change (for
+  polymorphic recursion). These must not occur in W (`[join-rec]` requires b̄ ∉ ftv(W)), so
+  a call can only become a jump if it passes the parameters in W unchanged. The others stay
+  those of f, so that `JoinArgs` can capture variables whose types mention them. The body
+  of the function only has its parameters in scope, so the join point is closed.
 -}
 module Backend.Typed.Passes.TailRec( tailRecProgram ) where
 
@@ -26,8 +27,8 @@ import Data.Functor.Identity( Identity(..) )
 import Common.Name( Name )
 import Backend.Typed.Syntax
 import Backend.Typed.Types( Types(..) )
-import Backend.Typed.Traversal( descendE )
-import Backend.Typed.Passes.Common( freshFor, freshNameFrom, freshPathFrom, mentionedT )
+import Backend.Typed.Traversal( descendE, jumps )
+import Backend.Typed.Passes.Common( freshFor, substJump, freshNameFrom, freshPathFrom, mentionedT )
 
 tailRecProgram :: Program -> Program
 tailRecProgram prog = prog{ progDefs = map tailRecDef (progDefs prog) }
@@ -37,24 +38,23 @@ tailRecDef def
   = case def of
       DefFun f tvs args res body
         | all (\(_,_,t) -> null (mentionedT t)) args     -- the parameters are renamed
-        , body' <- selfJumps f j tvs res body, body' /= body
+        , body0 <- selfJumps f j tvs cands body, body0 /= body
         -> let (ys,_) = foldr (\_ (ps,s) -> let (p,s') = freshPathFrom "arg" s in (p:ps,s')) ([],supply') args
-               bs = quantified tvs res
+               -- the candidates that some jump changes
+               bs = [b | (i,b) <- zip [0..] cands, any (\(ts,_) -> ts !! i /= AVar b) (jumps j body0)]
+               body' = substJump j (\ts -> Jump j [t | (t,b) <- zip ts cands, b `elem` bs]) body0
            in def{ defArgs = [(y,m,t) | (y,(_,m,t)) <- zip ys args]
                  , defBody = Join (Rec res) j bs args body' (Jump j (map AVar bs) (map Var ys)) }
       _ -> def
   where
     (j,supply') = freshNameFrom "loop" (freshFor def)
+    -- the type parameters that a loop over the body may quantify over
+    cands = [a | a <- defParams def, a `notElem` ftv (defRes def)]
 
--- the type parameters of a function that a loop over its body quantifies over
-quantified :: [TVar] -> VType -> [TVar]
-quantified tvs res = [a | a <- tvs, a `notElem` ftv res]
-
--- replace the self tail calls of `f` by jumps to `j`
-selfJumps :: Name -> Name -> [TVar] -> VType -> VExpr -> VExpr
-selfJumps f j tvs res = go
+-- replace the self tail calls of `f` by jumps to `j`, which quantifies over `bs`
+selfJumps :: Name -> Name -> [TVar] -> [TVar] -> VExpr -> VExpr
+selfJumps f j tvs bs = go
   where
-    bs = quantified tvs res
     go expr
       = case expr of
           Call g tys vs
