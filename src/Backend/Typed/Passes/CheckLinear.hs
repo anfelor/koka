@@ -46,8 +46,8 @@
   first branch of `IsUnique`; unique parameters and a `let` whose bound expression has a
   unique result are unique too, and so are the pointers of the scrutinee of a unique
   destructuring. An expression has a unique result (its result mode `q`, which follows the
-  join points in scope) if it returns a unique value (a unique variable, a fresh context, an
-  append or `ctx-copy c`) or calls a function with a unique result in every tail position.
+  join points in scope) if it returns a unique value (a unique variable or a fresh context),
+  appends or copies a context, or calls a function with a unique result in every tail position.
   The body of a definition has the definition's result mode. A context is plugged or appended only
   through a unique value. Any borrowed use of a unique variable, or of a variable on its path,
   may duplicate the reference, after which it is only owned.
@@ -339,11 +339,6 @@ ownedV env g val
       TyApp _ _ -> children
       Hole -> return noUse
       Context _ k -> ownedV env g k
-      Plug c v -> uses [uniqueV env g c, ownedV env g v]
-      Append c d -> uses [uniqueV env g c, uniqueV env g d]
-      CtxCopy c -> ownedV env g c
-      -- the value is evaluated before the block is written
-      Memoize c _ _ v -> uses [ownedV env g v, ownedV env g c]
   where
     children = uses (getConst (descendV (\a -> Const [ownedA env g a]) (\v -> Const [ownedV env g v]) val))
 
@@ -381,8 +376,6 @@ uniqueV env g val
       Tuple vs -> uses (map (uniqueV env g) vs)
       Pack _ _ w -> uniqueV env g w
       Context _ k -> ownedV env g k
-      CtxCopy c -> ownedV env g c
-      Append c d -> uses [uniqueV env g c, uniqueV env g d]
       _ -> fail ("unique use of a value that is not unique: " ++ show val)
 
 borrowedV :: Env -> Gamma -> VVal -> L Use
@@ -511,9 +504,15 @@ checkE env g js q expr
         -> do g' <- liftE (lockGamma g z)
               u <- consume env g z
               before (return u{ uNet = M.empty }) (checkE env g' js q e)
+      -- appending and copying give a unique context, plugging and memoizing an owned value
+      Append c d -> uses [uniqueV env g c, uniqueV env g d]
+      CtxCopy c -> ownedV env g c
+      Plug c v -> ownedResult expr >> uses [uniqueV env g c, ownedV env g v]
+      Memoize c _ _ v -> ownedResult expr >> uses [ownedV env g v, ownedV env g c]
       CaseLit v alts def -> before (borrowedV env g v) (branches =<< mapM (checkE env g js q) (def : map snd alts))
       _ -> fail "unexpected destructuring form"
   where
+    ownedResult e = when (q == Unique) (fail ("unique result of an expression without one: " ++ show e))
     -- owned and unique arguments (and captured variables) first: a borrowed argument must not
     -- be derived from one of them
     args caps ms vs = uses ([ownedV env g v | (Owned,v) <- zip ms vs] ++

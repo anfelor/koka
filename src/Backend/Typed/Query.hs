@@ -179,6 +179,31 @@ inferExpr env g js expr
                                                 checkArgs env g (map (inst tvs ts) ps) vs
                                                 return t
                      Nothing -> Left ("jump to " ++ show j ++ " outside of its scope or not in tail position")
+      Plug c v -> do t <- inferV env g c
+                     case t of
+                       VCtx _ a b -> checkV env g v (VPtr b) >> return (VPtr a)
+                       _ -> Left ("plugging a non-context: " ++ ppr t)
+      Append c d -> do tc <- inferV env g c
+                       td <- inferV env g d
+                       case (tc,td) of
+                         (VCtx f a b, VCtx f' b' c') | alphaEq b b' -> return (VCtx (if f == Full then f else f') a c')
+                         _ -> Left ("appending " ++ ppr td ++ " to " ++ ppr tc)
+      CtxCopy c -> do t <- inferV env g c
+                      case t of
+                        VCtx _ _ _ -> return t
+                        _ -> Left ("unsharing a non-context: " ++ ppr t)
+      Memoize c d k v -> do tc <- inferV env g c
+                            case tc of
+                              VCell n a -> do (l,ss) <- lazySides env a
+                                              s <- case lookup k (case d of Whnf -> ss; Delay -> l) of
+                                                     Just (ABox s) -> return s
+                                                     _ -> Left ("memoizing alternative " ++ show k ++ " of " ++ ppr (A a) ++ ", which is not a box on its side")
+                                              checkV env g v s
+                                              noHeapCredit s
+                                              m <- reuseSize s
+                                              unless (m <= n) (Left ("memoizing " ++ show m ++ " bytes in a cell of " ++ show n ++ " bytes"))
+                                              return (VPtr a)
+                              _ -> Left ("memoizing into a non-cell: " ++ ppr tc)
       Gen tvs e -> do unbound tvs (ftvCtx g e)
                       t <- inferE env g noJoins e
                       case t of
@@ -517,31 +542,6 @@ inferV env g val
                         case t of
                           VPtr a -> return (VCtx (if k == Hole then MaybeEmpty else Full) a b)
                           _ -> Left ("context of a non-pointer: " ++ ppr t)
-      Plug c v -> do t <- inferV env g c
-                     case t of
-                       VCtx _ a b -> checkV env g v (VPtr b) >> return (VPtr a)
-                       _ -> Left ("plugging a non-context: " ++ ppr t)
-      Append c d -> do tc <- inferV env g c
-                       td <- inferV env g d
-                       case (tc,td) of
-                         (VCtx f a b, VCtx f' b' c') | alphaEq b b' -> return (VCtx (if f == Full then f else f') a c')
-                         _ -> Left ("appending " ++ ppr td ++ " to " ++ ppr tc)
-      CtxCopy c -> do t <- inferV env g c
-                      case t of
-                        VCtx _ _ _ -> return t
-                        _ -> Left ("unsharing a non-context: " ++ ppr t)
-      Memoize c d k v -> do tc <- inferV env g c
-                            case tc of
-                              VCell n a -> do (l,ss) <- lazySides env a
-                                              s <- case lookup k (case d of Whnf -> ss; Delay -> l) of
-                                                     Just (ABox s) -> return s
-                                                     _ -> Left ("memoizing alternative " ++ show k ++ " of " ++ ppr (A a) ++ ", which is not a box on its side")
-                                              checkV env g v s
-                                              noHeapCredit s
-                                              m <- reuseSize s
-                                              unless (m <= n) (Left ("memoizing " ++ show m ++ " bytes in a cell of " ++ show n ++ " bytes"))
-                                              return (VPtr a)
-                              _ -> Left ("memoizing into a non-cell: " ++ ppr tc)
       DupV v -> do unless (isGlob v) (Left ("dup of a value that is not a global: " ++ ppr val))
                    inferV env g v
       TyApp v tys -> do tv <- inferV env g v

@@ -42,6 +42,7 @@ hoistDeep expr
       Ret v -> one v Ret
       Call f ts vs -> many vs (Call f ts)
       App f vs -> many vs (App f)
+      Memoize c d k w -> one w (Memoize c d k)
       _ -> Nothing
   where
     one v k = do (w,mk) <- deep 0 v
@@ -73,7 +74,6 @@ childrenV v = case v of
   Pack t ts w -> [(w,Pack t ts)]
   TyApp w ts -> [(w,\x -> TyApp x ts)]
   DupV w -> [(w,DupV)]
-  Memoize c d k w -> [(w,Memoize c d k)]
   _ -> []
 
 childrenA :: AVal -> [(VVal, VVal -> AVal)]

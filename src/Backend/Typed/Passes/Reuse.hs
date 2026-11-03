@@ -198,6 +198,10 @@ ruE expr
       Call _ _ _ -> plain
       App _ _ -> plain
       Gen _ _ -> plain
+      Append{} -> plain
+      Plug{} -> plain
+      CtxCopy{} -> plain
+      Memoize{} -> plain
       Dup x e -> Dup x <$> ruE e
       -- destructuring forms are handled above
       Proj{} -> plain

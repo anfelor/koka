@@ -22,7 +22,7 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Char( isAlphaNum, ord )
 import Data.List( sortOn, zip4 )
-import Data.Maybe( fromMaybe )
+import Data.Maybe( fromMaybe, isJust )
 import qualified Numeric
 import Control.Monad( forM, when )
 import Lib.PPrint( Doc, text, string, int, integer, empty, isEmptyDoc, line, nest, align, vcat, hcat, hsep, punctuate, (<.>), (<+>), (<->) )
@@ -33,10 +33,10 @@ import Kind.Kind( kindStar )
 import Kind.Newtypes
 import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
-import Backend.Typed.Traversal( child, TestSide(..), boxTag, canonical, failingTo, fvA, fvE, holes, testSides, within )
+import Backend.Typed.Traversal( child, TestSide(..), boxTag, canonical, failingTo, fvA, fvE, fvV, holes, testSides, within )
 import Backend.Typed.Types( Types(..), inst, isShape )
 import Backend.Typed.Env( Env(..), envOf, unrollT, openFields, boxContents, reuseSize, M, get, gets, liftE, modify, put, runM, state )
-import Backend.Typed.Query( Gamma, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
+import Backend.Typed.Query( Gamma, inferE, inferV, inferVar, noJoins, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 import Backend.Typed.Layout
 import Backend.Typed.CGen.Layout hiding( dupExpr, dropStmt )
 import Backend.Typed.CGen.Koka hiding( conInfoOf, conFieldNames )
@@ -242,13 +242,6 @@ genV cx val
                     genProd cx t (prodLeafVals val)
       Hole -> return "kk_box_null()"   -- the placeholder (`kk_cctx_hole`)
       Context b k -> genCtx cx b k
-      Plug c v -> genV cx v >>= plug cx c
-      Append c d -> genAppend cx c d
-      CtxCopy c -> do ct <- tyOf cx c >>= ctype
-                      ce <- genV cx c
-                      x <- fresh "c"
-                      return (stmtExpr [cty ct <+> x <+> "=" <+> ce <.> ";", "kt_ctx_copy(&" <.> x <.> ".f0,&" <.> x <.> ".f1,_ctx);"] x)
-      Memoize c _ k v -> genBox cx k (In c) v
 
 -- Contexts have the same two-box layout as Koka's `cctx`; convert at the boundary.
 toCctx :: Doc -> Doc
@@ -266,11 +259,42 @@ genCtx cx b k
          _ -> do (ss,res,hole) <- genHolePath (bindVar cx nameHole (V (VPtr b))) k
                  return (stmtExpr ss (fromCctx ct ("kk_cctx_create(" <.> res <.> "," <.> hole <.> ",_ctx)")))
 
+-- An operation on contexts or cells is a C expression (`genOperation`), and so is `ctx-copy`
+-- followed by plugging the copy (`copyPlug`).
+isOperation :: VExpr -> Bool
+isOperation expr
+  = case expr of
+      Append{} -> True
+      Plug{} -> True
+      CtxCopy{} -> True
+      Memoize{} -> True
+      _ -> isJust (copyPlug expr)
+
+genOperation :: Ctx -> VExpr -> G Doc
+genOperation cx expr
+  = case expr of
+      _ | Just (c,v) <- copyPlug expr -> genV cx v >>= plug "kk_cctx_apply" cx c
+      Append c d -> genAppend cx c d
+      Plug c v -> genV cx v >>= plug "kk_cctx_apply_linear" cx c
+      CtxCopy c -> do ct <- tyOf cx c >>= ctype
+                      ce <- genV cx c
+                      x <- fresh "c"
+                      return (stmtExpr [cty ct <+> x <+> "=" <+> ce <.> ";", "kt_ctx_copy(&" <.> x <.> ".f0,&" <.> x <.> ".f1,_ctx);"] x)
+      Memoize c _ k v -> genBox cx k (In c) v
+      _ -> failG ("not an operation: " ++ show expr)
+
+-- `let c' = ctx-copy c in c'[v]`: plugging a copy of `c`
+copyPlug :: VExpr -> Maybe (VVal,VVal)
+copyPlug expr
+  = case expr of
+      Let x _ (CtxCopy c) (Plug (Var y) v) | y == x, S.notMember x (fvV v) -> Just (c,v)
+      _ -> Nothing
+
 -- Appending a nonempty context plugs its `res` into the hole and keeps its hole
 -- (`kk_cctx_extend_linear`); `kk_cctx_compose_linear` handles a possibly empty second context.
 genAppend :: Ctx -> VVal -> VVal -> G Doc
 genAppend cx c d
-  = do ct <- tyOf cx (Append c d) >>= ctype
+  = do ct <- liftC (inferE (cxEnv cx) (cxGamma cx) noJoins (Append c d)) >>= ctype
        td <- tyOf cx d
        de <- genV cx d
        case td of
@@ -284,12 +308,9 @@ genAppend cx c d
 
 -- fill the hole of a unique context in place (`kk_cctx_apply_linear`); a copy of a context
 -- is filled in place if it is unique and copied with the child otherwise (`kk_cctx_apply`)
-plug :: Ctx -> VVal -> Doc -> G Doc
-plug cx c ve
-  = do let (fill,c') = case c of
-                         CtxCopy c0 -> ("kk_cctx_apply",c0)
-                         _          -> ("kk_cctx_apply_linear",c)
-       ce <- genV cx c'
+plug :: Doc -> Ctx -> VVal -> Doc -> G Doc
+plug fill cx c ve
+  = do ce <- genV cx c
        return (fill <.> "(" <.> toCctx ce <.> "," <.> ve <.> ",_ctx)")
 
 -- Allocate a one-hole value (`genBox` records the context path in the header of each block on
@@ -747,11 +768,18 @@ genE cx dest expr
                   ct <- ctype t
                   e <- genV cx v
                   return (assignTo dest ct e)
+      _ | isOperation expr
+        -> do ct <- liftC (inferE (cxEnv cx) (cxGamma cx) noJoins expr) >>= ctype
+              e <- genOperation cx expr
+              return (assignTo dest ct e)
+      -- a copy that a bound plug fills is bound with the plug (`copyPlug`)
+      Let x tx e1@CtxCopy{} (Let y t e2@(Plug (Var x') _) e3)
+        | x' == x, S.notMember x (fvE e3) -> genE cx dest (Let y t (Let x tx e1 e2) e3)
       Let x t e1 e2
         -> do s1 <- genBound cx x t e1
               -- a shared cell stays shared once memoized
               let cx' = case e1 of
-                          Ret (Memoize (Var c) _ _ _) -> shareAlias cx c x
+                          Memoize (Var c) _ _ _ -> shareAlias cx c x
                           _ -> cx
               s2 <- genE (bindVar cx' x (V t)) dest e2
               return (s1 ++ s2)
@@ -939,6 +967,10 @@ genE cx dest expr
                           return (litTest ve l, s)
               sd <- genE cx dest def
               return [ifChain brs sd]
+      Append{} -> failG "an operation"
+      Plug{} -> failG "an operation"
+      CtxCopy{} -> failG "an operation"
+      Memoize{} -> failG "an operation"
       CaseOpen _ v alts def
         -> do let ve = localName v
               brs <- forM alts $ \(c,xs,e) ->
@@ -963,6 +995,7 @@ genBound cx x t e
        -- the binders of `e` are out of scope in the body, and a path may be bound in both
        let assign = case e of
                       Ret _ -> s
+                      _ | isOperation e -> s
                       _ -> [block s]
        return ((cty ct <+> localName x <.> ";") : assign)
 

@@ -226,12 +226,15 @@ valueAt vals (Path x ss)
 
 -- replace each jump to a join point
 substJump :: Name -> ([AType] -> [VVal] -> VExpr) -> VExpr -> VExpr
-substJump j f expr
+substJump j f = runIdentity . substJumpM j (\ts vs -> Identity (f ts vs))
+
+substJumpM :: Applicative m => Name -> ([AType] -> [VVal] -> m VExpr) -> VExpr -> m VExpr
+substJumpM j f expr
   = case expr of
       Jump k ts vs | k == j -> f ts vs
-      Join NonRec k tvs ps e1 e2 | k == j -> Join NonRec k tvs ps (substJump j f e1) e2
-      Join Rec{} k _ _ _ _ | k == j -> expr
-      _ -> runIdentity (descendE Identity Identity (\_ e -> Identity (substJump j f e)) expr)
+      Join NonRec k tvs ps e1 e2 | k == j -> (\e1' -> Join NonRec k tvs ps e1' e2) <$> substJumpM j f e1
+      Join Rec{} k _ _ _ _ | k == j -> pure expr
+      _ -> descendE pure pure (\_ e -> substJumpM j f e) expr
 
 -- substitute types for type variables, which the expression does not bind again
 substTypesE :: Sub -> VExpr -> VExpr
@@ -592,6 +595,10 @@ isRead expr
       Lock{}      -> False
       Join{}      -> False
       Jump{}      -> False
+      Append{}    -> False
+      Plug{}      -> False
+      CtxCopy{}   -> False
+      Memoize{}   -> False
 
 -- the binders of these destructuring forms are the scrutinee's pointer (the scrutinee itself
 -- for `[unpack]`), so they may be unique
@@ -628,3 +635,7 @@ keepsPointer expr
       Lock{}      -> False
       Join{}      -> False
       Jump{}      -> False
+      Append{}    -> False
+      Plug{}      -> False
+      CtxCopy{}   -> False
+      Memoize{}   -> False

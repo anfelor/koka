@@ -90,10 +90,7 @@ untagged x t
 exE :: Full -> VExpr -> X VExpr
 exE full expr
   = case expr of
-      Ret _ -> statement expr >>= allocate full
-      Call{} -> statement expr >>= allocate full
-      App{} -> statement expr >>= allocate full
-      Jump{} -> statement expr >>= allocate full
+      _ | isStatement expr -> statement expr >>= allocate full
       Let x t e1 e2 | isStatement e1
         -> do e1' <- statement e1
               e2' <- exE (S.union full (fullOf [(x,t)])) e2
@@ -136,6 +133,10 @@ isStatement e
       Call{} -> True
       App{} -> True
       Jump{} -> True
+      Append{} -> True
+      Plug{} -> True
+      CtxCopy{} -> True
+      Memoize{} -> True
       _ -> False
 
 -- closures get no credits

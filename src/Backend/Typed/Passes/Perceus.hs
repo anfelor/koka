@@ -199,6 +199,10 @@ consumedWith expr z x
       Proj{}     -> False
       Ret _      -> True
       Call _ _ _ -> True
+      Append{}   -> True
+      Plug{}     -> True
+      CtxCopy{}  -> True
+      Memoize{}  -> True
       App f _    -> x /= f
       Jump{}     -> True
       Let _ _ _ e2 -> not (S.member z (needs (fvE e2))) && S.member x (fvE e2)
@@ -339,7 +343,14 @@ percE' pe owned expr
         -> do alts' <- mapM (\(l,e) -> (,) l <$> percE pe owned e) alts
               def'  <- percE pe owned def
               return (CaseLit v alts' def')
+      Append c d -> operation [(Unique,c),(Unique,d)] (\[c',d'] -> Append c' d')
+      Plug c v -> operation [(Unique,c),(Owned,v)] (\[c',v'] -> Plug c' v')
+      CtxCopy c -> operation [(Owned,c)] (\[c'] -> CtxCopy c')
+      Memoize c d i v -> operation [(Owned,c),(Owned,v)] (\[c',v'] -> Memoize c' d i v')
       _ -> fail "unexpected destructuring form"
+  where
+    operation mvs build = do (k,vs') <- useVals pe owned mvs
+                             return (k (build vs'))
 
 -- duplications
 

@@ -39,8 +39,8 @@
     The result mode of an expression (`: W` owned, `:! W` unique, as for values) follows J in
     the same way: an expression in tail position has the mode of the expression around it (and
     the rules write `: W` for both), and one where J is reset is owned, unless the rule writes
-    `:!` (the bound expression of `[let-unique]`). Only `[ret]` and `[call]` have their own
-    mode. A jump has either: the body of its join point is in tail position of the `join`, so it
+    `:!` (the bound expression of `[let-unique]`). Only `[ret]`, `[call]` and the operations
+    on contexts and cells have their own mode. A jump has either: the body of its join point is in tail position of the `join`, so it
     has the same mode as the jump. A unique result may be used as an owned one.
 
     The tag of a box z, tag(z), is determined by its path (`Traversal.boxTag`): it is i if z is
@@ -94,7 +94,10 @@
     is unique and `[plug]` writes into the hole in place. Duplicating a context shares `res`
     and demotes it to owned; `[ctx-copy]` copies the path of an owned context when `res` is
     shared, after which it can be plugged in place.
-    The type has no destructuring rule, so nothing else can reach into the path.
+    The type has no destructuring rule, so nothing else can reach into the path. A fresh
+    context `ctx K` is a value, as it only writes into the blocks that K allocates; the
+    operations `[ctx-append]`, `[plug]` and `[ctx-copy]` write to (or test) an existing path,
+    so they are expressions, and nested operations are `let` chains.
 -}
 module Backend.Typed.Syntax where
 
@@ -332,9 +335,8 @@ nameHole = root (newHiddenName "hole")
 
 -- Values `Γ ⊢ v :q t`. A borrowed value is structural: a variable, a global, a literal, `()`,
 -- a function, a type application of one of these, or a tuple, injection or pack of borrowed
--- values (as in the paper). A unique value is a variable, a context `ctx K`, `c₁ ++ c₂`,
--- `ctx-copy c`, `()`, a literal of a trivial type, or a tuple, injection or pack of unique
--- values. All other values are owned.
+-- values (as in the paper). A unique value is a variable, a context `ctx K`, `()`, a literal
+-- of a trivial type, or a tuple, injection or pack of unique values. All other values are owned.
 --
 -- Boxed values `Γ ⊢ a :q A`; boxed variables occur only as named operands.
 data AVal
@@ -515,53 +517,6 @@ data VVal
   -- the context path in the headers of the blocks that K allocates on the path to the hole,
   -- which it locates by the position of `□` (no constructor or field names are involved).
   | Context AType VVal
-
-  --   Γ₁ ⊢ c₁ :! ctx^f₁⟨A,B⟩    Γ₂ ⊢ c₂ :! ctx^f₂⟨B,C⟩
-  --  ──────────────────────────────────────────────────── [ctx-append]
-  --   Γ₁, Γ₂ ⊢ c₁ ++ c₂ :! ctx^(f₁ ∨ f₂)⟨A,C⟩
-  --
-  -- Plugs the `res` of `c₂` into the hole of `c₁` in place and keeps the hole of `c₂`; an empty
-  -- `c₂` gives `c₁`. The paths of both are unique, so the path of the result is too. The result
-  -- is nonempty if either context is. Extending a context with a nonempty one, such as
-  -- `c ++ ctx K` with K ≠ □, is TRMC's step (`kk_cctx_extend_linear`): code generation does not
-  -- test whether `c₂` is empty.
-  | Append VVal VVal
-
-  --   Γ₁ ⊢ c :! ctx⟨A,B⟩    Γ₂ ⊢ v : B*
-  --  ─────────────────────────────────── [plug]
-  --   Γ₁, Γ₂ ⊢ c[v] : A*
-  --
-  -- Fills the hole in place without checking uniqueness (`kk_cctx_apply_linear`); the empty
-  -- context gives `v` itself. A context that may be shared is copied first (`[ctx-copy]`),
-  -- which is Koka's `cctx/(++.)` (`kk_cctx_apply`).
-  | Plug VVal VVal
-
-  --   Γ ⊢ c : ctx^f⟨A,B⟩
-  --  ───────────────────────────────── [ctx-copy]
-  --   Γ ⊢ ctx-copy c :! ctx^f⟨A,B⟩
-  --
-  -- Makes a context unique by copying its path if `res` is shared (`kk_cctx_copy`). Elaboration
-  -- uses it to plug or append a context that may be shared (Koka's `cctx/(++)` copies both
-  -- arguments), and where a closure (such as the
-  -- continuation of an effect that may resume more than once) passes a captured context to a
-  -- unique parameter.
-  | CtxCopy VVal
-
-  --   Γ ⊢ v : V    unroll(τ) = L ~> S    Sₖ = Box V    |V| ≤ n
-  --  ───────────────────────────────────────────────────────── [memoize]
-  --   Γ, c : cell_n⟨τ⟩ ⊢ memoize c (whnf (injₖ v)) : τ*
-  --
-  --   Γ ⊢ v : V    unroll(τ) = L ~> S    Lₖ = Box V    |V| ≤ n
-  --  ───────────────────────────────────────────────────────── [memoize-delay]
-  --   Γ, c : cell_n⟨τ⟩ ⊢ memoize c (delay (injₖ v)) : τ*
-  --
-  -- Writes the alternative k over the block of the cell in place, keeping its reference count,
-  -- and releases the cell: the result is its reference, now a value. A strict k is the paper's
-  -- `memoize l w`; a thunk k replaces the thunk by another one (Koka's step mode), and the
-  -- indirection is the paper's `indirect l w`, which always fits as thunks are padded. The cell
-  -- is an ordinary operand (it is unboxed), and the value is evaluated before the block is
-  -- written.
-  | Memoize VVal Side Int VVal
   deriving (Eq,Show)
 
 -- Whether a join point is recursive (`[join-rec]`), with its result type.
@@ -598,7 +553,8 @@ data VExpr
   --   Γ₁, Γ₂ | J ⊢ let x : V = e₁ in e₂ : W
   --
   -- The binder is unique if the bound expression returns a unique value in every tail
-  -- position: a unique value (`[ret]`), or a call of a function with a unique result.
+  -- position: a unique value (`[ret]`), a call of a function with a unique result, or an
+  -- operation with a unique result (`[ctx-append]`, `[ctx-copy]`).
   | Let Path VType VExpr VExpr
 
   --   Γ₁, ^Γ₂ | ∅ ⊢ʸ e₁ : V    Γ₂, x : V | J ⊢ e₂ : W    Γ₂ | J ⊢ e₃ : W
@@ -888,6 +844,57 @@ data VExpr
   -- Perceus, from the self tail calls of a function, and are closed until `JoinArgs` makes
   -- invariant borrowed parameters captures. (Not in the paper.)
   | Join Recursion Name [TVar] [(Path,Mode,VType)] VExpr VExpr
+
+  -- Operations on contexts and cells. Unlike values, they write to memory that they did not just
+  -- allocate, or read or change its reference counts, so they are expressions: they cannot be
+  -- substituted, duplicated or reordered like values. Their operands are values (including
+  -- `ctx K`), and a bound operation is evaluated before the body of its `let`.
+  --
+  --   Γ₁ ⊢ c₁ :! ctx^f₁⟨A,B⟩    Γ₂ ⊢ c₂ :! ctx^f₂⟨B,C⟩
+  --  ──────────────────────────────────────────────────── [ctx-append]
+  --   Γ₁, Γ₂ | J ⊢ c₁ ++ c₂ :! ctx^(f₁ ∨ f₂)⟨A,C⟩
+  --
+  -- Plugs the `res` of `c₂` into the hole of `c₁` in place and keeps the hole of `c₂`; an empty
+  -- `c₂` gives `c₁`. The paths of both are unique, so the path of the result is too. The result
+  -- is nonempty if either context is. Extending a context with a nonempty one, such as
+  -- `c ++ ctx K` with K ≠ □, is TRMC's step (`kk_cctx_extend_linear`): code generation does not
+  -- test whether `c₂` is empty.
+  | Append VVal VVal
+
+  --   Γ₁ ⊢ c :! ctx⟨A,B⟩    Γ₂ ⊢ v : B*
+  --  ─────────────────────────────────── [plug]
+  --   Γ₁, Γ₂ | J ⊢ c[v] : A*
+  --
+  -- Fills the hole in place without checking uniqueness (`kk_cctx_apply_linear`); the empty
+  -- context gives `v` itself, which may be shared, so the result is owned. A context that may
+  -- be shared is copied first (`[ctx-copy]`), which is Koka's `cctx/(++.)` (`kk_cctx_apply`).
+  | Plug VVal VVal
+
+  --   Γ ⊢ c : ctx^f⟨A,B⟩
+  --  ───────────────────────────────── [ctx-copy]
+  --   Γ | J ⊢ ctx-copy c :! ctx^f⟨A,B⟩
+  --
+  -- Makes a context unique by copying its path if `res` is shared (`kk_cctx_copy`). Elaboration
+  -- uses it to plug or append a context that may be shared (Koka's `cctx/(++)` copies both
+  -- arguments), and where a closure (such as the
+  -- continuation of an effect that may resume more than once) passes a captured context to a
+  -- unique parameter.
+  | CtxCopy VVal
+
+  --   Γ ⊢ v : V    unroll(τ) = L ~> S    Sₖ = Box V    |V| ≤ n
+  --  ───────────────────────────────────────────────────────── [memoize]
+  --   Γ, c : cell_n⟨τ⟩ | J ⊢ memoize c (whnf (injₖ v)) : τ*
+  --
+  --   Γ ⊢ v : V    unroll(τ) = L ~> S    Lₖ = Box V    |V| ≤ n
+  --  ───────────────────────────────────────────────────────── [memoize-delay]
+  --   Γ, c : cell_n⟨τ⟩ | J ⊢ memoize c (delay (injₖ v)) : τ*
+  --
+  -- Writes the alternative k over the block of the cell in place, keeping its reference count,
+  -- and releases the cell: the result is its reference, now a value. A strict k is the paper's
+  -- `memoize l w`; a thunk k replaces the thunk by another one (Koka's step mode), and the
+  -- indirection is the paper's `indirect l w`, which always fits as thunks are padded. The cell
+  -- is an ordinary operand (it is unboxed).
+  | Memoize VVal Side Int VVal
 
   --   j : Γ_c; ∀ā. (q̄ V̄) -> W ∈ J    Γᵢ ⊢ vᵢ :qᵢ Vᵢ[B̄/ā]
   --  ──────────────────────────────────────────────────────── [jump]

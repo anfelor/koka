@@ -19,15 +19,14 @@
   instantiates the type parameters.
 
   Afterwards, a fresh context that is only appended is inlined: elaboration binds the
-  argument of `c ++ ctx K` (Koka's `cctx/(++)`) and copies it as if it may be shared,
+  argument of `c ++ ctx K` (Koka's `cctx/(++)`) and copies it as if it may be shared
   but the literal is unique, and appended in place it extends `c` without testing
   whether it is empty (see `genAppend` in `CGen`).
 
   Finally, a case on a known value (an injection, or a value that the definition binds with
   `let x = ret v`, through the pointers and rolls of `v`) is replaced by its alternative if
   that does not use its binder. Inlining leaves such cases, mostly on constructors without
-  fields. The bindings of values, pointers and rolls that are then unused are removed, except for values
-  that memoize, which write over their cell.
+  fields. The bindings of values, pointers and rolls that are then unused are removed.
 -}
 module Backend.Typed.Passes.Simplify( simplifyProgram ) where
 
@@ -103,16 +102,20 @@ freshE expr
         | Just e' <- appendFresh x k e -> freshE e'
       _ -> mapAll (const freshE) expr
 
--- inline the fresh context `x = k` into an append that follows immediately and is its only use
+-- Inline the fresh context `x = k` into an append that follows immediately and is its only
+-- use, as `let c = ctx-copy c₀ in let d = ctx-copy x in c ++ d`: the copy of `x` goes away.
 appendFresh :: Path -> VVal -> VExpr -> Maybe VExpr
 appendFresh x k expr
   = case expr of
-      Let y t (Ret v) e | Just v' <- append v, S.notMember x (fvE e) -> Just (Let y t (Ret v') e)
-      Ret v | Just v' <- append v -> Just (Ret v')
+      Let d _ (CtxCopy (Var z)) e | z == x, S.notMember x (fvE e) -> appended d e
+      Let c t e1@(CtxCopy _) e | S.notMember x (fvE e1) -> Let c t e1 <$> appendFresh x k e
       _ -> Nothing
   where
-    append (Append c (CtxCopy (Var z))) | z == x, S.notMember x (fvV c) = Just (Append c k)
-    append _ = Nothing
+    appended d e = case e of
+                     Let y t e1 e2 | Just e1' <- append d e1, S.notMember d (fvE e2) -> Just (Let y t e1' e2)
+                     _ -> append d e
+    append d (Append c (Var z)) | z == d, S.notMember d (fvV c) = Just (Append c k)
+    append _ _ = Nothing
 
 -- cases of known values
 
@@ -148,19 +151,8 @@ knownE known expr
     -- the taken alternative, unless it uses its binder
     taken x e = let e' = knownE (shadow [x] known) e
                 in if used x e' then descend else e'
-    isRet (Ret v) = not (memoizes v)
+    isRet (Ret _) = True
     isRet _ = False
-
--- a value that writes over a cell (`[memoize]`); closures cannot capture cells
-memoizes :: VVal -> Bool
-memoizes val
-  = case val of
-      Memoize{} -> True
-      _ -> or (getConst (descendV (\a -> Const [memoizesA a]) (\v -> Const [memoizes v]) val))
-  where
-    memoizesA a = case a of
-      Lam{} -> False
-      _ -> or (getConst (descendA (const (Const [])) (\b -> Const [memoizesA b]) (\v -> Const [memoizes v]) a))
 
 -- keep a destructuring with the binder `x` around `e` if `e` uses it
 ifUsed :: Path -> (VExpr -> VExpr) -> VExpr -> VExpr

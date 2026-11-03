@@ -249,11 +249,14 @@ elabApp f args resTp
                   VCtx _ a b -> return (a,b)
                   _ -> failE ("plugging a non-context: " ++ ppr t)
        let shared = not (isLinearContextPrim f)
-       callWith (\[c,v] -> return (Ret (Plug (ctxCopy shared c) v))) [t, VPtr b] (VPtr a) args resTp
+       callWith (\[c,v] -> do (k,c') <- ctxCopy shared t c
+                              return (k (Plug c' v))) [t, VPtr b] (VPtr a) args resTp
   | isPrim nameCCtxCompose f
   = do t <- vt resTp
-       ts <- mapM (vt . typeOf) args
-       callWith (\[c,d] -> return (Ret (Append (CtxCopy c) (CtxCopy d)))) ts t args resTp
+       ts@[tc,td] <- mapM (vt . typeOf) args
+       callWith (\[c,d] -> do (kc,c') <- ctxCopy True tc c
+                              (kd,d') <- ctxCopy True td d
+                              return (kc (kd (Append c' d')))) ts t args resTp
   | any (`isPrim` f) [nameCCtxHoleCreate, nameFieldAddrOf]
   = failE "a hole outside of a context"
   -- extends with the hole of a context that may be shared, without copying its path
@@ -266,7 +269,8 @@ elabApp f args resTp
            -> do (tysD,params,res) <- instFun g sig gtp tys
                  e <- env
                  let copies = [m == Unique && captured e arg | ((m,_),arg) <- zip ps args] ++ repeat False
-                 callWith (return . Call g tysD . zipWith ctxCopy copies) params res args resTp
+                 callWith (\vs -> do (ks,vs') <- unzip <$> sequence (zipWith3 ctxCopy copies params vs)
+                                     return (compose ks (Call g tysD vs'))) params res args resTp
          _ -> do (k1,fv) <- elabVal f
                  (params,res) <- funType f
                  body <- callWith (applyFun (AFun params res) fv) (map snd params) res args resTp
@@ -656,7 +660,9 @@ elabCtx mbAcc res addr resTp
          Nothing -> return (k1 (Ret (Context b v)))
          Just (linear,acc)
            -> do (k0,c) <- elabVal acc
-                 return (k0 (k1 (Ret (Append (ctxCopy (not linear) c) (Context b v)))))
+                 tacc <- vt (typeOf acc)
+                 (kc,c') <- ctxCopy (not linear) tacc c
+                 return (k0 (k1 (kc (Append c' (Context b v)))))
 
 -- A closure (such as the continuation of an effect that may resume more than once) only owns
 -- the contexts that it captures: it copies one that it passes to a unique parameter (if it is
@@ -667,9 +673,11 @@ captured e arg
       C.Var x _ -> S.member (getName x) (envCaptured e)
       _ -> False
 
-ctxCopy :: Bool -> VVal -> VVal
-ctxCopy True v = CtxCopy v
-ctxCopy False v = v
+-- a copy of a context of type `t` that may be shared, bound by a `let` (if `True`)
+ctxCopy :: Bool -> VType -> VVal -> E (K,VVal)
+ctxCopy True t v = do x <- fresh "c"
+                      return (Let x t (CtxCopy v), Var x)
+ctxCopy False _ v = return (id,v)
 
 -- the type of the hole of a context
 holeType :: VType -> E AType
