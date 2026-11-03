@@ -51,7 +51,7 @@ envOf prog = Env (progTypes prog) (progSigs prog)
 funSig :: Env -> Name -> [AType] -> Q ([VType],VType)
 funSig env f tys
   = case M.lookup f (envSigs env) of
-      Just (SigFun tvs ps r) | length tvs == length tys
+      Just (SigFun tvs ps _ r) | length tvs == length tys
         -> return (map (inst tvs tys . snd) ps, inst tvs tys r)
       Just sig -> Left ("call of " ++ show f ++ " with " ++ show (length tys) ++ " type arguments: " ++ show sig)
       Nothing  -> Left ("unknown function: " ++ show f)

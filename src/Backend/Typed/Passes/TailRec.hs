@@ -36,7 +36,7 @@ tailRecProgram prog = prog{ progDefs = map tailRecDef (progDefs prog) }
 tailRecDef :: Def -> Def
 tailRecDef def
   = case def of
-      DefFun f tvs args res body
+      DefFun{ defName = f, defParams = tvs, defArgs = args, defRes = res, defBody = body }
         | all (\(_,_,t) -> null (mentionedT t)) args     -- the parameters are renamed
         , body0 <- selfJumps f j tvs cands body, body0 /= body
         -> let (ys,_) = foldr (\_ (ps,s) -> let (p,s') = freshPathFrom "arg" s in (p:ps,s')) ([],supply') args
