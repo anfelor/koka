@@ -9,7 +9,6 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents, collapse
                           , unrollMu, isPtr, forallA, prodV, prodFields
-                          , leaves, isEnum
                           , dupType, isTrivialWith, isShape, containsLinear
                           , applyA, vtInt, vtString, vtChar, vtFloat
                           ) where
@@ -189,31 +188,6 @@ isPtr t
       VReuse _ _ _  -> False
       VCtx _ _ _  -> False
       VCell _ _   -> False
-
--- leaves of a product
-leaves :: VType -> [VType]
-leaves t
-  = case t of
-      VProd fs -> concatMap (leaves . snd) fs
-      VExists _ b -> leaves b
-      VUnit -> []
-      VPtr _ -> [t]
-      VSum _ -> [t]
-      VRaw _ -> [t]
-      VReuse _ _ _ -> [t]
-      VCtx _ a b -> [VPtr a, VPtr b]
-      VCell _ _ -> [t]
-
-isEnum :: VType -> Bool
-isEnum t
-  = case t of
-      VSum ts -> length ts > 1 && all (isUnitT . snd) ts
-      _ -> False
-  where
-    isUnitT VUnit = True
-    isUnitT (VProd fs) = all (isUnitT . snd) fs
-    isUnitT (VExists _ b) = isUnitT b
-    isUnitT _ = False
 
 eqV :: VType -> VType -> Bool
 eqV s t
