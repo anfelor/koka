@@ -26,8 +26,8 @@ sameBitsV src v
 -- The tag and the scan size that the description of a credit records for its block, and for
 -- each leaf of the new payload whether its C slot already holds its bits: the old payload has
 -- a leaf at the same offset, with the same layout and the same value (`Inline` makes equal
--- values syntactically equal, so the payload names the variables of the description or their
--- copies, `sameBits`).
+-- values syntactically equal, so the payload names the variables of the description, or join
+-- parameters with their bits, `sameBits`).
 -- Payloads of different types can thus share slots. A dup preserves a field's bits, but its
 -- reference-count effect must still run.
 keptLeaves :: Sources -> Ty -> VType -> VVal -> Maybe (Maybe Int, Int, [Bool])

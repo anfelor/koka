@@ -9,7 +9,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents, collapse
                           , unrollMu, isPtr, forallA, prodV, prodFields
-                          , dupType, isShape, containsLinear
+                          , checkDupType, isShape, containsLinear
                           , applyA, vtInt, vtString, vtChar, vtFloat
                           ) where
 
@@ -280,14 +280,13 @@ eqA s t
         -> eqA a (inst (y:bs) (map AVar (x:as)) b) && eqAs ss ts
       _ -> s == t
 
--- The duplication rule: the type of the copy of a variable of type `t`
-dupType :: Ty -> Either String Ty
-dupType t
+-- The duplication rule: a variable of type `t` may be duplicated
+checkDupType :: Ty -> Either String ()
+checkDupType t
   = case t of
       V (VReuse _ _ _) -> Left "dup of a reuse credit"
       V (VCell _ _) -> Left "dup of a cell"
-      V _ -> Right t
-      A _ -> Left "dup of a boxed value"
+      _ -> Right ()
 
 -- Boxed sum alternatives must have a tag determined by their construction: sums are flat and
 -- their tags are increasing.

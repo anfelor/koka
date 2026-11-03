@@ -123,7 +123,7 @@ descendB fn fv fb expr
       Gen tvs e             -> Gen tvs <$> plain e
       Drop x e              -> Drop <$> fn x <*> plain e
       Free r e              -> Free <$> fn r <*> plain e
-      Dup x y e             -> (\x' (y',e') -> Dup x' y' e') <$> fn x <*> one y [] e
+      Dup x e               -> Dup <$> fn x <*> plain e
       IsUnique x e1 e2      -> IsUnique <$> fn x <*> plain e1 <*> plain e2
       IfFull r e1 e2        -> IfFull <$> fn r <*> plain e1 <*> plain e2
       UnboxRu v r e         -> (\v' (r',e') -> UnboxRu v' r' e') <$> fn v <*> one r [] e
