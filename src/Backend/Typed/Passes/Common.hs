@@ -81,7 +81,7 @@ mentionedE e = annotations ++ getConst (descendE (Const . (:[])) (Const . mentio
           Unreachable t -> mentionedT t
           Call _ ts _ -> concatMap (mentionedT . VPtr) ts
           Jump _ ts _ -> concatMap (mentionedT . VPtr) ts
-          Join _ _ ps _ _ -> concatMap (mentionedT . (\(_,_,t) -> t)) ps
+          Join r _ _ ps _ _ -> concatMap mentionedT (recResult r ++ [t | (_,_,t) <- ps])
           _ -> []
 
 mentionedV :: VVal -> [Path]
@@ -214,7 +214,8 @@ substJump :: Name -> ([AType] -> [VVal] -> VExpr) -> VExpr -> VExpr
 substJump j f expr
   = case expr of
       Jump k ts vs | k == j -> f ts vs
-      Join k tvs ps e1 e2 | k == j -> Join k tvs ps (substJump j f e1) e2
+      Join NonRec k tvs ps e1 e2 | k == j -> Join NonRec k tvs ps (substJump j f e1) e2
+      Join Rec{} k _ _ _ _ | k == j -> expr
       _ -> runIdentity (descendE Identity Identity (\_ e -> Identity (substJump j f e)) expr)
 
 -- substitute types for type variables, which the expression does not bind again
@@ -228,7 +229,7 @@ substTypesE sub expr
       Yielded t             -> Yielded (subst sub t)
       Unreachable t         -> Unreachable (subst sub t)
       Call f ts vs          -> Call f (map (subst sub) ts) vs
-      Join j tvs ps e1 e2   -> Join j tvs [(x,m,subst sub t) | (x,m,t) <- ps] e1 e2
+      Join r j tvs ps e1 e2 -> Join (mapRecursion (subst sub) r) j tvs [(x,m,subst sub t) | (x,m,t) <- ps] e1 e2
       Jump j ts vs          -> Jump j (map (subst sub) ts) vs
       _                     -> expr
 
@@ -426,8 +427,8 @@ substStepWith renameRoot recur scope sub expr
       Unreachable t -> Unreachable (substVType sub t)
       Call f ts vs -> Call f (map (substAType sub) ts) vs
       Jump j ts vs -> Jump j (map (substAType sub) ts) vs
-      Join j tvs ps e1 e2 -> let sub' = hide [x | (x,_,_) <- ps] sub
-                            in Join j tvs [(x,m,substVType sub' t) | (x,m,t) <- ps] e1 e2
+      Join r j tvs ps e1 e2 -> let sub' = hide [x | (x,_,_) <- ps] sub
+                              in Join (mapRecursion (substVType sub) r) j tvs [(x,m,substVType sub' t) | (x,m,t) <- ps] e1 e2
       _ -> expr
     operands = runIdentity (descendB (Identity . substName sub) (Identity . substVWith renameRoot recur scope sub)
                              (\bs e -> Identity (map fst bs,e)) annotated)
@@ -498,7 +499,8 @@ subGammas env g expr
   = case expr of
       Let x t _ _ -> return [g, M.insert x (V t) g]
       LetYield x t _ _ _ -> return [g, M.insert x (V t) g, g]
-      Join _ _ ps _ _ -> return [bindAll [(x,V t) | (x,_,t) <- ps] g, g]
+      Join NonRec _ _ ps _ _ -> return [bindAll [(x,V t) | (x,_,t) <- ps] g, g]
+      Join Rec{} _ _ ps _ _ -> return [M.fromList [(x,V t) | (x,_,t) <- ps], g]
       Dup x y _ -> do t <- inferVar g x >>= dupType
                       return [M.insert y t g]
       IsUnique x _ _ -> return [uniqueGamma g x, g]

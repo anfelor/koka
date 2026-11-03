@@ -161,7 +161,7 @@ elabExpr expr
               (ps,e1') <- withTVars tvs' $
                           do ps <- mapM (\p -> (\t -> (root (getName p),paramMode Own (S.member (getName p) linear),t)) <$> vt (tnameType p)) pars
                              (,) ps <$> withLocals (map getName pars) (elabExpr e1)
-              Join j tvs' ps e1' <$> elabExpr (C.Let dgs body)
+              Join NonRec j tvs' ps e1' <$> elabExpr (C.Let dgs body)
       C.App f args | (Just (TName j tp,_),tys) <- splitTypeApp f, isJoinName j, Just (pars,_,_) <- splitFunType (typeOf f)
         -> do tys' <- instArgs tp tys
               (ks,vs) <- unzip <$> mapM (\((_,ptp),arg) -> do t <- vt ptp

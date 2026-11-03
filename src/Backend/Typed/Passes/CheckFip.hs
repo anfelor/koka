@@ -27,7 +27,8 @@
   - A `dup` shares a value and prevents its reuse, except for a borrowed function: the IR
     has no borrowed application, so applying it duplicates it first.
   - A call to the recursive group outside of a tail position uses stack. A join point runs
-    in the position of its definition. As in the frontend, a call whose continuation only
+    in the position of its definition. A jump to a recursive join point in its body is a tail
+    call to the recursive group. As in the frontend, a call whose continuation only
     destructures values and builds the result from them is in a tail position (modulo
     product contexts).
 
@@ -82,8 +83,9 @@ allocation = mempty{ cAlloc = AllocAtMost 1, cAllocs = True }
 -- functions, and its borrowed parameters
 data Info = Info{ iFip :: Fip, iGroup :: S.Set Name, iFips :: M.Map Name Fip, iBorrowed :: [Path] }
 
--- a join point in scope: its instance, parameters, body, and the environment of its definition
-data JoinPt = JoinPt Int [(Path,Mode,VType)] VExpr FEnv
+-- a join point in scope: its instance, parameters, body, and the environment of its
+-- definition; or a recursive join point in its own body
+data JoinPt = JoinPt Int [(Path,Mode,VType)] VExpr FEnv | Loop
 
 -- `fFull`: the credits that are full besides those of a full type;
 -- `fFailing`: the join points whose bodies fail
@@ -304,11 +306,20 @@ fipE expr
         -> do fe <- ask
               g' <- liftE (lockGamma (fGamma fe) z c)
               local (\fe' -> fe'{ fGamma = g' }) (fipE e)
-      Join j _ ps e1 e2
+      Join NonRec j _ ps e1 e2
         -> do i <- state (\s -> (fsUniq s, s{ fsUniq = fsUniq s + 1 }))
               failing <- asks fFailing
               let enter fe = fe{ fJoins = M.insert j (JoinPt i ps e1 fe) (fJoins fe)
                                , fFailing = if fails failing e1 then S.insert j failing else failing }
+              local enter (fipE e2)
+      -- the body is closed, and a jump to the join in its body is a tail call to the
+      -- recursive group (its parameters are those of the function it was made from)
+      Join Rec{} j _ ps e1 e2
+        -> do i <- state (\s -> (fsUniq s, s{ fsUniq = fsUniq s + 1 }))
+              let body fe = fe{ fInfo = (fInfo fe){ iBorrowed = [x | (x,Borrowed,_) <- ps] ++ iBorrowed (fInfo fe) }
+                              , fJoins = M.singleton j Loop, fFailing = S.empty }
+                  enter fe = fe{ fJoins = M.insert j (JoinPt i ps e1 (body fe)) (fJoins fe)
+                               , fFailing = if fails S.empty e1 then S.insert j (fFailing fe) else fFailing fe }
               local enter (fipE e2)
       Jump j _ vs
         -> do cs <- mapM fipV vs
@@ -340,7 +351,8 @@ fails failing expr
       Jump j _ _ -> S.member j failing
       Let _ _ e1 e2 -> fails failing e1 || fails failing e2
       LetYield _ _ e1 e2 e3 -> fails failing e1 || (fails failing e2 && fails failing e3)
-      Join j _ _ e1 e2 -> fails (if fails failing e1 then S.insert j failing else failing) e2
+      Join NonRec j _ _ e1 e2 -> fails (if fails failing e1 then S.insert j failing else failing) e2
+      Join Rec{} j _ _ e1 e2 -> fails (if fails S.empty e1 then S.insert j failing else failing) e2
       _ -> let es = subexprs expr in not (null es) && all (fails failing) es
 
 -- the continuation of a call only destructures values and builds its result from values, given
@@ -355,7 +367,8 @@ modProduct joins expr
       Jump j _ _ -> S.member j joins
       LetYield x t e1 e2 _ -> modProduct joins (Let x t e1 e2)
       Let _ _ e1 e2 -> modProduct S.empty e1 && modProduct joins e2
-      Join j _ _ e1 e2 -> modProduct (if modProduct joins e1 then S.insert j joins else joins) e2
+      Join NonRec j _ _ e1 e2 -> modProduct (if modProduct joins e1 then S.insert j joins else joins) e2
+      Join Rec{} _ _ _ _ e2 -> modProduct joins e2
       _ | Just ds <- destructAOf expr -> single (dsAlts ds)
         | Just ds <- destructVOf expr -> single (dsAlts ds)
         | otherwise -> all (modProduct joins) (subexprs expr)
@@ -380,16 +393,19 @@ branches fs
 jump :: Name -> [VVal] -> F (Cost,Bool)
 jump j vs
   = do js <- asks fJoins
-       JoinPt i ps body fe <- maybe (fail ("unknown join point " ++ show j)) return (M.lookup j js)
-       fulls <- mapM fullV vs
-       runs <- gets fsRuns
-       case M.lookup (i,fulls) runs of
-         Just r -> return r
-         Nothing -> do let enter = fe{ fGamma = bindAll [(x,V t) | (x,_,t) <- ps] (fGamma fe)
-                                     , fFull = S.union (S.fromList [x | ((x,_,_),True) <- zip ps fulls]) (fFull fe) }
-                       r <- local (const enter) (fipE body)
-                       modify (\s -> s{ fsRuns = M.insert (i,fulls) r (fsRuns s) })
-                       return r
+       pt <- maybe (fail ("unknown join point " ++ show j)) return (M.lookup j js)
+       case pt of
+         Loop -> return (mempty{ cSelf = True },False)
+         JoinPt i ps body fe
+           -> do fulls <- mapM fullV vs
+                 runs <- gets fsRuns
+                 case M.lookup (i,fulls) runs of
+                   Just r -> return r
+                   Nothing -> do let enter = fe{ fGamma = bindAll [(x,V t) | (x,_,t) <- ps] (fGamma fe)
+                                               , fFull = S.union (S.fromList [x | ((x,_,_),True) <- zip ps fulls]) (fFull fe) }
+                                 r <- local (const enter) (fipE body)
+                                 modify (\s -> s{ fsRuns = M.insert (i,fulls) r (fsRuns s) })
+                                 return r
 
 call :: Name -> F Cost
 call f

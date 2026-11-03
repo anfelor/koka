@@ -136,7 +136,7 @@ renE global ren expr
       Yielded t -> Yielded (replaceVType sub t)
       Unreachable t -> Unreachable (replaceVType sub t)
       Call f ts vs -> Call f (map (replaceAType sub) ts) vs
-      Join j tvs ps e1 e2 -> Join j tvs [(x,m,replaceVType sub t) | (x,m,t) <- ps] e1 e2
+      Join r j tvs ps e1 e2 -> Join (mapRecursion (replaceVType sub) r) j tvs [(x,m,replaceVType sub t) | (x,m,t) <- ps] e1 e2
       Jump j ts vs -> Jump j (map (replaceAType sub) ts) vs
       _ -> expr
 

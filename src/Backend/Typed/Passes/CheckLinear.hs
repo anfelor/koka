@@ -436,7 +436,8 @@ checkE env g js expr
                      Nothing -> fail ("jump to unknown join point " ++ show j)
       -- the captured variables that are not parts of other captured variables, including those
       -- of the join points that the body jumps to
-      Join j _ ps e1 e2 -> do let fvs = S.toList (S.union (fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps])
+      Join NonRec j _ ps e1 e2
+                        -> do let fvs = S.toList (S.union (fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps])
                                                            (S.fromList [x | (k,(_,cs)) <- M.toList js, not (null (jumpArgs k e1)), (x,_) <- cs]))
                               let xs = [x | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
                               u <- local (const (M.fromList (params env ps ++ [(x,Unique) | x <- xs])))
@@ -444,6 +445,11 @@ checkE env g js expr
                               caps <- mapM (captured u) xs
                               _ <- leave (params env ps ++ caps) u
                               checkE env g (M.insert j ([m | (_,m,_) <- ps],caps) js) e2
+      -- a closed body, like that of a function, in which only the join point itself is in scope
+      Join Rec{} j _ ps e1 e2
+        -> do let self = M.insert j ([m | (_,m,_) <- ps],[])
+              closed (params env ps) (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) (self M.empty) e1)
+              checkE env g (self js) e2
       App f vs -> do ft <- liftE (inferVar g f)
                      case ft of
                        A a -> ownedParams a

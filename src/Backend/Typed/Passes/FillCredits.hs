@@ -57,13 +57,13 @@ fillCreditsProgram prog
 fillE :: VExpr -> C VExpr
 fillE expr
   = case expr of
-      Join j tvs ps e (IsUnique z u s)
+      Join NonRec j tvs ps e (IsUnique z u s)
         | ((i,r,m,n,p):_) <- [(i,r,m,n,p) | (i,(r,m,VReuse MaybeEmpty n p)) <- zip [0 :: Int ..] ps, describes z p]
         , consumed False r e
         -> do c <- state (freshPathFrom "fc")
               let ps' = [if k == i then (r,m,VReuse Full n p) else b | (k,b) <- zip [0..] ps]
                   s' = substJump j (\ts vs -> Jump j ts [if k == i then Var c else v | (k,v) <- zip [0..] vs]) s
-              Join j tvs ps' <$> fillE e <*> (IsUnique z <$> fillE u <*> (CopyRu z c <$> fillE s'))
+              Join NonRec j tvs ps' <$> fillE e <*> (IsUnique z <$> fillE u <*> (CopyRu z c <$> fillE s'))
       Let r (VReuse MaybeEmpty n p) (IsUnique z u (Drop z' (Ret (NoReuse _ _)))) e
         | z' == z, describes z p, consumed False r e
         -> do c <- state (freshPathFrom "fc")
@@ -93,7 +93,7 @@ consumed = go S.empty
           Free r' e -> if r' == r then freeing else go js freeing r e
           Let _ _ e1 e2 | isStatement e1 -> if mentions e1 then direct e1 else go js freeing r e2
                         | otherwise -> not (mentions e1) && go js freeing r e2
-          Join k _ _ e1 e2 | mentions e1 -> go js freeing r e1 && go (S.insert k js) freeing r e2
+          Join _ k _ _ e1 e2 | mentions e1 -> go js freeing r e1 && go (S.insert k js) freeing r e2
                            | otherwise -> go js freeing r e2
           IfFull r' _ _ | r' == r -> False
           Jump k _ vs | S.member k js -> not (any (varIn r) vs)

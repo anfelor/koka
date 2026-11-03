@@ -316,10 +316,10 @@ percE' pe owned expr
         -> do ms <- maybe (fail ("unknown join point " ++ show j)) return (M.lookup j (peJoins pe))
               (k,vs') <- useVals pe owned (zip ms vs)
               return (k (Jump j ts vs'))
-      Join j tvs ps e1 e2
+      Join rc j tvs ps e1 e2
         -> do e1' <- percE (paramEnv (peEnv pe) ps (peJoins pe)) (ownedParams (peEnv pe) ps) e1
               e2' <- percE' pe{ peJoins = M.insert j [m | (_,m,_) <- ps] (peJoins pe) } owned e2
-              return (Join j tvs ps e1' e2')
+              return (Join rc j tvs ps e1' e2')
       App f vs
         -> do let move = S.member f owned && all (S.notMember f . fvV) vs
               (kf,f') <- if move then return (id,f) else (\(d,_,y,_) -> (d,y)) <$> copy pe f

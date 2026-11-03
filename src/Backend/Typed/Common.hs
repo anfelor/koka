@@ -47,7 +47,8 @@ prodVal [v] = v
 prodVal vs  = Tuple vs
 
 -- Where a variable gets the bits of another variable: a copy (`[dup]`) gets those
--- of its variable, and a parameter of a join point those of its arguments.
+-- of its variable, and a parameter of a join point those of its arguments (including those
+-- of the jumps in its body if it is recursive).
 data Source = Copy Path | Param [VVal]
 
 type Sources = M.Map Path Source
@@ -57,23 +58,29 @@ sources expr = M.union here (getConst (descendAll (\_ e -> Const (sources e)) ex
   where
     here = case expr of
              Dup x y _ -> M.singleton y (Copy x)
-             Join j _ ps _ e2 -> M.fromList [(y,Param [vs !! i | vs <- jumpArgs j e2]) | (i,(y,_,_)) <- zip [0..] ps]
+             Join r j _ ps e1 e2 -> let jumps = jumpArgs j e2 ++ (case r of Rec{} -> jumpArgs j e1; NonRec -> [])
+                                    in M.fromList [(y,Param [vs !! i | vs <- jumps]) | (i,(y,_,_)) <- zip [0..] ps]
              _ -> M.empty
 
 -- The variable whose bits a variable has, through the longest prefix of its path that has a
--- source: a join parameter has the bits of its arguments if they are the same.
+-- source: a join parameter has the bits of its arguments if they are the same. An argument
+-- with the bits of the parameter itself (passed back by a recursive jump, possibly through
+-- other parameters) does not change them.
 sameBits :: Sources -> Path -> Path
-sameBits src x@(Path r ss)
-  = case [(k,s) | k <- [length ss, length ss - 1 .. 0], Just s <- [M.lookup (Path r (take k ss)) src]] of
-      ((k,s):_) -> case s of
-                     Copy y -> sameBits src (extend y (drop k ss))
-                     Param vs | Just (y:ys) <- mapM sameOf vs, all (== y) ys -> extend y (drop k ss)
-                     _ -> x
-      [] -> x
+sameBits src = go S.empty
   where
+    go seen x@(Path r ss)
+      = case [(k,s) | k <- [length ss, length ss - 1 .. 0], Just s <- [M.lookup (Path r (take k ss)) src]] of
+          ((k,s):_) -> let p = Path r (take k ss)
+                       in case s of
+                            Copy y -> go seen (extend y (drop k ss))
+                            Param vs | not (S.member p seen), Just ys <- mapM (sameOf (S.insert p seen)) vs
+                                     , (y:ys') <- filter (/= p) ys, all (== y) ys' -> extend y (drop k ss)
+                            _ -> x
+          [] -> x
     extend (Path y ts) rest = Path y (ts ++ rest)
-    sameOf (Var y) = Just (sameBits src y)
-    sameOf _ = Nothing
+    sameOf seen (Var y) = Just (go seen y)
+    sameOf _ _ = Nothing
 
 -- The `lazy-C` functions with the tag of their constructor, the size of its cell and its
 -- fields (with the padding, see `Elab.TypeInfo.conFieldTypes`), the

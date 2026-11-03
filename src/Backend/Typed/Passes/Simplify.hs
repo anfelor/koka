@@ -51,7 +51,7 @@ simplifyDef def = def{ defBody = knownE M.empty (freshE (copyE (defScope def) (c
 inlineE :: VExpr -> VExpr
 inlineE expr
   = case expr of
-      Join j tvs ps e1 e2
+      Join NonRec j tvs ps e1 e2
         -> let e1' = inlineE e1
                e2' = inlineE e2
                bindArgs ts vs = let sub = M.fromList (zip tvs ts)
@@ -59,7 +59,7 @@ inlineE expr
            in case length (jumpArgs j e2') of
                 0 -> e2'
                 1 -> substJump j bindArgs e2'
-                _ -> Join j tvs ps e1' e2'
+                _ -> Join NonRec j tvs ps e1' e2'
       _ -> mapAll (const inlineE) expr
 
 copyE :: SubstExpr

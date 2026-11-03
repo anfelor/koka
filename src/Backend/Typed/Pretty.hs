@@ -213,7 +213,9 @@ prettyExpr expr
       UnboxRu v r e -> letIn empty (text "@" <+> pv r) (pv v) e
       CopyRu z r e -> letIn empty (text "@copy" <+> pv r) (pv z) e
       Lock z c e -> letIn empty (text "lock" <+> pv c) (pv z) e
-      Join j tvs ps e1 e2 -> text "join" <+> nm j <.> tyParams tvs <.> params ps <+> text "="
+      Join NonRec j tvs ps e1 e2 -> text "join" <+> nm j <.> tyParams tvs <.> params ps <+> text "="
+                         <-> indent 2 (prettyExpr e1) <-> text "in" <+> align (prettyExpr e2)
+      Join (Rec t) j tvs ps e1 e2 -> text "join rec" <+> nm j <.> tyParams tvs <.> params ps <+> colon <+> prettyV t <+> text "="
                          <-> indent 2 (prettyExpr e1) <-> text "in" <+> align (prettyExpr e2)
       Jump j [] vs -> text "jump" <+> nm j <.> args vs
       Jump j ts vs -> text "jump" <+> nm j <.> tyArgs ts <.> args vs
@@ -310,7 +312,7 @@ shortenE expr
       Unreachable t -> Unreachable (shortenT t)
       Call f ts vs -> Call f (map shortenAT ts) vs
       Jump j ts vs -> Jump j (map shortenAT ts) vs
-      Join j tvs ps e1 e2 -> Join j tvs [(x,m,shortenT t) | (x,m,t) <- ps] e1 e2
+      Join r j tvs ps e1 e2 -> Join (mapRecursion shortenT r) j tvs [(x,m,shortenT t) | (x,m,t) <- ps] e1 e2
       _ -> expr
 
 shortenV :: VVal -> VVal

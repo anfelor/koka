@@ -128,7 +128,7 @@ descendB fn fv fb expr
       UnboxRu v r e         -> (\v' (r',e') -> UnboxRu v' r' e') <$> fn v <*> one r [] e
       CopyRu v r e          -> (\v' (r',e') -> CopyRu v' r' e') <$> fn v <*> one r [] e
       Lock z c e            -> (\z' (c',e') -> Lock z' c' e') <$> fn z <*> one c [] e
-      Join j tvs ps e1 e2   -> (\(xs,e1') e2' -> Join j tvs [(x',m,t) | (x',(_,m,t)) <- zip xs ps] e1' e2')
+      Join r j tvs ps e1 e2 -> (\(xs,e1') e2' -> Join r j tvs [(x',m,t) | (x',(_,m,t)) <- zip xs ps] e1' e2')
                                  <$> fb [(x,[]) | (x,_,_) <- ps] e1 <*> plain e2
       Jump j ts vs          -> Jump j ts <$> traverse fv vs
   where
@@ -236,12 +236,13 @@ scrutVar expr
         | otherwise -> Nothing
 
 -- the arguments of each jump to a join point; jumps are never inside values, and an inner
--- join of the same name shadows it
+-- join of the same name shadows it (also in its body if it is recursive)
 jumpArgs :: Name -> VExpr -> [[VVal]]
 jumpArgs j expr
   = case expr of
       Jump k _ vs | k == j -> [vs]
-      Join k _ _ e1 _ | k == j -> jumpArgs j e1
+      Join NonRec k _ _ e1 _ | k == j -> jumpArgs j e1
+      Join Rec{} k _ _ _ _ | k == j -> []
       _ -> getConst (descendE (const (Const [])) (const (Const [])) (\_ e -> Const (jumpArgs j e)) expr)
 
 -- a top-level value, possibly instantiated (`[dup-glob]`)

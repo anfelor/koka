@@ -25,6 +25,8 @@
   names must be in scope at the join point, as substitution does not follow a name out of
   its scope (such as `z.contents` before the `[bunbox]` of `z`); `SinkJoins` moves a join
   into the branch that binds the box.
+
+  Recursive join points are left unchanged, as they cannot capture variables.
 -}
 module Backend.Typed.Passes.JoinArgs( joinArgsProgram ) where
 
@@ -47,14 +49,17 @@ declared :: VExpr -> Declared
 declared expr = M.union here (getConst (descendAll (\_ e -> Const (declared e)) expr))
   where
     here = case expr of
-             Join _ _ ps _ _ -> M.fromList [(x,p) | (x,_,VReuse _ _ p) <- ps]
+             Join _ _ _ ps _ _ -> M.fromList [(x,p) | (x,_,VReuse _ _ p) <- ps]
              Let x (VReuse _ _ p) _ _ -> M.singleton x p
              _ -> M.empty
 
 jaE :: Declared -> Scope -> VExpr -> VExpr
 jaE decl scope expr
   = case expr of
-      Join j tvs ps e1 e2
+      -- a recursive join point is closed
+      Join rc@Rec{} j tvs ps e1 e2
+        -> Join rc j tvs ps (jaE decl (scopeOf [x | (x,_,_) <- ps]) e1) (jaE decl scope e2)
+      Join NonRec j tvs ps e1 e2
         -> let e1' = jaE decl (M.union (scopeOf [x | (x,_,_) <- ps]) scope) e1
                e2' = jaE decl scope e2
                bound = S.fromList (bindersE e1' ++ bindersE e2')
@@ -79,5 +84,5 @@ jaE decl scope expr
                                _ -> False
                inScope (Contents _ v _) = all (`M.member` scope) (fvV v)
                ps' = kept (zipWith describe ps args)
-           in Join j tvs ps' (substEIn (M.union (scopeOf [x | (x,_,_) <- ps']) scope) (valueAt sub) e1') (substJump j (\ts -> Jump j ts . kept) e2')
+           in Join NonRec j tvs ps' (substEIn (M.union (scopeOf [x | (x,_,_) <- ps']) scope) (valueAt sub) e1') (substJump j (\ts -> Jump j ts . kept) e2')
       _ -> mapAll (\xs -> jaE decl (bindScope expr xs scope)) expr
