@@ -46,7 +46,8 @@ import Data.Functor.Const( Const(..) )
 import Common.Name
 import Common.NamePrim( nameLazyMemoize, nameLazyMemoizeTarget )
 import Backend.Typed.Syntax
-import Backend.Typed.Common
+import Backend.Typed.Build( prodVal, padFields )
+import Backend.Typed.Lazies( Lazies(..) )
 import Backend.Typed.Passes.Common( NameSupply, freshFor, freshPathFrom, perDef, substE )
 import Backend.Typed.Traversal( child, descendE, fvE, fvV, lamsV )
 import Backend.Typed.Pretty( ppr )

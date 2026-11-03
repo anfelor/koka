@@ -11,7 +11,7 @@
 module Backend.Typed.CGen.ReuseSlots( keptLeaves ) where
 
 import Backend.Typed.Syntax
-import Backend.Typed.Common( Sources, sameBits )
+import Backend.Typed.Sources( Sources, sameBits )
 import Backend.Typed.Traversal( child, fieldsAt, mapV )
 import Backend.Typed.Types( collapse, leaves )
 import Backend.Typed.Layout( layout, scanOf )
