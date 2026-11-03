@@ -35,7 +35,7 @@ import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Sources( Sources, sources, sameBits )
 import Backend.Typed.Traversal( TestSide(..), boxTag, canonical, failingTo, fvA, fvE, holes, testSides, within )
-import Backend.Typed.Types( Types(..), dupType, inst, isShape )
+import Backend.Typed.Types( Types(..), inst, isShape )
 import Backend.Typed.Env( Env(..), envOf, unrollT, openFields, boxContents, reuseSize, M, get, gets, liftE, modify, put, runM, state )
 import Backend.Typed.Query( Gamma, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 import Backend.Typed.Layout
@@ -64,7 +64,7 @@ data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [Strin
 data Ctx = Ctx{ cxEnv :: Env, cxCEnv :: CEnv, cxGamma :: Gamma
               , cxJoins :: M.Map Name (Doc,[(Path,VType)],Bool)
               , cxShared :: S.Set Path     -- blocks known to be shared (the else branch of `IsUnique`, and its aliases)
-              , cxSources :: Sources }     -- the copies and join parameters of the definition (`sameBits`)
+              , cxSources :: Sources }     -- the join parameters of the definition (`sameBits`)
 
 type G a = M () St a
 
@@ -148,24 +148,24 @@ pointerShape env t
                , Right b <- unrollT env a -> shape (S.insert n seen) b
       _ -> Nothing
 
--- Like aggregate dup helpers, keep field dups inline: a call can spill another
--- live field and enlarge even the unique path's stack frame. Root dups may be
--- tail calls, so leave their inlining to the C compiler.
-dupAt :: Ctx -> Path -> Ty -> CT -> Doc -> Doc
-dupAt cx x t CBox ve
+-- The statement of `dup x`, if `x` needs one. Like aggregate dup helpers, keep field dups
+-- inline: a call can spill another live field and enlarge even the unique path's stack frame.
+-- Root dups may be tail calls, so leave their inlining to the C compiler.
+dupStmt :: Ctx -> Path -> Ty -> CT -> Doc -> Doc
+dupStmt cx x t CBox ve
   | Just a <- pointerShape (cxEnv cx) t
   = case shapeIsHeap a of
-      Just False -> ve
+      Just False -> empty
       heap -> let f = case heap of
                         Just True -> "kk_datatype_ptr_dup"
                         _ -> "kk_datatype_dup"
               in if field
                    then (if heap == Just True then "kt_datatype_ptr_dup_inline" else "kt_datatype_dup_inline")
-                          <.> "(" <.> ve <.> ",_ctx)"
-                   else "kk_datatype_box(" <.> f <.> "(kk_datatype_unbox(" <.> ve <.> "),_ctx))"
-  | field = "kt_box_dup_inline(" <.> ve <.> ",_ctx)"
+                          <.> "(" <.> ve <.> ",_ctx);"
+                   else f <.> "(kk_datatype_unbox(" <.> ve <.> "),_ctx);"
+  | field = "kt_box_dup_inline(" <.> ve <.> ",_ctx);"
   where field = case canonical x of { Path _ (_:_) -> True; _ -> False }
-dupAt _ _ _ ct ve = dupExpr ct ve
+dupStmt _ _ _ ct ve = maybe empty (\f -> text f <.> "(" <.> ve <.> ",_ctx);") (dupFun ct)
 
 dropStmt :: CT -> Doc -> Doc
 dropStmt ct e = maybe empty (\f -> text f <.> "(" <.> e <.> ",_ctx);") (dropFun ct)
@@ -344,8 +344,7 @@ holeMember cx ct v
                  _ -> return (i,Just v)
 
 -- Injections only contain construction forms, so their tag can be passed down to
--- the allocation; a box or unit outside a sum has tag 1. Existing boxed operands are
--- duplicated through their pointers (`Dup`).
+-- the allocation; a box or unit outside a sum has tag 1.
 genA :: Ctx -> AVal -> G Doc
 genA cx = genAIn cx 1
 
@@ -792,13 +791,11 @@ genE cx dest expr
                            V (VReuse Full _ _) -> "kt_reuse_free(" <.> localName r <.> ",_ctx);"
                            _ -> dropStmt CReuse (localName r)
               return (free : s)
-      Dup x y e
+      Dup x e
         -> do t <- tyOfName cx x
               ct <- ctOf t
-              let ve = localName x
-              ty <- liftC (dupType t)
-              s <- genE (bindVar cx y ty) dest e
-              return (declare (cty ct) y (dupAt cx x t ct ve) : s)
+              s <- genE cx dest e
+              return (dupStmt cx x t ct (localName x) : s)
       IsUnique x e1 e2
         -> do t <- liftC (inferVar (cxGamma cx) x)
               s1 <- genE cx{ cxGamma = uniqueGamma (cxGamma cx) x } dest e1

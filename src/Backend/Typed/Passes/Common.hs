@@ -19,7 +19,7 @@ import Data.Maybe( listToMaybe, fromMaybe )
 import Control.Monad( foldM )
 import Control.Monad.State( runState, state )
 import Backend.Typed.Syntax
-import Backend.Typed.Types( Sub, Types(..), dupType, inst, mapReuseContents, traverseReuseContents )
+import Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents )
 import Backend.Typed.Traversal
 import Backend.Typed.Env( Env(..), M, unrollT, ask, local )
 import Backend.Typed.Query( Gamma, bindAll, inferVar, inferV, altTypes, lamGamma, uniqueGamma, unboxRuGamma, copyRuGamma, lockGamma )
@@ -183,28 +183,9 @@ dropValue trivial fresh scope x t e
         VUnit -> return e
         VRaw _ -> return e
 
--- the type at steps into a product
-partAt :: VType -> [Step] -> Maybe VType
-partAt t [] = Just t
-partAt (VProd fs) (SField i _ : ss) | i < length fs = partAt (snd (fs !! i)) ss
-partAt _ _ = Nothing
-
 -- project fields of a product variable around an expression, reusing those in scope
 projectAll :: Scope -> Mode -> Path -> [(Path,Int,VType)] -> VExpr -> VExpr
 projectAll scope m x fields body = foldr (\(y,i,_) e -> reuseParts scope (Proj m (Var x) i y e)) body fields
-
--- the projection at a step into a product
-projAt :: Step -> Mode -> VVal -> Path -> VExpr -> VExpr
-projAt s m v = case s of
-                 SField i _ -> Proj m v i
-                 _ -> error ("Backend.Typed.Common.projAt: not a step into a product: " ++ show s)
-
--- the pointer that the binder of a `[deref]` is the dereference of
-derefOf :: Path -> Maybe Path
-derefOf (Path x ss)
-  = case reverse ss of
-      SDeref : rest -> Just (Path x (reverse rest))
-      _ -> Nothing
 
 -- A `[let-yield]` as the `let` that is taken if no effect yields, and its yielding branch,
 -- which is cold.
@@ -213,11 +194,6 @@ yieldingAlts expr
   = case expr of
       LetYield x t e1 e2 e3 -> Just (Let x t e1 e2,e3)
       _ -> Nothing
-
-renamePrefix :: Path -> Path -> Path -> Path
-renamePrefix p q x
-  | x `within` p = foldl child q (stepsFrom p x)
-  | otherwise = x
 
 -- the bodies of the alternatives of a `CaseV`, by index
 altBodies :: [(Int,Path,VExpr)] -> [VExpr]
@@ -533,8 +509,7 @@ subGammas env g expr
       LetYield x t _ _ _ -> return [g, M.insert x (V t) g, g]
       Join NonRec _ _ ps _ _ -> return [bindAll [(x,V t) | (x,_,t) <- ps] g, g]
       Join Rec{} _ _ ps _ _ -> return [M.fromList [(x,V t) | (x,_,t) <- ps], g]
-      Dup x y _ -> do t <- inferVar g x >>= dupType
-                      return [M.insert y t g]
+      Dup _ _ -> return [g]
       IsUnique x _ _ -> return [uniqueGamma g x, g]
       IfFull r _ _ -> do t <- inferV env g (Var r)
                          case t of

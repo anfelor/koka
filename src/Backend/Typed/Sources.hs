@@ -16,10 +16,9 @@ import Data.Functor.Const( Const(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( descendAll, jumpArgs )
 
--- Where a variable gets the bits of another variable: a copy (`[dup]`) gets those
--- of its variable, and a parameter of a join point those of its arguments (including those
--- of the jumps in its body if it is recursive).
-data Source = Copy Path | Param [VVal]
+-- Where a variable gets the bits of another variable: a parameter of a join point gets those
+-- of its arguments (including those of the jumps in its body if it is recursive).
+data Source = Param [VVal]
 
 type Sources = M.Map Path Source
 
@@ -27,7 +26,6 @@ sources :: VExpr -> Sources
 sources expr = M.union here (getConst (descendAll (\_ e -> Const (sources e)) expr))
   where
     here = case expr of
-             Dup x y _ -> M.singleton y (Copy x)
              Join r j _ ps e1 e2 -> let jumps = jumpArgs j e2 ++ (case r of Rec{} -> jumpArgs j e1; NonRec -> [])
                                     in M.fromList [(y,Param [vs !! i | vs <- jumps]) | (i,(y,_,_)) <- zip [0..] ps]
              _ -> M.empty
@@ -43,7 +41,6 @@ sameBits src = go S.empty
       = case [(k,s) | k <- [length ss, length ss - 1 .. 0], Just s <- [M.lookup (Path r (take k ss)) src]] of
           ((k,s):_) -> let p = Path r (take k ss)
                        in case s of
-                            Copy y -> go seen (extend y (drop k ss))
                             Param vs | not (S.member p seen), Just ys <- mapM (sameOf (S.insert p seen)) vs
                                      , (y:ys') <- filter (/= p) ys, all (== y) ys' -> extend y (drop k ss)
                             _ -> x

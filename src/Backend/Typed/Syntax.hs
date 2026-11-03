@@ -66,8 +66,10 @@
       where the parent is). Hence an owned destructuring of a variable is a borrowed one whose
       binders are consumed, and only a unique destructuring needs its mode: it consumes a unique
       scrutinee.
-    - `[dup]` binds its copy as a new root, so a variable holds at most one owned reference.
-      For example, after `val y = dup z.left; drop z` the context holds `y : V`.
+    - A variable may hold several owned references (`[dup]` keeps the name), and Γ is a multiset:
+      `Γ, x : t, x : t` holds two. A reference held by a part outlives the consumption of its
+      parent, which consumes one reference of each of its parts. For example, after
+      `dup z.left; drop z` the context still holds `z.left : V`.
     - Code generation loads the contents of a box (copies them out of the block) at
       `[bunbox]`, while the box is live, so no other form reads a block.
 
@@ -410,8 +412,8 @@ data VVal
   --
   -- As in the paper, a variable is only a value at an unboxed type. A variable `x :q A` at a boxed
   -- type (bound by `[case]` on `⊕ᵢ Aᵢ`, `[deref]` or `[unroll]`) is only an *operand*: the
-  -- scrutinee of a destructuring form or `[unscalar]`, the variable of `[drop]` or `[if-unique]`, or
-  -- the function of `[app]`. It cannot be stored again as a boxed value.
+  -- scrutinee of a destructuring form or `[unscalar]`, the variable of `[drop]`, `[dup]` or
+  -- `[if-unique]`, or the function of `[app]`. It cannot be stored again as a boxed value.
   = Var Path
 
   --   x : ∀ā. V ∈ Σ
@@ -769,15 +771,15 @@ data VExpr
   -- is freed without a test.
   | Free Path VExpr
 
-  --   Γ, y : V ⊢ e : W    V is not a credit or a cell
-  --  ──────────────────────────────────────── [dup]
-  --   Γ, x :^ V ⊢ val y = dup x; e : W
+  --   Γ, x : t ⊢ e : W    t is not a credit or a cell
+  --  ──────────────────────────────── [dup]
+  --   Γ, x :^ t ⊢ dup x; e : W
   --
-  -- Duplicate an unboxed variable (its pointers and contexts) into a new root `y`, the copy;
-  -- a copy of a trivial variable only copies its bits.
-  -- The parts of `x` in scope are not parts of `y`, which has none until it is
-  -- destructured. A boxed operand is duplicated through the pointer it was dereferenced from.
-  | Dup Path Path VExpr
+  -- Duplicate a variable in place (its pointers and contexts): `x` gains an owned reference and
+  -- keeps its name, so the copy is still a part of the variables on its path (see "Structural
+  -- rules"). With `[contract]` before it, `x` stays available borrowed as well. A boxed operand
+  -- is duplicated through its pointer.
+  | Dup Path VExpr
 
   --   Γ, x :! Box V ⊢ e₁ : W    Γ, x : Box V ⊢ e₂ : W    |V| defined
   --  ────────────────────────────────────────────────────────────────── [if-unique]
