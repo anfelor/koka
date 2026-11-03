@@ -126,7 +126,7 @@ specialize parts z s n e
        let shared = compose [Dup x c | (((x,_),_),c) <- zip parts sharedCopies]
                       (Drop z (Jump j [] (map Var sharedCopies ++ [NoReuse n payload])))
        body <- bind [(y,V ty) | (y,_,ty) <- ps] (dsE (Free r e))
-       return (Join j [] ps body (IsUnique z unique shared))
+       return (Join NonRec j [] ps body (IsUnique z unique shared))
 
 -- Drop `v : t` except for its parts `xs`, which the unique branch passes on.
 dropExcept :: [Path] -> Path -> VType -> VExpr -> D VExpr

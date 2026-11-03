@@ -60,7 +60,7 @@ whnfTests expr
               l <- fresh "delay"
               test <- (\e1' e0' -> Deref Owned (Var x) d (Unroll Owned d r (IfWhnf Owned r (s,e1') (l,e0'))))
                         <$> whnfTests e1 <*> whnfTests e0
-              joins' <- mapM (\(j,tvs,ps,e2) -> Join j tvs ps <$> whnfTests e2) joins
+              joins' <- mapM (\(j,tvs,ps,e2) -> Join NonRec j tvs ps <$> whnfTests e2) joins
               let expr' = pre (foldr ($) test joins')
               if S.member b (fvE expr') then descend else return expr'
       _ -> descend
@@ -75,6 +75,6 @@ whnfTests expr
     -- the join points before the case on the result of the test
     joinsTo e
       = case e of
-          Join j tvs ps e1 e2 -> (\(js,y,alts) -> ((j,tvs,ps,e1) : js,y,alts)) <$> joinsTo e2
+          Join NonRec j tvs ps e1 e2 -> (\(js,y,alts) -> ((j,tvs,ps,e1) : js,y,alts)) <$> joinsTo e2
           CaseV _ (Var y) alts -> Just ([],y,alts)
           _ -> Nothing
