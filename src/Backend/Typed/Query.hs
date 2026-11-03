@@ -160,16 +160,16 @@ inferExpr env g js expr
                                 unbound tvs (ftv t ++ ftvCtx g e1)
                                 let caps = S.unions (S.difference (fvE e1) (S.fromList xs) : [cs | (k,(cs,_,_,_)) <- M.toList (jsPoints js), not (null (jumpArgs k e1))])
                                 t <$ checkE env g js{ jsPoints = M.insert j (caps,tvs,[p | (_,_,p) <- ps],t) (jsPoints js) } e2 t
-      -- closed, and only itself is in scope in its body
+      -- only itself is in scope in its body (its captures are borrowed, see `CheckLinear`)
       Join (Rec t) j tvs ps e1 e2
                           -> do let xs = [x | (x,_,_) <- ps]
-                                case [y | y <- S.toList (fvE e1), not (any (y `within`) xs)] of
-                                  (y:_) -> Left ("recursive join point " ++ show j ++ " captures " ++ show y)
-                                  [] -> return ()
+                                    caps = S.filter (\y -> not (any (y `within`) xs)) (fvE e1)
+                                unless (S.disjoint caps (S.fromList (bindersE e2)))
+                                  (Left ("recursive join point " ++ show j ++ " captures a variable that is bound again in its scope"))
                                 joinDescriptions j ps
-                                unbound tvs (ftv t)
-                                let self = M.insert j (S.empty,tvs,[p | (_,_,p) <- ps],t)
-                                checkE env (M.fromList [(x,V p) | (x,_,p) <- ps]) js{ jsPoints = self M.empty } e1 t
+                                unbound tvs (ftv t ++ ftvCtx g e1)
+                                let self = M.insert j (caps,tvs,[p | (_,_,p) <- ps],t)
+                                checkE env (bindAll [(x,V p) | (x,_,p) <- ps] g) js{ jsPoints = self M.empty } e1 t
                                 t <$ checkE env g js{ jsPoints = self (jsPoints js) } e2 t
       -- the captured variables must still be in scope (`[unbox-ru]` and `[lock]` split a box into its parts)
       Jump j ts vs -> case M.lookup j (jsPoints js) of

@@ -232,15 +232,19 @@ scrutVar expr
         | Just ds <- destructVOf expr, Var z <- dsScrut ds -> Just z
         | otherwise -> Nothing
 
--- the arguments of each jump to a join point; jumps are never inside values, and an inner
--- join of the same name shadows it (also in its body if it is recursive)
-jumpArgs :: Name -> VExpr -> [[VVal]]
-jumpArgs j expr
+-- the type arguments and arguments of each jump to a join point; jumps are never inside
+-- values, and an inner join of the same name shadows it (also in its body if it is recursive)
+jumps :: Name -> VExpr -> [([AType],[VVal])]
+jumps j expr
   = case expr of
-      Jump k _ vs | k == j -> [vs]
-      Join NonRec k _ _ e1 _ | k == j -> jumpArgs j e1
+      Jump k ts vs | k == j -> [(ts,vs)]
+      Join NonRec k _ _ e1 _ | k == j -> jumps j e1
       Join Rec{} k _ _ _ _ | k == j -> []
-      _ -> getConst (descendE (const (Const [])) (const (Const [])) (\_ e -> Const (jumpArgs j e)) expr)
+      _ -> getConst (descendE (const (Const [])) (const (Const [])) (\_ e -> Const (jumps j e)) expr)
+
+-- the arguments of each jump to a join point
+jumpArgs :: Name -> VExpr -> [[VVal]]
+jumpArgs j = map snd . jumps j
 
 -- a top-level value, possibly instantiated (`[dup-glob]`)
 isGlob :: VVal -> Bool

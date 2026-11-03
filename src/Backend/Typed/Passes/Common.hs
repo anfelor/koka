@@ -507,8 +507,7 @@ subGammas env g expr
   = case expr of
       Let x t _ _ -> return [g, M.insert x (V t) g]
       LetYield x t _ _ _ -> return [g, M.insert x (V t) g, g]
-      Join NonRec _ _ ps _ _ -> return [bindAll [(x,V t) | (x,_,t) <- ps] g, g]
-      Join Rec{} _ _ ps _ _ -> return [M.fromList [(x,V t) | (x,_,t) <- ps], g]
+      Join _ _ _ ps _ _ -> return [bindAll [(x,V t) | (x,_,t) <- ps] g, g]
       Dup _ _ -> return [g]
       IsUnique x _ _ -> return [uniqueGamma g x, g]
       IfFull r _ _ -> do t <- inferV env g (Var r)

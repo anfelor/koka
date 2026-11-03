@@ -855,22 +855,27 @@ data VExpr
   -- and is always a tail call. Join points only have owned parameters, except for contexts
   -- that are plugged in place (unique, see `[plug]`). Perceus only produces closed join
   -- points (Γ_c = ∅); only `DropSpec` (the continuation of a drop) and the
-  -- late passes `JoinArgs` (for owned parameters) and `ExpandReuse` introduce captures. A captured variable must not be bound again in e₂, so every jump sees
+  -- late passes `JoinArgs` (for invariant parameters) and `ExpandReuse` introduce captures. A captured variable must not be bound again in e₂, so every jump sees
   -- the same variable. The descriptions in V̄ do not name the parameters x̄, as every jump
   -- binds them to different values (a jump can only pass an empty credit for them).
   -- The type parameters ā abstract over the witnesses of existentials that are unpacked
   -- before the jumps (`Elab.Match`).
   --
-  --   x̄ :q̄ V̄ | j : ∅; ∀ā. (q̄ V̄) -> W ⊢ e₁ : W    Γ | J, j : ∅; ∀ā. (q̄ V̄) -> W ⊢ e₂ : W    ā ∉ ftv(W)
+  --   ^Γ_c, x̄ :q̄ V̄ | j : ^Γ_c; ∀ā. (q̄ V̄) -> W ⊢ e₁ : W
+  --   Γ, Γ_c | J, j : ^Γ_c; ∀ā. (q̄ V̄) -> W ⊢ e₂ : W    ā ∉ ftv(Γ_c, W)
   --  ────────────────────────────────────────────────────────────────────────────────── [join-rec]
-  --   Γ | J ⊢ join rec j⟨ā⟩(x̄ :q̄ V̄) : W = e₁ in e₂ : W
+  --   Γ, Γ_c | J ⊢ join rec j⟨ā⟩(x̄ :q̄ V̄) : W = e₁ in e₂ : W
   --
   -- A recursive join point is a loop: `j` is in scope in its body, which may run any number of
-  -- times. It is therefore closed (it captures no variables, and its body cannot jump to
-  -- outer joins), and its parameters may have any mode: a borrowed parameter is lent anew
-  -- by every jump. Its result type W is annotated, as the jumps in its body need it. The
+  -- times. It therefore captures its variables Γ_c (as for `[join]`) only borrowed: an owned
+  -- or unique capture would be consumed by every iteration. Every jump lends them, like
+  -- borrowed arguments, so they are live throughout the loop, and are consumed (if owned)
+  -- after it. Its body cannot jump to outer joins, and its parameters may have any mode: a
+  -- borrowed parameter is lent anew by every jump. A captured variable must not be bound
+  -- again in e₂. Its result type W is annotated, as the jumps in its body need it. The
   -- yield mark of the context passes to its body. Recursive joins are introduced after
-  -- Perceus, from the self tail calls of a function. (Not in the paper.)
+  -- Perceus, from the self tail calls of a function, and are closed until `JoinArgs` makes
+  -- invariant borrowed parameters captures. (Not in the paper.)
   | Join Recursion Name [TVar] [(Path,Mode,VType)] VExpr VExpr
 
   --   j : Γ_c; ∀ā. (q̄ V̄) -> W ∈ J    Γᵢ ⊢ vᵢ :qᵢ Vᵢ[B̄/ā]
