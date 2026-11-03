@@ -33,7 +33,6 @@ import Kind.Kind( kindStar )
 import Kind.Newtypes
 import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
-import Backend.Typed.Sources( Sources, sources, sameBits )
 import Backend.Typed.Traversal( TestSide(..), boxTag, canonical, failingTo, fvA, fvE, holes, testSides, within )
 import Backend.Typed.Types( Types(..), inst, isShape )
 import Backend.Typed.Env( Env(..), envOf, unrollT, openFields, boxContents, reuseSize, M, get, gets, liftE, modify, put, runM, state )
@@ -63,8 +62,7 @@ data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [Strin
 -- recursive (its jumps then assign the parameters in parallel)
 data Ctx = Ctx{ cxEnv :: Env, cxCEnv :: CEnv, cxGamma :: Gamma
               , cxJoins :: M.Map Name (Doc,[(Path,VType)],Bool)
-              , cxShared :: S.Set Path     -- blocks known to be shared (the else branch of `IsUnique`, and its aliases)
-              , cxSources :: Sources }     -- the join parameters of the definition (`sameBits`)
+              , cxShared :: S.Set Path }   -- blocks known to be shared (the else branch of `IsUnique`, and its aliases)
 
 type G a = M () St a
 
@@ -467,7 +465,7 @@ genBox cx tag at v
                                    -- A described credit is a unique block of its described payload,
                                    -- so its header only needs the new tag and scan size, where they differ,
                                    -- and only the fields that change are stored. Dups still run, in `y`.
-                                   update = case keptLeaves (cxSources cx) rt t v of
+                                   update = case keptLeaves rt t v of
                                               Just (k,oldScan,matches) -> [setTag k, setScan oldScan, setPath] ++ writes matches
                                               Nothing -> ("kk_block_init(&" <.> x <.> "->_block,sizeof(" <.> bt <.> ")," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ");")
                                                          : storeFrom y
@@ -1158,13 +1156,13 @@ genDef env cenv def
         -> do pcts <- mapM (\(_,_,t) -> ctype t) args
               rct  <- ctype res
               let g  = M.fromList [(x,V t) | (x,_,t) <- args]
-                  cx = Ctx env cenv g M.empty S.empty (sources body)
+                  cx = Ctx env cenv g M.empty S.empty
               ss <- genE cx DReturn body
               let sig = cty rct <+> text (cName f) <.> "(" <.> hcat [cty ct <+> localName x <.> ", " | ((x,_,_),ct) <- zip args pcts] <.> "kk_context_t* _ctx)"
               return (sig <.> ";", sig <+> block ss, empty)
       DefVal x _ t body
         -> do ct <- ctype t
-              let cx = Ctx env cenv M.empty M.empty S.empty (sources body)
+              let cx = Ctx env cenv M.empty M.empty S.empty
               ss <- genE cx DReturn body
               let name  = text (cName x)
                   initf = name <.> "_init"
@@ -1180,7 +1178,7 @@ genWrapper env cenv f
         -> do pcts <- mapM (ctype . snd) ps
               rct  <- ctype r
               let xs  = [root (newHiddenName ("p" ++ show i)) | i <- [0..length ps - 1]]
-                  cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) M.empty S.empty M.empty
+                  cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) M.empty S.empty
               body <- genCall cx DReturn f (map AVar tvs) (map Var xs)
               let sig = "static" <+> cty rct <+> text (cName f) <.> "_fun(kk_function_t _fself" <.> hcat [", " <.> cty ct <+> localName x | (x,ct) <- zip xs pcts] <.> ", kk_context_t* _ctx)"
               return (sig <.> ";", sig <+> block ("kk_function_static_drop(_fself,_ctx);" : body))

@@ -15,8 +15,12 @@
   when it reuses the credit.
 
   The variable must be in scope at the join point and not be bound in its body or scope:
-  every jump then passes the same one. (`[unbox-ru]` renames the contents of a box, so a jump
-  after it may pass a variable that is not in scope at the join point.)
+  every jump then passes the same one. A field that the branches read themselves is first
+  brought into scope: elaboration reads a field where it is used, and `Paths` merges the
+  reads only within a scope, before `Contify` makes the join point. When every binder of
+  the variable in the scope of the join is a borrowed `[proj]` of the same variable in scope
+  at the join point, that read moves to just before it. It cannot fail, and the variable it
+  reads is live there, as the branches read it.
 
   A credit that `Reuse` asks for has no description. If the jumps pass different credits
   with the same declared description, or empty ones (which satisfy every description), the
@@ -59,13 +63,20 @@ jaE decl scope expr
       -- a recursive join point is closed
       Join rc@Rec{} j tvs ps e1 e2
         -> Join rc j tvs ps (jaE decl (scopeOf [x | (x,_,_) <- ps]) e1) (jaE decl scope e2)
-      Join NonRec j tvs ps e1 e2
+      Join NonRec j tvs ps e1 e0
         -> let e1' = jaE decl (M.union (scopeOf [x | (x,_,_) <- ps]) scope) e1
-               e2' = jaE decl scope e2
+               e0' = jaE decl scope e0
+               args0 = transpose (jumpArgs j e0') ++ repeat []
+               -- the reads of fields that every jump passes to an owned parameter
+               hoisted = [(y,p,i) | ((_,Owned,_),Var y : vs) <- zip ps args0, all (== Var y) vs, M.notMember y scope
+                                  , y `notElem` bindersE e1', rs@((p,i):_) <- [readsOf y e0'], all (== (p,i)) rs
+                                  , length rs == length (filter (== y) (bindersE e0')), M.member p scope]
+               e2' = unread (S.fromList [y | (y,_,_) <- hoisted]) e0'
+               scope' = M.union (scopeOf [y | (y,_,_) <- hoisted]) scope
                bound = S.fromList (bindersE e1' ++ bindersE e2')
                args = transpose (jumpArgs j e2') ++ repeat []
                -- for each parameter, the variable that every jump passes to it
-               invariant (_,Owned,_) vs@(Var y : _) | all (== Var y) vs, M.member y scope, S.notMember y bound = Just y
+               invariant (_,Owned,_) vs@(Var y : _) | all (== Var y) vs, M.member y scope', S.notMember y bound = Just y
                invariant _ _ = Nothing
                ys = zipWith invariant ps args
                sub = M.fromList [(x,Var y) | ((x,_,_),Just y) <- zip ps ys]
@@ -82,7 +93,23 @@ jaE decl scope expr
                isNoReuse v = case v of
                                NoReuse _ _ -> True
                                _ -> False
-               inScope (Contents _ v _) = all (`M.member` scope) (fvV v)
+               inScope (Contents _ v _) = all (`M.member` scope') (fvV v)
                ps' = kept (zipWith describe ps args)
-           in Join NonRec j tvs ps' (substEIn (M.union (scopeOf [x | (x,_,_) <- ps']) scope) (valueAt sub) e1') (substJump j (\ts -> Jump j ts . kept) e2')
+               join = Join NonRec j tvs ps' (substEIn (M.union (scopeOf [x | (x,_,_) <- ps']) scope') (valueAt sub) e1') (substJump j (\ts -> Jump j ts . kept) e2')
+           in foldr (\(y,p,i) -> Proj Borrowed (Var p) i y) join hoisted
       _ -> mapAll (\xs -> jaE decl (bindScope expr xs scope)) expr
+
+-- the variable and field of each borrowed `[proj]` that binds `y`
+readsOf :: Path -> VExpr -> [(Path,Int)]
+readsOf y expr = here ++ getConst (descendAll (\_ e -> Const (readsOf y e)) expr)
+  where
+    here = case expr of
+             Proj Borrowed (Var p) i x _ | x == y -> [(p,i)]
+             _ -> []
+
+-- remove the `[proj]`s that bind the variables `ys`
+unread :: S.Set Path -> VExpr -> VExpr
+unread ys expr
+  = case expr of
+      Proj _ _ _ x e | S.member x ys -> unread ys e
+      _ -> mapAll (\_ -> unread ys) expr

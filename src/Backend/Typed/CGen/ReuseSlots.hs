@@ -11,32 +11,24 @@
 module Backend.Typed.CGen.ReuseSlots( keptLeaves ) where
 
 import Backend.Typed.Syntax
-import Backend.Typed.Sources( Sources, sameBits )
-import Backend.Typed.Traversal( child, fieldsAt, mapV )
+import Backend.Typed.Traversal( child, fieldsAt )
 import Backend.Typed.Types( collapse )
 import Backend.Typed.Layout( layout, leaves, scanOf )
 import Backend.Typed.CGen.Layout( leafSlots )
 
-sameBitsV :: Sources -> VVal -> VVal
-sameBitsV src v
-  = case v of
-      Var x -> Var (sameBits src x)
-      _ -> mapV id (sameBitsV src) v
-
 -- The tag and the scan size that the description of a credit records for its block, and for
 -- each leaf of the new payload whether its C slot already holds its bits: the old payload has
 -- a leaf at the same offset, with the same layout and the same value (`Inline` makes equal
--- values syntactically equal, so the payload names the variables of the description, or join
--- parameters with their bits, `sameBits`).
+-- values syntactically equal, so the payload names the variables of the description).
 -- Payloads of different types can thus share slots. A dup preserves a field's bits, but its
 -- reference-count effect must still run.
-keptLeaves :: Sources -> Ty -> VType -> VVal -> Maybe (Maybe Int, Int, [Bool])
-keptLeaves src rt t v
+keptLeaves :: Ty -> VType -> VVal -> Maybe (Maybe Int, Int, [Bool])
+keptLeaves rt t v
   = case rt of
       V (VReuse _ _ (Just (Contents k old ot)))
         -> let slots s w = zip (leafSlots (layout s)) (leafValues s w)
                kept = slots ot old
-           in Just (k, scanOf (layout ot), [leaf `elem` kept | leaf <- slots t (sameBitsV src v)])
+           in Just (k, scanOf (layout ot), [leaf `elem` kept | leaf <- slots t v])
       _ -> Nothing
 
 -- The value of each leaf of a value of type `t`, as a value in normal form (`collapse`) and
