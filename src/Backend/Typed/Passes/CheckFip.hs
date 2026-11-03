@@ -50,7 +50,6 @@ import Common.Name
 import Common.NamePrim( nameTpInt, nameYielding, nameCoreDebug, nameCoreHnd, namePatternMatchError )
 import Common.Syntax( Fip(..), FipAlloc(..), fipAlloc, isFipTop )
 import Backend.Typed.Syntax
-import Backend.Typed.Types( dupType )
 import Backend.Typed.Traversal( descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsScrut, stepsFrom, within )
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Passes.Common( trivialTy )
@@ -277,16 +276,13 @@ fipE expr
         -> do full <- isFull r
               when full (require mayDealloc ("freeing the reuse credit " ++ show r ++ " causes deallocation"))
               fipE e
-      Dup x y e
+      Dup x e
         -> do t <- typeOfVar x
               u <- untracked t
               b <- isBorrowed x
               unless (u || (b && isFun t))
                 (require mayAlloc ("the variable " ++ show x ++ " is duplicated (causing sharing and preventing reuse)"))
-              -- the copy of a borrowed function is only called
-              let borrowCopy fe = if b && isFun t then fe{ fInfo = (fInfo fe){ iBorrowed = y : iBorrowed (fInfo fe) } } else fe
-              ty <- liftE (dupType t)
-              local borrowCopy (bind [(y,ty)] (fipE e))
+              fipE e
       IsUnique x e1 _ -> local (\fe -> fe{ fGamma = uniqueGamma (fGamma fe) x }) (fipE e1)
       IfFull r e1 e2
         -> do full <- isFull r

@@ -20,8 +20,8 @@
   after `JoinArgs`, so that a captured variable is inlined into the join body as well.
 
   In an enum alternative, a reused payload can name its old enum field instead of the
-  equal constructor constant, or a variable with its bits (`sameBits`), such as a copy of
-  it. Only variables still in scope are used; enum values carry no ownership. Descriptions
+  equal constructor constant, or a variable with its bits (`sameBits`), such as a join
+  parameter that receives it. Only variables still in scope are used; enum values carry no ownership. Descriptions
   and the checking rules stay unchanged.
 
   Bindings that keep a literal dereference named are retained, preserving its operand
@@ -92,7 +92,7 @@ valuesE expr = here <> getConst (descendAll (\_ e -> Const (valuesE e)) expr)
     here = case expr of
              Let x _ (Ret v) _ | structural v -> (M.singleton x v,S.empty)
              Deref _ (Var x) _ _ -> (M.empty,S.singleton x)
-             Dup x _ _ -> (M.empty,S.singleton x)
+             Dup x _ -> (M.empty,S.singleton x)
              _ -> mempty
 
 -- remove the lets of the inlined values, and the forms that use them as a whole

@@ -28,7 +28,6 @@ import Data.List( nub, (\\) )
 import Data.Maybe( fromMaybe )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Types( dupType )
 import Backend.Typed.Traversal( boxTag, child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut )
 import Backend.Typed.Passes.Common( trivialTy, defGamma, NameSupply, dropValue, freshFor, freshPathFrom, perBody, reuseParts, scopeOf )
 import Backend.Typed.Env( Env, envOf, boxContents, reuseSize, unrollT, M, ask, asks, evalM, get, gets, liftE, local, modify, put, state )
@@ -199,10 +198,7 @@ ruE expr
       Call _ _ _ -> plain
       App _ _ -> plain
       Gen _ _ -> plain
-      Dup x y e
-        -> do g <- asks reGamma
-              t <- liftE (inferVar g x >>= dupType)
-              Dup x y <$> bind [(y,t)] (ruE e)
+      Dup x e -> Dup x <$> ruE e
       -- destructuring forms are handled above
       Proj{} -> plain
       CaseV{} -> plain
@@ -254,9 +250,7 @@ branches alts = branchActions [bind bs (ruE e) | (bs,e) <- alts]
 -- DropSpec's shared arm only duplicates fields before releasing the tested box. Duplication cannot make that box unique, so do not offer its block for reuse.
 -- Stop at any other operation: a release or call could change its reference count.
 sharedDrop :: Path -> VExpr -> R VExpr
-sharedDrop z (Dup x y e)
-  = do t <- typeOfName x >>= liftE . dupType
-       Dup x y <$> bind [(y,t)] (sharedDrop z e)
+sharedDrop z (Dup x e) = Dup x <$> sharedDrop z e
 sharedDrop z (Drop x e) | x == z = Drop x <$> ruE e
 sharedDrop _ e = ruE e
 

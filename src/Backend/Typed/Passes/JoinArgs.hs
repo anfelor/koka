@@ -10,9 +10,9 @@
 {- Invariant join arguments (the last pass).
 
   An owned join parameter that receives the same variable at every jump is removed, and
-  the join body captures that variable instead (`[join]`). This removes the copies, and a
-  credit keeps its description in the join body, so code generation can omit the stores
-  of unchanged fields when it reuses the credit.
+  the join body captures that variable instead (`[join]`). A credit then keeps its
+  description in the join body, so code generation can omit the stores of unchanged fields
+  when it reuses the credit.
 
   The variable must be in scope at the join point and not be bound in its body or scope:
   every jump then passes the same one. (`[unbox-ru]` renames the contents of a box, so a jump
