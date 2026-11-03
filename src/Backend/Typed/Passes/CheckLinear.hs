@@ -43,9 +43,12 @@
   linear: it is owned and not trivial, so it must be consumed (as `Check` rejects a dup or a
   drop of it, by `memoize`, a uniqueness test or a call or jump), and it must not be live
   across a `[let-yield]`, whose yielding branch could not consume it. An owned variable is unique in the
-  first branch of `IsUnique`; unique parameters and a `let` of a unique value (a unique
-  variable, a fresh context, an append or `ctx-copy c`) are unique too, and so are the
-  pointers of the scrutinee of a unique destructuring. A context is plugged or appended only
+  first branch of `IsUnique`; unique parameters and a `let` whose bound expression has a
+  unique result are unique too, and so are the pointers of the scrutinee of a unique
+  destructuring. An expression has a unique result (its result mode `q`, which follows the
+  join points in scope) if it returns a unique value (a unique variable, a fresh context, an
+  append or `ctx-copy c`) or calls a function with a unique result in every tail position.
+  The body of a definition has the definition's result mode. A context is plugged or appended only
   through a unique value. Any borrowed use of a unique variable, or of a variable on its path,
   may duplicate the reference, after which it is only owned.
 
@@ -84,7 +87,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( child, descendV, destructAOf, destructVOf, dsAlts, dsMode, dsScrut, fieldsAt, fvA, fvE, jumpArgs, sibling, within )
 import Backend.Typed.Types( checkDupType, prodV )
-import Backend.Typed.Passes.Common( isRead, keepsPointer, paramModes, prefixes, trivialTy )
+import Backend.Typed.Passes.Common( isRead, keepsPointer, paramModes, prefixes, resultMode, trivialTy )
 import Backend.Typed.Env( Env(..), envOf, M, ask, evalM, get, gets, liftE, local, modify )
 import Backend.Typed.Query( Gamma, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 
@@ -120,11 +123,11 @@ checkLinear prog
 checkDef :: Env -> Def -> Either String ()
 checkDef env def
   = case def of
-      DefFun _ _ args _ body
-        -> run (M.fromList [(x,V t) | (x,_,t) <- args]) (params env args) body
-      DefVal _ _ _ body -> run M.empty [] body
+      DefFun _ _ args q _ body
+        -> run (M.fromList [(x,V t) | (x,_,t) <- args]) (params env args) q body
+      DefVal _ _ _ body -> run M.empty [] Owned body
   where
-    run g ps body = evalM (closed ps (checkE env g M.empty body)) M.empty (Parts S.empty M.empty)
+    run g ps q body = evalM (closed ps (checkE env g M.empty q body)) M.empty (Parts S.empty M.empty)
 
 -- the parameters that are not of a trivial type
 params :: Env -> [(Path,Mode,VType)] -> [(Path,Mode)]
@@ -353,7 +356,7 @@ ownedA env g val
         -> do unless (all (\(_,m,_) -> m == Owned) ps) (fail ("closure with parameters that are not owned: " ++ show val))
               let caps = S.toList (fvA val)
               closed ([(x,Owned) | x <- caps, not (trivialVar env g x)] ++ params env ps)
-                     (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) M.empty e)
+                     (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) M.empty Owned e)
               uses (map (consume env g) caps)
       UnitA -> return noUse
       InjA _ _ v -> ownedA env g v
@@ -405,16 +408,16 @@ ownedParams a = unless (all (== Owned) (modes a)) (fail ("closure with parameter
 
 -- expressions
 
-checkE :: Env -> Gamma -> Joins -> VExpr -> L Use
+checkE :: Env -> Gamma -> Joins -> Mode -> VExpr -> L Use
 -- the binder is a copy of trivial contents, and an owned read consumes the scalar
-checkE env g js expr@(Unscalar m z x e)
+checkE env g js q expr@(Unscalar m z x e)
   = do t <- liftE (inferVar g z)
        [[tx]] <- liftE (altTypes env t expr)
-       before ((if owning m then consume else readVar) env g z) (checkE env (bindAll [(x,tx)] g) js e)
-checkE _ _ _ expr
+       before ((if owning m then consume else readVar) env g z) (checkE env (bindAll [(x,tx)] g) js q e)
+checkE _ _ _ _ expr
   | isRead expr, Just ds <- destructAOf expr, owning (dsMode ds)
   = fail ("owned read of the contents of a box: " ++ show (dsScrut ds))
-checkE env g js expr
+checkE env g js q expr
   | Just ds <- destructAOf expr = destructE (liftE (inferVar g (dsScrut ds))) (dsMode ds) (Var (dsScrut ds)) (dsAlts ds)
   | Just ds <- destructVOf expr = destructE (V <$> liftE (inferV env g (dsScrut ds))) (dsMode ds) (dsScrut ds) (dsAlts ds)
   where
@@ -423,30 +426,32 @@ checkE env g js expr
              (fail ("unique destructuring of a value that is not a pointer: " ++ show v))
            t <- infer
            tss <- liftE (altTypes env t expr)
-           destruct env g js m v [(zip xs ts, e) | ((xs,e),ts) <- zip alts tss]
-checkE env g js expr
+           destruct env g js q m v [(zip xs ts, e) | ((xs,e),ts) <- zip alts tss]
+checkE env g js q expr
   = case expr of
-      Ret v -> ownedV env g v
-      -- the binder is unique if it is used as unique (and the value is unique)
-      Let x t e1 e2 -> do u2 <- withOwners [(x,Owned)] (checkE env (M.insert x (V t) g) js e2)
-                          (m,u1) <- case e1 of
-                                      Ret w | S.member x (uUnique u2) -> (,) Unique <$> uniqueV env g w
-                                      _ -> (,) Owned <$> checkE env g M.empty e1
+      Ret v | q == Unique -> uniqueV env g v
+            | otherwise -> ownedV env g v
+      -- the binder is unique if it is used as unique (and the expression's result is unique)
+      Let x t e1 e2 -> do u2 <- withOwners [(x,Owned)] (checkE env (M.insert x (V t) g) js q e2)
+                          let m = if S.member x (uUnique u2) then Unique else Owned
+                          u1 <- checkE env g M.empty m e1
                           andThen u1 =<< leave [(x,m) | not (trivialTy env (V t))] u2
       -- the binder is not in scope where an effect yields
       LetYield x t e1 e2 e3
         -> do case [y | y <- S.toList (S.union (fvE e2) (fvE e3)), Just (V (VCell _ _)) <- [M.lookup y g]] of
                 (y:_) -> fail ("cell live across a yield: " ++ show y)
                 [] -> return ()
-              u2 <- withOwners [(x,Owned)] (checkE env (M.insert x (V t) g) js e2)
+              u2 <- withOwners [(x,Owned)] (checkE env (M.insert x (V t) g) js q e2)
                     >>= leave [(x,Owned) | not (trivialTy env (V t))]
-              u3 <- checkE env g js e3
-              u1 <- checkE env g M.empty e1
+              u3 <- checkE env g js q e3
+              u1 <- checkE env g M.empty Owned e1
               andThen u1 =<< branches [u2, u3]
       Yielded _ -> return noUse
       -- control never gets here, so every reference counts as consumed
       Unreachable _ -> return noUse{ uDiverges = True }
-      Call f _ vs -> args [] (paramModes env f (length vs)) vs
+      Call f _ vs -> do when (q == Unique && resultMode env f /= Unique)
+                          (fail ("unique result of a call to a function without one: " ++ show f))
+                        args [] (paramModes env f (length vs)) vs
       Jump j _ vs -> case M.lookup j js of
                      Just (ms,caps) -> args caps ms vs
                      Nothing -> fail ("jump to unknown join point " ++ show j)
@@ -457,56 +462,56 @@ checkE env g js expr
                                                            (S.fromList [x | (k,(_,cs)) <- M.toList js, not (null (jumpArgs k e1)), (x,_) <- cs]))
                               let xs = [x | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
                               u <- local (const (M.fromList (params env ps ++ [(x,Unique) | x <- xs])))
-                                         (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) js e1)
+                                         (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) js q e1)
                               caps <- concat <$> mapM (captured u) xs
                               _ <- leave (params env ps ++ caps) u
-                              checkE env g (M.insert j ([m | (_,m,_) <- ps],caps) js) e2
+                              checkE env g (M.insert j ([m | (_,m,_) <- ps],caps) js) q e2
       -- a body, like that of a function, in which only the join point itself is in scope, and
       -- whose captures are borrowed: every jump lends them
       Join Rec{} j _ ps e1 e2
         -> do let fvs = S.toList (S.filter (\y -> not (any (y `within`) [x | (x,_,_) <- ps])) (fvE e1))
                   caps = [(x,Borrowed) | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
                   self = M.insert j ([m | (_,m,_) <- ps],caps)
-              closed (params env ps ++ caps) (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) (self M.empty) e1)
-              checkE env g (self js) e2
+              closed (params env ps ++ caps) (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) (self M.empty) q e1)
+              checkE env g (self js) q e2
       App f vs -> do ft <- liftE (inferVar g f)
                      case ft of
                        A a -> ownedParams a
                        _ -> fail "unboxed function operand"
                      uses (consume env g f : map (ownedV env g) vs)
-      Gen _ e -> checkE env g M.empty e
-      Drop x e -> before (consume env g x) (checkE env g js e)
-      Free r e -> before (consume env g r) (checkE env g js e)
+      Gen _ e -> checkE env g M.empty Owned e
+      Drop x e -> before (consume env g x) (checkE env g js q e)
+      Free r e -> before (consume env g r) (checkE env g js q e)
       Dup x e -> do liftE (inferVar g x >>= checkDupType)
-                    before (dupVar env g x) (checkE env g js e)
+                    before (dupVar env g x) (checkE env g js q e)
       -- the test reads the variable without borrowing it, which is unique in the first branch
       IsUnique x e1 e2 -> do m <- ownerMode x
                              when (m == Borrowed) (fail ("uniqueness test of a variable that is not owned: " ++ show x))
                              z <- keyOf x
-                             u1 <- checkE env (uniqueGamma g x) js e1
-                             u2 <- checkE env g js e2
+                             u1 <- checkE env (uniqueGamma g x) js q e1
+                             u2 <- checkE env g js q e2
                              before (readVar env g x) (branches [u1{ uUnique = S.delete z (uUnique u1) }, u2])
       -- the test reads the credit, which is empty in the second branch: the test consumes it there
-      IfFull r e1 e2 -> do u1 <- checkE env g js e1
-                           u2 <- before (consume env g r) (checkE env g js e2)
+      IfFull r e1 e2 -> do u1 <- checkE env g js q e1
+                           u2 <- before (consume env g r) (checkE env g js q e2)
                            before (readVar env g r) (branches [u1, u2])
       -- a unique use of `z` that splits it into its contents and its block `z.credit`, which
       -- the body consumes as parts of `z`
       UnboxRu z e
         -> do g' <- liftE (unboxRuGamma g z)
               u <- uniqueName env g z
-              before (return u{ uNet = M.empty }) (checkE env g' js e)
+              before (return u{ uNet = M.empty }) (checkE env g' js q e)
       -- a copy of the block of `z`, which only reads the block `z.credit`, as a new root
       CopyRu z r e
         -> do g' <- liftE (copyRuGamma g z r)
               c <- keyOf (child z SCredit)
-              before (return noUse{ uPeak = M.singleton c 1 }) (roots env Owned [(r,g' M.! r)] (checkE env g' js e))
+              before (return noUse{ uPeak = M.singleton c 1 }) (roots env Owned [(r,g' M.! r)] (checkE env g' js q e))
       -- the same for an owned box, whose block becomes a cell
       Lock z e
         -> do g' <- liftE (lockGamma g z)
               u <- consume env g z
-              before (return u{ uNet = M.empty }) (checkE env g' js e)
-      CaseLit v alts def -> before (borrowedV env g v) (branches =<< mapM (checkE env g js) (def : map snd alts))
+              before (return u{ uNet = M.empty }) (checkE env g' js q e)
+      CaseLit v alts def -> before (borrowedV env g v) (branches =<< mapM (checkE env g js q) (def : map snd alts))
       _ -> fail "unexpected destructuring form"
   where
     -- owned and unique arguments (and captured variables) first: a borrowed argument must not
@@ -535,8 +540,8 @@ checkE env g js expr
 -- destructuring consumes those of a trivial type. A unique destructuring consumes its
 -- scrutinee as unique, so its alternatives must consume the scrutinee. The binders of a
 -- destructuring of another value are new roots with the mode of the destructuring.
-destruct :: Env -> Gamma -> Joins -> Mode -> VVal -> [([(Path,Ty)],VExpr)] -> L Use
-destruct env g js m v alts
+destruct :: Env -> Gamma -> Joins -> Mode -> Mode -> VVal -> [([(Path,Ty)],VExpr)] -> L Use
+destruct env g js q m v alts
   = case v of
       Var z -> do zc <- keyOf z
                   rs <- sequence [alt zc bs e | (bs,e) <- alts]
@@ -566,10 +571,10 @@ destruct env g js m v alts
                            modify (\tr -> Parts (S.unions [ptTrivial tr, S.fromList ts, S.fromList [y | (_,fs) <- fields, (y,_,u) <- fs, trivialTy env (V u)]])
                                                 (M.union (ptFields tr) (M.fromList [(p,[y | (y,_,_) <- fs]) | (p,fs@(_:_)) <- fields])))
                            tr <- get
-                           u <- checkE env (bindAll bs g) js e
+                           u <- checkE env (bindAll bs g) js q e
                            return (not (trivialVar env g z) && any ((== zc) . key tr) ts, u)
       _ -> do let use = case m of
                           Owned -> ownedV env g v
                           Unique -> uniqueV env g v
                           Borrowed -> borrowedV env g v
-              before use (branches =<< sequence [roots env m bs (checkE env (bindAll bs g) js e) | (bs,e) <- alts])
+              before use (branches =<< sequence [roots env m bs (checkE env (bindAll bs g) js q e) | (bs,e) <- alts])

@@ -440,7 +440,7 @@ inferA :: Env -> Gamma -> AVal -> Q AType
 inferA env g val
   = case val of
       Fun f -> case M.lookup f (envSigs env) of
-                 Just (SigFun tvs ps r) -> return (forallA tvs (AFun ps r))
+                 Just (SigFun tvs ps _ r) -> return (forallA tvs (AFun ps r))
                  _ -> Left ("unknown function " ++ show f)
       UnitA -> return AUnit
       InjA i a v -> case a of

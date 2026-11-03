@@ -60,11 +60,11 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
   where
     vars = map (VPtr . AVar)
     sig s = case s of
-      SigFun vs ps r -> vars vs ++ (r : map snd ps)
+      SigFun vs ps _ r -> vars vs ++ (r : map snd ps)
       SigVal vs t -> vars vs ++ [t]
       SigCon vs ts _ -> vars vs ++ ts
     def d = case d of
-      DefFun _ vs ps r e -> vars vs ++ (r : map (\(_,_,t) -> t) ps ++ et e)
+      DefFun _ vs ps _ r e -> vars vs ++ (r : map (\(_,_,t) -> t) ps ++ et e)
       DefVal _ vs t e -> vars vs ++ (t : et e)
     at a = case a of
       ABox t -> [t]
@@ -233,5 +233,6 @@ tvarsA bound val
 checkDef :: Env -> Def -> Either String ()
 checkDef env def
   = case def of
-      DefFun _ _ args res body -> checkE env (M.fromList [(x,V t) | (x,_,t) <- args]) yieldJoins body res
+      DefFun _ _ _ Borrowed _ _ -> Left "borrowed result"
+      DefFun _ _ args _ res body -> checkE env (M.fromList [(x,V t) | (x,_,t) <- args]) yieldJoins body res
       DefVal _ _ t body        -> checkE env M.empty yieldJoins body t

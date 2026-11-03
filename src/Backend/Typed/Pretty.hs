@@ -244,7 +244,7 @@ ifThen test e1 e2 = test <-> indent 2 (vcat [text "then" <+> align (prettyExpr e
 prettyDef :: Def -> Doc
 prettyDef def
   = case def of
-      DefFun f vs ps r e -> text "fun" <+> nm f <.> tyParams vs <.> params ps <+> colon <+> prettyV r <+> text "=" <-> indent 2 (prettyExpr e)
+      DefFun f vs ps q r e -> text "fun" <+> nm f <.> tyParams vs <.> params ps <+> colon <+> mode q <.> prettyV r <+> text "=" <-> indent 2 (prettyExpr e)
       DefVal x vs t e    -> text "val" <+> nm x <.> tyParams vs <+> colon <+> prettyV t <+> text "=" <-> indent 2 (prettyExpr e)
 
 prettyProgram :: Program -> Doc
@@ -261,10 +261,7 @@ prettyElided prog
   = prettyProgram prog{ progDefs = map elideDef (progDefs prog) }
 
 elideDef :: Def -> Def
-elideDef def
-  = case def of
-      DefFun f vs ps r e -> shortenDef (DefFun f vs ps r (elideE e))
-      DefVal x vs t e    -> shortenDef (DefVal x vs t (elideE e))
+elideDef def = shortenDef def{ defBody = elideE (defBody def) }
 
 elideE :: VExpr -> VExpr
 elideE expr
@@ -298,7 +295,7 @@ shorten (Path x ss) = Path x (halves (filter (`notElem` [SRoll,SDeref,SContents]
 shortenDef :: Def -> Def
 shortenDef def
   = case def of
-      DefFun f vs ps r e -> DefFun f vs [(shorten x,m,shortenT t) | (x,m,t) <- ps] (shortenT r) (shortenE e)
+      DefFun f vs ps q r e -> DefFun f vs [(shorten x,m,shortenT t) | (x,m,t) <- ps] q (shortenT r) (shortenE e)
       DefVal x vs t e    -> DefVal x vs (shortenT t) (shortenE e)
 
 shortenE :: VExpr -> VExpr

@@ -79,7 +79,7 @@ elabFunDef def pars body
        body' <- withTVars tvs (withLocals (map getName pars) (elabExprAt res body))
        let params = withParamModes (defModes def) args
            args' = [(root (getName p),m,t) | (p,(m,t)) <- zip pars params]
-       return (DefFun (C.defName def) tvs args' res body', SigFun tvs params res)
+       return (DefFun (C.defName def) tvs args' Owned res body', SigFun tvs params Owned res)
 
 elabValDef :: C.Def -> E (Def,Sig)
 elabValDef def
@@ -114,7 +114,7 @@ paramMode _ False      = Owned
 withModes :: [Mode] -> Sig -> Sig
 withModes modes sig
   = case sig of
-      SigFun tvs ps r -> SigFun tvs (withParamModes modes ps) r
+      SigFun tvs ps q r -> SigFun tvs (withParamModes modes ps) q r
       _ -> sig
 
 withParamModes :: [Mode] -> [(Mode,VType)] -> [(Mode,VType)]
@@ -122,7 +122,7 @@ withParamModes modes ps = [(m,t) | ((_,t),m) <- zip ps (modes ++ repeat Owned)]
 
 typeSig :: Newtypes -> Type -> Bool -> Tr Sig
 typeSig nt tp isFun
-  | isFun     = (\(tvs,args,res) -> SigFun tvs args res) <$> funSigOf nt tp
+  | isFun     = (\(tvs,args,res) -> SigFun tvs args Owned res) <$> funSigOf nt tp
   | otherwise = uncurry SigVal <$> elabScheme nt tp
 
 funSigOf :: Newtypes -> Type -> Tr ([TVar],[(Mode,VType)],VType)
@@ -262,7 +262,7 @@ elabApp f args resTp
 elabApp f args resTp
   = do mbsig <- globalOf f
        case mbsig of
-         Just (g,sig@(SigFun _ ps _),gtp,tys)
+         Just (g,sig@(SigFun _ ps _ _),gtp,tys)
            -> do (tysD,params,res) <- instFun g sig gtp tys
                  e <- env
                  let copies = [m == Unique && captured e arg | ((m,_),arg) <- zip ps args] ++ repeat False
@@ -299,7 +299,7 @@ isFunInfo (C.InfoExternal _) = True
 isFunInfo _                  = False
 
 instFun :: Name -> Sig -> Type -> [Type] -> E ([AType],[VType],VType)
-instFun g (SigFun tvs params res) gtp tys
+instFun g (SigFun tvs params _ res) gtp tys
   = do e <- env
        tys' <- instArgs gtp tys
        useA <- tr (elabFunType (envNT e) gtp)
@@ -493,14 +493,14 @@ elabNamed e x tp info tys
                  return (k . ki,w)
          else do sig <- globalSig x tp info
                  case sig of
-                   SigFun tvs ps r -> do (tysD,params,res) <- instFun x sig tp tys
-                                         let a = AFun [(Owned,p) | p <- params] res
-                                         f <- if any ((/= Owned) . fst) ps then Ptr a <$> etaOwned x tysD params res
-                                                                           else return (tapp (Ptr (forallA tvs (AFun ps r)) (Fun x)) tysD)
-                                         coerce (VPtr a) expect f
-                   SigVal _ _   -> do (tysD,t) <- instVal x sig tp tys
-                                      coerce t expect (Glob x tysD)
-                   SigCon _ _ _ -> failE ("constructor used as a variable: " ++ show x)
+                   SigFun tvs ps _ r -> do (tysD,params,res) <- instFun x sig tp tys
+                                           let a = AFun [(Owned,p) | p <- params] res
+                                           f <- if any ((/= Owned) . fst) ps then Ptr a <$> etaOwned x tysD params res
+                                                                             else return (tapp (Ptr (forallA tvs (AFun ps r)) (Fun x)) tysD)
+                                           coerce (VPtr a) expect f
+                   SigVal _ _     -> do (tysD,t) <- instVal x sig tp tys
+                                        coerce t expect (Glob x tysD)
+                   SigCon _ _ _   -> failE ("constructor used as a variable: " ++ show x)
 
 -- closures only have owned parameters ([fun]): wrap a function that borrows (or takes a unique argument)
 etaOwned :: Name -> [AType] -> [VType] -> VType -> E AVal

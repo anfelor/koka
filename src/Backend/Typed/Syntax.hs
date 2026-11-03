@@ -25,6 +25,7 @@
     Γ ⊢ v :q V       the unboxed value v has type V; an owned value consumes Γ
     Γ | J ⊢ e : W    the expression e has unboxed type W and consumes every owned variable of Γ
     Γ | J ⊢ʸ e : W   the same, where the result of e may be the dummy value of an effect yield
+    Γ | J ⊢ e :! W   the same, where the result of e is unique
     ⊢ def            a top-level definition is well-typed
 
     `^Γ` marks every variable of Γ as borrowed. J is passed unchanged to every subexpression in
@@ -35,6 +36,12 @@
     the bound expression of `[let-yield]`). Only `[yielded]` requires it. Without the mark, a
     position only excludes `[yielded]`: since the IR has no effects, a call bound by `[let]`
     may still return a dummy, which `Yields` ensures is not inspected (see `[let-yield]`).
+    The result mode of an expression (`: W` owned, `:! W` unique, as for values) follows J in
+    the same way: an expression in tail position has the mode of the expression around it (and
+    the rules write `: W` for both), and one where J is reset is owned, unless the rule writes
+    `:!` (the bound expression of `[let-unique]`). Only `[ret]` and `[call]` have their own
+    mode. A jump has either: the body of its join point is in tail position of the `join`, so it
+    has the same mode as the jump. A unique result may be used as an owned one.
 
     The tag of a box z, tag(z), is determined by its path (`Traversal.boxTag`): it is i if z is
     the binder of alternative i of a `[case-a]`, and 1 otherwise.
@@ -575,9 +582,9 @@ recResult (Rec t) = [t]
 -- return, calls, application and generalization produce V, and every other expression
 -- forwards a subexpression's result. Thus no rule introduces an A-typed expression.
 data VExpr
-  --   Γ ⊢ v : V
-  --  ──────────────────── [ret]
-  --   Γ ⊢ ret v : V
+  --   Γ ⊢ v :q V
+  --  ────────────────── [ret]
+  --   Γ ⊢ ret v :q V
   --
   -- Expressions only have unboxed types, as in the paper.
   = Ret VVal
@@ -586,9 +593,12 @@ data VExpr
   --  ─────────────────────────────────────────────────── [let]
   --   Γ₁, Γ₂ | J ⊢ let x : V = e₁ in e₂ : W
   --
-  --   Γ₁ ⊢ v :! V    Γ₂, x :! V | J ⊢ e : W
-  --  ─────────────────────────────────────────── [let-unique]
-  --   Γ₁, Γ₂ | J ⊢ let x : V = ret v in e : W
+  --   Γ₁, ^Γ₂ | ∅ ⊢ e₁ :! V    Γ₂, x :! V | J ⊢ e₂ : W
+  --  ─────────────────────────────────────────────────── [let-unique]
+  --   Γ₁, Γ₂ | J ⊢ let x : V = e₁ in e₂ : W
+  --
+  -- The binder is unique if the bound expression returns a unique value in every tail
+  -- position: a unique value (`[ret]`), or a call of a function with a unique result.
   | Let Path VType VExpr VExpr
 
   --   Γ₁, ^Γ₂ | ∅ ⊢ʸ e₁ : V    Γ₂, x : V | J ⊢ e₂ : W    Γ₂ | J ⊢ e₃ : W
@@ -622,11 +632,12 @@ data VExpr
   -- no other form can discharge without filling them. Code generation aborts.
   | Unreachable VType
 
-  --   f : ∀ā. (q̄ V̄) -> W ∈ Σ    Γᵢ ⊢ vᵢ :qᵢ Vᵢ[B̄/ā]
+  --   f : ∀ā. (q̄ V̄) -> q W ∈ Σ    Γᵢ ⊢ vᵢ :qᵢ Vᵢ[B̄/ā]
   --  ───────────────────────────────────────────────── [call]
-  --   Γ₁, ..., Γₙ ⊢ f[B̄](v₁, ..., vₙ) : W[B̄/ā]
+  --   Γ₁, ..., Γₙ ⊢ f[B̄](v₁, ..., vₙ) :q W[B̄/ā]
   --
-  -- Parameter modes come from the function's signature, including imported functions.
+  -- Parameter and result modes come from the function's signature, including imported
+  -- functions. A call returns a unique value only if the function's result is unique.
   | Call Name [AType] [VVal]
 
   --   Γ₀ ⊢ v : (V̄) -> W    Γᵢ ⊢ vᵢ : Vᵢ
@@ -873,7 +884,7 @@ data VExpr
   -- after it. Its body cannot jump to outer joins, and its parameters may have any mode: a
   -- borrowed parameter is lent anew by every jump. A captured variable must not be bound
   -- again in e₂. Its result type W is annotated, as the jumps in its body need it. The
-  -- yield mark of the context passes to its body. Recursive joins are introduced after
+  -- yield mark and the result mode of the context pass to its body. Recursive joins are introduced after
   -- Perceus, from the self tail calls of a function, and are closed until `JoinArgs` makes
   -- invariant borrowed parameters captures. (Not in the paper.)
   | Join Recursion Name [TVar] [(Path,Mode,VType)] VExpr VExpr
@@ -886,12 +897,15 @@ data VExpr
   | Jump Name [AType] [VVal]
   deriving (Eq,Show)
 
--- Definitions `⊢ def`, with `f : ∀ā. (q̄ V̄) -> W ∈ Σ` and `x : ∀ā. V ∈ Σ`
+-- Definitions `⊢ def`, with `f : ∀ā. (q̄ V̄) -> q W ∈ Σ` and `x : ∀ā. V ∈ Σ`
 data Def
-  --   x̄ :q̄ V̄ | ∅ ⊢ʸ e : W
+  --   x̄ :q̄ V̄ | ∅ ⊢ʸ e :q W
   --  ──────────────────────────────── [deffun]
-  --   ⊢ fun f⟨ā⟩(x̄ :q̄ V̄) : W = e
-  = DefFun{ defName :: Name, defParams :: [TVar], defArgs :: [(Path,Mode,VType)], defRes :: VType, defBody :: VExpr }
+  --   ⊢ fun f⟨ā⟩(x̄ :q̄ V̄) :q W = e
+  --
+  -- The result mode q is owned or unique. Elaboration only produces owned results (as Core
+  -- has no unique ones), and so do imported functions; closures always have owned results.
+  = DefFun{ defName :: Name, defParams :: [TVar], defArgs :: [(Path,Mode,VType)], defResMode :: Mode, defRes :: VType, defBody :: VExpr }
 
   --   ∅ | ∅ ⊢ʸ e : V
   --  ───────────────────────── [defval]
@@ -902,9 +916,9 @@ data Def
   deriving (Show)
 
 -- signatures Σ
-data Sig = SigFun [TVar] [(Mode,VType)] VType  -- f : ∀ā. (q̄ V̄) -> W
-         | SigVal [TVar] VType                 -- x : ∀ā. V
-         | SigCon [TVar] [VType] Name          -- C : ∀ā. V̄ -> T⟨ā⟩, a constructor of an open type T
+data Sig = SigFun [TVar] [(Mode,VType)] Mode VType  -- f : ∀ā. (q̄ V̄) -> q W
+         | SigVal [TVar] VType                      -- x : ∀ā. V
+         | SigCon [TVar] [VType] Name               -- C : ∀ā. V̄ -> T⟨ā⟩, a constructor of an open type T
          deriving (Show)
 
 type Sigs = M.Map Name Sig

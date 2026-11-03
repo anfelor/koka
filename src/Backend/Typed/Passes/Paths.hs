@@ -63,12 +63,12 @@ pathsDef def
 renDef :: Global -> Def -> R Def
 renDef global def
   = case def of
-      DefFun f tvs args res body
+      DefFun{ defArgs = args, defRes = res, defBody = body }
         -> do xs <- mapM (\(x,_,_) -> bindRoot x) args
               let ren = M.fromList (zip [x | (x,_,_) <- args] xs)
                   sub = described global ren
               body' <- renE global ren body
-              return (DefFun f tvs [(x',m,replaceVType sub t) | (x',(_,m,t)) <- zip xs args] (replaceVType sub res) body')
+              return def{ defArgs = [(x',m,replaceVType sub t) | (x',(_,m,t)) <- zip xs args], defRes = replaceVType sub res, defBody = body' }
       DefVal x tvs t body
         -> DefVal x tvs (replaceVType (described global M.empty) t) <$> renE global M.empty body
 

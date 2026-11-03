@@ -31,8 +31,15 @@ import Common.NamePrim( nameTpReuse )
 paramModes :: Env -> Name -> Int -> [Mode]
 paramModes env f n
   = case M.lookup f (envSigs env) of
-      Just (SigFun _ ps _) -> map fst ps ++ replicate (n - length ps) Owned
+      Just (SigFun _ ps _ _) -> map fst ps ++ replicate (n - length ps) Owned
       _ -> replicate n Owned
+
+-- the mode of the result of a call
+resultMode :: Env -> Name -> Mode
+resultMode env f
+  = case M.lookup f (envSigs env) of
+      Just (SigFun _ _ q _) -> q
+      _ -> Owned
 
 -- values of these types need no references, also through named types
 trivialTy :: Env -> Ty -> Bool

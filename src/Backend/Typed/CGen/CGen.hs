@@ -1124,7 +1124,7 @@ fixedWidthLit f i
 callSig :: Ctx -> Name -> [AType] -> G ([VType],VType)
 callSig cx f tys
   = case M.lookup f (envSigs (cxEnv cx)) of
-      Just (SigFun tvs ps r) -> return (map (inst tvs tys . snd) ps, inst tvs tys r)
+      Just (SigFun tvs ps _ r) -> return (map (inst tvs tys . snd) ps, inst tvs tys r)
       _ -> failG ("unknown function " ++ show f)
 
 genExtern :: Ctx -> Dest -> Name -> [AType] -> [VVal] -> External -> G [Doc]
@@ -1152,7 +1152,7 @@ genExtern cx dest f tys vs ext
 genDef :: Env -> CEnv -> Def -> G (Doc,Doc,Doc)
 genDef env cenv def
   = case def of
-      DefFun f _ args res body
+      DefFun f _ args _ res body
         -> do pcts <- mapM (\(_,_,t) -> ctype t) args
               rct  <- ctype res
               let g  = M.fromList [(x,V t) | (x,_,t) <- args]
@@ -1174,7 +1174,7 @@ genDef env cenv def
 genWrapper :: Env -> CEnv -> Name -> G (Doc,Doc)
 genWrapper env cenv f
   = case M.lookup f (envSigs env) of
-      Just (SigFun tvs ps r)
+      Just (SigFun tvs ps _ r)
         -> do pcts <- mapM (ctype . snd) ps
               rct  <- ctype r
               let xs  = [root (newHiddenName ("p" ++ show i)) | i <- [0..length ps - 1]]
