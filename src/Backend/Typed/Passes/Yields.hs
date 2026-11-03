@@ -48,7 +48,6 @@ import Data.Monoid( All(..) )
 import Common.Name
 import Common.NamePrim( nameYielding, nameYieldExtend, nameCoreHnd )
 import Backend.Typed.Syntax
-import Backend.Typed.Common
 import Backend.Typed.Traversal( descendE, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut, fvE, lamsV, mapA, mapV, within )
 import Backend.Typed.Passes.Common( NameSupply, altBodies, cloneE, freshFor, freshPathFrom, replaceA, replaceE, replaceV )
 import Backend.Typed.Types( Types(..), inst )

@@ -28,7 +28,6 @@ import Data.List( nub, (\\) )
 import Data.Maybe( fromMaybe )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Common
 import Backend.Typed.Types( dupType )
 import Backend.Typed.Traversal( boxTag, child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut )
 import Backend.Typed.Passes.Common( trivialTy, defGamma, NameSupply, dropValue, freshFor, freshPathFrom, perBody, reuseParts, scopeOf )

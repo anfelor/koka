@@ -26,7 +26,7 @@ import qualified Core.CoreVar as CV
 import Core.Pretty()
 import qualified Type.TypeVar as TV
 import Backend.Typed.Syntax
-import Backend.Typed.Common
+import Backend.Typed.Build( K, compose, prodVal, padFields )
 import Backend.Typed.Traversal( child )
 import Backend.Typed.Elab.Types( typeDefs )
 import Backend.Typed.Elab.TypeInfo
@@ -790,7 +790,7 @@ matches con br
       C.Branch [C.PatCon pc _ _ _ _ _ _ _] _ -> getName pc == conInfoName con
       _ -> False
 
--- The binder is the path to the alternative, which names its constructor (`Common.injAStep`).
+-- The binder is the path to the alternative, which names its constructor (`Traversal.injAStep`).
 boxedAlt :: [AType] -> [C.Branch] -> Path -> (Int,ConInfo) -> E (Int,Path,VExpr)
 boxedAlt vargs brs z (i,con)
   = do let y = child z (SInjA i (Con (conInfoName con)))
@@ -805,7 +805,7 @@ elabValueCase info vargs v brs
 
 -- an alternative with the position of its branch in the source, to keep the order of the tests.
 -- The binder of a variable scrutinee is the path to the alternative, which names its constructor
--- (`Common.injVStep`).
+-- (`Traversal.injVStep`).
 valueAlt :: [AType] -> [C.Branch] -> VVal -> (Int,ConInfo) -> E (Int,(Int,Path,VExpr))
 valueAlt vargs brs v (i,con)
   = do y <- case v of
@@ -824,7 +824,7 @@ elabOpenCase info vargs v brs
        return (Deref Owned v p (CaseOpen Owned p alts def))
 
 -- one binder for each field of the scrutinee `d`: its path, which names the field
--- (`Common.openSteps`)
+-- (`Traversal.openSteps`)
 openAlt :: DataInfo -> [AType] -> Path -> (ConInfo,C.Branch) -> E (Name,[Path],VExpr)
 openAlt info vargs d (con,br@(C.Branch [pat] _))
   = do recordOpenSig info (conInfoName con) (conInfoType con)
@@ -899,7 +899,7 @@ subBinder _              = Nothing
 -- for its getter in the expression that actually uses the field.
 -- The fields are a product (`[proj]`), unless there is only one. Getters of different fields
 -- project the same product, which `Paths` merges where it is in scope. The binder of a field
--- of a variable is its path, which names the field (`Common.projStep`).
+-- of a variable is its path, which names the field (`Traversal.projStep`).
 destructure :: [(Maybe TName,Field,VType)] -> (K,VVal) -> E [(Name,(K,VVal))]
 destructure [(x,_,s)] getter = bindField x s getter
 destructure fields (k,p)

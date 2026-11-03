@@ -36,7 +36,7 @@ import qualified Data.Set as S
 import Data.Maybe( fromMaybe )
 import Data.Functor.Const( Const(..) )
 import Backend.Typed.Syntax
-import Backend.Typed.Common
+import Backend.Typed.Sources( Sources, sources, sameBits )
 import Backend.Typed.Traversal( descendA, descendAll, descendV, mapV )
 import Backend.Typed.Passes.Common( mapAll, defGamma, descendTyped, defScope, perBody, project, substEIn, substVType, valueAt )
 import Backend.Typed.Query( Env, Gamma, envOf, inferVar, lamGamma
