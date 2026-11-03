@@ -210,9 +210,9 @@ prettyExpr expr
       Free r e -> text "free" <+> pv r <.> semi <-> prettyExpr e
       IsUnique x e1 e2 -> ifThen (text "if-unique" <+> pv x) e1 e2
       IfFull r e1 e2 -> ifThen (text "if-full" <+> pv r) e1 e2
-      UnboxRu v r e -> letIn empty (text "@" <+> pv r) (pv v) e
+      UnboxRu z e -> letIn empty (text "@" <+> pv (child z SCredit)) (pv z) e
       CopyRu z r e -> letIn empty (text "@copy" <+> pv r) (pv z) e
-      Lock z c e -> letIn empty (text "lock" <+> pv c) (pv z) e
+      Lock z e -> letIn empty (text "lock" <+> pv (child z SCredit)) (pv z) e
       Join NonRec j tvs ps e1 e2 -> text "join" <+> nm j <.> tyParams tvs <.> params ps <+> text "="
                          <-> indent 2 (prettyExpr e1) <-> text "in" <+> align (prettyExpr e2)
       Join (Rec t) j tvs ps e1 e2 -> text "join rec" <+> nm j <.> tyParams tvs <.> params ps <+> colon <+> prettyV t <+> text "="

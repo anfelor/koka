@@ -259,7 +259,7 @@ data Step = SField Int Field       -- [proj]
           | SInjA Int Con | SRest  -- [case-a]: an alternative or the default
           | SLo | SHi              -- [split-a]
           | SWhnf | SDelay         -- [if-whnf]
-          | SContents | SCredit    -- [bunbox]: the contents, and the rest of the block (not a binder)
+          | SContents | SCredit    -- [bunbox]: the contents; [unbox-ru], [lock]: the rest of the block
           | SOpen Name             -- [case-open]
           deriving (Eq,Ord)
 
@@ -803,18 +803,19 @@ data VExpr
   -- and empty in the second, where nothing is left to consume.
   | IfFull Path VExpr VExpr
 
-  --   Γ, r : ◆n[tag(z); z.contents : V] ⊢ e : W    |V| = n
+  --   Γ, z.contents :^ V, z.credit : ◆n[tag(z); z.contents : V] ⊢ e : W    |V| = n
   --  ──────────────────────────────────────────────────────────────── [unbox-ru]
-  --   Γ, z :! Box V ⊢ let @ r = z in e : W                  (z.contents :^ V ∈ Γ)
+  --   Γ, z :! Box V, z.contents :^ V ⊢ let @ z.credit = z in e : W
   --
   -- A unique `Box V` whose contents were read (`[bunbox]`) splits into its contents and its
   -- block, the inverse of `[box-at]`: the contents are taken out of the block without
-  -- reference counting, and the block becomes the credit `r`, a new root. The contents are
-  -- the part of `z` that is left (the credit consumes the block `z.credit`); they keep their
-  -- names, as code generation loaded them at `[bunbox]`. The description of `r` names them
-  -- too, as the block still holds them until it is written. With `[if-unique]` it makes `drop-reuse` of a box derivable. The block of `z`
-  -- has tag tag(z).
-  | UnboxRu Path Path VExpr
+  -- reference counting, and the block becomes the credit `z.credit`, the part of `z` beside
+  -- its contents. `z` itself is no longer in scope, only its two parts, which the body
+  -- consumes. The contents keep their names, as code generation loaded them at `[bunbox]`.
+  -- The description of the credit names them too, as the block still holds them until it
+  -- is written, and survives where the credit is passed to a join parameter. With
+  -- `[if-unique]` it makes `drop-reuse` of a box derivable. The block of `z` has tag tag(z).
+  | UnboxRu Path VExpr
 
   --   Γ, z :^ Box V, r : ◆n[tag(z); z.contents : V] ⊢ e : W    |V| = n
   --  ─────────────────────────────────────────────────────────────────── [copy-ru]
@@ -829,17 +830,17 @@ data VExpr
   -- (`FillCredits`).
   | CopyRu Path Path VExpr
 
-  --   Γ, c : cell_|V|⟨τ⟩ | J ⊢ e : W
+  --   Γ, z.contents :^ V, z.credit : cell_|V|⟨τ⟩ | J ⊢ e : W
   --  ──────────────────────────────────────────────────────── [lock]
-  --   Γ, z : Box V | J ⊢ let lock c = z in e : W
-  --                 (z = y.roll.delay.p.injⱼ with y : τ, p ∈ {lo,hi}*; z.contents :^ V ∈ Γ)
+  --   Γ, z : Box V, z.contents :^ V | J ⊢ let lock z.credit = z in e : W
+  --                 (z = y.roll.delay.p.injⱼ with y : τ, p ∈ {lo,hi}*)
   --
   -- The counterpart of `[unbox-ru]` for an owned, possibly shared, thunk (the `delay` step shows
-  -- that z is one): its contents are taken
-  -- out of the block without reference counting, as there, and its block becomes the cell `c`, a new root, which must be filled by `[memoize]` (or freed if it
-  -- turns out to be unique, `[if-unique-cell]`). Consuming `z` consumes the pointer it was
-  -- matched from (see "Structural rules").
-  | Lock Path Path VExpr
+  -- that z is one): its contents are taken out of the block without reference counting, as
+  -- there, and its block becomes the cell `z.credit`, which must be filled by `[memoize]` (or
+  -- freed if it turns out to be unique, `[if-unique-cell]`). Consuming both parts consumes
+  -- `z`, and so the pointer it was matched from (see "Structural rules").
+  | Lock Path VExpr
 
   --   Γ_c, x̄ :q̄ V̄ | J ⊢ e₁ : W    Γ, Γ_c | J, j : Γ_c; ∀ā. (q̄ V̄) -> W ⊢ e₂ : W    ā ∉ ftv(Γ_c, W)
   --  ────────────────────────────────────────────────────────────────────────────────── [join]

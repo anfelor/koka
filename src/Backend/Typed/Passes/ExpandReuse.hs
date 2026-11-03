@@ -56,7 +56,7 @@ import Control.Monad.State
 import Data.Functor.Identity( Identity(..) )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Traversal( descendA, descendE, descendV, holes, lamsV, mapA, mapV )
+import Backend.Typed.Traversal( child, descendA, descendE, descendV, holes, lamsV, mapA, mapV )
 import Backend.Typed.Passes.Common( NameSupply, cloneE, freshFor, freshNameFrom, replaceA, replaceV )
 
 -- the credits in scope that are full
@@ -110,7 +110,7 @@ exE full expr
       Join rc j tvs ps e1 e2 -> do e1' <- exE (S.union full (fullOf [(x,t) | (x,_,t) <- ps])) e1
                                    ps' <- mapM (\(x,m,t) -> (,,) x m <$> untagged x t) ps
                                    Join rc j tvs ps' e1' <$> exE full e2
-      UnboxRu z r e -> UnboxRu z r <$> exE (S.insert r full) e
+      UnboxRu z e -> UnboxRu z <$> exE (S.insert (child z SCredit) full) e
       CopyRu z r e -> CopyRu z r <$> exE (S.insert r full) e
       IfFull r e1 e2 -> IfFull r <$> exE (S.insert r full) e1 <*> exE full e2
       CaseV{} -> alternatives

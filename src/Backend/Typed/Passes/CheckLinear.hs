@@ -36,10 +36,10 @@
   a reference, and so does `z.left` after a `let` that consumes the other parts of `z`.
 
   A unique variable is owned and holds the only reference to its block, so `UnboxRu` may
-  take its contents and keep its block as a credit, a new root that consumes the block
-  `z.credit` of `z` (the part of `z` beside its contents), which leaves the contents. `CopyRu`
-  only reads the block of `z` and binds a copy of it as a new root. `Lock` is
-  checked in the same way, but consumes an owned box, and its new root is a cell. A cell is
+  take its contents and keep its block as a credit: it splits `z` into its contents and its
+  block `z.credit`, which the body consumes as the parts of `z` (`z` itself is out of
+  scope). `CopyRu` only reads the block of `z` and binds a copy of it as a new root. `Lock`
+  is checked like `UnboxRu`, but needs an owned box, and its block is a cell. A cell is
   linear: it is owned and not trivial, so it must be consumed (as `Check` rejects a dup or a
   drop of it, by `memoize`, a uniqueness test or a call or jump), and it must not be live
   across a `[let-yield]`, whose yielding branch could not consume it. An owned variable is unique in the
@@ -486,24 +486,22 @@ checkE env g js expr
       IfFull r e1 e2 -> do u1 <- checkE env g js e1
                            u2 <- before (consume env g r) (checkE env g js e2)
                            before (readVar env g r) (branches [u1, u2])
-      -- a unique use of `z` that consumes its block `z.credit` (leaving its contents) and binds
-      -- the block as a new root; the contents are taken out of the block
-      UnboxRu z r e
-        -> do g' <- liftE (unboxRuGamma g z r)
+      -- a unique use of `z` that splits it into its contents and its block `z.credit`, which
+      -- the body consumes as parts of `z`
+      UnboxRu z e
+        -> do g' <- liftE (unboxRuGamma g z)
               u <- uniqueName env g z
-              c <- keyOf (child z SCredit)
-              before (return u{ uNet = M.singleton c 1 }) (roots env Owned [(r,g' M.! r)] (checkE env g' js e))
+              before (return u{ uNet = M.empty }) (checkE env g' js e)
       -- a copy of the block of `z`, which only reads the block `z.credit`, as a new root
       CopyRu z r e
         -> do g' <- liftE (copyRuGamma g z r)
               c <- keyOf (child z SCredit)
               before (return noUse{ uPeak = M.singleton c 1 }) (roots env Owned [(r,g' M.! r)] (checkE env g' js e))
       -- the same for an owned box, whose block becomes a cell
-      Lock z c e
-        -> do g' <- liftE (lockGamma g z c)
+      Lock z e
+        -> do g' <- liftE (lockGamma g z)
               u <- consume env g z
-              k <- keyOf (child z SCredit)
-              before (return u{ uNet = M.singleton k 1 }) (roots env Owned [(c,g' M.! c)] (checkE env g' js e))
+              before (return u{ uNet = M.empty }) (checkE env g' js e)
       CaseLit v alts def -> before (borrowedV env g v) (branches =<< mapM (checkE env g js) (def : map snd alts))
       _ -> fail "unexpected destructuring form"
   where

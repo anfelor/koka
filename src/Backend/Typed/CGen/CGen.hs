@@ -33,7 +33,7 @@ import Kind.Kind( kindStar )
 import Kind.Newtypes
 import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
-import Backend.Typed.Traversal( TestSide(..), boxTag, canonical, failingTo, fvA, fvE, holes, testSides, within )
+import Backend.Typed.Traversal( child, TestSide(..), boxTag, canonical, failingTo, fvA, fvE, holes, testSides, within )
 import Backend.Typed.Types( Types(..), inst, isShape )
 import Backend.Typed.Env( Env(..), envOf, unrollT, openFields, boxContents, reuseSize, M, get, gets, liftE, modify, put, runM, state )
 import Backend.Typed.Query( Gamma, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
@@ -537,11 +537,11 @@ genRead cx dest x t ue e
 
 -- `[unbox-ru]` of `z` takes its block as a credit, which may then be freed or written. Its
 -- contents were already loaded at `[bunbox]`.
-genUnboxRu :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
-genUnboxRu cx dest z r e
-  = do g' <- liftC (unboxRuGamma (cxGamma cx) z r)
+genUnboxRu :: Ctx -> Dest -> Path -> VExpr -> G [Doc]
+genUnboxRu cx dest z e
+  = do g' <- liftC (unboxRuGamma (cxGamma cx) z)
        s <- genE cx{ cxGamma = g' } dest e
-       return (declare "kk_reuse_t" r ("kt_box_as_ptr(" <.> localName z <.> ",_ctx)") : s)
+       return (declare "kk_reuse_t" (child z SCredit) ("kt_box_as_ptr(" <.> localName z <.> ",_ctx)") : s)
 
 -- `[copy-ru]` of `z` allocates a block with the header of `z` and copies its payload. The
 -- header is not copied: the reference count of `z` may change concurrently if `z` is
@@ -563,11 +563,11 @@ genCopyRu cx dest z r e
     copyPayload _ x old = "memcpy(&" <.> x <.> "->p,&" <.> old <.> "->p,sizeof(" <.> x <.> "->p));"
 
 -- `[lock]` of `z` takes its block as a cell, the pointer to the block, which is then written.
-genLock :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
-genLock cx dest z c e
-  = do g' <- liftC (lockGamma (cxGamma cx) z c)
+genLock :: Ctx -> Dest -> Path -> VExpr -> G [Doc]
+genLock cx dest z e
+  = do g' <- liftC (lockGamma (cxGamma cx) z)
        s <- genE cx{ cxGamma = g' } dest e
-       return (declare "kk_box_t" c (localName z) : s)
+       return (declare "kk_box_t" (child z SCredit) (localName z) : s)
 
 -- Koka's `box` of a scalar
 genScalar :: Ctx -> VVal -> G Doc
@@ -819,9 +819,9 @@ genE cx dest expr
               s1 <- genE (bindVar cx r full) dest e1
               s2 <- genE cx dest e2
               return ["if kk_likely(" <.> localName r <+> "!= kk_reuse_null)" <+> block s1 <+> "else" <+> block s2]
-      UnboxRu v r e -> genUnboxRu cx dest v r e
+      UnboxRu v e -> genUnboxRu cx dest v e
       CopyRu z r e -> genCopyRu cx dest z r e
-      Lock z c e -> genLock cx dest z c e
+      Lock z e -> genLock cx dest z e
       Gen _ e -> genE cx dest e
       -- the body of a recursive join point is a loop, which only sees the join point itself
       Join rc j _ ps e1 e2

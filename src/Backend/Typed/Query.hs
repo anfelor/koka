@@ -145,12 +145,12 @@ inferExpr env g js expr
                            case t of
                              VReuse _ n p -> branches env [inferE env (M.insert r (V (VReuse Full n p)) g) js e1, inferE env (M.delete r g) js e2]
                              _ -> Left ("test of a non-credit: " ++ ppr t)
-      UnboxRu v r e -> do g' <- unboxRuGamma g v r
-                          inferE env g' js e
+      UnboxRu v e -> do g' <- unboxRuGamma g v
+                        inferE env g' js e
       CopyRu z r e -> do g' <- copyRuGamma g z r
                          inferE env g' js e
-      Lock z c e -> do g' <- lockGamma g z c
-                       inferE env g' js e
+      Lock z e -> do g' <- lockGamma g z
+                     inferE env g' js e
       Join NonRec j tvs ps e1 e2
                           -> do let xs = [x | (x,_,_) <- ps]
                                 unless (S.disjoint (fvE e1 `S.difference` S.fromList xs) (S.fromList (bindersE e2)))
@@ -171,7 +171,7 @@ inferExpr env g js expr
                                 let self = M.insert j (S.empty,tvs,[p | (_,_,p) <- ps],t)
                                 checkE env (M.fromList [(x,V p) | (x,_,p) <- ps]) js{ jsPoints = self M.empty } e1 t
                                 t <$ checkE env g js{ jsPoints = self (jsPoints js) } e2 t
-      -- the captured variables must still be in scope (`[unbox-ru]` renames the contents of a box)
+      -- the captured variables must still be in scope (`[unbox-ru]` and `[lock]` split a box into its parts)
       Jump j ts vs -> case M.lookup j (jsPoints js) of
                      Just (caps,tvs,ps,t) -> do forM_ (S.toList caps) $ \x ->
                                                   unless (M.member x g) (Left ("jump to " ++ show j ++ ", which captures " ++ show x ++ ", out of its scope"))
@@ -275,17 +275,17 @@ lamGamma :: [(Path,Mode,VType)] -> Gamma -> Gamma
 lamGamma ps g = bindAll [(x,V t) | (x,_,t) <- ps] (M.delete nameHole g)
 
 -- The context of the body of `[unbox-ru]`: the contents `z.contents` of the box must have
--- been read, and the binder is the credit of the block, a new root, whose tag follows from the
--- path of the box.
-unboxRuGamma :: Gamma -> Path -> Path -> Q Gamma
-unboxRuGamma g z r
+-- been read, and the box `z` splits into them and the credit `z.credit` of its block, whose
+-- tag follows from the path of the box.
+unboxRuGamma :: Gamma -> Path -> Q Gamma
+unboxRuGamma g z
   = do s <- inferAVar g z >>= boxContents
        n <- reuseSize s
        let x = child z SContents
        case M.lookup x g of
          Just (V s') | alphaEq s s' -> return ()
          _ -> Left ("taking the block of " ++ show z ++ " whose contents are not read")
-       return (M.insert r (V (VReuse Full n (Just (Contents (Just (boxTag z)) (Var x) s)))) g)
+       return (M.insert (child z SCredit) (V (VReuse Full n (Just (Contents (Just (boxTag z)) (Var x) s)))) (M.delete z g))
 
 -- The context of the body of `[copy-ru]`: the binder is a credit with the description of the
 -- block of `z`, a new root.
@@ -296,10 +296,10 @@ copyRuGamma g z r
        return (M.insert r (V (VReuse Full n (Just (Contents (Just (boxTag z)) (Var (child z SContents)) s)))) g)
 
 -- The context of the body of `[lock]`: as for `[unbox-ru]`, the contents `z.contents` of the
--- box must have been read, and the binder is the cell of the
--- block, a new root. The box is a thunk of a value `y` of a lazy type, also after `[split-a]`.
-lockGamma :: Gamma -> Path -> Path -> Q Gamma
-lockGamma g z c
+-- box must have been read, and the box splits into them and the cell `z.credit` of its
+-- block. The box is a thunk of a value `y` of a lazy type, also after `[split-a]`.
+lockGamma :: Gamma -> Path -> Q Gamma
+lockGamma g z
   = do s <- inferAVar g z >>= boxContents
        t <- case z of
               Path r ss | (SInjA _ _ : splits) <- reverse ss, (SDelay : SRoll : rest) <- dropWhile (`elem` [SLo,SHi]) splits
@@ -309,7 +309,7 @@ lockGamma g z c
        case M.lookup (child z SContents) g of
          Just (V s') | alphaEq s s' -> return ()
          _ -> Left ("locking " ++ show z ++ " whose contents are not read")
-       return (M.insert c (V (VCell n t)) g)
+       return (M.insert (child z SCredit) (V (VCell n t)) (M.delete z g))
 
 -- The context of the first branch of `[if-unique]`: a unique cell is a full credit.
 uniqueGamma :: Gamma -> Path -> Gamma

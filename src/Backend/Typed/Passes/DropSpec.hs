@@ -106,18 +106,18 @@ specialize parts z s n e
   = do (_,g) <- ask
        j <- state (freshNameFrom "dsj")
        r <- fresh "r"
-       r' <- fresh "c"
        let p = child z SContents
+           r' = child z SCredit
            payload = Just (Contents (Just (boxTag z)) (Var p) s)
            t = VReuse MaybeEmpty n payload
            moved = [x | (x,Moved) <- parts]
            unders = [(q,b) | (_,Under q b) <- parts]
            covered = [Dup x | (x,Covered) <- parts]
            dups b = [Dup x | (x,Under _ b') <- parts, b' == b]
-       g' <- liftE (unboxRuGamma g z r')
+       g' <- liftE (unboxRuGamma g z)
        taken <- withGamma g' (dropExcept (moved ++ nub (map fst unders)) p s
                   (compose covered (compose [compose (dups b) . Drop b | b <- nub (map snd unders)] (Jump j [] [Var r']))))
-       unique <- dsE (UnboxRu z r' taken)
+       unique <- dsE (UnboxRu z taken)
        let shared = compose (map (Dup . fst) parts) (Drop z (Jump j [] [NoReuse n payload]))
        body <- bind [(r,V t)] (dsE (Free r e))
        return (Join NonRec j [] [(r,Owned,t)] body (IsUnique z unique shared))

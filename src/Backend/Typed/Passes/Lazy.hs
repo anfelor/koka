@@ -113,8 +113,7 @@ cellE cs expr
                  let lockAlt (i,b,e)
                        | i /= ind, Just (ABox w) <- lookup i thunks
                        = do n <- liftE (reuseSize w)
-                            c <- fresh "cell"
-                            (,,) i b <$> lock (x,c,n,a) b e
+                            (,,) i b <$> lock (x,n,a) b e
                        | otherwise = (,,) i b <$> cellE cs e
                  e1' <- cellE cs e1
                  alts' <- mapM lockAlt alts
@@ -161,14 +160,15 @@ cellE cs expr
     operands e = getConst (descendE (Const . S.singleton) (Const . fvV) (\_ _ -> Const S.empty) e)
 
 -- Lock the box `b` of a lazy alternative of the lazy value `x` in `e`, whose uses of `x` become
--- uses of the cell `c`. The box is a part of `x`, so only `x` itself is renamed.
-lock :: (Path,Path,Int,AType) -> Path -> VExpr -> L VExpr
-lock (x,c,n,a) b e
-  = do let body = case e of
+-- uses of the cell `b.credit`. The box is a part of `x`, so only `x` itself is renamed.
+lock :: (Path,Int,AType) -> Path -> VExpr -> L VExpr
+lock (x,n,a) b e
+  = do let c = child b SCredit
+           body = case e of
                     Unbox _ b' _ e' | b' == b -> e'
                     _ -> e
        body' <- cellE (M.singleton c (n,a)) (substE (\y -> if y == x then Just (Var c) else Nothing) body)
-       return (Unbox Borrowed b (child b SContents) (Lock b c body'))
+       return (Unbox Borrowed b (child b SContents) (Lock b body'))
 
 -- the lambdas in a value have no cells
 cellV :: VVal -> L VVal

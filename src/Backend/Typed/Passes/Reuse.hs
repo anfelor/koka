@@ -180,18 +180,18 @@ ruE expr
       IfFull r e1 e2
         -> do es <- branches [([],e1),([],e2)]
               return (IfFull r (es !! 0) (es !! 1))
-      UnboxRu v r e
+      UnboxRu v e
         -> do g <- asks reGamma
-              g' <- liftE (unboxRuGamma g v r)
-              UnboxRu v r <$> withGamma g' (ruE e)
+              g' <- liftE (unboxRuGamma g v)
+              UnboxRu v <$> withGamma g' (ruE e)
       CopyRu z r e
         -> do g <- asks reGamma
               g' <- liftE (copyRuGamma g z r)
               CopyRu z r <$> withGamma g' (ruE e)
-      Lock z c e
+      Lock z e
         -> do re <- ask
-              g' <- liftE (lockGamma (reGamma re) z c)
-              Lock z c <$> withGamma g' (ruE e)
+              g' <- liftE (lockGamma (reGamma re) z)
+              Lock z <$> withGamma g' (ruE e)
       Ret _ -> plain
       Yielded _ -> plain
       Unreachable _ -> plain
@@ -228,8 +228,7 @@ offer r n use unusedOp e
 -- the paper's `[dropru]`, derived from `[if-unique]` and `[unbox-ru]`
 dropReuse :: Path -> Path -> Int -> VExpr -> R VExpr
 dropReuse x r n e
-  = do r' <- fresh
-       g <- asks reGamma
+  = do g <- asks reGamma
        env <- asks reEnv
        s <- liftE (inferAVar g x >>= boxContents)
        let y = child x SContents
@@ -237,8 +236,8 @@ dropReuse x r n e
            desc = Just (Contents (Just (boxTag x)) (Var y) s)
            -- the contents are read once
            readY = if M.member y g then id else Unbox Borrowed x y
-       body <- dropValue (trivialTy env) fresh (scopeOf (M.keys g)) y (V s) (Ret (Var r'))
-       return (readY (Let r (VReuse MaybeEmpty n desc) (IsUnique x (UnboxRu x r' body)
+       body <- dropValue (trivialTy env) fresh (scopeOf (M.keys g)) y (V s) (Ret (Var (child x SCredit)))
+       return (readY (Let r (VReuse MaybeEmpty n desc) (IsUnique x (UnboxRu x body)
                                                (Drop x (Ret (NoReuse n desc))))
                         e))
 
