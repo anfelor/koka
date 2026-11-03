@@ -193,10 +193,6 @@ canonical (Path x ss) = Path x (reverse (dropWhile (not . hasSibling) (reverse s
                      SField _ _ -> True
                      _ -> isJust (sibling s)
 
--- the variables on the path to a variable, from its root
-prefixes :: Path -> [Path]
-prefixes (Path x ss) = [Path x (take k ss) | k <- [0 .. length ss - 1]]
-
 -- `x` is `y` or one of its parts
 within :: Path -> Path -> Bool
 within (Path x ss) (Path y ts) = x == y && ts `isPrefixOf` ss
@@ -372,77 +368,6 @@ destructVOf expr
       Lock{} -> Nothing
       Join{} -> Nothing
       Jump{} -> Nothing
-
--- reading the contents of a box never moves them
-isRead :: VExpr -> Bool
-isRead expr
-  = case expr of
-      SplitA{}    -> False
-      Unbox{}     -> True
-      Unscalar{}  -> False
-      CaseOpen{}  -> True
-      Proj{}      -> False
-      CaseV{}     -> False
-      CaseA{}     -> False
-      Deref{}     -> False
-      Unroll{}    -> False
-      Unpack{}    -> False
-      Ret{}       -> False
-      Let{}       -> False
-      LetYield{}  -> False
-      Yielded{}   -> False
-      Unreachable{} -> False
-      Call{}      -> False
-      App{}       -> False
-      CaseLit{}   -> False
-      Gen{}       -> False
-      Dup{}       -> False
-      Drop{}      -> False
-      Free{}      -> False
-      IsUnique{}  -> False
-      IfWhnf{}    -> False
-      IfFull{}    -> False
-      UnboxRu{}   -> False
-      CopyRu{}    -> False
-      Lock{}      -> False
-      Join{}      -> False
-      Jump{}      -> False
-
--- the binders of these destructuring forms are the scrutinee's pointer (the scrutinee itself
--- for `[unpack]`), so they may be unique
-keepsPointer :: VExpr -> Bool
-keepsPointer expr
-  = case expr of
-      SplitA{}    -> True
-      IfWhnf{}    -> True
-      CaseA{}     -> True
-      Deref{}     -> True
-      Unroll{}    -> True
-      Unpack{}    -> True
-      Proj{}      -> False
-      CaseV{}     -> False
-      Unbox{}     -> False
-      Unscalar{}  -> False
-      CaseOpen{}  -> False
-      Ret{}       -> False
-      Let{}       -> False
-      LetYield{}  -> False
-      Yielded{}   -> False
-      Unreachable{} -> False
-      Call{}      -> False
-      App{}       -> False
-      CaseLit{}   -> False
-      Gen{}       -> False
-      Dup{}       -> False
-      Drop{}      -> False
-      Free{}      -> False
-      IsUnique{}  -> False
-      IfFull{}    -> False
-      UnboxRu{}   -> False
-      CopyRu{}    -> False
-      Lock{}      -> False
-      Join{}      -> False
-      Jump{}      -> False
 
 -- An alternative of a test with two alternatives (`[case]`, `[case-a]` or `[split-a]`), taken
 -- against the other one: whether it is the first, both alternatives, and the test with new

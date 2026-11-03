@@ -9,13 +9,13 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents, collapse
                           , unrollMu, isPtr, forallA, prodV, prodFields
-                          , dupType, isTrivialWith, isShape, containsLinear
+                          , dupType, isShape, containsLinear
                           , applyA, vtInt, vtString, vtChar, vtFloat
                           ) where
 
 import Data.Functor.Identity( Identity(..) )
 import qualified Data.Map as M
-import Common.NamePrim( nameTpInt, nameTpString, nameTpReuse )
+import Common.NamePrim( nameTpInt, nameTpString )
 import Backend.Typed.Syntax
 
 type Sub = M.Map TVar AType
@@ -288,38 +288,6 @@ dupType t
       V (VCell _ _) -> Left "dup of a cell"
       V _ -> Right t
       A _ -> Left "dup of a boxed value"
-
--- values of these types need no reference counting, where `unroll` gives the body of a
--- named type if it is known (a type with a single constructor without fields, for example)
-isTrivialWith :: (AType -> Maybe AType) -> Ty -> Bool
-isTrivialWith unroll t
-  = case t of
-      V v -> trivialV v
-      A a -> trivialA a
-  where
-    trivialV v = case v of
-                   VRaw _       -> True
-                   VUnit        -> True
-                   VProd fs     -> all (trivialV . snd) fs
-                   VSum ts      -> all (trivialV . snd) ts
-                   VExists _ b  -> trivialV b
-                   VPtr a       -> trivialA a
-                   VReuse _ _ _   -> False
-                   VCtx _ _ _   -> False
-                   VCell _ _    -> False
-    trivialA a = case a of
-                   AUnit     -> True
-                   ASum ts   -> all (trivialA . snd) ts
-                   ACon n _  -> n == nameTpReuse || maybe False trivialA (unroll a)
-                   ALazy l b -> trivialA l && trivialA b
-                   AMu _ _ _ _ -> maybe False trivialA (unroll a)
-                   ABox _    -> False
-                   AScalar _ -> False
-                   AFun _ _  -> False
-                   AForall _ _ -> False
-                   AVar _    -> False
-                   AApp _ _  -> False
-                   ALam _ _  -> False
 
 -- Boxed sum alternatives must have a tag determined by their construction: sums are flat and
 -- their tags are increasing.

@@ -64,8 +64,8 @@ import Data.Maybe( isJust, isNothing, listToMaybe )
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Build( K, compose )
-import Backend.Typed.Traversal( Destruct(..), child, descendA, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut, fieldsAt, fvA, fvE, fvV, isRead, prefixes, scrutVar, stepsFrom, takesContents, within )
-import Backend.Typed.Passes.Common( paramModes, trivialTy, NameSupply, derefOf, dropValue, freshFor, perDef, freshPathFrom, nameParts, partAt, projAt, projectAll, renameE, renamePrefix, scopeOf )
+import Backend.Typed.Traversal( Destruct(..), child, descendA, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut, fieldsAt, fvA, fvE, fvV, scrutVar, stepsFrom, takesContents, within )
+import Backend.Typed.Passes.Common( isRead, paramModes, prefixes, trivialTy, NameSupply, derefOf, dropValue, freshFor, perDef, freshPathFrom, nameParts, partAt, projAt, projectAll, renameE, renamePrefix, scopeOf )
 import Backend.Typed.Env( Env(..), envOf, M, evalM, get, gets, lift, liftE, put, state, StateT, runStateT )
 import Backend.Typed.Query( Gamma, bindAll, inferV, altTypes, lockGamma, uniqueGamma )
 import Backend.Typed.Types( dupType, inst, isPtr )
