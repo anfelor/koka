@@ -35,7 +35,6 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
 import Backend.Typed.Syntax
-import Backend.Typed.Common
 import Backend.Typed.Traversal( descendA, descendV, fvE, fvV, jumpArgs, stepsFrom, within )
 import Backend.Typed.Passes.Common( mapAll, SubstExpr, defScope, project, substJump, substName, substStep, substTypesE, valueAt )
 import Backend.Typed.Types( Types(..) )

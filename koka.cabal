@@ -34,7 +34,7 @@ library
       Backend.Typed.CGen.Koka
       Backend.Typed.CGen.Layout
       Backend.Typed.CGen.ReuseSlots
-      Backend.Typed.Common
+      Backend.Typed.Build
       Backend.Typed.Elab.Coerce
       Backend.Typed.Elab.Common
       Backend.Typed.Elab.FromCore
@@ -46,6 +46,7 @@ library
       Backend.Typed.Elab.TypeMatch
       Backend.Typed.Elab.Types
       Backend.Typed.Layout
+      Backend.Typed.Lazies
       Backend.Typed.Passes.Anf
       Backend.Typed.Passes.CheckFip
       Backend.Typed.Passes.CheckLinear
@@ -69,6 +70,7 @@ library
       Backend.Typed.Passes.Yields
       Backend.Typed.Pretty
       Backend.Typed.Query
+      Backend.Typed.Sources
       Backend.Typed.Syntax
       Backend.Typed.Traversal
       Backend.Typed.Typed

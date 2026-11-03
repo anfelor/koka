@@ -12,7 +12,7 @@ module Backend.Typed.Elab.Coerce( coerce, genVal, genPtr, applyFun ) where
 import qualified Data.Map as M
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Common
+import Backend.Typed.Build( K, compose )
 import Backend.Typed.Traversal( child )
 import Backend.Typed.Types
 import Backend.Typed.Elab.TypeMatch( match )

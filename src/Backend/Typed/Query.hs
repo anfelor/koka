@@ -26,8 +26,7 @@ import Control.Monad( zipWithM_, unless, when, forM_ )
 import Common.Name
 import Lib.PPrint( Pretty )
 import Backend.Typed.Syntax
-import Backend.Typed.Common
-import Backend.Typed.Traversal( bindersE, boxTag, child, destructAOf, destructVOf, dsAlts, dsScrut, fvA, fvE, fvV, isGlob, jumpArgs, within )
+import Backend.Typed.Traversal( bindersE, boxTag, child, destructAOf, destructVOf, dsAlts, dsScrut, fvA, fvE, fvV, holes, isGlob, jumpArgs, within )
 import Backend.Typed.Types
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Layout( layout, blockSize )

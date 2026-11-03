@@ -38,8 +38,7 @@ import Data.List( sortOn )
 import Data.Maybe( listToMaybe )
 import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
-import Backend.Typed.Common( TestSide(..), testSides, failingTo )
-import Backend.Typed.Traversal( child, descendE, fvE, within )
+import Backend.Typed.Traversal( TestSide(..), child, descendE, failingTo, fvE, testSides, within )
 import Backend.Typed.Passes.Common( mapAll, mapLams, defGamma, typedChildren, Scope, bindScope, defScope, knownAlt, nameParts, perDef, renameE, reuseParts, scopeOf )
 import Backend.Typed.Query( Env, Gamma, envOf, inferVar
                           , M, ask, evalM, liftE )

@@ -39,7 +39,7 @@ import qualified Data.Map as M
 import Control.Monad( foldM, guard )
 import Data.List( nub, partition )
 import Backend.Typed.Syntax
-import Backend.Typed.Common
+import Backend.Typed.Build( compose )
 import Backend.Typed.Traversal( boxTag, child, fieldsAt, stepsFrom, within )
 import Backend.Typed.Passes.Common( trivialTy, defGamma, typedChildren, NameSupply, dropValue, freshFor, freshNameFrom, freshPathFrom, perBody, projectAll, scopeOf )
 import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferAVar, unboxRuGamma, boxContents, reuseSize

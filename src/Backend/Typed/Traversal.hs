@@ -15,6 +15,7 @@ import Data.Functor.Const( Const(..) )
 import Data.Functor.Identity( Identity(..) )
 import Data.List( isPrefixOf )
 import Data.Maybe( isJust )
+import Data.Monoid( Sum(..) )
 import Common.Name( Name )
 import Backend.Typed.Syntax
 
@@ -136,7 +137,7 @@ descendB fn fv fb expr
     one x s e = (\(xs,e') -> (single xs,e')) <$> fb [(x,s)] e
     single xs = case xs of
                   [x] -> x
-                  _   -> error "Backend.Typed.Common.descendB: expecting one binder"
+                  _   -> error "Backend.Typed.Traversal.descendB: expecting one binder"
 
 -- the binder at a step from a variable
 child :: Path -> Step -> Path
@@ -172,7 +173,7 @@ injAStep :: Int -> Path -> Step
 injAStep i (Path x ss)
   = case reverse ss of
       (SInjA _ c : _) -> SInjA i c
-      _ -> error ("Backend.Typed.Common.injAStep: the binder " ++ show (Path x ss) ++ " is not an alternative")
+      _ -> error ("Backend.Typed.Traversal.injAStep: the binder " ++ show (Path x ss) ++ " is not an alternative")
 
 -- the other part of the parent of a part of a box
 sibling :: Step -> Maybe Step
@@ -269,6 +270,18 @@ fvV val
 
 fvE :: VExpr -> S.Set Path
 fvE expr = getConst (descendE (Const . S.singleton) (Const . fvV) (\xs e -> Const (fvE e `S.difference` S.fromList xs)) expr)
+
+-- the occurrences of the hole, except in nested contexts and closures (which do not bind it)
+holes :: VVal -> Int
+holes = getSum . holesV
+  where
+    holesV v = case v of
+                 Hole -> Sum 1
+                 Context _ _ -> Sum 0
+                 _ -> getConst (descendV (Const . holesA) (Const . holesV) v)
+    holesA a = case a of
+                 Lam{} -> Sum 0
+                 _ -> getConst (descendA (const (Const (Sum 0))) (Const . holesA) (Const . holesV) a)
 
 -- all bound variables (with repetitions)
 bindersE :: VExpr -> [Path]
@@ -430,3 +443,29 @@ keepsPointer expr
       Lock{}      -> False
       Join{}      -> False
       Jump{}      -> False
+
+-- An alternative of a test with two alternatives (`[case]`, `[case-a]` or `[split-a]`), taken
+-- against the other one: whether it is the first, both alternatives, and the test with new
+-- bodies for them.
+data TestSide = TestSide{ sideTest :: VExpr, sideMode :: Mode, sideFirst :: Bool
+                        , sideTaken :: (Path,VExpr), sideOther :: (Path,VExpr)
+                        , sideRebuild :: VExpr -> VExpr -> VExpr }
+
+testSides :: VExpr -> [TestSide]
+testSides expr
+  = case expr of
+      CaseV m v [(i,x,a),(j,y,b)] -> both m (x,a) (y,b) (\a' b' -> CaseV m v [(i,x,a'),(j,y,b')])
+      CaseA m v [(i,x,a),(j,y,b)] Nothing -> both m (x,a) (y,b) (\a' b' -> CaseA m v [(i,x,a'),(j,y,b')] Nothing)
+      CaseA m v [(i,x,a)] (Just (y,b)) -> both m (x,a) (y,b) (\a' b' -> CaseA m v [(i,x,a')] (Just (y,b')))
+      SplitA m v k (x,a) (y,b) -> both m (x,a) (y,b) (\a' b' -> SplitA m v k (x,a') (y,b'))
+      _ -> []
+  where
+    both m l r build = [TestSide expr m True l r build, TestSide expr m False r l (flip build)]
+
+-- The side of a test whose other alternative is `failure`, which does not use its binder:
+-- consecutive tests with one failure form a conjunction.
+failingTo :: VExpr -> VExpr -> Maybe TestSide
+failingTo failure expr
+  = case [s | s <- testSides expr, let (y,other) = sideOther s, other == failure, not (any (`within` y) (fvE other))] of
+      (s:_) -> Just s
+      [] -> Nothing

@@ -20,7 +20,7 @@ import qualified Data.Set as S
 import Common.Name
 import Type.Type
 import Kind.Newtypes
-import Backend.Typed.Common( K )
+import Backend.Typed.Build( K )
 import Backend.Typed.Syntax
 import Backend.Typed.Elab.TypeInfo
 

@@ -36,7 +36,7 @@
     position only excludes `[yielded]`: since the IR has no effects, a call bound by `[let]`
     may still return a dummy, which `Yields` ensures is not inspected (see `[let-yield]`).
 
-    The tag of a box z, tag(z), is determined by its path (`Common.boxTag`): it is i if z is
+    The tag of a box z, tag(z), is determined by its path (`Traversal.boxTag`): it is i if z is
     the binder of alternative i of a `[case-a]`, and 1 otherwise.
 
   Structural rules
@@ -316,6 +316,10 @@ posField i = Field (newName ("field" ++ show i))
 
 root :: Name -> Path
 root x = Path x []
+
+-- the name under which the type of the hole is bound in the one-hole value of a context
+nameHole :: Path
+nameHole = root (newHiddenName "hole")
 
 -- Values `Γ ⊢ v :q t`. A borrowed value is structural: a variable, a global, a literal, `()`,
 -- a function, a type application of one of these, or a tuple, injection or pack of borrowed
@@ -747,7 +751,7 @@ data VExpr
   --  ─────────────────────────── [drop]   ───────────────────────────────── [drop-ctx]
   --   Γ, x : A ⊢ drop x; e : W            Γ, x : ctx⟨A,B⟩ ⊢ drop x; e : W
   --
-  -- Other unboxed values are destructured to drop their boxed components (`Common.dropValue`).
+  -- Other unboxed values are destructured to drop their boxed components (`Passes.Common.dropValue`).
   -- A context is not: dropping it drops its `res` through the runtime, which skips the
   -- placeholder in the hole. The paper's `[dropru]` is derived
   -- from `[if-unique]` and `[unbox-ru]` (`Reuse.dropReuse`):

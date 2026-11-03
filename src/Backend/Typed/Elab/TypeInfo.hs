@@ -158,7 +158,7 @@ conFields nt vargs con = prodFields . zip (conFieldNames con) <$> conFieldTypes 
 -- The fields of a constructor. A thunk is padded after its fields if its block would be
 -- smaller than that of an indirection `Box(τ*)`, so that `[memoize]` can write one over it.
 -- A unit payload needs an 8-byte padding field; other small payloads need only a
--- 4-byte char. `Common.padFields` supplies zero values for these fields.
+-- 4-byte char. `Build.padFields` supplies zero values for these fields.
 conFieldTypes :: Newtypes -> [AType] -> ConInfo -> Tr [VType]
 conFieldTypes nt vargs con = pad <$> schemeFieldTypes nt vargs (conInfoType con)
   where
