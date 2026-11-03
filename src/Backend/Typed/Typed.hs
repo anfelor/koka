@@ -29,7 +29,8 @@ import Backend.Typed.Passes.Simplify( simplifyProgram )
 import Backend.Typed.Passes.Yields( yieldsProgram )
 import Backend.Typed.Passes.Perceus( perceusProgram )
 import Backend.Typed.Passes.TailRec( tailRecProgram )
-import Backend.Typed.Passes.UniqueJoins( uniqueJoinsProgram )
+import Backend.Typed.Passes.UniqueJoins( uniqueJoinsProgram, workerName )
+import Backend.Typed.Passes.UniqueWorkers( uniqueWorkersProgram )
 import Backend.Typed.Passes.Reuse( reuseProgram )
 import Backend.Typed.Passes.ExpandReuse( expandReuseProgram )
 import Backend.Typed.Passes.FillCredits( fillCreditsProgram )
@@ -57,6 +58,7 @@ typedFromCore enableReuse nt imports uniq core
                                   ,("yields",WellFormed,pure' yieldsProgram)
                                   ,("perceus",Linear,perceusProgram)
                                   ,("tailrec",Linear,pure' tailRecProgram)
+                                  ,("uniqueworkers",Linear,pure' uniqueWorkersProgram)
                                   ,("uniquejoins",Linear,pure' uniqueJoinsProgram)
                                    ,("dropspec",Linear,dropSpecProgram)] ++ [("reuse",Linear,reuseProgram) | enableReuse]
                                    ++ [("match",Linear,matchProgram), ("sinkjoins",Linear,pure' sinkJoinsProgram), ("joinargs",Linear,pure' joinArgsProgram)]
@@ -69,11 +71,13 @@ typedFromCore enableReuse nt imports uniq core
   where
     pure' f prog = (f prog,[])
 
--- the FIP annotations of the functions
+-- the FIP annotations of the functions, which their workers (`UniqueWorkers`) share
 fipsOf :: [C.Core] -> M.Map Name Fip
 fipsOf cores
-  = M.fromList ([(C.defName d, fip) | c <- cores, d <- C.flattenDefGroups (C.coreProgDefs c), Syntax.DefFun _ fip <- [C.defSort d]]
+  = withWorkers $ M.fromList ([(C.defName d, fip) | c <- cores, d <- C.flattenDefGroups (C.coreProgDefs c), Syntax.DefFun _ fip <- [C.defSort d]]
                 ++ [(C.externalName x, C.externalFip x) | c <- cores, x@(C.External{}) <- C.coreProgExternals c])
+  where
+    withWorkers fips = M.union fips (M.mapKeys workerName fips)
 
 -- the recursive group of each recursive definition
 groupsOf :: C.Core -> M.Map Name (S.Set Name)
