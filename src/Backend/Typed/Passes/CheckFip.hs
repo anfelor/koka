@@ -321,8 +321,16 @@ fipE expr
               (c,full) <- jump j vs
               return (mconcat cs <> c,full)
       Unreachable _ -> return (mempty,False)
+      -- the operations on contexts cost what their operands do, and memoization writes over the
+      -- block of its cell: it neither allocates nor frees
+      Append c d -> operands [c,d]
+      Plug c v -> operands [c,v]
+      CtxCopy c -> operands [c]
+      Memoize _ _ _ w -> operands [w]
       _ -> fail ("unexpected expression: " ++ ppr expr)
   where
+    operands vs = do cs <- mapM fipV vs
+                     return (mconcat cs,False)
     isFun t = case t of
                 V (VPtr a) -> isFunA a
                 A a        -> isFunA a
@@ -425,8 +433,6 @@ fipV :: VVal -> F Cost
 fipV v
   = case v of
       Ptr t a -> fipA (Just t) a
-      -- memoization writes over the block of its cell: it neither allocates nor frees
-      Memoize _ _ _ w -> fipV w
       Context b k -> bind [(nameHole,V (VPtr b))] (fipV k)
       _ -> mconcat <$> sequence (getConst (descendV (\a -> Const [fipA Nothing a]) (\w -> Const [fipV w]) v))
 

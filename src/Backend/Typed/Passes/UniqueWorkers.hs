@@ -13,8 +13,8 @@
   that returns a context and takes owned contexts therefore gets a worker `f!` (`workerName`)
   whose context parameters and result are unique:
 
-    fun (++)(acc : ctx, t) : ctx = ... ret (ctx-copy acc) ++ ctx K ... ret acc
-    ~> fun (++)!(acc :! ctx, t) : !ctx = ... ret acc ++ ctx K ... ret acc
+    fun (++)(acc : ctx, t) : ctx = ... let c = ctx-copy acc in c ++ ctx K ... ret acc
+    ~> fun (++)!(acc :! ctx, t) : !ctx = ... acc ++ ctx K ... ret acc
 
   The body of the worker is that of `f` with its context parameters unique, rewritten by
   `UniqueJoins.uniqueScope`. A parameter that does not remain unique there (as a borrowed use
@@ -38,6 +38,8 @@ import Data.Monoid( Any(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Env( Env, envOf )
 import Backend.Typed.Traversal( descendE )
+import Control.Monad.State( evalState )
+import Backend.Typed.Passes.Common( freshFor )
 import Backend.Typed.Passes.UniqueJoins( uniqueScope, Flow(..), tails, uniq, uniqF, copyCount, isCtx, workerName )
 
 uniqueWorkersProgram :: Program -> Program
@@ -65,12 +67,12 @@ worker env def
       | otherwise = Nothing
       where
         ps = [(x,if x `elem` cs then Unique else m,t) | (x,m,t) <- defArgs def]
-        (u,body') = uniqueScope env ps (defBody def)
+        (u,body') = evalState (uniqueScope env ps (defBody def)) (freshFor def)
         kept = filter (`S.member` u) cs
         result r = case r of
                      FVal _ -> True
                      _ -> uniqF env u r
-        body'' = mapRets (\v -> if uniq u v then v else CtxCopy v) body'
+        body'' = mapRets (\v -> if uniq u v then Ret v else CtxCopy v) body'
 
 -- whether an effect may yield in an expression, outside of closures
 yields :: VExpr -> Bool
@@ -80,11 +82,11 @@ yields expr
       Yielded{} -> True
       _ -> getAny (getConst (descendE (const (Const mempty)) (const (Const mempty)) (\_ e -> Const (Any (yields e))) expr))
 
--- map the values in the tail positions of an expression (see `UniqueJoins.tails`)
-mapRets :: (VVal -> VVal) -> VExpr -> VExpr
+-- replace the values in the tail positions of an expression (see `UniqueJoins.tails`)
+mapRets :: (VVal -> VExpr) -> VExpr -> VExpr
 mapRets f expr
   = case expr of
-      Ret v -> Ret (f v)
+      Ret v -> f v
       Let x t e1 e2 -> Let x t e1 (mapRets f e2)
       LetYield x t e1 e2 e3 -> LetYield x t e1 (mapRets f e2) (mapRets f e3)
       Gen{} -> expr

@@ -149,10 +149,6 @@ prettyVal val
       NoReuse n p -> text "no-reuse" <.> int n <.> prettyContents p
       Hole        -> text "hole"
       Context _ v -> text "ctx" <+> atomVal v
-      Plug c v    -> atomVal c <.> brackets (prettyVal v)
-      CtxCopy v   -> text "ctx-copy" <+> atomVal v
-      Append c d  -> atomVal c <+> text "++" <+> atomVal d
-      Memoize c d k v -> text "memoize" <+> atomVal c <+> parens (side d <+> parens (text "inj" <.> int k <+> atomVal v))
 
 atomAVal :: AVal -> Doc
 atomAVal v
@@ -168,9 +164,6 @@ atomVal v
       Ptr _ _   -> parens (prettyVal v)
       DupV _    -> parens (prettyVal v)
       Context _ _ -> parens (prettyVal v)
-      CtxCopy _ -> parens (prettyVal v)
-      Append _ _ -> parens (prettyVal v)
-      Memoize _ _ _ _ -> parens (prettyVal v)
       _         -> prettyVal v
 
 prettyLit :: Lit -> Doc
@@ -219,6 +212,10 @@ prettyExpr expr
                          <-> indent 2 (prettyExpr e1) <-> text "in" <+> align (prettyExpr e2)
       Jump j [] vs -> text "jump" <+> nm j <.> args vs
       Jump j ts vs -> text "jump" <+> nm j <.> tyArgs ts <.> args vs
+      Plug c v -> atomVal c <.> brackets (prettyVal v)
+      Append c d -> atomVal c <+> text "++" <+> atomVal d
+      CtxCopy c -> text "ctx-copy" <+> atomVal c
+      Memoize c d k v -> text "memoize" <+> atomVal c <+> parens (side d <+> parens (text "inj" <.> int k <+> atomVal v))
       Gen vs e -> text "gen" <+> hsep (map tv vs) <.> text "." <+> align (prettyExpr e)
       CaseOpen m v alts def -> caseOf (text "case" <.> mode m) (pv v) ([(nm c <.> parens (commaSep (map pv xs)), e) | (c,xs,e) <- alts] ++ [(text "_", def)])
 

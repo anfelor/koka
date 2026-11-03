@@ -181,7 +181,7 @@ memoize c n a v
        case v of
          Ptr _ (Roll _ (InjLazy d _ (InjA k _ (Box w))))
            | Just (ABox s) <- lookup k (case d of Whnf -> strict; Delay -> thunks), Right m <- reuseSize s, m <= n
-           -> return (Ret (Memoize (Var c) d k w))
+           -> return (Memoize (Var c) d k w)
          _ -> indirect c a v
 
 -- `indirect c v`: free the cell if it is unique, and otherwise write an indirection to `v` over it
@@ -192,7 +192,7 @@ indirect c a v
        p <- fresh "p"
        return (Let r (VPtr a) (Ret v)
                 (IsUnique c (Free c (Ret (Var r)))
-                            (Let p (VPtr a) (Ret (Memoize (Var c) Delay i (Var r))) (Ret (Var r)))))
+                            (Let p (VPtr a) (Memoize (Var c) Delay i (Var r)) (Ret (Var r)))))
 
 -- the lazy constructor with tag k and fields v̄ at the type of a cell
 conValue :: AType -> Int -> [VVal] -> L VVal
