@@ -87,3 +87,29 @@ padFields fields vs = vs ++ map zero (drop (length vs) fields)
   where
     zero (VRaw RFloat64) = Lit (LitFloat 0)
     zero _ = Lit (LitChar '\0')
+
+-- An alternative of a test with two alternatives (`[case]`, `[case-a]` or `[split-a]`), taken
+-- against the other one: whether it is the first, both alternatives, and the test with new
+-- bodies for them.
+data TestSide = TestSide{ sideTest :: VExpr, sideMode :: Mode, sideFirst :: Bool
+                        , sideTaken :: (Path,VExpr), sideOther :: (Path,VExpr)
+                        , sideRebuild :: VExpr -> VExpr -> VExpr }
+
+testSides :: VExpr -> [TestSide]
+testSides expr
+  = case expr of
+      CaseV m v [(i,x,a),(j,y,b)] -> both m (x,a) (y,b) (\a' b' -> CaseV m v [(i,x,a'),(j,y,b')])
+      CaseA m v [(i,x,a),(j,y,b)] Nothing -> both m (x,a) (y,b) (\a' b' -> CaseA m v [(i,x,a'),(j,y,b')] Nothing)
+      CaseA m v [(i,x,a)] (Just (y,b)) -> both m (x,a) (y,b) (\a' b' -> CaseA m v [(i,x,a')] (Just (y,b')))
+      SplitA m v k (x,a) (y,b) -> both m (x,a) (y,b) (\a' b' -> SplitA m v k (x,a') (y,b'))
+      _ -> []
+  where
+    both m l r build = [TestSide expr m True l r build, TestSide expr m False r l (flip build)]
+
+-- The side of a test whose other alternative is `failure`, which does not use its binder:
+-- consecutive tests with one failure form a conjunction.
+failingTo :: VExpr -> VExpr -> Maybe TestSide
+failingTo failure expr
+  = case [s | s <- testSides expr, let (y,other) = sideOther s, other == failure, not (any (`within` y) (fvE other))] of
+      (s:_) -> Just s
+      [] -> Nothing
