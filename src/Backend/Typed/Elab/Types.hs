@@ -20,7 +20,7 @@ import Kind.Newtypes
 import Type.Type( typevarId, conInfoName, conInfoIsLazy, dataInfoIsLazy )
 import Backend.Typed.Syntax
 import Backend.Typed.Types( applyA )
-import Backend.Typed.Query( reuseSize )
+import Backend.Typed.Env( reuseSize )
 import Backend.Typed.Elab.TypeInfo
 
 refBody :: Newtypes -> DataInfo -> Tr (Maybe AType)
