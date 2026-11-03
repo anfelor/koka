@@ -327,13 +327,13 @@ percE' pe owned expr
       Drop x e -> Drop x <$> percE' pe owned e
       Free r e -> Free r <$> percE' pe owned e
       IsUnique x e1 e2 -> IsUnique x <$> percE pe{ peGamma = uniqueGamma (peGamma pe) x } owned e1 <*> percE pe owned e2
-      -- the contents are taken under their new names, and the cell is a new root
-      Lock z c e
+      -- the box splits into its contents and its cell, which are owned in its place
+      Lock z e
         -> do unless (S.member z owned) (fail ("lock of a box that is not owned: " ++ show z))
-              g' <- liftE (lockGamma (peGamma pe) z c)
-              let contents = [b | b@(x,_) <- M.toList g', x == child z SContents]
-                  owned' = S.delete z owned `S.union` ownedOf pe ((c,g' M.! c) : contents)
-              Lock z c <$> percE pe{ peGamma = g' } owned' e
+              g' <- liftE (lockGamma (peGamma pe) z)
+              let parts = [b | b@(x,_) <- M.toList g', x `elem` [child z SContents, child z SCredit]]
+                  owned' = S.delete z owned `S.union` ownedOf pe parts
+              Lock z <$> percE pe{ peGamma = g' } owned' e
       Dup x e -> Dup x <$> percE pe (S.insert x owned) e
       CaseLit v alts def
         -> do alts' <- mapM (\(l,e) -> (,) l <$> percE pe owned e) alts

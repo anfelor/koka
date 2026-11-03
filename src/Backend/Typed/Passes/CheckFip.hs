@@ -288,18 +288,18 @@ fipE expr
         -> do full <- isFull r
               alive <- alivePaths
               if full then fipE e1 else branches ([withFull [r] (fipE e1) | alive e1] ++ [fipE e2 | alive e2])
-      UnboxRu z r e
+      UnboxRu z e
         -> do g <- asks fGamma
-              g' <- liftE (unboxRuGamma g z r)
+              g' <- liftE (unboxRuGamma g z)
               local (\fe -> fe{ fGamma = g' }) (fipE e)
       -- only in the shared branch of `if-unique`, which is not taken
       CopyRu z r e
         -> do g <- asks fGamma
               g' <- liftE (copyRuGamma g z r)
               local (\fe -> fe{ fGamma = g' }) (fipE e)
-      Lock z c e
+      Lock z e
         -> do fe <- ask
-              g' <- liftE (lockGamma (fGamma fe) z c)
+              g' <- liftE (lockGamma (fGamma fe) z)
               local (\fe' -> fe'{ fGamma = g' }) (fipE e)
       Join NonRec j _ ps e1 e2
         -> do i <- state (\s -> (fsUniq s, s{ fsUniq = fsUniq s + 1 }))
