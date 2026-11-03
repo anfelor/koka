@@ -80,9 +80,9 @@ import Control.Monad( unless, when, forM_, foldM )
 import Data.Functor.Const( Const(..) )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Traversal( child, descendV, destructAOf, destructVOf, dsAlts, dsMode, dsScrut, fieldsAt, fvA, fvE, isRead, jumpArgs, keepsPointer, prefixes, sibling, within )
+import Backend.Typed.Traversal( child, descendV, destructAOf, destructVOf, dsAlts, dsMode, dsScrut, fieldsAt, fvA, fvE, jumpArgs, sibling, within )
 import Backend.Typed.Types( dupType, prodV )
-import Backend.Typed.Passes.Common( paramModes, trivialTy )
+import Backend.Typed.Passes.Common( isRead, keepsPointer, paramModes, prefixes, trivialTy )
 import Backend.Typed.Env( Env(..), envOf, M, ask, evalM, get, gets, liftE, local, modify )
 import Backend.Typed.Query( Gamma, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 

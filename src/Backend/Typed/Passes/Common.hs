@@ -19,12 +19,13 @@ import Data.Maybe( listToMaybe, fromMaybe )
 import Control.Monad( foldM )
 import Control.Monad.State( runState, state )
 import Backend.Typed.Syntax
-import Backend.Typed.Types( Sub, Types(..), dupType, inst, isTrivialWith, mapReuseContents, traverseReuseContents )
+import Backend.Typed.Types( Sub, Types(..), dupType, inst, mapReuseContents, traverseReuseContents )
 import Backend.Typed.Traversal
 import Backend.Typed.Env( Env(..), M, unrollT, ask, local )
 import Backend.Typed.Query( Gamma, bindAll, inferVar, inferV, altTypes, lamGamma, uniqueGamma, unboxRuGamma, copyRuGamma, lockGamma )
 import Backend.Typed.Pretty( ppr )
 import Common.Name( Name, newHiddenName )
+import Common.NamePrim( nameTpReuse )
 
 -- the modes of the parameters of a call with n arguments
 paramModes :: Env -> Name -> Int -> [Mode]
@@ -36,6 +37,38 @@ paramModes env f n
 -- values of these types need no references, also through named types
 trivialTy :: Env -> Ty -> Bool
 trivialTy env = isTrivialWith (either (const Nothing) Just . unrollT env)
+
+-- values of these types need no reference counting, where `unroll` gives the body of a
+-- named type if it is known (a type with a single constructor without fields, for example)
+isTrivialWith :: (AType -> Maybe AType) -> Ty -> Bool
+isTrivialWith unroll t
+  = case t of
+      V v -> trivialV v
+      A a -> trivialA a
+  where
+    trivialV v = case v of
+                   VRaw _       -> True
+                   VUnit        -> True
+                   VProd fs     -> all (trivialV . snd) fs
+                   VSum ts      -> all (trivialV . snd) ts
+                   VExists _ b  -> trivialV b
+                   VPtr a       -> trivialA a
+                   VReuse _ _ _   -> False
+                   VCtx _ _ _   -> False
+                   VCell _ _    -> False
+    trivialA a = case a of
+                   AUnit     -> True
+                   ASum ts   -> all (trivialA . snd) ts
+                   ACon n _  -> n == nameTpReuse || maybe False trivialA (unroll a)
+                   ALazy l b -> trivialA l && trivialA b
+                   AMu _ _ _ _ -> maybe False trivialA (unroll a)
+                   ABox _    -> False
+                   AScalar _ -> False
+                   AFun _ _  -> False
+                   AForall _ _ -> False
+                   AVar _    -> False
+                   AApp _ _  -> False
+                   ALam _ _  -> False
 
 -- Run a pass on each definition; a definition that fails is kept, with its error.
 perDef :: (Def -> Either String Def) -> Program -> (Program,[String])
@@ -539,3 +572,78 @@ typedChildren f expr
   = do (env,g) <- ask
        let under g' = local (const (env,g')) . f
        descendTyped env g (lamsTyped g under) under expr
+
+-- the variables on the path to a variable, from its root
+prefixes :: Path -> [Path]
+prefixes (Path x ss) = [Path x (take k ss) | k <- [0 .. length ss - 1]]
+
+-- reading the contents of a box never moves them
+isRead :: VExpr -> Bool
+isRead expr
+  = case expr of
+      SplitA{}    -> False
+      Unbox{}     -> True
+      Unscalar{}  -> False
+      CaseOpen{}  -> True
+      Proj{}      -> False
+      CaseV{}     -> False
+      CaseA{}     -> False
+      Deref{}     -> False
+      Unroll{}    -> False
+      Unpack{}    -> False
+      Ret{}       -> False
+      Let{}       -> False
+      LetYield{}  -> False
+      Yielded{}   -> False
+      Unreachable{} -> False
+      Call{}      -> False
+      App{}       -> False
+      CaseLit{}   -> False
+      Gen{}       -> False
+      Dup{}       -> False
+      Drop{}      -> False
+      Free{}      -> False
+      IsUnique{}  -> False
+      IfWhnf{}    -> False
+      IfFull{}    -> False
+      UnboxRu{}   -> False
+      CopyRu{}    -> False
+      Lock{}      -> False
+      Join{}      -> False
+      Jump{}      -> False
+
+-- the binders of these destructuring forms are the scrutinee's pointer (the scrutinee itself
+-- for `[unpack]`), so they may be unique
+keepsPointer :: VExpr -> Bool
+keepsPointer expr
+  = case expr of
+      SplitA{}    -> True
+      IfWhnf{}    -> True
+      CaseA{}     -> True
+      Deref{}     -> True
+      Unroll{}    -> True
+      Unpack{}    -> True
+      Proj{}      -> False
+      CaseV{}     -> False
+      Unbox{}     -> False
+      Unscalar{}  -> False
+      CaseOpen{}  -> False
+      Ret{}       -> False
+      Let{}       -> False
+      LetYield{}  -> False
+      Yielded{}   -> False
+      Unreachable{} -> False
+      Call{}      -> False
+      App{}       -> False
+      CaseLit{}   -> False
+      Gen{}       -> False
+      Dup{}       -> False
+      Drop{}      -> False
+      Free{}      -> False
+      IsUnique{}  -> False
+      IfFull{}    -> False
+      UnboxRu{}   -> False
+      CopyRu{}    -> False
+      Lock{}      -> False
+      Join{}      -> False
+      Jump{}      -> False
