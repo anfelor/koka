@@ -87,9 +87,9 @@ perceusProgram prog = perDef (\d -> evalM (perceusDef (envOf prog) d) () (freshF
 perceusDef :: Env -> Def -> P Def
 perceusDef env def
   = case def of
-      DefFun f tvs args res body
+      DefFun{ defArgs = args, defBody = body }
         -> do body' <- percE (paramEnv env args M.empty) (ownedParams env args) body
-              return (DefFun f tvs args res body')
+              return def{ defBody = body' }
       DefVal x tvs t body
         -> DefVal x tvs t <$> percE (PEnv env M.empty S.empty M.empty) S.empty body
 
@@ -520,7 +520,7 @@ isAtom _ = False
 resultOfCall :: PEnv -> Name -> [AType] -> P VType
 resultOfCall pe f tys
   = case M.lookup f (envSigs (peEnv pe)) of
-      Just (SigFun tvs _ r) -> return (inst tvs tys r)
+      Just (SigFun tvs _ _ r) -> return (inst tvs tys r)
       _ -> fail ("unknown function " ++ show f)
 
 -- environment

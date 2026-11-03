@@ -68,12 +68,12 @@ fresh s = state (\(ns,js) -> let (x,ns') = freshPathFrom ("lz" ++ s) ns in (x,(n
 lazyProgram :: Lazies -> Program -> (Program,[String])
 lazyProgram lazies prog
   = let (prog',errs) = perDef (\d -> evalM (lazyDef d) (LEnv (envOf prog) lazies Nothing) (freshFor d, M.empty)) prog
-        cells = M.fromList [(f,c) | DefFun f _ ((_,_,c@VCell{}):_) _ _ <- progDefs prog']
+        cells = M.fromList [(f,c) | DefFun f _ ((_,_,c@VCell{}):_) _ _ _ <- progDefs prog']
     in (prog'{ progSigs = M.mapWithKey (withCell cells) (progSigs prog) }, errs)
   where
     withCell cells f sig
       = case (M.lookup f cells, sig) of
-          (Just c, SigFun tvs ((m,_):ps) r) -> SigFun tvs ((m,c):ps) r
+          (Just c, SigFun tvs ((m,_):ps) q r) -> SigFun tvs ((m,c):ps) q r
           _ -> sig
 
 -- the first parameter of a `lazy-C` function is the cell of its constructor, and the first
@@ -82,13 +82,13 @@ lazyDef :: Def -> L Def
 lazyDef def
   = do lazies <- asks leLazies
        case def of
-         DefFun f tvs ((x,m,t):ps) res body
+         DefFun{ defName = f, defArgs = (x,m,t):ps, defBody = body }
            | Just (_,n,_) <- M.lookup f (lzCons lazies)
            -> case t of
-                VPtr a | targets x body -> DefFun f tvs ((x,m,VCell n a):ps) res <$> cellE (M.singleton x (n,a)) body
+                VPtr a | targets x body -> (\body' -> def{ defArgs = (x,m,VCell n a):ps, defBody = body' }) <$> cellE (M.singleton x (n,a)) body
                 _ -> fail ("a lazy constructor function without a memoization target: " ++ show x)
            | S.member f (lzLocked lazies), VPtr a <- t
-           -> DefFun f tvs ((x,m,t):ps) res <$> local (\le -> le{ leLocked = Just (x,a) }) (cellE M.empty body)
+           -> (\body' -> def{ defBody = body' }) <$> local (\le -> le{ leLocked = Just (x,a) }) (cellE M.empty body)
          _ -> (\body -> def{ defBody = body }) <$> cellE M.empty (defBody def)
   where
     targets x body = case body of
