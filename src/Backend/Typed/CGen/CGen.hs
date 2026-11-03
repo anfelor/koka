@@ -59,9 +59,10 @@ data CEnv = CEnv{ ceModName   :: Name
 data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [String], stDecls :: [Doc], stWrappers :: S.Set Name
             , stLocal :: Bool, stTailCall :: Bool }
 
--- `cxJoins`: the label and the parameters of each join point in scope
+-- `cxJoins`: the label and the parameters of each join point in scope, and whether it is
+-- recursive (its jumps then assign the parameters in parallel)
 data Ctx = Ctx{ cxEnv :: Env, cxCEnv :: CEnv, cxGamma :: Gamma, cxSelf :: Maybe (Name,[Path])
-              , cxJoins :: M.Map Name (Doc,[Path])
+              , cxJoins :: M.Map Name (Doc,[(Path,VType)],Bool)
               , cxShared :: S.Set Path     -- blocks known to be shared (the else branch of `IsUnique`, and its aliases)
               , cxSources :: Sources }     -- the copies and join parameters of the definition (`sameBits`)
 
@@ -827,20 +828,28 @@ genE cx dest expr
       CopyRu z r e -> genCopyRu cx dest z r e
       Lock z c e -> genLock cx dest z c e
       Gen _ e -> genE cx dest e
-      Join j _ ps e1 e2
+      -- the body of a recursive join point is a loop, which only sees the join point itself
+      Join rc j _ ps e1 e2
         -> do lbl <- fresh "join"
               decls <- mapM (\(x,_,t) -> do ct <- ctype t
                                             return (cty ct <+> localName x <.> ";")) ps
-              s2 <- genE cx{ cxJoins = M.insert j (lbl,[x | (x,_,_) <- ps]) (cxJoins cx) } dest e2
-              s1 <- genE (foldl (\c (x,_,t) -> bindVar c x (V t)) cx ps) dest e1
+              let point = (lbl,[(x,t) | (x,_,t) <- ps],rc /= NonRec)
+                  inner = case rc of
+                            NonRec -> cxJoins cx
+                            Rec{} -> M.singleton j point
+              s2 <- genE cx{ cxJoins = M.insert j point (cxJoins cx) } dest e2
+              s1 <- genE (foldl (\c (x,_,t) -> bindVar c x (V t)) cx{ cxJoins = inner } ps) dest e1
               let (skip,end) = case dest of
                                  DReturn -> ([],[])
                                  _ -> (["goto" <+> lbl <.> "_end;"], [lbl <.> "_end: ;"])
               return [block (decls ++ s2 ++ skip ++ [lbl <.> ":" <+> block s1] ++ end)]
       Jump j _ vs
-        -> do (lbl,xs) <- maybe (failG ("jump to unknown join point " ++ show j)) return (M.lookup j (cxJoins cx))
+        -> do (lbl,xs,recursive) <- maybe (failG ("jump to unknown join point " ++ show j)) return (M.lookup j (cxJoins cx))
               args <- mapM (genV cx) vs
-              return ([localName x <+> "=" <+> a <.> ";" | (x,a) <- zip xs args] ++ ["goto" <+> lbl <.> ";"])
+              if recursive
+                then do assigns <- parallelAssign xs args
+                        return [block (assigns ++ ["goto" <+> lbl <.> ";"])]
+                else return ([localName x <+> "=" <+> a <.> ";" | ((x,_),a) <- zip xs args] ++ ["goto" <+> lbl <.> ";"])
       Call f tys vs -> genCall cx dest f tys vs
       App f vs
         -> do ft <- tyOfName cx f
@@ -1101,11 +1110,16 @@ genCall cx dest f tys vs
 genSelfCall :: [Path] -> [VType] -> [Doc] -> G [Doc]
 genSelfCall params ps args
   = do modify (\st -> st{ stTailCall = True })
-       tmps <- mapM (const (fresh "a")) args
-       pcts <- mapM ctype ps
-       return [block ([cty ct <+> t <+> "=" <+> a <.> ";" | (t,a,ct) <- zip3 tmps args pcts]
-                      ++ [localName p <+> "=" <+> t <.> ";" | (p,t) <- zip params tmps]
-                      ++ ["goto kt_tailcall;"])]
+       assigns <- parallelAssign (zip params ps) args
+       return [block (assigns ++ ["goto kt_tailcall;"])]
+
+-- assign the arguments to the parameters through temporaries, as they may read the parameters
+parallelAssign :: [(Path,VType)] -> [Doc] -> G [Doc]
+parallelAssign params args
+  = do tmps <- mapM (const (fresh "a")) args
+       pcts <- mapM (ctype . snd) params
+       return ([cty ct <+> t <+> "=" <+> a <.> ";" | (t,a,ct) <- zip3 tmps args pcts]
+               ++ [localName p <+> "=" <+> t <.> ";" | ((p,_),t) <- zip params tmps])
 
 -- Conversions of small integer literals to fixed-width integers become C literals
 -- (as in `Backend.C.FromCore.genAppSpecial`); `ssize_t` and `intptr_t` stay within 32 bits

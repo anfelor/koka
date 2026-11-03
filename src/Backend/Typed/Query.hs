@@ -27,7 +27,7 @@ import Common.Name
 import Lib.PPrint( Pretty )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Traversal( bindersE, boxTag, child, destructAOf, destructVOf, dsAlts, dsScrut, fvA, fvE, fvV, isGlob, jumpArgs )
+import Backend.Typed.Traversal( bindersE, boxTag, child, destructAOf, destructVOf, dsAlts, dsScrut, fvA, fvE, fvV, isGlob, jumpArgs, within )
 import Backend.Typed.Types
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Layout( layout, blockSize )
@@ -182,15 +182,26 @@ inferExpr env g js expr
                          inferE env g' js e
       Lock z c e -> do g' <- lockGamma g z c
                        inferE env g' js e
-      Join j tvs ps e1 e2 -> do let xs = [x | (x,_,_) <- ps]
+      Join NonRec j tvs ps e1 e2
+                          -> do let xs = [x | (x,_,_) <- ps]
                                 unless (S.disjoint (fvE e1 `S.difference` S.fromList xs) (S.fromList (bindersE e2)))
                                   (Left ("join point " ++ show j ++ " captures a variable that is bound again in its scope"))
-                                unless (S.disjoint (S.fromList xs) (S.fromList [root n | (_,_,p) <- ps, Contents _ v _ <- descriptions p, Path n _ <- S.toList (fvV v)]))
-                                  (Left ("a description in the parameters of join point " ++ show j ++ " names a parameter"))
+                                joinDescriptions j ps
                                 t <- inferE env (bindAll [(x,V p) | (x,_,p) <- ps] g) js e1
                                 unbound tvs (ftv t ++ ftvCtx g e1)
                                 let caps = S.unions (S.difference (fvE e1) (S.fromList xs) : [cs | (k,(cs,_,_,_)) <- M.toList (jsPoints js), not (null (jumpArgs k e1))])
                                 t <$ checkE env g js{ jsPoints = M.insert j (caps,tvs,[p | (_,_,p) <- ps],t) (jsPoints js) } e2 t
+      -- closed, and only itself is in scope in its body
+      Join (Rec t) j tvs ps e1 e2
+                          -> do let xs = [x | (x,_,_) <- ps]
+                                case [y | y <- S.toList (fvE e1), not (any (y `within`) xs)] of
+                                  (y:_) -> Left ("recursive join point " ++ show j ++ " captures " ++ show y)
+                                  [] -> return ()
+                                joinDescriptions j ps
+                                unbound tvs (ftv t)
+                                let self = M.insert j (S.empty,tvs,[p | (_,_,p) <- ps],t)
+                                checkE env (M.fromList [(x,V p) | (x,_,p) <- ps]) js{ jsPoints = self M.empty } e1 t
+                                t <$ checkE env g js{ jsPoints = self (jsPoints js) } e2 t
       -- the captured variables must still be in scope (`[unbox-ru]` renames the contents of a box)
       Jump j ts vs -> case M.lookup j (jsPoints js) of
                      Just (caps,tvs,ps,t) -> do forM_ (S.toList caps) $ \x ->
@@ -205,6 +216,12 @@ inferExpr env g js expr
                         VPtr a -> return (VPtr (AForall tvs a))
                         _ -> Left ("generalization of a non-pointer: " ++ ppr t)
       _ -> Left "unexpected destructuring form"
+
+-- the descriptions in the parameters of a join point do not name its parameters
+joinDescriptions :: Name -> [(Path,Mode,VType)] -> Q ()
+joinDescriptions j ps
+  = unless (S.disjoint (S.fromList [x | (x,_,_) <- ps]) (S.fromList [root n | (_,_,p) <- ps, Contents _ v _ <- descriptions p, Path n _ <- S.toList (fvV v)]))
+      (Left ("a description in the parameters of join point " ++ show j ++ " names a parameter"))
 
 -- The two scrutinee categories share branch checking and existential escape checks.
 inferDestruct :: Env -> Gamma -> Joins -> VExpr -> Ty -> [([Path],VExpr)] -> Q VType

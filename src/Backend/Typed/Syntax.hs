@@ -551,6 +551,18 @@ data VVal
   | Memoize VVal Side Int VVal
   deriving (Eq,Show)
 
+-- Whether a join point is recursive (`[join-rec]`), with its result type.
+data Recursion = NonRec | Rec VType
+  deriving (Eq,Show)
+
+mapRecursion :: (VType -> VType) -> Recursion -> Recursion
+mapRecursion _ NonRec = NonRec
+mapRecursion f (Rec t) = Rec (f t)
+
+recResult :: Recursion -> [VType]
+recResult NonRec = []
+recResult (Rec t) = [t]
+
 -- Expressions `Γ | J ⊢ e : W` (always unboxed).
 --
 -- The result metavariable of the control-flow rules is W, not an arbitrary t = A | V:
@@ -841,7 +853,18 @@ data VExpr
   -- binds them to different values (a jump can only pass an empty credit for them).
   -- The type parameters ā abstract over the witnesses of existentials that are unpacked
   -- before the jumps (`Elab.Match`).
-  | Join Name [TVar] [(Path,Mode,VType)] VExpr VExpr
+  --
+  --   x̄ :q̄ V̄ | j : ∅; ∀ā. (q̄ V̄) -> W ⊢ e₁ : W    Γ | J, j : ∅; ∀ā. (q̄ V̄) -> W ⊢ e₂ : W    ā ∉ ftv(W)
+  --  ────────────────────────────────────────────────────────────────────────────────── [join-rec]
+  --   Γ | J ⊢ join rec j⟨ā⟩(x̄ :q̄ V̄) : W = e₁ in e₂ : W
+  --
+  -- A recursive join point is a loop: `j` is in scope in its body, which may run any number of
+  -- times. It is therefore closed (it captures no variables, and its body cannot jump to
+  -- outer joins), and its parameters may have any mode: a borrowed parameter is lent anew
+  -- by every jump. Its result type W is annotated, as the jumps in its body need it. The
+  -- yield mark of the context passes to its body. Recursive joins are introduced after
+  -- Perceus, from the self tail calls of a function. (Not in the paper.)
+  | Join Recursion Name [TVar] [(Path,Mode,VType)] VExpr VExpr
 
   --   j : Γ_c; ∀ā. (q̄ V̄) -> W ∈ J    Γᵢ ⊢ vᵢ :qᵢ Vᵢ[B̄/ā]
   --  ──────────────────────────────────────────────────────── [jump]

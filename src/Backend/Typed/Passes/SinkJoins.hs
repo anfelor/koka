@@ -42,19 +42,19 @@ sinkJoinsProgram prog = prog{ progDefs = [d{ defBody = sjE (defBody d) } | d <- 
 sjE :: VExpr -> VExpr
 sjE expr
   = case expr of
-      Join j tvs ps e1 e2 -> sink j tvs ps (sjE e1) (sjE e2)
+      Join r j tvs ps e1 e2 -> sink r j tvs ps (sjE e1) (sjE e2)
       _ -> mapAll (const sjE) expr
 
 -- define `join j(ps) = e1` in the innermost subexpression of `e` that contains every jump to it
-sink :: Name -> [TVar] -> [(Path,Mode,VType)] -> VExpr -> VExpr -> VExpr
-sink j tvs ps e1 e
+sink :: Recursion -> Name -> [TVar] -> [(Path,Mode,VType)] -> VExpr -> VExpr -> VExpr
+sink r j tvs ps e1 e
   = case getConst (descendE (const (Const [])) (const (Const [])) (\xs sub -> Const [xs | jumpsIn sub]) e) of
       [xs] | movable, all (`S.notMember` free) xs
-        -> runIdentity (descendE Identity Identity (\_ sub -> Identity (if jumpsIn sub then sink j tvs ps e1 sub else sub)) e)
-      _ -> Join j tvs ps e1 e
+        -> runIdentity (descendE Identity Identity (\_ sub -> Identity (if jumpsIn sub then sink r j tvs ps e1 sub else sub)) e)
+      _ -> Join r j tvs ps e1 e
   where
     jumpsIn sub = not (null (jumpArgs j sub))
     free = fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps]
     movable = case e of
-                Join k _ _ _ _ -> k /= j && null (jumpArgs k e1)
+                Join _ k _ _ _ _ -> k /= j && null (jumpArgs k e1)
                 _ -> True

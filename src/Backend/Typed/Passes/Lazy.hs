@@ -145,7 +145,7 @@ cellE cs expr
          LetYield x t e1 e2 e3
            -> LetYield x t <$> cellE cs e1 <*> cellE M.empty e2 <*> cellE M.empty e3
          -- the jumps come first, and give the parameters that are cells
-         Join j tvs ps e1 e2
+         Join r j tvs ps e1 e2
            -> do e2' <- cellE cs e2
                  sizes <- gets (M.findWithDefault M.empty j . snd)
                  ps' <- mapM (\(i,(x,m,t)) -> case (M.lookup i sizes, t) of
@@ -154,7 +154,7 @@ cellE cs expr
                                                (Just _,_) -> fail ("a cell passed to a parameter of " ++ show j ++ " that is not a pointer"))
                              (zip [0 :: Int ..] ps)
                  e1' <- cellE (M.fromList [(x,(n,a)) | (x,_,VCell n a) <- ps']) e1
-                 return (Join j tvs ps' e1' e2')
+                 return (Join r j tvs ps' e1' e2')
          _ | not (S.disjoint (M.keysSet cs) (operands expr)) -> fail ("unexpected use of a cell in " ++ ppr expr)
            | otherwise -> descendE pure cellV (\_ e -> cellE cs e) expr
   where

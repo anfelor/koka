@@ -18,6 +18,7 @@
   Closures get no credits. The body of a join point (which runs at most once) asks
   its jumps for the credits it needs as extra parameters: an allocation that finds
   no credit adds one. A jump passes an available credit of each size, or an empty one.
+  The body of a recursive join point, like a closure, gets no credits from its jumps.
 -}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Passes.Reuse( reuseProgram ) where
@@ -133,11 +134,15 @@ ruE expr
         -> do e1' <- ruE e1
               es <- branches [([(x,V t)],e2),([],e3)]
               return (LetYield x t e1' (es !! 0) (es !! 1))
-      Join j tvs ps e1 e2
+      Join NonRec j tvs ps e1 e2
         -> do (e1',as) <- scope (Just []) (bind [(x,V t) | (x,_,t) <- ps] (ruE e1))
               let rs = fromMaybe [] as
               e2' <- local (\re -> re{ reJoins = M.insert j (map snd rs) (reJoins re) }) (ruE e2)
-              return (Join j tvs (ps ++ [(r,Owned,VReuse MaybeEmpty n Nothing) | (r,n) <- rs]) e1' e2')
+              return (Join NonRec j tvs (ps ++ [(r,Owned,VReuse MaybeEmpty n Nothing) | (r,n) <- rs]) e1' e2')
+      Join rc@Rec{} j tvs ps e1 e2
+        -> do let self = M.insert j []
+              e1' <- fst <$> scope Nothing (local (\re -> re{ reJoins = self M.empty }) (bind [(x,V t) | (x,_,t) <- ps] (ruE e1)))
+              Join rc j tvs ps e1' <$> local (\re -> re{ reJoins = self (reJoins re) }) (ruE e2)
       Jump j ts vs
         -> do vs' <- mapM ruV vs
               ns  <- asks (M.findWithDefault [] j . reJoins)
