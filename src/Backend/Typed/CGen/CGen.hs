@@ -57,11 +57,11 @@ data CEnv = CEnv{ ceModName   :: Name
 
 -- `stLocal`: whether the current definition uses declarations of the C file (static functions)
 data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [String], stDecls :: [Doc], stWrappers :: S.Set Name
-            , stLocal :: Bool, stTailCall :: Bool }
+            , stLocal :: Bool }
 
 -- `cxJoins`: the label and the parameters of each join point in scope, and whether it is
 -- recursive (its jumps then assign the parameters in parallel)
-data Ctx = Ctx{ cxEnv :: Env, cxCEnv :: CEnv, cxGamma :: Gamma, cxSelf :: Maybe (Name,[Path])
+data Ctx = Ctx{ cxEnv :: Env, cxCEnv :: CEnv, cxGamma :: Gamma
               , cxJoins :: M.Map Name (Doc,[(Path,VType)],Bool)
               , cxShared :: S.Set Path     -- blocks known to be shared (the else branch of `IsUnique`, and its aliases)
               , cxSources :: Sources }     -- the copies and join parameters of the definition (`sameBits`)
@@ -674,7 +674,7 @@ genLam cx ps r e
        rct  <- ctype r
        let structDef = sname <+> block ("struct kk_function_s _base;" : [cty ct <+> "c" <.> int i <.> ";" | (i,ct) <- fields]) <.> ";"
            g'  = M.union (M.fromList ([(x,V t) | (x,_,t) <- ps])) (cxGamma cx)
-           cx' = cx{ cxGamma = g', cxSelf = Nothing, cxJoins = M.empty }
+           cx' = cx{ cxGamma = g', cxJoins = M.empty }
        body <- genE cx' DReturn e
        -- Transfer captures from unique closures; shared closures retain their own references.
        let loads = [cty ct <+> localName (caps !! i) <+> "= _self->c" <.> int i <.> ";" | (i,ct) <- fields]
@@ -1099,19 +1099,10 @@ genCall cx dest f tys vs
        return (assignTo dest rct (fromKoka kt rct lit))
   | Just ext <- M.lookup f (ceExterns (cxCEnv cx)) = genExtern cx dest f tys vs ext
   | otherwise
-  = do (ps,r) <- callSig cx f tys
+  = do (_,r) <- callSig cx f tys
        rct <- ctype r
        args <- mapM (genV cx) vs
-       case (dest, cxSelf cx) of
-         (DReturn, Just (self,params)) | self == f && length params == length args
-           -> genSelfCall params ps args
-         _ -> return (assignTo dest rct (text (cName f) <.> "(" <.> hcat [a <.> ", " | a <- args] <.> "_ctx)"))
-
-genSelfCall :: [Path] -> [VType] -> [Doc] -> G [Doc]
-genSelfCall params ps args
-  = do modify (\st -> st{ stTailCall = True })
-       assigns <- parallelAssign (zip params ps) args
-       return [block (assigns ++ ["goto kt_tailcall;"])]
+       return (assignTo dest rct (text (cName f) <.> "(" <.> hcat [a <.> ", " | a <- args] <.> "_ctx)"))
 
 -- assign the arguments to the parameters through temporaries, as they may read the parameters
 parallelAssign :: [(Path,VType)] -> [Doc] -> G [Doc]
@@ -1170,16 +1161,13 @@ genDef env cenv def
         -> do pcts <- mapM (\(_,_,t) -> ctype t) args
               rct  <- ctype res
               let g  = M.fromList [(x,V t) | (x,_,t) <- args]
-                  cx = Ctx env cenv g (Just (f,[x | (x,_,_) <- args])) M.empty S.empty (sources body)
-              modify (\st -> st{ stTailCall = False })
+                  cx = Ctx env cenv g M.empty S.empty (sources body)
               ss <- genE cx DReturn body
-              tailCall <- gets stTailCall
               let sig = cty rct <+> text (cName f) <.> "(" <.> hcat [cty ct <+> localName x <.> ", " | ((x,_,_),ct) <- zip args pcts] <.> "kk_context_t* _ctx)"
-                  label = ["kt_tailcall: ;" | tailCall]
-              return (sig <.> ";", sig <+> block (label ++ ss), empty)
+              return (sig <.> ";", sig <+> block ss, empty)
       DefVal x _ t body
         -> do ct <- ctype t
-              let cx = Ctx env cenv M.empty Nothing M.empty S.empty (sources body)
+              let cx = Ctx env cenv M.empty M.empty S.empty (sources body)
               ss <- genE cx DReturn body
               let name  = text (cName x)
                   initf = name <.> "_init"
@@ -1195,7 +1183,7 @@ genWrapper env cenv f
         -> do pcts <- mapM (ctype . snd) ps
               rct  <- ctype r
               let xs  = [root (newHiddenName ("p" ++ show i)) | i <- [0..length ps - 1]]
-                  cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) Nothing M.empty S.empty M.empty
+                  cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) M.empty S.empty M.empty
               body <- genCall cx DReturn f (map AVar tvs) (map Var xs)
               let sig = "static" <+> cty rct <+> text (cName f) <.> "_fun(kk_function_t _fself" <.> hcat [", " <.> cty ct <+> localName x | (x,ct) <- zip xs pcts] <.> ", kk_context_t* _ctx)"
               return (sig <.> ";", sig <+> block ("kk_function_static_drop(_fself,_ctx);" : body))
@@ -1221,7 +1209,7 @@ cgenModule cenv prog
                     ws <- gets (S.toList . stWrappers)
                     wdefs <- mapM (genWrapper env cenv) ws
                     return (rs,wdefs)
-    in case runM genAll () (St 0 M.empty [] [] S.empty False False) of
+    in case runM genAll () (St 0 M.empty [] [] S.empty False) of
          Left err -> ("","",[err])
          Right ((rs,wdefs),st)
            -> let ok    = [x | Right x <- rs]
