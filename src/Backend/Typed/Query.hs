@@ -7,19 +7,13 @@
 -----------------------------------------------------------------------------
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
--- Type inference and environment queries shared by typed IR consumers.
+-- Type inference and typing-context queries shared by typed IR consumers.
 -- Keep inference in sync with the typing rules in Syntax.
-module Backend.Typed.Query( Env(..), Gamma, noJoins, yieldJoins, envOf, bindAll, checkE, inferE, inferA, inferV
-                          , inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize
-                          , unrollT, lazySides, openFields, funSig
+module Backend.Typed.Query( Gamma, noJoins, yieldJoins, bindAll, checkE, inferE, inferA, inferV
+                          , inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma
                           , lamGamma
-                          , M, runM, evalM, liftE
-                          , module Control.Monad.Reader, module Control.Monad.State
                           ) where
 
-import Control.Monad.Reader
-import Control.Monad.State
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad( zipWithM_, unless, when, forM_ )
@@ -29,23 +23,7 @@ import Backend.Typed.Syntax
 import Backend.Typed.Traversal( bindersE, boxTag, child, destructAOf, destructVOf, dsAlts, dsScrut, fvA, fvE, fvV, holes, isGlob, jumpArgs, within )
 import Backend.Typed.Types
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Layout( layout, blockSize )
-
--- The monad for typed IR consumers: an environment, state and failure message.
-newtype M r s a = M (ReaderT r (StateT s (Either String)) a)
-                deriving (Functor, Applicative, Monad, MonadReader r, MonadState s)
-
-instance MonadFail (M r s) where
-  fail msg = M (lift (lift (Left msg)))
-
-runM :: M r s a -> r -> s -> Either String (a,s)
-runM (M m) r s = runStateT (runReaderT m r) s
-
-evalM :: M r s a -> r -> s -> Either String a
-evalM m r s = fst <$> runM m r s
-
-liftE :: Either String a -> M r s a
-liftE = either fail return
+import Backend.Typed.Env( Env(..), Q, funSig, unrollT, lazySides, openFields, boxContents, reuseSize, noHeapCredit )
 
 type Gamma = M.Map Path Ty
 
@@ -58,13 +36,6 @@ data Joins = Joins{ jsPoints :: M.Map Name (S.Set Path,[TVar],[VType],VType), js
 noJoins, yieldJoins :: Joins
 noJoins = Joins M.empty False
 yieldJoins = Joins M.empty True
-
-data Env = Env{ envTypes :: TypeDefs, envSigs :: Sigs }
-
-type Q a = Either String a
-
-envOf :: Program -> Env
-envOf prog = Env (progTypes prog) (progSigs prog)
 
 bindAll :: [(Path,Ty)] -> Gamma -> Gamma
 bindAll bs g = foldr (uncurry M.insert) g bs
@@ -362,62 +333,10 @@ branches env cs = do ts <- sequence cs
     weaken = mapCredits (const MaybeEmpty) id
     erase = mapCredits (const MaybeEmpty) (const Nothing)
 
-funSig :: Env -> Name -> [AType] -> Q ([VType],VType)
-funSig env f tys
-  = case M.lookup f (envSigs env) of
-      Just (SigFun tvs ps r) | length tvs == length tys
-        -> return (map (inst tvs tys . snd) ps, inst tvs tys r)
-      Just sig -> Left ("call of " ++ show f ++ " with " ++ show (length tys) ++ " type arguments: " ++ show sig)
-      Nothing  -> Left ("unknown function: " ++ show f)
-
 checkArgs :: Env -> Gamma -> [VType] -> [VVal] -> Q ()
 checkArgs env g ps vs
   | length ps == length vs = zipWithM_ (\p v -> checkV env g v p) ps vs
   | otherwise = Left ("expecting " ++ show (length ps) ++ " arguments but got " ++ show (length vs))
-
--- `unroll(τ)` of a recursive type, also by its name (δ), when the unrolling folds back to it
-unrollT :: Env -> AType -> Q AType
-unrollT env t
-  = case t of
-      AMu x vs a bs | length vs == length bs
-        -> return (unrollMu (if null vs then t else ALam vs (AMu x vs a (map AVar vs))) x vs a bs)
-      ACon n args -> case M.lookup n (envTypes env) of
-                       Just (TypeDef _ tvs (Just body)) | length tvs == length args
-                         -> case body of
-                              AMu x vs a bs | bs == map AVar tvs -> return (unrollMu (ACon n []) x vs a args)
-                              _ -> unrollT env (inst tvs args body)
-                       Just _  -> Left ("cannot unroll abstract type " ++ show n)
-                       Nothing -> Left ("unknown type " ++ show n)
-      _ -> Left ("unroll of " ++ ppr (A t))
-
--- the thunks and the strict alternatives of a lazy type, `unroll(τ) = L ~> S`
-lazySides :: Env -> AType -> Q ([(Int,AType)],[(Int,AType)])
-lazySides env t
-  = do b <- unrollT env t
-       case b of
-         ALazy (ASum l) (ASum s) -> return (l,s)
-         _ -> Left ("not a lazy type: " ++ ppr (A t))
-
--- the fields of an open constructor at an instance `T⟨B̄⟩` of its type
-openFields :: Env -> Name -> AType -> Q [VType]
-openFields env c t
-  = case (M.lookup c (envSigs env), t) of
-      (Just (SigCon tvs fs n), ACon m args) | n == m && length tvs == length args -> return (map (inst tvs args) fs)
-      (Just (SigCon _ _ _), _) -> Left ("open constructor " ++ show c ++ " does not match " ++ ppr (A t))
-      _ -> Left ("unknown open constructor " ++ show c)
-
--- the contents `V` of a box `Box V`
-boxContents :: AType -> Q VType
-boxContents t
-  = case t of
-      ABox v -> return v
-      _ -> Left ("not a box: " ++ ppr t)
-
--- The size `|V|` of a box block. Heap contents cannot contain linear resources.
-reuseSize :: VType -> Q Int
-reuseSize v
-  = do noHeapCredit v
-       return (blockSize (layout v))
 
 litType :: Lit -> VType
 litType lit
@@ -517,9 +436,6 @@ checkLazy a
     isBox t = case t of
                 ABox _ -> True
                 _ -> False
-
-noHeapCredit :: VType -> Q ()
-noHeapCredit t = when (containsLinear (V t)) (Left "cannot store reuse credits or cells in a heap block")
 
 inferA :: Env -> Gamma -> AVal -> Q AType
 inferA env g val
