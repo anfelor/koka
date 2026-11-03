@@ -21,11 +21,11 @@ module Backend.Typed.CGen.CGen( CEnv(..), External(..), cgenModule, cName, ktIni
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Char( isAlphaNum, ord )
-import Data.List( zip4 )
+import Data.List( sortOn, zip4 )
 import Data.Maybe( fromMaybe )
 import qualified Numeric
 import Control.Monad( forM, when )
-import Lib.PPrint( Doc, text, string, int, integer, empty, isEmptyDoc, line, nest, align, vcat, hcat, hsep, (<.>), (<+>), (<->) )
+import Lib.PPrint( Doc, text, string, int, integer, empty, isEmptyDoc, line, nest, align, vcat, hcat, hsep, punctuate, (<.>), (<+>), (<->) )
 import Common.Name
 import Common.NamePrim
 import Type.Type
@@ -34,7 +34,7 @@ import Kind.Newtypes
 import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Common
-import Backend.Typed.Traversal( boxTag, canonical, fvA, within )
+import Backend.Typed.Traversal( boxTag, canonical, fvA, fvE, within )
 import Backend.Typed.Types( Types(..), dupType, inst, leaves, isEnum, isShape )
 import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, unrollT, openFields, boxContents, reuseSize
                           , M, get, gets, liftE, modify, put, runM, state )
@@ -873,17 +873,9 @@ genE cx dest expr
               genAlias (shareAlias cx v x) dest (localName v) x (A a) e
       Unbox _ v x e -> genUnbox cx dest v x e
       Unscalar m v x e -> genUnscalar cx dest m v x e
-      SplitA _ v k (x,e1) (y,e2)
-        -> do t <- tyOfName cx v
-              [[tl@(A ls)],[tr@(A rs)]] <- liftC (altTypes (cxEnv cx) t expr)
-              let ve = localName v
-              left <- genSumBranch cx dest v x tl e1
-              right <- genSumBranch cx dest v y tr e2
-              tg <- fresh "t"
-              let (header,test) = case pointerTest ve ls rs of
-                                   Just c -> ([],c)
-                                   Nothing -> ([tagDecl t tg ve],tg <+> "<" <+> int k)
-              return [block (header ++ [ifChain [(test,left)] right])]
+      _ | Just (tests,failure) <- conjunction expr
+        -> genConjunction cx dest tests failure
+      SplitA{} -> failG "a split is a conjunction"
       -- the strict tags come before the thunks, and only strict alternatives are immediate
       IfWhnf _ v (x,e1) (y,e2)
         -> do t <- tyOfName cx v
@@ -907,11 +899,10 @@ genE cx dest expr
                             (Just (x,e), [[td]]) -> Just <$> genSumBranch cx dest v x td e
                             _ -> return Nothing
               tg <- fresh "t"
-              -- Match owns partitioning. A single alternative needs no test, and
-              -- with a default only an equality branch.
+              -- Match owns partitioning. A single alternative needs no test; two
+              -- are a conjunction.
               case (brs,fallback) of
                 ([(_,body)],Nothing) -> return [block body]
-                ([([tag],body)],Just other) -> return [block [tagDecl t tg ve, ifChain [(tg <+> "==" <+> int tag,body)] other]]
                 _ -> return [block [tagDecl t tg ve, switchCases tg brs fallback]]
       -- a variable is a local, another value is copied into one
       CaseV _ v alts
@@ -980,11 +971,83 @@ genSumBranch cx dest v x t e
 -- Read the tag of a boxed sum; when every alternative is a heap block, the
 -- tag is in the block header and needs no pointer test.
 tagDecl :: Ty -> Doc -> Doc -> Doc
-tagDecl t tg ve = "kk_tag_t" <+> tg <+> "=" <+> tagRead <.> ";"
+tagDecl t tg ve = "kk_tag_t" <+> tg <+> "=" <+> tagRead t ve <.> ";"
+
+tagRead :: Ty -> Doc -> Doc
+tagRead t ve = (case t of
+                  A a | shapeIsHeap a == Just True -> "kt_heap_tag"
+                  _ -> "kt_tag") <.> "(" <.> ve <.> ",_ctx)"
+
+-- Consecutive tests with one failure (`failingTo`) form one condition, like a pattern
+-- level in Koka's C backend, so that the C compiler evaluates them together: with
+-- separate branches it sinks the loads of later operands behind earlier tests. The
+-- operands are in scope before the first test. A single test is a conjunction of one;
+-- the failure keeps the binder of its first test.
+conjunction :: VExpr -> Maybe ([TestSide],(Path,VExpr))
+conjunction expr
+  = case sortOn (negate . length . fst) [(s : more (snd (sideOther s)) [fst (sideTaken s)] (snd (sideTaken s)),sideOther s) | s <- testSides expr, combinable s] of
+      (c:_) -> Just c
+      [] -> Nothing
   where
-    tagRead = (case t of
-                 A a | shapeIsHeap a == Just True -> "kt_heap_tag"
-                 _ -> "kt_tag") <.> "(" <.> ve <.> ",_ctx)"
+    more failure xs e
+      = case failingTo failure e of
+          Just s | combinable s, not (any (\u -> any (u `within`) xs) (fvE (sideRebuild s unused unused)))
+            -> s : more failure (fst (sideTaken s) : xs) (snd (sideTaken s))
+          _ -> []
+    unused = Unreachable VUnit
+    -- the payload of a sum value is read twice
+    combinable s = case sideTest s of
+                     CaseV _ v _ -> case v of { Var _ -> True; _ -> False }
+                     _ -> True
+
+genConjunction :: Ctx -> Dest -> [TestSide] -> (Path,VExpr) -> G [Doc]
+genConjunction cx dest sides (_,failure)
+  = do tests <- mapM (twoWay cx . sideTest) sides
+       let taken = [if sideFirst s then (c,a) else ("!(" <.> c <.> ")",b) | (s,(c,a,b)) <- zip sides tests]
+           other = case (sides,tests) of
+                     (s:_,(_,a,b):_) -> if sideFirst s then b else a
+                     _ -> error "Backend.Typed.CGen.genConjunction: no test"
+           bind c (x,t,_) = bindVar c x t
+           decl (_,_,d) = d
+           cond = case taken of
+                    [(c,_)] -> c
+                    _ -> hcat (punctuate " && " ["(" <.> c <.> ")" | (c,_) <- taken])
+       yes <- genE (foldl bind cx (map snd taken)) dest (snd (sideTaken (last sides)))
+       no <- genE (bind cx other) dest failure
+       return [ifChain [(cond,map (decl . snd) taken ++ yes)] (decl other : no)]
+
+-- The condition of the first alternative of a test with two alternatives, and the binder
+-- of each alternative with its type and declaration.
+twoWay :: Ctx -> VExpr -> G (Doc,(Path,Ty,Doc),(Path,Ty,Doc))
+twoWay cx expr
+  = case expr of
+      SplitA _ v k (x,_) (y,_)
+        -> do t <- tyOfName cx v
+              [[tl@(A ls)],[tr@(A rs)]] <- liftC (altTypes (cxEnv cx) t expr)
+              let ve = localName v
+              return (fromMaybe (tagRead t ve <+> "<" <+> int k) (pointerTest ve ls rs), alias v x tl, alias v y tr)
+      CaseA _ v [(i,x,_)] (Just (y,_)) -> tagged v i x y
+      CaseA _ v [(i,x,_),(_,y,_)] Nothing -> tagged v i x y
+      CaseV _ v@(Var _) [(i,x,_),(j,y,_)]
+        -> do t@(VSum ts) <- tyOf cx v
+              ct <- ctype t
+              z <- genV cx v
+              let tag = case ct of { CEnum _ -> z; _ -> "kk_smallint_from_integer(" <.> z <.> "._tag) - 1" }
+                  payload k = case ct of
+                    CSum alts | Just _ <- alts !! k -> z <.> "._cons.c" <.> int k
+                    _ -> "kk_Unit"
+                  binder k w = do let tk = snd (ts !! k)
+                                  ctk <- ctype tk
+                                  return (w,V tk,declare (cty ctk) w (payload k))
+              a <- binder i x
+              b <- binder j y
+              return ("(" <.> tag <.> ") ==" <+> int i,a,b)
+      _ -> failG "twoWay: not a test with two alternatives"
+  where
+    alias v x t = (x,t,declare "kk_box_t" x (localName v))
+    tagged v i x y = do t <- tyOfName cx v
+                        [[ti],[to]] <- liftC (altTypes (cxEnv cx) t expr)
+                        return (tagRead t (localName v) <+> "==" <+> int i,alias v x ti,alias v y to)
 
 -- The final arm of an exhaustive boxed case is the default, so that the switch
 -- needs no unreachable case (without emitting its body twice).
