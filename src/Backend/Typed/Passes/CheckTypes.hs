@@ -19,7 +19,8 @@ import Backend.Typed.Syntax
 import Backend.Typed.Traversal( descendA, descendB, descendE, descendV, pathOf, scrutVar )
 import Backend.Typed.Types( Types(..) )
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Query( Env, envOf, checkE, yieldJoins )
+import Backend.Typed.Env( Env, envOf )
+import Backend.Typed.Query( checkE, yieldJoins )
 import Backend.Typed.Layout( layout, checkLayout )
 
 checkProgram :: Program -> [String]

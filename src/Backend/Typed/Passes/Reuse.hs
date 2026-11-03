@@ -31,8 +31,8 @@ import Backend.Typed.Syntax
 import Backend.Typed.Types( dupType )
 import Backend.Typed.Traversal( boxTag, child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut )
 import Backend.Typed.Passes.Common( trivialTy, defGamma, NameSupply, dropValue, freshFor, freshPathFrom, perBody, reuseParts, scopeOf )
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, boxContents, reuseSize, inferE, noJoins, unrollT
-                          , M, ask, asks, evalM, get, gets, liftE, local, modify, put, state )
+import Backend.Typed.Env( Env, envOf, boxContents, reuseSize, unrollT, M, ask, asks, evalM, get, gets, liftE, local, modify, put, state )
+import Backend.Typed.Query( Gamma, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, inferE, noJoins )
 
 -- credits with the size of their block
 type Credits = [(Path,Int)]

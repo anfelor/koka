@@ -42,8 +42,8 @@ import Backend.Typed.Syntax
 import Backend.Typed.Build( compose )
 import Backend.Typed.Traversal( boxTag, child, fieldsAt, stepsFrom, within )
 import Backend.Typed.Passes.Common( trivialTy, defGamma, typedChildren, NameSupply, dropValue, freshFor, freshNameFrom, freshPathFrom, perBody, projectAll, scopeOf )
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferAVar, unboxRuGamma, boxContents, reuseSize
-                          , M, ask, evalM, liftE, local, state )
+import Backend.Typed.Env( Env, envOf, boxContents, reuseSize, M, ask, evalM, liftE, local, state )
+import Backend.Typed.Query( Gamma, bindAll, inferVar, inferAVar, unboxRuGamma )
 
 type D a = M (Env,Gamma) NameSupply a
 

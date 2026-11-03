@@ -83,8 +83,8 @@ import Backend.Typed.Syntax
 import Backend.Typed.Traversal( child, descendV, destructAOf, destructVOf, dsAlts, dsMode, dsScrut, fieldsAt, fvA, fvE, isRead, jumpArgs, keepsPointer, prefixes, sibling, within )
 import Backend.Typed.Types( dupType, prodV )
 import Backend.Typed.Passes.Common( paramModes, trivialTy )
-import Backend.Typed.Query( Env(..), Gamma, envOf, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma
-                          , M, ask, evalM, get, gets, liftE, local, modify )
+import Backend.Typed.Env( Env(..), envOf, M, ask, evalM, get, gets, liftE, local, modify )
+import Backend.Typed.Query( Gamma, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 
 -- the mode of the variables at and below each owner: the roots in scope, and in the body of a
 -- join point the variables it captures

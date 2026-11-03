@@ -36,8 +36,8 @@ import Backend.Typed.Syntax
 import Backend.Typed.Sources( Sources, sources, sameBits )
 import Backend.Typed.Traversal( TestSide(..), boxTag, canonical, failingTo, fvA, fvE, holes, testSides, within )
 import Backend.Typed.Types( Types(..), dupType, inst, leaves, isEnum, isShape )
-import Backend.Typed.Query( Env(..), Gamma, envOf, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, unrollT, openFields, boxContents, reuseSize
-                          , M, get, gets, liftE, modify, put, runM, state )
+import Backend.Typed.Env( Env(..), envOf, unrollT, openFields, boxContents, reuseSize, M, get, gets, liftE, modify, put, runM, state )
+import Backend.Typed.Query( Gamma, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 import Backend.Typed.Layout
 import Backend.Typed.CGen.Layout hiding( dupExpr, dropStmt )
 import Backend.Typed.CGen.Koka hiding( conInfoOf, conFieldNames )

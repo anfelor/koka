@@ -51,8 +51,7 @@ import Backend.Typed.Lazies( Lazies(..) )
 import Backend.Typed.Passes.Common( NameSupply, freshFor, freshPathFrom, perDef, substE )
 import Backend.Typed.Traversal( child, descendE, fvE, fvV, lamsV )
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Query( Env(..), envOf, unrollT, reuseSize, lazySides
-                          , M, asks, evalM, gets, liftE, local, modify, state )
+import Backend.Typed.Env( Env(..), envOf, unrollT, reuseSize, lazySides, M, asks, evalM, gets, liftE, local, modify, state )
 
 -- the lazy value of `lazy-eval-locked` and its type
 data LEnv = LEnv{ leEnv :: Env, leLazies :: Lazies, leLocked :: Maybe (Path,AType) }

@@ -45,6 +45,7 @@ library
       Backend.Typed.Elab.TypeInfo
       Backend.Typed.Elab.TypeMatch
       Backend.Typed.Elab.Types
+      Backend.Typed.Env
       Backend.Typed.Layout
       Backend.Typed.Lazies
       Backend.Typed.Passes.Anf

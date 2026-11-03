@@ -54,8 +54,8 @@ import Backend.Typed.Types( dupType )
 import Backend.Typed.Traversal( descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsScrut, stepsFrom, within )
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Passes.Common( trivialTy )
-import Backend.Typed.Query( Env, Gamma, envOf, bindAll, inferVar, inferV, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma
-                          , M, ask, asks, gets, liftE, local, modify, runM, state )
+import Backend.Typed.Env( Env, envOf, M, ask, asks, gets, liftE, local, modify, runM, state )
+import Backend.Typed.Query( Gamma, bindAll, inferVar, inferV, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 
 -- The allocations of the most allocating path; whether there are allocations, calls to the
 -- recursive group, and both in sequence; and the types of the values boxed for polymorphism.
