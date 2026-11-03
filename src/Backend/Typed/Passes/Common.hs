@@ -515,9 +515,9 @@ subGammas env g expr
                          case t of
                            VReuse _ n p -> return [M.insert r (V (VReuse Full n p)) g, M.delete r g]
                            _ -> Left ("test of a non-credit: " ++ ppr t)
-      UnboxRu z r _ -> pure <$> unboxRuGamma g z r
+      UnboxRu z _ -> pure <$> unboxRuGamma g z
       CopyRu z r _ -> pure <$> copyRuGamma g z r
-      Lock z c _ -> pure <$> lockGamma g z c
+      Lock z _ -> pure <$> lockGamma g z
       _ -> return (map (const g) (subexprs expr))
   where
     alts as t = do tss <- altTypes env t expr

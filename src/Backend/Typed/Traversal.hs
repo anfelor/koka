@@ -126,9 +126,9 @@ descendB fn fv fb expr
       Dup x e               -> Dup <$> fn x <*> plain e
       IsUnique x e1 e2      -> IsUnique <$> fn x <*> plain e1 <*> plain e2
       IfFull r e1 e2        -> IfFull <$> fn r <*> plain e1 <*> plain e2
-      UnboxRu v r e         -> (\v' (r',e') -> UnboxRu v' r' e') <$> fn v <*> one r [] e
+      UnboxRu v e           -> (\v' (_,e') -> UnboxRu v' e') <$> fn v <*> one (child v SCredit) [SCredit] e
       CopyRu v r e          -> (\v' (r',e') -> CopyRu v' r' e') <$> fn v <*> one r [] e
-      Lock z c e            -> (\z' (c',e') -> Lock z' c' e') <$> fn z <*> one c [] e
+      Lock z e              -> (\z' (_,e') -> Lock z' e') <$> fn z <*> one (child z SCredit) [SCredit] e
       Join r j tvs ps e1 e2 -> (\(xs,e1') e2' -> Join r j tvs [(x',m,t) | (x',(_,m,t)) <- zip xs ps] e1' e2')
                                  <$> fb [(x,[]) | (x,_,_) <- ps] e1 <*> plain e2
       Jump j ts vs          -> Jump j ts <$> traverse fv vs
@@ -215,19 +215,19 @@ fieldsAt x t
       _ -> []
 
 -- `[unbox-ru]` and `[lock]` of a box `z` take its contents out of its block and bind its
--- block as a new root: the box, the root and the body
-takesContents :: VExpr -> Maybe (Path,Path,VExpr)
+-- block `z.credit`: the box and the body
+takesContents :: VExpr -> Maybe (Path,VExpr)
 takesContents expr
   = case expr of
-      UnboxRu z r e -> Just (z,r,e)
-      Lock z c e -> Just (z,c,e)
+      UnboxRu z e -> Just (z,e)
+      Lock z e -> Just (z,e)
       _ -> Nothing
 
 -- the variable that a destructuring form destructures
 scrutVar :: VExpr -> Maybe Path
 scrutVar expr
   = case expr of
-      _ | Just (z,_,_) <- takesContents expr -> Just z
+      _ | Just (z,_) <- takesContents expr -> Just z
         | Just ds <- destructAOf expr -> Just (dsScrut ds)
         | Just ds <- destructVOf expr, Var z <- dsScrut ds -> Just z
         | otherwise -> Nothing
