@@ -20,8 +20,7 @@
   after `JoinArgs`, so that a captured variable is inlined into the join body as well.
 
   In an enum alternative, a reused payload can name its old enum field instead of the
-  equal constructor constant, or a variable with its bits (`sameBits`), such as a join
-  parameter that receives it. Only variables still in scope are used; enum values carry no ownership. Descriptions
+  equal constructor constant. Only variables still in scope are used; enum values carry no ownership. Descriptions
   and the checking rules stay unchanged.
 
   Bindings that keep a literal dereference named are retained, preserving its operand
@@ -36,7 +35,6 @@ import qualified Data.Set as S
 import Data.Maybe( fromMaybe )
 import Data.Functor.Const( Const(..) )
 import Backend.Typed.Syntax
-import Backend.Typed.Sources( Sources, sources, sameBits )
 import Backend.Typed.Traversal( descendA, descendAll, descendV, mapV )
 import Backend.Typed.Passes.Common( mapAll, defGamma, descendTyped, defScope, perBody, project, substEIn, substVType, valueAt )
 import Backend.Typed.Env( Env, envOf, M, ask, evalM, liftE, local )
@@ -47,7 +45,7 @@ type Values = M.Map Path VVal
 
 inlineProgram :: Program -> (Program,[String])
 inlineProgram prog
-  = perBody (\d -> evalM (reuseE (defBody d)) (envOf inlined,defGamma d,M.empty,sources (defBody d)) ()) inlined
+  = perBody (\d -> evalM (reuseE (defBody d)) (envOf inlined,defGamma d,M.empty) ()) inlined
   where
     inlined = prog{ progDefs = map inlineDef (progDefs prog) }
 
@@ -104,18 +102,17 @@ inlineE vals expr
       CaseV _ (Var z) alts | Just (Inj i _ _) <- known vals z, (e:_) <- [e | (j,_,e) <- alts, j == i] -> inlineE vals e
       _ -> mapAll (\_ -> inlineE vals) expr
 
--- The enum facts are local to a branch, unlike the structural lets above. The sources of
--- the definition give the variables with the bits of others.
-type Reuse a = M (Env,Gamma,Values,Sources) () a
+-- The enum facts are local to a branch, unlike the structural lets above.
+type Reuse a = M (Env,Gamma,Values) () a
 
 -- In an alternative of a case on an enum, the enum is known.
 reuseE :: VExpr -> Reuse VExpr
 reuseE expr
-  = do (env,g,facts,src) <- ask
-       let under g' = local (const (env,g',facts,src)) . reuseE
+  = do (env,g,facts) <- ask
+       let under g' = local (const (env,g',facts)) . reuseE
        case expr of
          CaseV m (Var z) alts | Right (V t) <- inferVar g z, enumType t
-           -> CaseV m (Var z) <$> sequence [(,,) i x <$> local (const (env,M.insert x (V VUnit) g,M.insert z (Inj i t UnitV) facts,src)) (reuseE e)
+           -> CaseV m (Var z) <$> sequence [(,,) i x <$> local (const (env,M.insert x (V VUnit) g,M.insert z (Inj i t UnitV) facts)) (reuseE e)
                                            | (i,x,e) <- alts]
          _ -> descendTyped env g reuseV under expr
 
@@ -129,23 +126,21 @@ reuseV = descendV reuseA reuseV
 reuseA :: AVal -> Reuse AVal
 reuseA val
   = case val of
-      BoxAt r v -> do (_,g,facts,src) <- ask
+      BoxAt r v -> do (_,g,facts) <- ask
                       v' <- reuseV v
                       t <- liftE (inferVar g r)
                       return (BoxAt r (case t of
-                        V (VReuse _ _ (Just (Contents _ old _))) -> restore g facts src old v'
+                        V (VReuse _ _ (Just (Contents _ old _))) -> restore g facts old v'
                         _ -> v'))
-      Lam ps r e -> Lam ps r <$> local (\(env,g,_,src) -> (env,lamGamma ps g,M.empty,src)) (reuseE e)
+      Lam ps r e -> Lam ps r <$> local (\(env,g,_) -> (env,lamGamma ps g,M.empty)) (reuseE e)
       _ -> descendA pure reuseA reuseV val
 
--- Prefer the old field's variable, or one with its bits, only where the branch proves it
--- equals the new constant. Description names may be out of scope, and must not become
--- runtime uses.
-restore :: Gamma -> Values -> Sources -> VVal -> VVal -> VVal
-restore g facts src old new
-  | Var x <- old
-  , (y:_) <- [y | y <- x : M.keys facts, y == x || sameBits src y == x, Just (V t) <- [M.lookup y g], enumType t, M.lookup y facts == Just new]
-  = Var y
+-- Prefer the old field's variable only where the branch proves it equals the new constant.
+-- Description names may be out of scope, and must not become runtime uses.
+restore :: Gamma -> Values -> VVal -> VVal -> VVal
+restore g facts old new
+  | Var x <- old, Just (V t) <- M.lookup x g, enumType t, M.lookup x facts == Just new
+  = Var x
   | Tuple ws <- new, Just xs <- mapM (\i -> project old [SField i (posField i)]) [0 .. length ws - 1]
-  = Tuple (zipWith (restore g facts src) xs ws)
+  = Tuple (zipWith (restore g facts) xs ws)
   | otherwise = new

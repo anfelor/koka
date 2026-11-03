@@ -71,7 +71,6 @@ library
       Backend.Typed.Passes.Yields
       Backend.Typed.Pretty
       Backend.Typed.Query
-      Backend.Typed.Sources
       Backend.Typed.Syntax
       Backend.Typed.Traversal
       Backend.Typed.Typed
