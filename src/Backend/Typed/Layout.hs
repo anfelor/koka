@@ -11,14 +11,38 @@
 -- decreasing alignment. Sums have a tag and storage for their largest alternative.
 -- Sizes and alignment currently assume 64-bit words.
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Layout( CT(..), EnumSize(..), enumBytes, layout, orderFields, shapeIsHeap
+module Backend.Typed.Layout( leaves, isEnum, CT(..), EnumSize(..), enumBytes, layout, orderFields, shapeIsHeap
                            , checkLayout, scanOf, blockSize, sizeAlign, fieldOffsets
                            ) where
 
 import Data.List( foldl', sortOn )
 import Data.Ord( Down(..) )
 import Backend.Typed.Syntax
-import Backend.Typed.Types( leaves, isEnum )
+
+-- leaves of a product
+leaves :: VType -> [VType]
+leaves t
+  = case t of
+      VProd fs -> concatMap (leaves . snd) fs
+      VExists _ b -> leaves b
+      VUnit -> []
+      VPtr _ -> [t]
+      VSum _ -> [t]
+      VRaw _ -> [t]
+      VReuse _ _ _ -> [t]
+      VCtx _ a b -> [VPtr a, VPtr b]
+      VCell _ _ -> [t]
+
+isEnum :: VType -> Bool
+isEnum t
+  = case t of
+      VSum ts -> length ts > 1 && all (isUnitT . snd) ts
+      _ -> False
+  where
+    isUnitT VUnit = True
+    isUnitT (VProd fs) = all (isUnitT . snd) fs
+    isUnitT (VExists _ b) = isUnitT b
+    isUnitT _ = False
 
 data CT = CBox
         | CPrim Raw

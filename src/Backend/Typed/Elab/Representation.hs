@@ -14,7 +14,7 @@ module Backend.Typed.Elab.Representation( rep, boxrep, boxA, shapeLeaves, leafCo
 
 import Common.NamePrim( nameTpAny )
 import Backend.Typed.Syntax
-import Backend.Typed.Types( leaves, isEnum )
+import Backend.Typed.Layout( leaves, isEnum )
 import Backend.Typed.Traversal( child )
 
 -- a value at a type variable: `a*`

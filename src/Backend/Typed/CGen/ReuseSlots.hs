@@ -13,8 +13,8 @@ module Backend.Typed.CGen.ReuseSlots( keptLeaves ) where
 import Backend.Typed.Syntax
 import Backend.Typed.Sources( Sources, sameBits )
 import Backend.Typed.Traversal( child, fieldsAt, mapV )
-import Backend.Typed.Types( collapse, leaves )
-import Backend.Typed.Layout( layout, scanOf )
+import Backend.Typed.Types( collapse )
+import Backend.Typed.Layout( layout, leaves, scanOf )
 import Backend.Typed.CGen.Layout( leafSlots )
 
 sameBitsV :: Sources -> VVal -> VVal
