@@ -29,6 +29,7 @@ import Backend.Typed.Passes.Simplify( simplifyProgram )
 import Backend.Typed.Passes.Yields( yieldsProgram )
 import Backend.Typed.Passes.Perceus( perceusProgram )
 import Backend.Typed.Passes.TailRec( tailRecProgram )
+import Backend.Typed.Passes.UniqueJoins( uniqueJoinsProgram )
 import Backend.Typed.Passes.Reuse( reuseProgram )
 import Backend.Typed.Passes.ExpandReuse( expandReuseProgram )
 import Backend.Typed.Passes.FillCredits( fillCreditsProgram )
@@ -56,6 +57,7 @@ typedFromCore enableReuse nt imports uniq core
                                   ,("yields",WellFormed,pure' yieldsProgram)
                                   ,("perceus",Linear,perceusProgram)
                                   ,("tailrec",Linear,pure' tailRecProgram)
+                                  ,("uniquejoins",Linear,pure' uniqueJoinsProgram)
                                    ,("dropspec",Linear,dropSpecProgram)] ++ [("reuse",Linear,reuseProgram) | enableReuse]
                                    ++ [("match",Linear,matchProgram), ("sinkjoins",Linear,pure' sinkJoinsProgram), ("joinargs",Linear,pure' joinArgsProgram)]
                                    ++ concat [[("fillcredits",Linear,pure' fillCreditsProgram),("expandreuse",Linear,pure' expandReuseProgram)] | enableReuse] ++ [("inline",Linear,inlineProgram)]

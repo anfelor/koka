@@ -68,6 +68,7 @@ library
       Backend.Typed.Passes.Simplify
       Backend.Typed.Passes.SinkJoins
       Backend.Typed.Passes.TailRec
+      Backend.Typed.Passes.UniqueJoins
       Backend.Typed.Passes.Yields
       Backend.Typed.Pretty
       Backend.Typed.Query
