@@ -112,6 +112,10 @@ isStatement e
       Call{} -> True
       App{} -> True
       Jump{} -> True
+      Append{} -> True
+      Plug{} -> True
+      CtxCopy{} -> True
+      Memoize{} -> True
       _ -> False
 
 statementValues :: VExpr -> [VVal]

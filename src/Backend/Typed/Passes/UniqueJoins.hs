@@ -13,8 +13,10 @@
   pass finds the binders of contexts that always hold a unique value, makes the parameters
   among them unique, and removes the copies of unique values:
 
-    join rec j(acc : ctx) = ... jump j(acc ++ ctx K) ... ret (ctx-copy acc)[v] in jump j(c)
-    ~> join rec j(acc :! ctx) = ... jump j(acc ++ ctx K) ... ret acc[v] in jump j(ctx-copy c)
+    join rec j(acc : ctx) = ... let a = acc ++ ctx K in jump j(a) ... let c = ctx-copy acc in c[v]
+    in jump j(c₀)
+    ~> join rec j(acc :! ctx) = ... let a = acc ++ ctx K in jump j(a) ... acc[v]
+       in let c₁ = ctx-copy c₀ in jump j(c₁)
 
   The candidates are the owned or unique parameters of join points and the binders of `let`
   (`[let-unique]`) of context type, and the unique parameters of the definition. A candidate is excluded if a borrowed use may demote it: `dup x`, a borrowed
@@ -25,12 +27,13 @@
   The unique binders U are the greatest set of candidates such that every value that flows
   into one is unique given U (`uniq`, as `CheckLinear.uniqueV`): the arguments of every jump
   to a non-recursive join point, those of the jumps in the body of a recursive one, and the
-  results of the bound expression of a `let` (`tails`). A result is a value, or a call that is
-  unique if its function has a unique result, or a worker with one (`UniqueWorkers`) whose
-  unique parameters receive unique values; such a call is redirected to the worker. The jumps that enter a recursive join point are exempt: they copy an
+  results of the bound expression of a `let` (`tails`). A result is a value, an append or a
+  copy (which are unique), or a call that is unique if its function has a unique result, or a
+  worker with one (`UniqueWorkers`) whose unique parameters receive unique values; such a call
+  is redirected to the worker. The jumps that enter a recursive join point are exempt: they copy an
   argument for a promoted parameter that is not unique, once per loop instead of once per
   iteration. Then `ctx-copy v` of a unique `v` is `v` (`kk_cctx_copy` only copies a shared
-  context). `CheckLinear` validates the result.
+  context): `let x = ctx-copy v in e` becomes `e[x := v]`. `CheckLinear` validates the result.
 
   The body of a closure is a scope of its own, in which the variables it captures are owned.
 -}
@@ -38,42 +41,45 @@ module Backend.Typed.Passes.UniqueJoins( uniqueJoinsProgram, uniqueScope, Flow(.
 
 import qualified Data.Map as M
 import qualified Data.Set as S
+import Control.Monad( zipWithM )
+import Control.Monad.State( State, evalState, state )
 import Data.Functor.Const( Const(..) )
-import Data.Functor.Identity( Identity(..) )
 import Data.Monoid( Sum(..) )
 import Common.Name( Name, makeHiddenName )
 import Backend.Typed.Syntax
 import Backend.Typed.Env( Env(..), envOf )
-import Backend.Typed.Traversal( descendA, descendE, descendV, fvE, fvV, jumpArgs, lamsV, mapA, mapV )
-import Backend.Typed.Passes.Common( paramModes, resultMode, substJump )
+import Backend.Typed.Traversal( descendE, fvE, fvV, jumpArgs, lamsV, subexprs )
+import Backend.Typed.Types( inst )
+import Backend.Typed.Build( K, compose )
+import Backend.Typed.Passes.Common( NameSupply, freshFor, freshPathFrom, paramModes, replaceE, resultMode, substJumpM )
 
 uniqueJoinsProgram :: Program -> Program
 uniqueJoinsProgram prog = prog{ progDefs = map def (progDefs prog) }
   where
     env = envOf prog
-    def d = case d of
-              DefFun{} -> d{ defBody = scope env (defArgs d) (defBody d) }
-              DefVal{} -> d{ defBody = scope env [] (defBody d) }
+    def d = d{ defBody = snd (evalState (uniqueScope env (params d) (defBody d)) (freshFor d)) }
+    params d = case d of
+                 DefFun{} -> defArgs d
+                 DefVal{} -> []
 
--- a definition or closure body with its parameters
-scope :: Env -> [(Path,Mode,VType)] -> VExpr -> VExpr
-scope env ps body = snd (uniqueScope env ps body)
-
--- the unique binders of a definition or closure body, and the rewritten body
-uniqueScope :: Env -> [(Path,Mode,VType)] -> VExpr -> (S.Set Path, VExpr)
-uniqueScope env ps body = (u, rewrite env u body')
+-- the unique binders of a definition or closure body, and the rewritten body; the names
+-- are fresh in the whole definition
+uniqueScope :: Env -> [(Path,Mode,VType)] -> VExpr -> State NameSupply (S.Set Path, VExpr)
+uniqueScope env ps body
+  = do body' <- closures body
+       let u = unique env (Facts [x | (x,_,_) <- ps] [x | (x,Unique,t) <- ps, isCtx t] S.empty [] <> facts env M.empty body')
+       (,) u <$> rewrite env u body'
   where
-    body' = closures body
-    u = unique env (Facts [x | (x,_,_) <- ps] [x | (x,Unique,t) <- ps, isCtx t] S.empty [] <> facts env M.empty body')
-    closures e = runIdentity (descendE pure (lamsV (\qs _ b -> Identity (scope env qs b))) (\_ b -> Identity (closures b)) e)
+    closures e = descendE pure (lamsV (\qs _ b -> snd <$> uniqueScope env qs b)) (\_ b -> closures b) e
 
 isCtx :: VType -> Bool
 isCtx t = case t of
             VCtx{} -> True
             _ -> False
 
--- what flows into a binder: a value, the result of a call, or another result
-data Flow = FVal VVal | FCall Name [VVal] | FOther
+-- what flows into a binder: a value, the result of a call, a unique context (of `[ctx-append]`
+-- or `[ctx-copy]`), or another result
+data Flow = FVal VVal | FCall Name [VVal] | FUnique | FOther
 
 -- the results of an expression, in its tail positions (the bodies of its join points
 -- included, and its jumps excluded)
@@ -82,6 +88,10 @@ tails expr
   = case expr of
       Ret v -> [FVal v]
       Call f _ vs -> [FCall f vs]
+      Append{} -> [FUnique]
+      CtxCopy{} -> [FUnique]
+      Plug{} -> [FOther]
+      Memoize{} -> [FOther]
       Jump{} -> []
       Unreachable{} -> []
       Let _ _ _ e -> tails e
@@ -130,13 +140,10 @@ facts env js expr
 
 -- the number of copies of contexts in an expression, outside of closures
 copyCount :: VExpr -> Int
-copyCount = getSum . go
+copyCount e = getSum (copy e <> foldMap (Sum . copyCount) (subexprs e))
   where
-    go e = getConst (descendE (const (Const mempty)) (Const . copyV) (\_ b -> Const (go b)) e)
-    copyV v = case v of
-                CtxCopy w -> Sum 1 <> copyV w
-                _ -> getConst (descendV (Const . copyA) (Const . copyV) v)
-    copyA a = getConst (descendA (const (Const mempty)) (Const . copyA) (Const . copyV) a)
+    copy CtxCopy{} = Sum 1
+    copy _ = Sum 0
 
 -- the greatest set of candidates that only receive unique values
 unique :: Env -> Facts -> S.Set Path
@@ -159,8 +166,6 @@ uniq u val
       Tuple vs -> all (uniq u) vs
       Pack _ _ w -> uniq u w
       Context _ _ -> True
-      CtxCopy _ -> True
-      Append c d -> uniq u c && uniq u d
       _ -> False
 
 -- a unique result given the unique binders
@@ -169,6 +174,7 @@ uniqF env u r
   = case r of
       FVal v -> uniq u v
       FCall f vs -> resultMode env (callee env u f vs) == Unique
+      FUnique -> True
       FOther -> False
 
 -- the worker of a function `f` (`UniqueWorkers`)
@@ -187,21 +193,26 @@ callee env u f vs
 
 -- make the unique parameters unique, copy the arguments that are not unique at the entries of
 -- recursive join points, remove the copies of unique values, and call workers
-rewrite :: Env -> S.Set Path -> VExpr -> VExpr
+rewrite :: Env -> S.Set Path -> VExpr -> State NameSupply VExpr
 rewrite env u expr
   = case expr of
       Join r j tvs ps e1 e2
-        -> let ps' = [(x,if S.member x u then Unique else m,t) | (x,m,t) <- ps]
-               promoted = [S.member x u && m == Owned | (x,m,_) <- ps]
-               entry ts vs = Jump j ts [if p && not (uniq u v) then CtxCopy v else v | (p,v) <- zip promoted vs]
-               e2' = case r of
-                       NonRec -> rewrite env u e2
-                       Rec _ -> substJump j entry (rewrite env u e2)
-           in Join r j tvs ps' (rewrite env u e1) e2'
-      Call f tys vs -> Call (callee env u f vs) tys (map rewriteV vs)
-      _ -> runIdentity (descendE pure (Identity . rewriteV) (\_ e -> Identity (rewrite env u e)) expr)
-  where
-    rewriteV v = case mapV rewriteA rewriteV v of
-                   CtxCopy w | uniq u w -> w
-                   v' -> v'
-    rewriteA = mapA id rewriteA rewriteV
+        -> do e1' <- rewrite env u e1
+              e2' <- rewrite env u e2 >>= case r of
+                                            NonRec -> pure
+                                            Rec _ -> substJumpM j entry
+              return (Join r j tvs [(x,if S.member x u then Unique else m,t) | (x,m,t) <- ps] e1' e2')
+        where
+          entry tys vs = do (ks,vs') <- unzip <$> zipWithM (arg tys) ps vs
+                            return (compose ks (Jump j tys vs'))
+          -- the argument of an owned parameter that becomes unique is copied unless it is unique
+          arg :: [AType] -> (Path,Mode,VType) -> VVal -> State NameSupply (K,VVal)
+          arg tys (x,m,t) v
+            | m == Owned, S.member x u, not (uniq u v)
+            = do c <- state (freshPathFrom "copy")
+                 return (Let c (inst tvs tys t) (CtxCopy v), Var c)
+            | otherwise = return (id,v)
+      CtxCopy v | uniq u v -> pure (Ret v)
+      Let x _ (CtxCopy v) e | uniq u v -> rewrite env u (replaceE (M.singleton x v) e)
+      Call f tys vs -> pure (Call (callee env u f vs) tys vs)
+      _ -> descendE pure pure (\_ e -> rewrite env u e) expr

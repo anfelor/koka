@@ -53,10 +53,6 @@ descendV fa fv val
       TyApp v ts     -> (`TyApp` ts) <$> fv v
       DupV v         -> DupV <$> fv v
       Context b v    -> Context b <$> fv v
-      Plug c v       -> Plug <$> fv c <*> fv v
-      CtxCopy v      -> CtxCopy <$> fv v
-      Append c d     -> Append <$> fv c <*> fv d
-      Memoize c d k v -> Memoize <$> fv c <*> pure d <*> pure k <*> fv v
       Hole           -> pure val
       Var _          -> pure val
       Glob _ _       -> pure val
@@ -132,6 +128,10 @@ descendB fn fv fb expr
       Join r j tvs ps e1 e2 -> (\(xs,e1') e2' -> Join r j tvs [(x',m,t) | (x',(_,m,t)) <- zip xs ps] e1' e2')
                                  <$> fb [(x,[]) | (x,_,_) <- ps] e1 <*> plain e2
       Jump j ts vs          -> Jump j ts <$> traverse fv vs
+      Append c d            -> Append <$> fv c <*> fv d
+      Plug c v              -> Plug <$> fv c <*> fv v
+      CtxCopy c             -> CtxCopy <$> fv c
+      Memoize c d k v       -> Memoize <$> fv c <*> pure d <*> pure k <*> fv v
   where
     plain e = snd <$> fb [] e
     one x s e = (\(xs,e') -> (single xs,e')) <$> fb [(x,s)] e
@@ -338,6 +338,10 @@ destructAOf expr
       Lock{} -> Nothing
       Join{} -> Nothing
       Jump{} -> Nothing
+      Append{} -> Nothing
+      Plug{} -> Nothing
+      CtxCopy{} -> Nothing
+      Memoize{} -> Nothing
 
 destructVOf :: VExpr -> Maybe (Destruct VVal)
 destructVOf expr
@@ -372,6 +376,10 @@ destructVOf expr
       Lock{} -> Nothing
       Join{} -> Nothing
       Jump{} -> Nothing
+      Append{} -> Nothing
+      Plug{} -> Nothing
+      CtxCopy{} -> Nothing
+      Memoize{} -> Nothing
 
 -- An alternative of a test with two alternatives (`[case]`, `[case-a]` or `[split-a]`), taken
 -- against the other one: whether it is the first, both alternatives, and the test with new
