@@ -63,7 +63,8 @@
   body uses them as unique, borrowed if the body does not consume them (a join point is not
   recursive and runs in the scope of its definition), and owned otherwise, with as many
   references as the body consumes (Γ_c is a multiset). The jumps use them in the same way, so a `let` before the join point is unique if the body uses its variable as
-  unique. A jump is checked like a call that also passes the captured variables.
+  unique. A recursive join point captures its variables only borrowed, as its body may run
+  any number of times. A jump is checked like a call that also passes the captured variables.
 
   Descriptions need no check here: a root is bound only once in a definition (`Check`) and
   the variables at its paths always denote its parts, so a name in a description denotes the
@@ -460,10 +461,13 @@ checkE env g js expr
                               caps <- concat <$> mapM (captured u) xs
                               _ <- leave (params env ps ++ caps) u
                               checkE env g (M.insert j ([m | (_,m,_) <- ps],caps) js) e2
-      -- a closed body, like that of a function, in which only the join point itself is in scope
+      -- a body, like that of a function, in which only the join point itself is in scope, and
+      -- whose captures are borrowed: every jump lends them
       Join Rec{} j _ ps e1 e2
-        -> do let self = M.insert j ([m | (_,m,_) <- ps],[])
-              closed (params env ps) (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) (self M.empty) e1)
+        -> do let fvs = S.toList (S.filter (\y -> not (any (y `within`) [x | (x,_,_) <- ps])) (fvE e1))
+                  caps = [(x,Borrowed) | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
+                  self = M.insert j ([m | (_,m,_) <- ps],caps)
+              closed (params env ps ++ caps) (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) (self M.empty) e1)
               checkE env g (self js) e2
       App f vs -> do ft <- liftE (inferVar g f)
                      case ft of
