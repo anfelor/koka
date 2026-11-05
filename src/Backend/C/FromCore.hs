@@ -1276,12 +1276,7 @@ genLambda params eff body
            newDef  = funSig <.> semi
                      <-> text (if toH then "static inline" else "static")
                      <+> text "kk_function_t" <+> ppName newName <.> ntparameters fields <+> block ( vcat (
-                       if (null fields)
-                         then [text "kk_define_static_function" <.> arguments [text "_fself", ppName funName] -- <.> semi
-                               --text "static" <+> structDoc <+> text "_self ="
-                              --  <+> braces (braces (text "static_header(1, TAG_FUNCTION), box_cptr(&" <.> ppName funName <.> text ")")) <.> semi
-                              , text "return kk_function_static_dup(_fself,kk_context());"]
-                         else [structDoc <.> text "* _self = kk_function_alloc_as" <.> arguments [structDoc, pretty scanCount
+                              [structDoc <.> text "* _self = kk_function_alloc_as" <.> arguments [structDoc, pretty scanCount
                                                                                               ] <.> semi
                               ,text "_self->_base.fun = kk_kkfun_ptr_box(&" <.> ppName funName <.> text ", kk_context());"]
                               ++ [text "_self->" <.> ppName name <+> text "=" <+> ppName name <.> semi | (name,_) <- fields]
@@ -1289,12 +1284,14 @@ genLambda params eff body
                               ++ [text "return kk_datatype_from_base(&_self->_base, kk_context());"])
                      )
 
-
-       emitToCurrentDef (vcat [linebreak,text "// lift anonymous function", tpDecl, newDef] <.> linebreak)
+       -- a function without free variables is a static function: encoded directly as its C function pointer
+       if (null fields)
+         then emitToCurrentDef (vcat [linebreak,text "// lift anonymous function", funSig <.> semi] <.> linebreak)
+         else emitToCurrentDef (vcat [linebreak,text "// lift anonymous function", tpDecl, newDef] <.> linebreak)
 
        bodyDoc <- genStat (ResultReturn (if eqType (typeOf body) typeUnit then Just (TName nameNil typeUnit) else Nothing) params) body
        let funDef = funSig <+> block (
-                      (if (null fields) then text "kk_function_static_drop(_fself,kk_context());"
+                      (if (null fields) then text "kk_unused(_fself);"
                         else let dups = braces (hcat [genDupCall tp (ppName name) <.> semi | (name,tp) <- fields])
                              in vcat ([structDoc <.> text "* _self = kk_function_as" <.> arguments [structDoc <.> text "*",text "_fself"] <.> semi]
                                    ++ [ppType tp <+> ppName name <+> text "= _self->" <.> ppName name <.> semi <+> text "/*" <+> pretty tp <+> text "*/"  | (name,tp) <- fields]
@@ -1304,7 +1301,9 @@ genLambda params eff body
                     )
        emitToC funDef  -- TODO: make  static if for a Private definition
 
-       let funNew = ppName newName <.> arguments [ppName name | (name,_) <- fields]
+       let funNew = if (null fields)
+                      then text "kk_function_static" <.> tupled [ppName funName, text "kk_context()"]
+                      else ppName newName <.> arguments [ppName name | (name,_) <- fields]
        return funNew
 
 ---------------------------------------------------------------------------------

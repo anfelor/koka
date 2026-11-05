@@ -19,28 +19,24 @@
 
 // identity function
 static kk_box_t _function_id(kk_function_t self, kk_box_t x, kk_context_t* ctx) {
-  kk_function_drop(self,ctx);
+  kk_unused(self); kk_unused(ctx);
   return x;
 }
 kk_function_t kk_function_id(kk_context_t* ctx) {
-  kk_define_static_function(fun_id, _function_id, ctx)
-  return kk_function_dup(fun_id,ctx);
+  return kk_function_static(_function_id, ctx);
 }
 
 // null function
 static kk_box_t _function_null(kk_function_t self, kk_context_t* ctx) {
-  kk_function_drop(self, ctx);
+  kk_unused(self); kk_unused(ctx);
   kk_fatal_error(EFAULT, "null function is called");
   return kk_box_null();
 }
 kk_function_t kk_function_null(kk_context_t* ctx) {
-  kk_define_static_function(fun_null, _function_null, ctx)
-  return kk_function_dup(fun_null,ctx);
+  return kk_function_static(_function_null, ctx);
 }
 bool kk_function_is_null(kk_function_t f, kk_context_t* ctx) {
-  kk_function_t fnull = kk_function_null(ctx);
-  bool eq = kk_datatype_eq(f, fnull);
-  kk_function_drop(fnull, ctx);
+  bool eq = kk_datatype_eq(f, kk_function_null(ctx));
   return eq;
 }
 

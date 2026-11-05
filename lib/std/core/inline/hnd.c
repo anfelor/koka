@@ -400,12 +400,11 @@ kk_box_t kk_fatal_resume_final(kk_context_t* ctx) {
 }
 
 static kk_box_t _fatal_resume_final(kk_function_t self, kk_context_t* ctx) {
-  kk_function_drop(self,ctx);
+  kk_unused(self);
   return kk_fatal_resume_final(ctx);
 }
 static kk_function_t fun_fatal_resume_final(kk_context_t* ctx) {
-  kk_define_static_function(f,_fatal_resume_final,ctx);
-  return kk_function_dup(f,ctx);
+  return kk_function_static(_fatal_resume_final,ctx);
 }
 
 
