@@ -671,8 +671,7 @@ cstring s
 staticFun :: Name -> G Doc
 staticFun f
   = do modify (\st -> st{ stWrappers = S.insert f (stWrappers st), stLocal = True })
-       x <- fresh "f"
-       return (stmtExpr ["kk_define_static_function(" <.> x <.> "," <.> text (cName f) <.> "_fun,_ctx);"] ("kk_datatype_box(" <.> x <.> ")"))
+       return ("kk_function_box(kk_function_static(" <.> text (cName f) <.> "_fun,_ctx),_ctx)")
 
 -- closures
 genLam :: Ctx -> [(Path,Mode,VType)] -> VType -> VExpr -> G Doc
@@ -698,16 +697,15 @@ genLam cx ps r e
        let loads = [cty ct <+> localName (caps !! i) <+> "= _self->c" <.> int i <.> ";" | (i,ct) <- fields]
            dups = [x <+> "=" <+> dupExpr ct x <.> ";" | (i,ct) <- fields, needsRC ct, let x = localName (caps !! i)]
            sig = "static" <+> cty rct <+> fname <.> "(kk_function_t _fself" <.> hcat [", " <.> cty ct <+> localName x | ((x,_,_),ct) <- zip ps pcts] <.> ", kk_context_t* _ctx)"
-           prologue | null caps = ["kk_function_static_drop(_fself,_ctx);"]
+           prologue | null caps = ["kk_unused(_fself);"]
                     | otherwise = (sname <.> "* _self = kk_function_as(" <.> sname <.> "*,_fself,_ctx);") : loads
                                   ++ ["kk_drop_match(_self,{" <+> hsep dups <+> "},{},_ctx);"]
        emitDecl (vcat ([structDef | not (null caps)] ++ [sig <+> block (prologue ++ body)]))
        x <- fresh "c"
        let capVals = map localName caps
-       -- A capture-free closure can share a static function block.
+       -- A capture-free closure is a static function: a value encoding its C function pointer.
        if null caps
-         then return (stmtExpr ["kk_define_static_function(" <.> x <.> "," <.> fname <.> ",_ctx);"]
-                               ("kk_datatype_box(kk_function_static_dup(" <.> x <.> ",_ctx))"))
+         then return ("kk_function_box(kk_function_static(" <.> fname <.> ",_ctx),_ctx)")
          else return (stmtExpr ([sname <.> "*" <+> x <+> "= kk_function_alloc_as(" <.> sname <.> "," <.> int scan <.> ",_ctx);",
                                  x <.> "->_base.fun = kk_kkfun_ptr_box(&" <.> fname <.> ",_ctx);"]
                                 ++ [x <.> "->c" <.> int i <+> "=" <+> (capVals !! i) <.> ";" | (i,_) <- fields])
@@ -1214,7 +1212,7 @@ genWrapper env cenv f
                   cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) M.empty S.empty
               body <- genCall cx DReturn f (map AVar tvs) (map Var xs)
               let sig = "static" <+> cty rct <+> text (cName f) <.> "_fun(kk_function_t _fself" <.> hcat [", " <.> cty ct <+> localName x | (x,ct) <- zip xs pcts] <.> ", kk_context_t* _ctx)"
-              return (sig <.> ";", sig <+> block ("kk_function_static_drop(_fself,_ctx);" : body))
+              return (sig <.> ";", sig <+> block ("kk_unused(_fself);" : body))
       _ -> failG ("wrapper for unknown function " ++ show f)
 
 -- modules
