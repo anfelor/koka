@@ -160,7 +160,7 @@ int kk_uv_handle_create( size_t sz, kk_function_t cb, uv_handle_t** phandle, kk_
     return UV_ENOMEM;
   }
   else {
-    h->data = kk_datatype_as_ptr(cb,ctx);
+    h->data = kk_function_to_voidp(cb);
     return 0;
   }
 }
@@ -168,7 +168,7 @@ int kk_uv_handle_create( size_t sz, kk_function_t cb, uv_handle_t** phandle, kk_
 void kk_uv_handle_free(uv_handle_t* h, kk_context_t* ctx) {
   if (h->data != NULL) {
     // drop the callback (just in case, should have been set NULL already in handle_close/callback)
-    kk_datatype_drop( kk_datatype_from_ptr((kk_ptr_t)(h->data),ctx), ctx );
+    kk_function_drop( kk_function_from_voidp(h->data), ctx );
     h->data = NULL;
   }
   kk_free(h,ctx);
@@ -184,7 +184,7 @@ void kk_uv_handle_close(uv_handle_t* h) {
     // drop the callback function right away
     // if a handle is disposed, uv might still schedule the callback; setting it to NULL prevents the callback still being called
     kk_context_t* ctx = kk_get_context();
-    kk_function_drop( kk_datatype_from_ptr((kk_ptr_t)(h->data),ctx), ctx );
+    kk_function_drop( kk_function_from_voidp(h->data), ctx );
     h->data = NULL;
   }
   uv_close(h, &kk_uv_handle_close_cb);  // if uv_close is called, any in-progress request is called with UV_ECANCELED (<https://docs.libuv.org/en/v1.x/handle.html>)
@@ -201,7 +201,7 @@ void kk_uv_handle_callback(uv_handle_t* h) {
   if (h==NULL) return;
   if (h->data != NULL) {
     kk_context_t* ctx = kk_get_context();
-    kk_function_t cb = kk_datatype_from_ptr((kk_ptr_t)(h->data),ctx); // the call drops the `cb`
+    kk_function_t cb = kk_function_from_voidp(h->data); // the call drops the `cb`
     h->data = NULL;
     kk_function_call0(cb,ctx);
   }
@@ -220,7 +220,7 @@ int kk_uv_req_create( size_t sz, kk_function_t cb, uv_req_t** preq, kk_context_t
     return UV_ENOMEM;
   }
   else {
-    req->data = kk_datatype_as_ptr(cb,ctx);
+    req->data = kk_function_to_voidp(cb);
     return 0;
   }
 }
@@ -229,7 +229,7 @@ void kk_uv_req_free(uv_req_t* req, kk_context_t* ctx) {
   if (req == NULL) return;
   if (req->data != NULL) {
     // drop the callback (just in case, should have been set NULL already in req_close/callback)
-    kk_datatype_drop( kk_datatype_from_ptr((kk_ptr_t)(req->data),ctx), ctx );
+    kk_function_drop( kk_function_from_voidp(req->data), ctx );
     req->data = NULL;
   }
   if (req->type == UV_FS) {
@@ -247,7 +247,7 @@ void kk_uv_req_close(uv_req_t* req) {
   kk_context_t* ctx = kk_get_context();    
   if (req->data != NULL) {
     // drop the callback
-    kk_datatype_drop( kk_datatype_from_ptr((kk_ptr_t)(req->data),ctx), ctx );
+    kk_function_drop( kk_function_from_voidp(req->data), ctx );
     req->data = NULL;
   }
   kk_uv_req_free(req,ctx);
@@ -260,7 +260,7 @@ void kk_uv_req_dispose(uv_req_t* req, void* arg, kk_context_t* ctx) {
   if (req==NULL) return;
   if (req->data != NULL) {
     // drop the callback so it will never be called
-    kk_datatype_drop( kk_datatype_from_ptr((kk_ptr_t)(req->data),ctx), ctx );
+    kk_function_drop( kk_function_from_voidp(req->data), ctx );
     req->data = NULL;
   }
   uv_cancel(req);
@@ -272,7 +272,7 @@ void kk_uv_req_callback(uv_req_t* req, kk_uv_req_call_fun_t* call ) {
   if (req==NULL) return;
   if (req->data != NULL) {
     kk_context_t* ctx = kk_get_context();
-    kk_function_t cb = kk_datatype_from_ptr((kk_ptr_t)(req->data),ctx); // the call drops the `cb`
+    kk_function_t cb = kk_function_from_voidp(req->data); // the call drops the `cb`
     req->data = NULL;    
     call(cb,req,ctx);  // call it
   }  

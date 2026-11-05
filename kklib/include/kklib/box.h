@@ -458,6 +458,27 @@ static inline kk_cfun_ptr_t kk_kkfun_ptr_unbox(kk_box_t b, kk_context_t* ctx) {
   return (kk_cfun_ptr_t)f;
 }
 
+// A static function (without free variables) is encoded directly as its function pointer value.
+#define kk_function_static(cfun,ctx)  kk_function_static_from_cfun((kk_cfun_ptr_t)&(cfun),ctx)
+
+static inline kk_function_t kk_function_static_from_cfun(kk_cfun_ptr_t fun, kk_context_t* ctx) {
+  kk_function_t f = { kk_kkfun_ptr_boxx(fun,ctx).box };
+  kk_assert_internal(kk_datatype_is_singleton(f));
+  return f;
+}
+
+// Get the C function pointer of a function value (closure or static function).
+static inline kk_cfun_ptr_t kk_function_cfun(kk_function_t f, kk_context_t* ctx) {
+  kk_box_t fun;
+  if (kk_datatype_is_ptr(f)) {
+    fun = kk_datatype_as_assert(struct kk_function_s*, f, KK_TAG_FUNCTION, ctx)->fun;
+  }
+  else {
+    fun.box = f.dbox;
+  }
+  return kk_kkfun_ptr_unbox(fun, ctx);
+}
+
 
 /*----------------------------------------------------------------
   internal pointers as values (used for context holes)

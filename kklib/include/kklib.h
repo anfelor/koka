@@ -1382,32 +1382,22 @@ static inline kk_decl_const kk_unit_t kk_unit_unbox(kk_box_t u) {
   Functions
 --------------------------------------------------------------------------------------*/
 
-#define kk_function_as(tp,fun,ctx)                 kk_datatype_as_assert(tp,fun,KK_TAG_FUNCTION,ctx)
+// A function value `kk_function_t` has one of two forms:
+// - a pointer to a closure block (`struct kk_function_s` followed by the free variables), or
+// - a value encoding the C function pointer directly (a "static" function without free variables),
+//   using the same encoding as the `fun` field of a closure (`kk_kkfun_ptr_box`).
+// Static functions are not reference counted; dup and drop only test the tag bit.
+// The C function always receives the `kk_function_t` itself as its first argument; for a static
+// function that argument can be ignored. `kk_function_static` and `kk_function_cfun` are defined
+// in `kklib/box.h` (after the function pointer encoding).
+
+#define kk_function_as(tp,fun,ctx)                 kk_datatype_as_assert(tp,fun,KK_TAG_FUNCTION,ctx)   // only for closures
 #define kk_function_alloc_as(tp,scan_fsize,ctx)    kk_block_alloc_as(tp,scan_fsize,KK_TAG_FUNCTION,ctx)
-#define kk_function_call(restp,argtps,f,args,ctx)  ((restp(*)argtps)(kk_kkfun_ptr_unbox(kk_datatype_as_assert(struct kk_function_s*,f,KK_TAG_FUNCTION,ctx)->fun,ctx)))args
+#define kk_function_call(restp,argtps,f,args,ctx)  ((restp(*)argtps)(kk_function_cfun(f,ctx)))args
 
-#if (KK_COMPRESS==0)
-#define kk_define_static_function(name,cfun,ctx) \
-  static struct kk_function_s _static_##name = { { KK_HEADER_STATIC(0,KK_TAG_FUNCTION) }, { kk_box_null_init } }; /* must be box_null */ \
-  struct kk_function_s* const _##name = &_static_##name; \
-  kk_function_t name = { (kk_intb_t)_##name }; \
-  if (kk_box_eq(_##name->fun,kk_box_null())) { _##name->fun = kk_kkfun_ptr_box(&cfun,ctx); }  // initialize on demand we can encode the field */
-
-#define kk_function_static_dup(fun,ctx)   (fun)
-#define kk_function_static_drop(fun,ctx)  kk_unused(fun)
-#else
-// for a compressed heap, allocate static functions once in the heap on demand; these are never deallocated
-#define kk_define_static_function(name,cfun,ctx) \
-  static kk_function_t name = { kk_datatype_null_init }; \
-  if (kk_datatype_is_null(name)) { \
-    struct kk_function_s* _fun = kk_block_alloc_as(struct kk_function_s, 1, KK_TAG_FUNCTION, ctx); \
-    _fun->fun = kk_kkfun_ptr_box(&cfun, ctx); \
-    name = kk_datatype_from_base(_fun,ctx); \
-  }
-#define kk_function_static_dup(fun,ctx)   kk_function_dup(fun,ctx)
-#define kk_function_static_drop(fun,ctx)  kk_function_drop(fun,ctx)
-#endif
-
+static inline kk_decl_const bool kk_function_is_static(kk_function_t f) {
+  return kk_datatype_is_singleton(f);
+}
 
 kk_function_t kk_function_id(kk_context_t* ctx);
 kk_function_t kk_function_null(kk_context_t* ctx);
@@ -1415,24 +1405,41 @@ bool          kk_function_is_null(kk_function_t f, kk_context_t* ctx);
 
 static inline kk_decl_pure kk_function_t kk_function_unbox(kk_box_t v, kk_context_t* ctx) {
   kk_unused(ctx);
-  return kk_datatype_ptr_unbox(v);
+  return kk_datatype_unbox(v);
 }
 
 static inline kk_decl_pure kk_box_t kk_function_box(kk_function_t d, kk_context_t* ctx) {
   kk_unused(ctx);
-  return kk_datatype_ptr_box(d);
+  return kk_datatype_box(d);
 }
 
 static inline kk_decl_pure bool kk_function_is_unique(kk_function_t f, kk_context_t* ctx) {
-  return kk_datatype_ptr_is_unique(f,ctx);
+  return kk_datatype_is_unique(f,ctx);
 }
 
 static inline void kk_function_drop(kk_function_t f, kk_context_t* ctx) {
-  kk_datatype_ptr_drop_assert(f, KK_TAG_FUNCTION, ctx);
+  if (kk_datatype_is_ptr(f)) {
+    kk_datatype_ptr_drop_assert(f, KK_TAG_FUNCTION, ctx);
+  }
 }
 
 static inline kk_function_t kk_function_dup(kk_function_t f, kk_context_t* ctx) {
-  return kk_datatype_ptr_dup_assert(f, KK_TAG_FUNCTION, ctx);
+  if (kk_datatype_is_ptr(f)) {
+    kk_datatype_ptr_dup_assert(f, KK_TAG_FUNCTION, ctx);
+  }
+  return f;
+}
+
+// Store a function (closure or static) in a `void*` (e.g. the `data` field of a libuv handle) and back.
+// The encoding is never `NULL`.
+static inline void* kk_function_to_voidp(kk_function_t f) {
+  kk_assert_internal(f.dbox != 0);
+  return (void*)((intptr_t)f.dbox);
+}
+
+static inline kk_function_t kk_function_from_voidp(void* p) {
+  kk_function_t f = { (kk_intb_t)((intptr_t)p) };
+  return f;
 }
 
 
