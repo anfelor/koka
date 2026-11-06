@@ -20,7 +20,7 @@ import Backend.Typed.Traversal( descendA, descendB, descendE, descendV, pathOf, 
 import Backend.Typed.Types( Types(..) )
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Env( Env, envOf )
-import Backend.Typed.Query( checkE, yieldJoins )
+import Backend.Typed.Query( checkE, signature, yieldJoins )
 import Backend.Typed.Layout( layout, checkLayout )
 
 checkProgram :: Program -> [String]
@@ -234,5 +234,6 @@ checkDef :: Env -> Def -> Either String ()
 checkDef env def
   = case def of
       DefFun _ _ _ Borrowed _ _ -> Left "borrowed result"
-      DefFun _ _ args _ res body -> checkE env (M.fromList [(x,V t) | (x,_,t) <- args]) yieldJoins body res
-      DefVal _ _ t body        -> checkE env M.empty yieldJoins body t
+      DefFun _ _ args _ res body -> do signature (res : [t | (_,_,t) <- args])
+                                       checkE env (M.fromList [(x,V t) | (x,_,t) <- args]) yieldJoins body res
+      DefVal _ _ t body        -> signature [t] >> checkE env M.empty yieldJoins body t
