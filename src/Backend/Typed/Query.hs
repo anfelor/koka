@@ -9,7 +9,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- Type inference and typing-context queries shared by typed IR consumers.
 -- Keep inference in sync with the typing rules in Syntax.
-module Backend.Typed.Query( Gamma, noJoins, yieldJoins, bindAll, checkE, inferE, inferA, inferV
+module Backend.Typed.Query( Gamma, noJoins, yieldJoins, bindAll, checkE, inferE, inferA, inferV, signature
                           , inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma
                           , lamGamma
                           ) where
@@ -109,8 +109,9 @@ inferExpr env g js expr
                           inferE env (M.insert x (V t) g) js e2
       LetYield x t e1 e2 e3 -> do checkE env g yieldJoins e1 t
                                   branches env [inferE env (M.insert x (V t) g) js e2, inferE env g js e3]
-      Yielded t | jsYield js -> return t
-                | otherwise -> Left "the dummy value of a yield where the result is inspected"
+      Yielded t | not (jsYield js) -> Left "the dummy value of a yield where the result is inspected"
+                | containsLinear (V t) -> Left ("the dummy value of a yield at a type with credits or cells: " ++ ppr t)
+                | otherwise -> return t
       Unreachable t -> return t
       Call f tys vs -> do (ps,r) <- funSig env f tys
                           checkArgs env g ps vs
@@ -216,6 +217,11 @@ joinDescriptions :: Name -> [(Path,Mode,VType)] -> Q ()
 joinDescriptions j ps
   = unless (S.disjoint (S.fromList [x | (x,_,_) <- ps]) (S.fromList [root n | (_,_,p) <- ps, Contents _ v _ <- descriptions p, Path n _ <- S.toList (fvV v)]))
       (Left ("a description in the parameters of join point " ++ show j ++ " names a parameter"))
+
+-- Descriptions are local to a definition: the parameters and results of functions and
+-- closures carry none, as their names would denote values of another scope.
+signature :: [VType] -> Q ()
+signature ts = unless (null (concatMap descriptions ts)) (Left "a description in the signature of a function or closure")
 
 -- The two scrutinee categories share branch checking and existential escape checks.
 inferDestruct :: Env -> Gamma -> Joins -> VExpr -> Ty -> [([Path],VExpr)] -> Q VType
@@ -496,6 +502,7 @@ inferA env g val
              _ -> Left ("unknown open constructor " ++ show c)
       Lam ps r e -> do when (any containsLinear [t | x <- S.toList (fvA val), Just t <- [M.lookup x g]])
                          (Left "cannot capture reuse credits or cells in a closure")
+                       signature (r : [t | (_,_,t) <- ps])
                        checkE env (lamGamma ps g) yieldJoins e r
                        return (AFun [(m,t) | (_,m,t) <- ps] r)
       BoxAt r v -> do tr <- inferV env g (Var r)
