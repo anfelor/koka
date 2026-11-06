@@ -12,7 +12,7 @@
   Each syntactic form below carries its typing rule as a comment. The rules follow the FIP
   calculus with unboxed types (fiplazy, "FIP Core Calculus" and its extensions to Perceus and
   unboxed sums), with the changes recorded in FINDINGS.md, and are labelled with their name in
-  the paper. `Check` checks the types and `Linear` the modes (after Perceus). Keep the rules and
+  the paper. `CheckTypes` checks the types and `CheckLinear` the modes (after Perceus). Keep the rules and
   the checkers in sync: a change to one must be reflected in the other.
 
   Contexts and judgements
@@ -59,9 +59,9 @@
     - A unique variable `x :! t` is owned and holds the only reference to its block. It may be used
       as an owned one. Any borrowed use of `x`, or of a variable on its path, may duplicate the
       reference and demotes it to `x : t`; branches agree on the weaker status.
-    - The paper scopes borrowing syntactically: `[let]` lends `^Γ₂` to the bound expression.
-      Our IR borrows from an owned variable `z` anywhere (e.g. `case^ z` with `z` owned, as Perceus
-      produces). The binders of a destructuring of `z` are its *parts*, named by their paths
+    - Borrowing is not lexical, as in the paper's ordered contexts, where a borrow may precede
+      its owner: the IR borrows from an owned variable `z` anywhere before `z` is consumed (e.g.
+      `case^ z` with `z` owned, as Perceus produces). The binders of a destructuring of `z` are its *parts*, named by their paths
       (`z.left`, see `Path`), and their borrowed uses become invalid once `z` is consumed. In
       particular a borrowed argument of a call cannot be one that is passed owned.
     - The parts of an owned variable are owned: consuming a part takes it out of its parent, and
@@ -218,8 +218,10 @@ data Raw = RChar | RSSize | RIntPtr | RFloat64 | RFloat32
 -- The description `k; p : V` of a credit's block: the tag k in its header and its contents, an
 -- unevaluated structural value p of type V with |V| = n. It carries no ownership, and its names denote the values they were
 -- bound to, so they need not be in scope: a binder runs at most once on each path through a
--- definition. A name in a description that is in scope may only be bound again to an alias of
--- its value (`Linear`). Descriptions follow substitution, and may be forgotten but not invented.
+-- definition, and a path in scope is not bound again (`CheckTypes`). Descriptions are local to
+-- a definition: the parameters and results of functions, closures and top-level values carry
+-- none (`Query.signature`), and those of join points do not name the parameters (`[join]`).
+-- Descriptions follow substitution, and may be forgotten but not invented.
 -- The tag alone may be forgotten as well (`_; p : V`), so that code generation writes it.
 data Contents = Contents (Maybe Int) VVal VType
               deriving (Eq,Show)
@@ -570,9 +572,12 @@ data VExpr
   -- may be a dummy is only bound by this rule.
   | LetYield Path VType VExpr VExpr VExpr
 
+  --   W contains no credits or cells
   --  ──────────────────────── [yielded]
   --   ∅ | J ⊢ʸ yielded : W
   --
+  -- The dummy is shared, so the result is owned (not unique), and it cannot stand for a credit
+  -- or cell, which would be created from nothing.
   -- The dummy value of an expression that yields an effect, in the yielding branch of a
   -- `[let-yield]` (in place of a coercion of the dummy that a call returns). It is only allowed
   -- where the result may be a dummy (`⊢ʸ`): in the body of a definition or closure, in
@@ -607,7 +612,9 @@ data VExpr
   -- owned (a move); borrowed destructuring gives binders borrowed from the scrutinee. Unique
   -- destructuring consumes a unique scrutinee and its binders are unique; it is only allowed
   -- where the binder is the scrutinee's pointer: `[case-a]`, `[split-a]`, `[if-whnf]`, `[deref]`,
-  -- `[unroll]` and `[unpack]` (`keepsPointer`).
+  -- `[unroll]` and `[unpack]` (`keepsPointer`). The binders of a destructuring of a value that
+  -- is not a variable are roots; for a borrowed one, they borrow the variables of the value
+  -- for the whole alternative.
   --
   --   Γ₁ ⊢ v :q ⊗ⱼ fⱼ: Vⱼ    Γ₂, x :q Vᵢ ⊢ e : W
   --  ──────────────────────────────────────────── [proj]
@@ -615,7 +622,8 @@ data VExpr
   --
   -- Reads and binds the field i of a product; a deeper part is reached by a chain of
   -- projections. For a variable v the binder is the path v.fᵢ, with that part's existing
-  -- ownership; the other fields remain available. Products are logical: their fields are in
+  -- ownership; the other fields remain available. Otherwise an owned projection consumes the
+  -- other fields, which must therefore be of a trivial type. Products are logical: their fields are in
   -- source order and may be products themselves, and code generation places the leaves of a
   -- product in memory order (`Layout.layout`). Elaboration gives a constructor with one field
   -- the type of that field, so it generates products of at least two fields.

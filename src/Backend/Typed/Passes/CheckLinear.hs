@@ -28,7 +28,9 @@
   destructuring of a variable is therefore irrelevant (an owned destructuring is a borrowed one
   whose parts are consumed), except that a unique destructuring consumes a unique scrutinee:
   its alternatives must consume it, and it is then a unique use of the scrutinee. `Unscalar` copies the trivial contents of a scalar into a root,
-  so its mode matters: an owned read consumes the scalar.
+  so its mode matters: an owned read consumes the scalar. The binders of a destructuring of a
+  value that is not a variable are roots: a borrowed one borrows the variables of the value
+  for the whole alternative, and an owned projection may only discard fields of a trivial type.
 
   `dup x` gives `x` one more reference under the same name, so a variable may hold several:
   the references are counted (`Counts`), where a reference to a variable stands for one to
@@ -69,10 +71,11 @@
   unique. A recursive join point captures its variables only borrowed, as its body may run
   any number of times. A jump is checked like a call that also passes the captured variables.
 
-  Descriptions need no check here: a root is bound only once in a definition (`Check`) and
-  the variables at its paths always denote its parts, so a name in a description denotes the
-  same value everywhere. Only a jump binds variables again, the parameters of its join point,
-  which descriptions in their types do not name (`[join]`).
+  Descriptions need no check here: a root is bound only once in a definition (`CheckTypes`)
+  and the variables at its paths always denote its parts, so a name in a description denotes
+  the same value everywhere. Only a jump binds variables again, the parameters of its join
+  point, which descriptions in their types do not name (`[join]`), and descriptions do not
+  cross definitions, as signatures of functions and closures carry none (`Query.signature`).
 
   This checks the modes of the typing rules in `Syntax` (the types are checked by `Check`).
   Keep it in sync with the rules: a change here must be reflected there, and vice versa.
@@ -418,6 +421,13 @@ checkE env g js q expr
       = do when (not (keepsPointer expr) && m == Unique)
              (fail ("unique destructuring of a value that is not a pointer: " ++ show v))
            t <- infer
+           -- an owned projection of a value that is not a variable consumes all of its fields
+           case (expr,t) of
+             (Proj _ (Var _) _ _ _, _) -> return ()
+             (Proj _ _ i _ _, V (VProd fs))
+               | owning m, not (all (trivialTy env . V . snd) [f | (k,f) <- zip [0..] fs, k /= i])
+               -> fail ("owned projection of a value that is not a variable discards a field: " ++ show v)
+             _ -> return ()
            tss <- liftE (altTypes env t expr)
            destruct env g js q m v [(zip xs ts, e) | ((xs,e),ts) <- zip alts tss]
 checkE env g js q expr
@@ -439,7 +449,7 @@ checkE env g js q expr
               u3 <- checkE env g js q e3
               u1 <- checkE env g M.empty Owned e1
               andThen u1 =<< branches [u2, u3]
-      Yielded _ -> return noUse
+      Yielded _ -> ownedResult expr >> return noUse
       -- control never gets here, so every reference counts as consumed
       Unreachable _ -> return noUse{ uDiverges = True }
       Call f _ vs -> do when (q == Unique && resultMode env f /= Unique)
@@ -572,8 +582,11 @@ destruct env g js q m v alts
                            tr <- get
                            u <- checkE env (bindAll bs g) js q e
                            return (not (trivialVar env g z) && any ((== zc) . key tr) ts, u)
+      -- the binders of a borrowed destructuring borrow the variables of the scrutinee for the
+      -- whole alternative
       _ -> do let use = case m of
                           Owned -> ownedV env g v
                           Unique -> uniqueV env g v
                           Borrowed -> borrowedV env g v
-              before use (branches =<< sequence [roots env m bs (checkE env (bindAll bs g) js q e) | (bs,e) <- alts])
+                  lent = if m == Borrowed then borrowedV env g v else return noUse
+              uses [use, branches =<< sequence [roots env m bs (checkE env (bindAll bs g) js q e) | (bs,e) <- alts], lent]
