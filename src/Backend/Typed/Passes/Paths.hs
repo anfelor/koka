@@ -35,7 +35,7 @@ import Data.Maybe( listToMaybe )
 import Data.Functor.Const( Const(..) )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Traversal( child, descendA, descendB, descendV, destructAOf, destructVOf, dsMode, pathOf, scrutVar )
+import Backend.Typed.Traversal( child, descendA, descendB, descendV, pathOf, scrutVar )
 import Backend.Typed.Passes.Common( replaceAType, replaceContents, replaceVType )
 
 -- the new names of the variables in scope
@@ -109,17 +109,14 @@ renE global ren expr
     -- an alternative whose binders are in scope
     known rests
           = do z <- scrut
-               m <- case destructAOf expr of
-                      Just ds -> Just (dsMode ds)
-                      Nothing -> dsMode <$> destructVOf expr
                let inScope = S.fromList (M.elems ren)
                    alts = getConst (descendB (const (Const [])) (const (Const [])) (\bs e -> Const [(bs,e)]) expr)
-               listToMaybe [(zip (map fst bs) ps, e) | m /= Unique, (bs@(_:_),e) <- alts
+               listToMaybe [(zip (map fst bs) ps, e) | (bs@(_:_),e) <- alts
                            , let ss = map snd bs, all (not . null) ss
                            , [SRest] `notElem` ss || M.lookup (child z SRest) rests == Just indices
                            , let ps = map (foldl child z) ss, all (`S.member` inScope) ps]
     indices = case expr of
-                CaseA _ _ as _ -> [i | (i,_,_) <- as]
+                CaseA _ as _ -> [i | (i,_,_) <- as]
                 _ -> []
     sub = described global ren
     scrut = look ren <$> scrutVar expr

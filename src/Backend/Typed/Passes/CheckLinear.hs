@@ -13,8 +13,8 @@
   unrestricted. Every other variable is a path (see `Syntax.Path`) and has the mode of its owner, the longest variable on its path that is a
   root (or, in the body of a join point, a variable it captures). An owned root holds one
   reference, which must be consumed exactly once on every path; a borrowed root (a borrowed
-  parameter, or a binder of a borrowed destructuring of a value that is not a variable) holds
-  a reference that may only be inspected.
+  parameter, or a binder of a destructuring of a value that is not a variable) holds a
+  reference that may only be inspected.
 
   The variables at the steps from a variable are its parts: a reference to a variable is one
   reference to each of its parts (all fields of a product, the contents and the credit of a
@@ -24,13 +24,12 @@
   `[unpack]` is its scrutinee, so consuming or testing it consumes or tests the scrutinee (`key`). So does a part whose
   siblings are of a trivial type, which is determined from the type of the parent: a `[case-open]`
   binds only its fields, not the product around them. In an alternative whose binder of a trivial type is all of
-  the scrutinee (`Nothing`), the scrutinee needs no references. The mode of a
-  destructuring of a variable is therefore irrelevant (an owned destructuring is a borrowed one
-  whose parts are consumed), except that a unique destructuring consumes a unique scrutinee:
-  its alternatives must consume it, and it is then a unique use of the scrutinee. `Unscalar` copies the trivial contents of a scalar into a root,
-  so its mode matters: an owned read consumes the scalar. The binders of a destructuring of a
-  value that is not a variable are roots: a borrowed one borrows the variables of the value
-  for the whole alternative, and an owned projection may only discard fields of a trivial type.
+  the scrutinee (`Nothing`), the scrutinee needs no references. A destructuring of a variable
+  therefore needs no mode: it only reads the scrutinee, and its alternatives consume the parts
+  they take over. `Unscalar` copies the trivial contents of a scalar into a root, so its mode
+  matters: an owned read consumes the scalar. The binders of a destructuring of a value that is
+  not a variable are borrowed roots, which borrow the variables of the value for the whole
+  alternative.
 
   `dup x` gives `x` one more reference under the same name, so a variable may hold several:
   the references are counted (`Counts`), where a reference to a variable stands for one to
@@ -46,8 +45,8 @@
   drop of it, by `memoize`, a uniqueness test or a call or jump), and it must not be live
   across a `[let-yield]`, whose yielding branch could not consume it. An owned variable is unique in the
   first branch of `IsUnique`; unique parameters and a `let` whose bound expression has a
-  unique result are unique too, and so are the pointers of the scrutinee of a unique
-  destructuring. An expression has a unique result (its result mode `q`, which follows the
+  unique result are unique too, and so are the binders that are the pointer of a unique
+  variable (`key`). An expression has a unique result (its result mode `q`, which follows the
   join points in scope) if it returns a unique value (a unique variable or a fresh context),
   appends or copies a context, or calls a function with a unique result in every tail position.
   The body of a definition has the definition's result mode. A context is plugged or appended only
@@ -88,9 +87,9 @@ import Control.Monad( unless, when, forM_, foldM )
 import Data.Functor.Const( Const(..) )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Traversal( child, descendV, destructAOf, destructVOf, dsAlts, dsMode, dsScrut, fieldsAt, fvA, fvE, jumpArgs, sibling, within )
+import Backend.Typed.Traversal( child, descendV, destructAOf, destructVOf, dsAlts, dsScrut, fieldsAt, fvA, fvE, jumpArgs, sibling, within )
 import Backend.Typed.Types( checkDupType, prodV )
-import Backend.Typed.Passes.Common( isRead, keepsPointer, paramModes, prefixes, resultMode, trivialTy )
+import Backend.Typed.Passes.Common( isRead, paramModes, prefixes, resultMode, trivialTy )
 import Backend.Typed.Env( Env(..), envOf, M, ask, evalM, get, gets, liftE, local, modify )
 import Backend.Typed.Query( Gamma, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 
@@ -410,26 +409,14 @@ checkE env g js q expr@(Unscalar m z x e)
   = do t <- liftE (inferVar g z)
        [[tx]] <- liftE (altTypes env t expr)
        before ((if owning m then consume else readVar) env g z) (checkE env (bindAll [(x,tx)] g) js q e)
-checkE _ _ _ _ expr
-  | isRead expr, Just ds <- destructAOf expr, owning (dsMode ds)
-  = fail ("owned read of the contents of a box: " ++ show (dsScrut ds))
 checkE env g js q expr
-  | Just ds <- destructAOf expr = destructE (liftE (inferVar g (dsScrut ds))) (dsMode ds) (Var (dsScrut ds)) (dsAlts ds)
-  | Just ds <- destructVOf expr = destructE (V <$> liftE (inferV env g (dsScrut ds))) (dsMode ds) (dsScrut ds) (dsAlts ds)
+  | Just ds <- destructAOf expr = destructE (liftE (inferVar g (dsScrut ds))) (Var (dsScrut ds)) (dsAlts ds)
+  | Just ds <- destructVOf expr = destructE (V <$> liftE (inferV env g (dsScrut ds))) (dsScrut ds) (dsAlts ds)
   where
-    destructE infer m v alts
-      = do when (not (keepsPointer expr) && m == Unique)
-             (fail ("unique destructuring of a value that is not a pointer: " ++ show v))
-           t <- infer
-           -- an owned projection of a value that is not a variable consumes all of its fields
-           case (expr,t) of
-             (Proj _ (Var _) _ _ _, _) -> return ()
-             (Proj _ _ i _ _, V (VProd fs))
-               | owning m, not (all (trivialTy env . V . snd) [f | (k,f) <- zip [0..] fs, k /= i])
-               -> fail ("owned projection of a value that is not a variable discards a field: " ++ show v)
-             _ -> return ()
+    destructE infer v alts
+      = do t <- infer
            tss <- liftE (altTypes env t expr)
-           destruct env g js q m v [(zip xs ts, e) | ((xs,e),ts) <- zip alts tss]
+           destruct env g js q v [(zip xs ts, e) | ((xs,e),ts) <- zip alts tss]
 checkE env g js q expr
   = case expr of
       Ret v | q == Unique -> uniqueV env g v
@@ -545,12 +532,10 @@ checkE env g js q expr
                    else if null consumed then [(x,Borrowed)]
                    else concat [replicate n (p,Owned) | (p,n) <- consumed])
 
--- The binders of a destructuring of a variable are its parts, and an owned or unique
--- destructuring consumes those of a trivial type. A unique destructuring consumes its
--- scrutinee as unique, so its alternatives must consume the scrutinee. The binders of a
--- destructuring of another value are new roots with the mode of the destructuring.
-destruct :: Env -> Gamma -> Joins -> Mode -> Mode -> VVal -> [([(Path,Ty)],VExpr)] -> L Use
-destruct env g js q m v alts
+-- The binders of a destructuring of a variable are its parts, which the scrutinee only reads.
+-- The binders of a destructuring of another value are new borrowed roots.
+destruct :: Env -> Gamma -> Joins -> Mode -> VVal -> [([(Path,Ty)],VExpr)] -> L Use
+destruct env g js q v alts
   = case v of
       Var z -> do zc <- keyOf z
                   rs <- sequence [alt zc bs e | (bs,e) <- alts]
@@ -563,12 +548,7 @@ destruct env g js q m v alts
                                                   , uPeak = outside (uPeak u) }
                                    in branches [if whole then adopt u else u | (whole,u) <- rs]
                          [] -> branches (map snd rs)
-                  if m /= Unique || trivialVar env g z
-                    then before scrutinee (return u)
-                    else do unless (uDiverges u || M.filterWithKey (\p _ -> p `within` zc) (refine tr [zc] (uNet u)) == M.singleton zc 1)
-                              (fail ("unique destructuring does not consume its scrutinee: " ++ show z))
-                            use <- uniqueName env g z
-                            return u{ uPeak = upper tr (uPeak use) (uPeak u), uUnique = S.union (uUnique use) (uUnique u) }
+                  before scrutinee (return u)
                   where
                     scrutinee | trivialVar env g z = return noUse
                               | otherwise = readVar env g z
@@ -582,11 +562,5 @@ destruct env g js q m v alts
                            tr <- get
                            u <- checkE env (bindAll bs g) js q e
                            return (not (trivialVar env g z) && any ((== zc) . key tr) ts, u)
-      -- the binders of a borrowed destructuring borrow the variables of the scrutinee for the
-      -- whole alternative
-      _ -> do let use = case m of
-                          Owned -> ownedV env g v
-                          Unique -> uniqueV env g v
-                          Borrowed -> borrowedV env g v
-                  lent = if m == Borrowed then borrowedV env g v else return noUse
-              uses [use, branches =<< sequence [roots env m bs (checkE env (bindAll bs g) js q e) | (bs,e) <- alts], lent]
+      -- the binders borrow the variables of the scrutinee for the whole alternative
+      _ -> uses [borrowedV env g v, branches =<< sequence [roots env Borrowed bs (checkE env (bindAll bs g) js q e) | (bs,e) <- alts], borrowedV env g v]

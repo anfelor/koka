@@ -28,7 +28,7 @@ import Data.List( nub, (\\) )
 import Data.Maybe( fromMaybe )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Traversal( boxTag, child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut )
+import Backend.Typed.Traversal( boxTag, child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut )
 import Backend.Typed.Passes.Common( trivialTy, defGamma, NameSupply, dropValue, freshFor, freshPathFrom, perBody, reuseParts, scopeOf )
 import Backend.Typed.Env( Env, envOf, boxContents, reuseSize, unrollT, M, ask, asks, evalM, get, gets, liftE, local, modify, put, state )
 import Backend.Typed.Query( Gamma, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, inferE, noJoins )
@@ -110,14 +110,14 @@ ruE expr
        tss <- liftE (altTypes env (V t) expr)
        v   <- ruV (dsScrut ds)
        es  <- branches [(zip xs ts,e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
-       return (dsBuild ds (dsMode ds) v es)
+       return (dsBuild ds v es)
 ruE expr
   | Just ds <- destructAOf expr
   = do t <- typeOfName (dsScrut ds)
        env <- asks reEnv
        tss <- liftE (altTypes env t expr)
        es <- branches [(zip xs ts,e) | ((xs,e),ts) <- zip (dsAlts ds) tss]
-       return (dsBuild ds (dsMode ds) (dsScrut ds) es)
+       return (dsBuild ds (dsScrut ds) es)
 ruE expr
   = case expr of
       Let x t e1 e2
@@ -166,7 +166,7 @@ ruE expr
                   Left _ | Right b@(ABox s) <- unrollT env a, Right _ <- reuseSize s
                     -> do let y = child x SRoll
                           g <- asks reGamma
-                          reuseParts (scopeOf (M.keys g)) . Unroll Owned x y <$> bind [(y,A b)] (ruE (Drop y e))
+                          reuseParts (scopeOf (M.keys g)) . Unroll x y <$> bind [(y,A b)] (ruE (Drop y e))
                   Left _ -> Drop x <$> ruE e
       Free r e
         -> do t <- typeOfName r
@@ -239,7 +239,7 @@ dropReuse x r n e
            -- as in `DropSpec`, both branches describe the block, so that `FillCredits` can fill it
            desc = Just (Contents (Just (boxTag x)) (Var y) s)
            -- the contents are read once
-           readY = if M.member y g then id else Unbox Borrowed x y
+           readY = if M.member y g then id else Unbox x y
        body <- dropValue (trivialTy env) fresh (scopeOf (M.keys g)) y (V s) (Ret (Var (child x SCredit)))
        return (readY (Let r (VReuse MaybeEmpty n desc) (IsUnique x (UnboxRu x body)
                                                (Drop x (Ret (NoReuse n desc))))

@@ -65,10 +65,10 @@ fieldOf t v
       VProd fs -> do x <- fresh "f"
                      let i = leafField fs
                      (k,w) <- fieldOf (snd (fs !! i)) (Var x)
-                     return (Proj Owned v i x . k, w)
+                     return (Proj v i x . k, w)
       VExists tvs b -> do x <- fresh "f"
                           (k,w) <- fieldOf b (Var x)
-                          return (Unpack Owned v tvs x . k, w)
+                          return (Unpack v tvs x . k, w)
       _ -> return (id, v)
 
 -- the value of type `t` whose only field (`scalarField`) is `w`; the existentials of `t` do not
@@ -93,7 +93,7 @@ leafField = length . takeWhile (null . leaves . snd)
 -- every alternative
 leafAV :: VType -> VVal -> (Int -> AVal -> E VExpr) -> E VExpr
 leafAV t v k
-  | VSum ts <- t, isMultiSum t = CaseV Owned v <$> mapM alt (zip3 [0..] (leafStarts ts) ts)
+  | VSum ts <- t, isMultiSum t = CaseV v <$> mapM alt (zip3 [0..] (leafStarts ts) ts)
   | otherwise                  = k 0 (boxLeaf t v)
   where
     alt (i,start,(c,ti)) = do y <- case v of
@@ -128,7 +128,7 @@ unboxV :: VType -> VVal -> E (K,VVal)
 unboxV t v
   = do a <- fresh "u"
        (k,w) <- unboxAV t a
-       return (Deref Owned v a . k, w)
+       return (Deref v a . k, w)
 
 unboxAV :: VType -> Path -> E (K,VVal)
 unboxAV t a
@@ -145,14 +145,14 @@ unboxAV t a
       VSum _      -> unbox Unbox
       VPtr _      -> unbox Unbox
       VProd _     -> unbox Unbox
-      VRaw _      -> unbox Unscalar
+      VRaw _      -> unbox (Unscalar Owned)
       VExists _ _ -> unbox Unbox
       VReuse _ _ _  -> unbox Unbox
       VCtx _ _ _  -> unbox Unbox
       VCell _ _   -> unbox Unbox
   where
     unbox form = do x <- fresh "x"
-                    return (form Owned a x, Var x)
+                    return (form a x, Var x)
 
 -- the value of type `t` whose leaf at position `j` is `y`
 unboxLeaf :: VType -> Int -> Path -> E (K,VVal)
@@ -211,7 +211,7 @@ applyFun a fv args
   | otherwise
   = do s <- fresh "f"
        let g = child s SDeref
-       return (Let s (VPtr a) (Ret fv) (Deref Owned (Var s) g (App g args)))
+       return (Let s (VPtr a) (Ret fv) (Deref (Var s) g (App g args)))
 
 -- a top-level function applied to all its type arguments; as a closure its parameters are owned
 knownFun :: VVal -> [AType] -> Maybe (Name,[AType])

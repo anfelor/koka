@@ -102,19 +102,19 @@ descendB fn fv fb expr
       Unreachable _         -> pure expr
       Call f ts vs          -> Call f ts <$> traverse fv vs
       App f vs              -> App <$> fn f <*> traverse fv vs
-      Proj m v i x e        -> (\v' (x',e') -> Proj m v' i x' e') <$> fv v <*> one x [projStep i x] e
-      CaseV m v alts        -> CaseV m <$> fv v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x [injVStep i x] e) alts
-      CaseA m v alts def    -> CaseA m <$> fn v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x [injAStep i x] e) alts
+      Proj v i x e          -> (\v' (x',e') -> Proj v' i x' e') <$> fv v <*> one x [projStep i x] e
+      CaseV v alts          -> CaseV <$> fv v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x [injVStep i x] e) alts
+      CaseA v alts def      -> CaseA <$> fn v <*> traverse (\(i,x,e) -> (\(x',e') -> (i,x',e')) <$> one x [injAStep i x] e) alts
                                        <*> traverse (\(x,e) -> one x [SRest] e) def
-      SplitA m v k (x,e1) (y,e2) -> SplitA m <$> fn v <*> pure k <*> one x [SLo] e1 <*> one y [SHi] e2
-      IfWhnf m v (x,e1) (y,e2) -> IfWhnf m <$> fn v <*> one x [SWhnf] e1 <*> one y [SDelay] e2
-      Deref m v x e         -> (\v' (x',e') -> Deref m v' x' e') <$> fv v <*> one x [SDeref] e
-      Unroll m v x e        -> (\v' (x',e') -> Unroll m v' x' e') <$> fn v <*> one x [SRoll] e
-      Unbox m v x e         -> (\v' (x',e') -> Unbox m v' x' e') <$> fn v <*> one x [SContents] e
+      SplitA v k (x,e1) (y,e2) -> SplitA <$> fn v <*> pure k <*> one x [SLo] e1 <*> one y [SHi] e2
+      IfWhnf v (x,e1) (y,e2) -> IfWhnf <$> fn v <*> one x [SWhnf] e1 <*> one y [SDelay] e2
+      Deref v x e           -> (\v' (x',e') -> Deref v' x' e') <$> fv v <*> one x [SDeref] e
+      Unroll v x e          -> (\v' (x',e') -> Unroll v' x' e') <$> fn v <*> one x [SRoll] e
+      Unbox v x e           -> (\v' (x',e') -> Unbox v' x' e') <$> fn v <*> one x [SContents] e
       Unscalar m v x e      -> (\v' (x',e') -> Unscalar m v' x' e') <$> fn v <*> one x [] e
-      Unpack m v tvs x e    -> (\v' (x',e') -> Unpack m v' tvs x' e') <$> fv v <*> one x [SPack] e
+      Unpack v tvs x e      -> (\v' (x',e') -> Unpack v' tvs x' e') <$> fv v <*> one x [SPack] e
       CaseLit v alts def    -> CaseLit <$> fv v <*> traverse (\(l,e) -> (,) l <$> plain e) alts <*> plain def
-      CaseOpen m v alts def -> CaseOpen m <$> fn v <*> traverse (\(c,xs,e) -> (\(xs',e') -> (c,xs',e')) <$> fb (zip xs (openSteps c xs)) e) alts
+      CaseOpen v alts def -> CaseOpen <$> fn v <*> traverse (\(c,xs,e) -> (\(xs',e') -> (c,xs',e')) <$> fb (zip xs (openSteps c xs)) e) alts
                                           <*> plain def
       Gen tvs e             -> Gen tvs <$> plain e
       Drop x e              -> Drop <$> fn x <*> plain e
@@ -296,25 +296,25 @@ bindersA val
 bindersV :: VVal -> [Path]
 bindersV = getConst . descendV (Const . bindersA) (Const . bindersV)
 
--- destructuring forms: the mode, the scrutinee, the alternatives with their binders, and a rebuild function.
+-- destructuring forms: the scrutinee, the alternatives with their binders, and a rebuild function.
 -- Boxed scrutinees are names; unboxed scrutinees are values.
-data Destruct v = Destruct{ dsMode :: Mode, dsScrut :: v, dsAlts :: [([Path],VExpr)], dsBuild :: Mode -> v -> [VExpr] -> VExpr }
+data Destruct v = Destruct{ dsScrut :: v, dsAlts :: [([Path],VExpr)], dsBuild :: v -> [VExpr] -> VExpr }
 
 destructAOf :: VExpr -> Maybe (Destruct Path)
 destructAOf expr
   = case expr of
-      SplitA m v k (x,e1) (y,e2) -> Just (Destruct m v [([x],e1),([y],e2)]
-                                      (\m' v' es -> SplitA m' v' k (x,head es) (y,last es)))
-      IfWhnf m v (x,e1) (y,e2) -> Just (Destruct m v [([x],e1),([y],e2)]
-                                    (\m' v' es -> IfWhnf m' v' (x,head es) (y,last es)))
-      CaseA m v alts def -> Just (Destruct m v ([([x],e) | (_,x,e) <- alts] ++ maybe [] (\(x,e) -> [([x],e)]) def)
-                                  (\m' v' es -> CaseA m' v' [(i,x,e) | ((i,x,_),e) <- zip alts es]
+      SplitA v k (x,e1) (y,e2) -> Just (Destruct v [([x],e1),([y],e2)]
+                                      (\v' es -> SplitA v' k (x,head es) (y,last es)))
+      IfWhnf v (x,e1) (y,e2) -> Just (Destruct v [([x],e1),([y],e2)]
+                                    (\v' es -> IfWhnf v' (x,head es) (y,last es)))
+      CaseA v alts def -> Just (Destruct v ([([x],e) | (_,x,e) <- alts] ++ maybe [] (\(x,e) -> [([x],e)]) def)
+                                  (\v' es -> CaseA v' [(i,x,e) | ((i,x,_),e) <- zip alts es]
                                     (fmap (\(x,_) -> (x,last es)) def)))
-      Unroll m v x e        -> Just (Destruct m v [([x],e)] (\m' v' es -> Unroll m' v' x (head es)))
-      Unbox m v x e         -> Just (Destruct m v [([x],e)] (\m' v' es -> Unbox m' v' x (head es)))
-      Unscalar m v x e      -> Just (Destruct m v [([x],e)] (\m' v' es -> Unscalar m' v' x (head es)))
-      CaseOpen m v alts def -> Just (Destruct m v ([(xs,e) | (_,xs,e) <- alts] ++ [([],def)])
-                                       (\m' v' es -> CaseOpen m' v' [(c,xs,e) | ((c,xs,_),e) <- zip alts es] (last es)))
+      Unroll v x e          -> Just (Destruct v [([x],e)] (\v' es -> Unroll v' x (head es)))
+      Unbox v x e           -> Just (Destruct v [([x],e)] (\v' es -> Unbox v' x (head es)))
+      Unscalar m v x e      -> Just (Destruct v [([x],e)] (\v' es -> Unscalar m v' x (head es)))
+      CaseOpen v alts def -> Just (Destruct v ([(xs,e) | (_,xs,e) <- alts] ++ [([],def)])
+                                       (\v' es -> CaseOpen v' [(c,xs,e) | ((c,xs,_),e) <- zip alts es] (last es)))
       Proj{} -> Nothing
       CaseV{} -> Nothing
       Deref{} -> Nothing
@@ -347,10 +347,10 @@ destructVOf :: VExpr -> Maybe (Destruct VVal)
 destructVOf expr
   = case expr of
       SplitA{} -> Nothing
-      Proj m v i x e        -> Just (Destruct m v [([x],e)] (\m' v' es -> Proj m' v' i x (head es)))
-      CaseV m v alts        -> Just (Destruct m v [([x],e) | (_,x,e) <- alts] (\m' v' es -> CaseV m' v' [(i,x,e) | ((i,x,_),e) <- zip alts es]))
-      Deref m v x e         -> Just (Destruct m v [([x],e)] (\m' v' es -> Deref m' v' x (head es)))
-      Unpack m v tvs x e    -> Just (Destruct m v [([x],e)] (\m' v' es -> Unpack m' v' tvs x (head es)))
+      Proj v i x e          -> Just (Destruct v [([x],e)] (\v' es -> Proj v' i x (head es)))
+      CaseV v alts          -> Just (Destruct v [([x],e) | (_,x,e) <- alts] (\v' es -> CaseV v' [(i,x,e) | ((i,x,_),e) <- zip alts es]))
+      Deref v x e           -> Just (Destruct v [([x],e)] (\v' es -> Deref v' x (head es)))
+      Unpack v tvs x e      -> Just (Destruct v [([x],e)] (\v' es -> Unpack v' tvs x (head es)))
       CaseA{} -> Nothing
       Unroll{} -> Nothing
       Unbox{} -> Nothing
@@ -384,20 +384,20 @@ destructVOf expr
 -- An alternative of a test with two alternatives (`[case]`, `[case-a]` or `[split-a]`), taken
 -- against the other one: whether it is the first, both alternatives, and the test with new
 -- bodies for them.
-data TestSide = TestSide{ sideTest :: VExpr, sideMode :: Mode, sideFirst :: Bool
+data TestSide = TestSide{ sideTest :: VExpr, sideFirst :: Bool
                         , sideTaken :: (Path,VExpr), sideOther :: (Path,VExpr)
                         , sideRebuild :: VExpr -> VExpr -> VExpr }
 
 testSides :: VExpr -> [TestSide]
 testSides expr
   = case expr of
-      CaseV m v [(i,x,a),(j,y,b)] -> both m (x,a) (y,b) (\a' b' -> CaseV m v [(i,x,a'),(j,y,b')])
-      CaseA m v [(i,x,a),(j,y,b)] Nothing -> both m (x,a) (y,b) (\a' b' -> CaseA m v [(i,x,a'),(j,y,b')] Nothing)
-      CaseA m v [(i,x,a)] (Just (y,b)) -> both m (x,a) (y,b) (\a' b' -> CaseA m v [(i,x,a')] (Just (y,b')))
-      SplitA m v k (x,a) (y,b) -> both m (x,a) (y,b) (\a' b' -> SplitA m v k (x,a') (y,b'))
+      CaseV v [(i,x,a),(j,y,b)] -> both (x,a) (y,b) (\a' b' -> CaseV v [(i,x,a'),(j,y,b')])
+      CaseA v [(i,x,a),(j,y,b)] Nothing -> both (x,a) (y,b) (\a' b' -> CaseA v [(i,x,a'),(j,y,b')] Nothing)
+      CaseA v [(i,x,a)] (Just (y,b)) -> both (x,a) (y,b) (\a' b' -> CaseA v [(i,x,a')] (Just (y,b')))
+      SplitA v k (x,a) (y,b) -> both (x,a) (y,b) (\a' b' -> SplitA v k (x,a') (y,b'))
       _ -> []
   where
-    both m l r build = [TestSide expr m True l r build, TestSide expr m False r l (flip build)]
+    both l r build = [TestSide expr True l r build, TestSide expr False r l (flip build)]
 
 -- The side of a test whose other alternative is `failure`, which does not use its binder:
 -- consecutive tests with one failure form a conjunction.

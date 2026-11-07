@@ -159,16 +159,16 @@ dropValue trivial fresh scope x t e
       A _ -> return (Drop x e)
       V v -> case v of
         VPtr a -> do let y = child x SDeref
-                     return (reuseParts scope (Deref Owned (Var x) y (Drop y e)))
+                     return (reuseParts scope (Deref (Var x) y (Drop y e)))
         VProd{} -> do let fields = [f | f@(_,_,s) <- fieldsAt x v, not (trivial (V s))]
                           parts = M.union (scopeOf [y | (y,_,_) <- fields]) scope
                       body <- foldM (\rest (y,_,s) -> dropValue trivial fresh parts y (V s) rest) e (reverse fields)
-                      return (projectAll scope Owned x fields body)
+                      return (projectAll scope x fields body)
         VSum ts -> do u <- fresh
                       alts <- mapM dropAlt (zip [0..] ts)
                       -- A continuation can bind roots. Keep it outside the case,
                       -- rather than copying its binders into every alternative.
-                      return (Let u VUnit (reuseParts scope (CaseV Owned (Var x) alts)) e)
+                      return (Let u VUnit (reuseParts scope (CaseV (Var x) alts)) e)
           where
             dropAlt (i,(c,s)) = do let y = child x (SInjV i c)
                                    body <- dropValue trivial fresh (M.insert y Nothing scope) y (V s) (Ret UnitV)
@@ -182,7 +182,7 @@ dropValue trivial fresh scope x t e
                     bs = take (length tvs) [start,start-1 ..]
                     s' = inst tvs (map AVar bs) s
                 body <- dropValue trivial fresh (M.insert y Nothing scope) y (V s') (Ret UnitV)
-                return (Let u VUnit (reuseParts scope (Unpack Owned (Var x) bs y body)) e)
+                return (Let u VUnit (reuseParts scope (Unpack (Var x) bs y body)) e)
         VReuse _ _ _ -> return (Free x e)
         VCtx _ _ _ -> return (Drop x e)
         -- a cell is linear and never dropped, which `Check` rejects
@@ -191,8 +191,8 @@ dropValue trivial fresh scope x t e
         VRaw _ -> return e
 
 -- project fields of a product variable around an expression, reusing those in scope
-projectAll :: Scope -> Mode -> Path -> [(Path,Int,VType)] -> VExpr -> VExpr
-projectAll scope m x fields body = foldr (\(y,i,_) e -> reuseParts scope (Proj m (Var x) i y e)) body fields
+projectAll :: Scope -> Path -> [(Path,Int,VType)] -> VExpr -> VExpr
+projectAll scope x fields body = foldr (\(y,i,_) e -> reuseParts scope (Proj (Var x) i y e)) body fields
 
 -- A `[let-yield]` as the `let` that is taken if no effect yields, and its yielding branch,
 -- which is cold.
@@ -382,20 +382,16 @@ bindScope :: VExpr -> [Path] -> Scope -> Scope
 bindScope expr xs scope = M.union (M.fromList [(x,rest x) | x <- xs]) scope
   where
     rest x = case expr of
-      CaseA _ z as _ | x == child z SRest -> Just [i | (i,_,_) <- as]
+      CaseA z as _ | x == child z SRest -> Just [i | (i,_,_) <- as]
       _ -> Nothing
 
--- Reuse an already established alternative, except when destructuring has the
--- effect of consuming a unique scrutinee. A residual sum also needs the same tags.
+-- Reuse an already established alternative. A residual sum also needs the same tags.
 knownAlt :: Scope -> VExpr -> Maybe Int
 knownAlt scope expr = do
   z <- scrutVar expr
-  m <- case destructAOf expr of
-         Just ds -> Just (dsMode ds)
-         Nothing -> dsMode <$> destructVOf expr
   let alts = getConst (descendB (const (Const [])) (const (Const [])) (\bs e -> Const [(bs,e)]) expr)
-      indices = case expr of CaseA _ _ as _ -> [i | (i,_,_) <- as]; _ -> []
-  listToMaybe [i | m /= Unique, (i,(bs@(_:_),_)) <- zip [0..] alts, let ss = map snd bs, all (not . null) ss
+      indices = case expr of CaseA _ as _ -> [i | (i,_,_) <- as]; _ -> []
+  listToMaybe [i | (i,(bs@(_:_),_)) <- zip [0..] alts, let ss = map snd bs, all (not . null) ss
                 , all (\s -> M.member (foldl child z s) scope) ss
                 , [SRest] `notElem` ss || M.lookup (child z SRest) scope == Just (Just indices)]
 
@@ -589,46 +585,6 @@ isRead expr
       Free{}      -> False
       IsUnique{}  -> False
       IfWhnf{}    -> False
-      IfFull{}    -> False
-      UnboxRu{}   -> False
-      CopyRu{}    -> False
-      Lock{}      -> False
-      Join{}      -> False
-      Jump{}      -> False
-      Append{}    -> False
-      Plug{}      -> False
-      CtxCopy{}   -> False
-      Memoize{}   -> False
-
--- the binders of these destructuring forms are the scrutinee's pointer (the scrutinee itself
--- for `[unpack]`), so they may be unique
-keepsPointer :: VExpr -> Bool
-keepsPointer expr
-  = case expr of
-      SplitA{}    -> True
-      IfWhnf{}    -> True
-      CaseA{}     -> True
-      Deref{}     -> True
-      Unroll{}    -> True
-      Unpack{}    -> True
-      Proj{}      -> False
-      CaseV{}     -> False
-      Unbox{}     -> False
-      Unscalar{}  -> False
-      CaseOpen{}  -> False
-      Ret{}       -> False
-      Let{}       -> False
-      LetYield{}  -> False
-      Yielded{}   -> False
-      Unreachable{} -> False
-      Call{}      -> False
-      App{}       -> False
-      CaseLit{}   -> False
-      Gen{}       -> False
-      Dup{}       -> False
-      Drop{}      -> False
-      Free{}      -> False
-      IsUnique{}  -> False
       IfFull{}    -> False
       UnboxRu{}   -> False
       CopyRu{}    -> False

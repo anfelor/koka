@@ -48,7 +48,7 @@ import Data.Monoid( All(..) )
 import Common.Name
 import Common.NamePrim( nameYielding, nameYieldExtend, nameCoreHnd )
 import Backend.Typed.Syntax
-import Backend.Typed.Traversal( descendE, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut, fvE, lamsV, mapA, mapV, within )
+import Backend.Typed.Traversal( descendE, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fvE, lamsV, mapA, mapV, within )
 import Backend.Typed.Passes.Common( NameSupply, altBodies, cloneE, freshFor, freshPathFrom, replaceA, replaceE, replaceV )
 import Backend.Typed.Types( Types(..), inst )
 
@@ -97,8 +97,8 @@ yieldTest expr
   = case expr of
       Let y _ (Call f [] []) body | f == nameYielding
         -> case body of
-             CaseV _ (Var y') alts | y' == y, [e2,e3] <- altBodies alts -> test y e2 (e3,False)
-             Let z t (CaseV _ (Var y') alts) c | y' == y, [e2,e3] <- altBodies alts, coercion z c -> test y (Let z t e2 c) (Let z t e3 c,True)
+             CaseV (Var y') alts | y' == y, [e2,e3] <- altBodies alts -> test y e2 (e3,False)
+             Let z t (CaseV (Var y') alts) c | y' == y, [e2,e3] <- altBodies alts, coercion z c -> test y (Let z t e2 c) (Let z t e3 c,True)
              _ -> Nothing
       _ -> Nothing
   where
@@ -118,13 +118,13 @@ coerced expr
   = case expr of
       Let r u e c | coercion r c -> Just (e,r,u,c)
       Let y s a b -> under (Let y s a) b
-      _ | Just ds <- destructAOf expr, [(_,b)] <- dsAlts ds -> under (\b' -> dsBuild ds (dsMode ds) (dsScrut ds) [b']) b
+      _ | Just ds <- destructAOf expr, [(_,b)] <- dsAlts ds -> under (\b' -> dsBuild ds (dsScrut ds) [b']) b
         | Just ds <- destructVOf expr, [(_,b)] <- dsAlts ds
         -> case expr of
              -- the type of `r` must not mention the unpacked type variables
-             Unpack _ _ tvs _ _ -> do res@(_,_,u,_) <- under (\b' -> dsBuild ds (dsMode ds) (dsScrut ds) [b']) b
-                                      if any (`elem` tvs) (ftv u) then Nothing else Just res
-             _ -> under (\b' -> dsBuild ds (dsMode ds) (dsScrut ds) [b']) b
+             Unpack _ tvs _ _ -> do res@(_,_,u,_) <- under (\b' -> dsBuild ds (dsScrut ds) [b']) b
+                                    if any (`elem` tvs) (ftv u) then Nothing else Just res
+             _ -> under (\b' -> dsBuild ds (dsScrut ds) [b']) b
         | otherwise -> Nothing
   where
     under k b = (\(b',r,u,c) -> (k b',r,u,c)) <$> coerced b
@@ -132,7 +132,7 @@ coerced expr
 -- `e` without `let x = c` where `c` unboxes `r` and `e` only boxes `x` again (as `r`)
 reboxed :: Path -> Path -> VExpr -> VExpr -> Maybe VExpr
 reboxed r x c e
-  | Deref _ (Var r') d (Unbox _ d' y (Ret (Var y'))) <- c, r' == r, d' == d, y' == y
+  | Deref (Var r') d (Unbox d' y (Ret (Var y'))) <- c, r' == r, d' == d, y' == y
   , let e' = replaceE e, not (any (`within` x) (fvE e')) = Just e'
   | otherwise = Nothing
   where

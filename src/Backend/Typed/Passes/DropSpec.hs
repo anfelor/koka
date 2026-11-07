@@ -131,7 +131,7 @@ dropExcept xs v t e
            | not (any (`within` v) xs) -> dropValue (trivialTy env) (fresh "d") (scopeOf (M.keys g)) v (V t) e
          VProd{} -> do let fields = fieldsAt v t
                        body <- bind [(y,V s) | (y,_,s) <- fields] (foldM (\rest (y,_,s) -> dropExcept xs y s rest) e (reverse fields))
-                       return (projectAll (scopeOf (M.keys g)) Borrowed v fields body)
+                       return (projectAll (scopeOf (M.keys g)) v fields body)
          _ -> case [(y,s) | (y,V s) <- M.toList g, y `within` v, length (stepsFrom v y) == 1, any (`within` y) xs] of
                 [(y,s)] -> dropExcept xs y s e
                 _ -> fail ("cannot drop the rest of " ++ show v)

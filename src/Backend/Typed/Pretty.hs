@@ -186,17 +186,17 @@ prettyExpr expr
       Call f [] vs -> nm f <.> args vs
       Call f ts vs -> nm f <.> tyArgs ts <.> args vs
       App f vs -> pv f <.> args vs
-      Proj m v i x e -> letIn (mode m) (pv x) (atomVal v <.> text ("." ++ show (projStep i x))) e
-      CaseV m v alts -> caseOf (text "case" <.> mode m) (prettyVal v) [(alt "inj" i x, e) | (i,x,e) <- alts]
-      SplitA m v k (x,e1) (y,e2) -> caseOf (text "split" <.> mode m) (pv v <+> text "at" <+> int k) [(pv x, e1), (pv y, e2)]
-      IfWhnf m v (x,e1) (y,e2) -> caseOf (text "if-whnf" <.> mode m) (pv v) [(side Whnf <+> pv x, e1), (side Delay <+> pv y, e2)]
-      CaseA m v alts def -> caseOf (text "case" <.> mode m) (pv v)
+      Proj v i x e -> letIn empty (pv x) (atomVal v <.> text ("." ++ show (projStep i x))) e
+      CaseV v alts -> caseOf (text "case") (prettyVal v) [(alt "inj" i x, e) | (i,x,e) <- alts]
+      SplitA v k (x,e1) (y,e2) -> caseOf (text "split") (pv v <+> text "at" <+> int k) [(pv x, e1), (pv y, e2)]
+      IfWhnf v (x,e1) (y,e2) -> caseOf (text "if-whnf") (pv v) [(side Whnf <+> pv x, e1), (side Delay <+> pv y, e2)]
+      CaseA v alts def -> caseOf (text "case") (pv v)
                               ([(alt "inj-a" i x, e) | (i,x,e) <- alts] ++ [(text "_" <+> pv x, e) | Just (x,e) <- [def]])
-      Deref m v x e -> letIn (mode m) (text "ptr" <+> pv x) (prettyVal v) e
-      Unroll m v x e -> letIn (mode m) (text "roll" <+> pv x) (pv v) e
-      Unbox m v x e -> letIn (mode m) (text "box" <+> pv x) (pv v) e
+      Deref v x e -> letIn empty (text "ptr" <+> pv x) (prettyVal v) e
+      Unroll v x e -> letIn empty (text "roll" <+> pv x) (pv v) e
+      Unbox v x e -> letIn empty (text "box" <+> pv x) (pv v) e
       Unscalar m v x e -> letIn (mode m) (text "scalar" <+> pv x) (pv v) e
-      Unpack m v vs x e -> letIn (mode m) (text "pack" <.> brackets (commaSep (map tv vs)) <+> pv x) (prettyVal v) e
+      Unpack v vs x e -> letIn empty (text "pack" <.> brackets (commaSep (map tv vs)) <+> pv x) (prettyVal v) e
       CaseLit v alts def -> caseOf (text "case") (prettyVal v) ([(prettyLit l, e) | (l,e) <- alts] ++ [(text "_", def)])
       Dup x e -> text "dup" <+> pv x <.> semi <-> prettyExpr e
       Drop x e -> text "drop" <+> pv x <.> semi <-> prettyExpr e
@@ -217,7 +217,7 @@ prettyExpr expr
       CtxCopy c -> text "ctx-copy" <+> atomVal c
       Memoize c d k v -> text "memoize" <+> atomVal c <+> parens (side d <+> parens (text "inj" <.> int k <+> atomVal v))
       Gen vs e -> text "gen" <+> hsep (map tv vs) <.> text "." <+> align (prettyExpr e)
-      CaseOpen m v alts def -> caseOf (text "case" <.> mode m) (pv v) ([(nm c <.> parens (commaSep (map pv xs)), e) | (c,xs,e) <- alts] ++ [(text "_", def)])
+      CaseOpen v alts def -> caseOf (text "case") (pv v) ([(nm c <.> parens (commaSep (map pv xs)), e) | (c,xs,e) <- alts] ++ [(text "_", def)])
 
 -- the binder of an alternative, which names it if it is a path to it
 alt :: String -> Int -> Path -> Doc
@@ -263,10 +263,10 @@ elideDef def = shortenDef def{ defBody = elideE (defBody def) }
 elideE :: VExpr -> VExpr
 elideE expr
   = case expr of
-      Proj _ (Var v) i x e | x == child v (projStep i x) -> elideE e
-      Deref _ (Var v) x e | x == child v SDeref -> elideE e
-      Unroll _ v x e    | x == child v SRoll -> elideE e
-      Unbox _ v x e     | x == child v SContents -> elideE e
+      Proj (Var v) i x e | x == child v (projStep i x) -> elideE e
+      Deref (Var v) x e | x == child v SDeref -> elideE e
+      Unroll v x e    | x == child v SRoll -> elideE e
+      Unbox v x e     | x == child v SContents -> elideE e
       _ -> runIdentity (descendE Identity (Identity . elideV) (\_ e -> Identity (elideE e)) expr)
 
 elideV :: VVal -> VVal

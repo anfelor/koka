@@ -13,11 +13,11 @@
   contains all of its jumps. The match compiler defines the join of a guard's fall-through
   after the whole match, outside the branch that binds the variables passed to it:
 
-    join j(x) = e1 in case^ z of { injᵢ y -> ... jump j(y) ... jump j(y) ...; ... }
+    join j(x) = e1 in case z of { injᵢ y -> ... jump j(y) ... jump j(y) ...; ... }
 
   becomes
 
-    case^ z of { injᵢ y -> join j(x) = e1 in ... jump j(y) ... jump j(y) ...; ... }
+    case z of { injᵢ y -> join j(x) = e1 in ... jump j(y) ... jump j(y) ...; ... }
 
   so that `JoinArgs` can make the invariant argument `y` a capture (and a credit keeps its
   description in the join body). A recursive join point is sunk in the same way, so that

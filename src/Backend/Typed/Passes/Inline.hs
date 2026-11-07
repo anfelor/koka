@@ -89,7 +89,7 @@ valuesE expr = here <> getConst (descendAll (\_ e -> Const (valuesE e)) expr)
   where
     here = case expr of
              Let x _ (Ret v) _ | structural v -> (M.singleton x v,S.empty)
-             Deref _ (Var x) _ _ -> (M.empty,S.singleton x)
+             Deref (Var x) _ _ -> (M.empty,S.singleton x)
              Dup x _ -> (M.empty,S.singleton x)
              _ -> mempty
 
@@ -98,8 +98,8 @@ inlineE :: Values -> VExpr -> VExpr
 inlineE vals expr
   = case expr of
       Let x _ _ e | M.member x vals -> inlineE vals e
-      Proj _ (Var z) _ _ e | Just Tuple{} <- known vals z -> inlineE vals e
-      CaseV _ (Var z) alts | Just (Inj i _ _) <- known vals z, (e:_) <- [e | (j,_,e) <- alts, j == i] -> inlineE vals e
+      Proj (Var z) _ _ e | Just Tuple{} <- known vals z -> inlineE vals e
+      CaseV (Var z) alts | Just (Inj i _ _) <- known vals z, (e:_) <- [e | (j,_,e) <- alts, j == i] -> inlineE vals e
       _ -> mapAll (\_ -> inlineE vals) expr
 
 -- The enum facts are local to a branch, unlike the structural lets above.
@@ -111,8 +111,8 @@ reuseE expr
   = do (env,g,facts) <- ask
        let under g' = local (const (env,g',facts)) . reuseE
        case expr of
-         CaseV m (Var z) alts | Right (V t) <- inferVar g z, enumType t
-           -> CaseV m (Var z) <$> sequence [(,,) i x <$> local (const (env,M.insert x (V VUnit) g,M.insert z (Inj i t UnitV) facts)) (reuseE e)
+         CaseV (Var z) alts | Right (V t) <- inferVar g z, enumType t
+           -> CaseV (Var z) <$> sequence [(,,) i x <$> local (const (env,M.insert x (V VUnit) g,M.insert z (Inj i t UnitV) facts)) (reuseE e)
                                            | (i,x,e) <- alts]
          _ -> descendTyped env g reuseV under expr
 

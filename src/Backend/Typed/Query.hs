@@ -230,7 +230,7 @@ inferDestruct env g js expr t alts
        unless (length alts == length tss) (Left "wrong number of alternatives")
        r <- branches env [inferE env (bindAll (zip xs ts) g) js e | ((xs,e),ts) <- zip alts tss]
        case expr of
-         Unpack _ _ tvs x e -> unbound tvs (ftv r ++ ftvCtx (M.delete x g) e)
+         Unpack _ tvs x e -> unbound tvs (ftv r ++ ftvCtx (M.delete x g) e)
          _ -> return ()
        return r
 
@@ -249,19 +249,19 @@ ftvCtx g e = concat [ftv t | x <- S.toList (fvE e), Just t <- [M.lookup x g]]
 altTypes :: Env -> Ty -> VExpr -> Q [[Ty]]
 altTypes env t expr
   = case (expr,t) of
-      (Proj _ _ i _ _, V (VProd fs)) | 0 <= i, i < length fs -> return [[V (snd (fs !! i))]]
-      (CaseV _ _ alts, V (VSum ts)) -> do
+      (Proj _ i _ _, V (VProd fs)) | 0 <= i, i < length fs -> return [[V (snd (fs !! i))]]
+      (CaseV _ alts, V (VSum ts)) -> do
         let indices = [i | (i,_,_) <- alts]
         unless (S.fromList indices == S.fromList [0 .. length ts - 1] && length indices == length ts)
           (Left "invalid value case indices")
         return [[V (snd (ts !! i))] | i <- indices]
-      (SplitA _ _ k _ _, A a@(ASum ts)) -> do
+      (SplitA _ k _ _, A a@(ASum ts)) -> do
         checkShape a
         let (ls,rs) = span ((< k) . fst) ts
         unless (not (null ls) && not (null rs)) (Left "invalid boxed sum partition")
         return [[A (ASum ls)], [A (ASum rs)]]
       (IfWhnf{}, A (ALazy l a)) -> return [[A a], [A l]]
-      (CaseA _ _ alts def, A a@(ASum ts)) -> do
+      (CaseA _ alts def, A a@(ASum ts)) -> do
         checkShape a
         let indices = [i | (i,_,_) <- alts]
             rest = [(i,t) | (i,t) <- ts, i `notElem` indices]
@@ -275,9 +275,9 @@ altTypes env t expr
                             return [[A b]]
       (Unbox{}, A (ABox s)) -> return [[V s]]
       (Unscalar{}, A (AScalar r)) -> return [[V (VRaw r)]]
-      (Unpack _ _ tvs _ _, V (VExists bs s)) | length bs == length tvs -> return [[V (inst bs (map AVar tvs) s)]]
-      (CaseOpen _ _ alts _, A a) -> do fss <- mapM (\(c,_,_) -> openFields env c a) alts
-                                       return (map (map V) fss ++ [[]])
+      (Unpack _ tvs _ _, V (VExists bs s)) | length bs == length tvs -> return [[V (inst bs (map AVar tvs) s)]]
+      (CaseOpen _ alts _, A a) -> do fss <- mapM (\(c,_,_) -> openFields env c a) alts
+                                     return (map (map V) fss ++ [[]])
       _ -> Left ("cannot destructure a value of type " ++ ppr t)
 
 -- the one-hole values `K` of `[ctx]`: the hole occurs once, in a field of a block that `K`

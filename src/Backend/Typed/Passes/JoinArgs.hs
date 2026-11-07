@@ -111,7 +111,7 @@ jaE decl scope expr
                inScope (Contents _ v _) = all (`M.member` scope') (fvV v)
                (ps',body) = capture scope' (zipWith describe ps args) ys e1'
                join = Join NonRec j tvs ps' body (substJump j (\ts -> Jump j ts . kept ys) e2')
-           in foldr (\(y,p,i) -> Proj Borrowed (Var p) i y) join hoisted
+           in foldr (\(y,p,i) -> Proj (Var p) i y) join hoisted
       _ -> mapAll (\xs -> jaE decl (bindScope expr xs scope)) expr
 
 -- the join body captures the variable `y` instead of each parameter with `Just y`, which
@@ -132,12 +132,12 @@ readsOf :: Path -> VExpr -> [(Path,Int)]
 readsOf y expr = here ++ getConst (descendAll (\_ e -> Const (readsOf y e)) expr)
   where
     here = case expr of
-             Proj Borrowed (Var p) i x _ | x == y -> [(p,i)]
+             Proj (Var p) i x _ | x == y -> [(p,i)]
              _ -> []
 
 -- remove the `[proj]`s that bind the variables `ys`
 unread :: S.Set Path -> VExpr -> VExpr
 unread ys expr
   = case expr of
-      Proj _ _ _ x e | S.member x ys -> unread ys e
+      Proj _ _ x e | S.member x ys -> unread ys e
       _ -> mapAll (\_ -> unread ys) expr
