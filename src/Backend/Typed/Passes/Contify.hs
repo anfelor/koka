@@ -56,7 +56,7 @@ contifyE env g expr
 
 -- Elaboration applies a closure by dereferencing it into a boxed operand.
 callOf :: Path -> VExpr -> Maybe [VVal]
-callOf f (Deref _ (Var x) g (App h vs)) | x == f, g == h = Just vs
+callOf f (Deref (Var x) g (App h vs)) | x == f, g == h = Just vs
 callOf f (Call o _ (Var x : vs)) | x == f, o == nameOpenNone (length vs) = Just vs
 callOf _ _ = Nothing
 

@@ -106,7 +106,7 @@ cellE cs expr
   = do locked <- asks leLocked
        cons <- asks (lzCons . leLazies)
        case expr of
-         Deref m (Var x) y (Unroll m' y' z (IfWhnf m1 z' (s,e1) (l,CaseA m'' l' alts def)))
+         Deref (Var x) y (Unroll y' z (IfWhnf z' (s,e1) (l,CaseA l' alts def)))
            | Just (x',a) <- locked, x == x', y' == y, z' == z, l' == l, M.null cs
            -> do ind <- indirectOf a
                  (thunks,_) <- sidesOf a
@@ -118,7 +118,7 @@ cellE cs expr
                  e1' <- cellE cs e1
                  alts' <- mapM lockAlt alts
                  def' <- traverse (\(u,e) -> (,) u <$> cellE cs e) def
-                 return (Deref m (Var x) y (Unroll m' y z (IfWhnf m1 z (s,e1') (l,CaseA m'' l alts' def'))))
+                 return (Deref (Var x) y (Unroll y z (IfWhnf z (s,e1') (l,CaseA l alts' def'))))
          Let _ _ (Call f _ (Var c : _)) e
            | f == nameLazyMemoizeTarget, M.member c cs -> cellE cs e
          Call f _ [Var c, v]
@@ -165,10 +165,10 @@ lock :: (Path,Int,AType) -> Path -> VExpr -> L VExpr
 lock (x,n,a) b e
   = do let c = child b SCredit
            body = case e of
-                    Unbox _ b' _ e' | b' == b -> e'
+                    Unbox b' _ e' | b' == b -> e'
                     _ -> e
        body' <- cellE (M.singleton c (n,a)) (substE (\y -> if y == x then Just (Var c) else Nothing) body)
-       return (Unbox Borrowed b (child b SContents) (Lock b body'))
+       return (Unbox b (child b SContents) (Lock b body'))
 
 -- the lambdas in a value have no cells
 cellV :: VVal -> L VVal

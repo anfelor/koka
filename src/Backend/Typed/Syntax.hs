@@ -61,7 +61,7 @@
       reference and demotes it to `x : t`; branches agree on the weaker status.
     - Borrowing is not lexical, as in the paper's ordered contexts, where a borrow may precede
       its owner: the IR borrows from an owned variable `z` anywhere before `z` is consumed (e.g.
-      `case^ z` with `z` owned, as Perceus produces). The binders of a destructuring of `z` are its *parts*, named by their paths
+      `case z` with `z` owned, as Perceus produces). The binders of a destructuring of `z` are its *parts*, named by their paths
       (`z.left`, see `Path`), and their borrowed uses become invalid once `z` is consumed. In
       particular a borrowed argument of a call cannot be one that is passed owned.
     - The parts of an owned variable are owned: consuming a part takes it out of its parent, and
@@ -70,9 +70,9 @@
       is a binder, see `[unbox-ru]`), or the binder of any other destructuring. The binder of `[case-a]`,
       `[split-a]`, `[if-whnf]`, `[deref]` or `[unroll]` at a boxed type is the parent's pointer, and that of
       `[unpack]` (a no-op) is the parent itself: consuming it, or testing it with `[if-unique]`, consumes or tests the parent (so it is unique
-      where the parent is). Hence an owned destructuring of a variable is a borrowed one whose
-      binders are consumed, and only a unique destructuring needs its mode: it consumes a unique
-      scrutinee.
+      where the parent is). Hence destructuring needs no mode: it borrows its scrutinee, and an
+      alternative that consumes all binders consumes the scrutinee (as in the paper, only
+      destructive unboxing takes ownership: `[unbox-ru]`, `[lock]` and `[unscalar]`).
     - A variable may hold several owned references (`[dup]` keeps the name), and Γ is a multiset:
       `Γ, x : t, x : t` holds two. A reference held by a part outlives the consumption of its
       parent, which consumes one reference of each of its parts. For example, after
@@ -254,7 +254,7 @@ data Lit = LitInt Integer
 
 -- Variables are paths: a root followed by the steps of the destructurings that lead from the
 -- root to the variable, outermost first. For example, `z.left.deref` is the binder of
--- `let_q ptr x = z.left` where `z.left` is the binder of `let_q x = z.left`. A field of
+-- `let ptr x = z.left` where `z.left` is the binder of `let x = z.left`. A field of
 -- `[case-open]` contributes the steps to its constructor and its field. The binders
 -- of other forms are roots, and a root is bound only once in a definition. `Paths`
 -- establishes these invariants after elaboration, which ends with `Lazy`.
@@ -608,97 +608,96 @@ data VExpr
   -- Applying a closure consumes it, and all its parameters are owned (no `[bapp]`).
   | App Path [VVal]
 
-  -- Destructuring takes a mode: owned destructuring consumes the scrutinee and its binders are
-  -- owned (a move); borrowed destructuring gives binders borrowed from the scrutinee. Unique
-  -- destructuring consumes a unique scrutinee and its binders are unique; it is only allowed
-  -- where the binder is the scrutinee's pointer: `[case-a]`, `[split-a]`, `[if-whnf]`, `[deref]`,
-  -- `[unroll]` and `[unpack]` (`keepsPointer`). The binders of a destructuring of a value that
-  -- is not a variable are roots; for a borrowed one, they borrow the variables of the value
-  -- for the whole alternative.
+  -- Destructuring has no mode: as in the paper, it borrows its scrutinee, and only the
+  -- destructive forms `[unbox-ru]`, `[lock]` and an owned `[unscalar]` take ownership of it. For a
+  -- variable scrutinee z, the binders are the parts of z (see "Structural rules"): they are
+  -- owned where z is, so an alternative may consume them, which consumes z, and the scrutinee
+  -- itself is only read (which does not demote a unique z). The binders that are the pointer of
+  -- z (`[case-a]`, `[split-a]`, `[if-whnf]`, `[deref]`, `[unroll]` and `[unpack]`) are unique
+  -- where z is. The binders of a destructuring of a value that is not a variable are roots, which
+  -- borrow the variables of the value for the whole alternative.
   --
-  --   Γ₁ ⊢ v :q ⊗ⱼ fⱼ: Vⱼ    Γ₂, x :q Vᵢ ⊢ e : W
+  --   Γ₁ ⊢ v :^ ⊗ⱼ fⱼ: Vⱼ    Γ₂, x :^ Vᵢ ⊢ e : W
   --  ──────────────────────────────────────────── [proj]
-  --   Γ₁, Γ₂ ⊢ let_q x = v.fᵢ in e : W
+  --   Γ₁, Γ₂ ⊢ let x = v.fᵢ in e : W
   --
   -- Reads and binds the field i of a product; a deeper part is reached by a chain of
   -- projections. For a variable v the binder is the path v.fᵢ, with that part's existing
-  -- ownership; the other fields remain available. Otherwise an owned projection consumes the
-  -- other fields, which must therefore be of a trivial type. Products are logical: their fields are in
+  -- ownership; the other fields remain available. Products are logical: their fields are in
   -- source order and may be products themselves, and code generation places the leaves of a
   -- product in memory order (`Layout.layout`). Elaboration gives a constructor with one field
   -- the type of that field, so it generates products of at least two fields.
-  | Proj Mode VVal Int Path VExpr
+  | Proj VVal Int Path VExpr
 
-  --   Γ₁ ⊢ v :q ⊕ᵢ Vᵢ    Γ₂, xᵢ :q Vᵢ ⊢ eᵢ : W   (for each i)
+  --   Γ₁ ⊢ v :^ ⊕ᵢ Vᵢ    Γ₂, xᵢ :^ Vᵢ ⊢ eᵢ : W   (for each i)
   --  ────────────────────────────────────────────────────────── [case]
-  --   Γ₁, Γ₂ ⊢ case_q v of { injᵢ xᵢ -> eᵢ } : W
+  --   Γ₁, Γ₂ ⊢ case v of { injᵢ xᵢ -> eᵢ } : W
   --
   -- Every alternative occurs exactly once, in any order; code generation tests them in the
   -- given order, which elaboration takes from the source. For a variable scrutinee z,
   -- branch i substitutes injᵢ xᵢ in credit descriptions.
-  | CaseV Mode VVal [(Int,Path,VExpr)]
+  | CaseV VVal [(Int,Path,VExpr)]
 
-  --   Γ₁ ⊢ v :q ⊕ⱼ∈J Aⱼ    Γ₂, xᵢ :q Aᵢ ⊢ eᵢ : W (i ∈ I)    Γ₂, d :q ⊕ⱼ∈J\I Aⱼ ⊢ e : W
+  --   Γ₁ ⊢ v :^ ⊕ⱼ∈J Aⱼ    Γ₂, xᵢ :^ Aᵢ ⊢ eᵢ : W (i ∈ I)    Γ₂, d :^ ⊕ⱼ∈J\I Aⱼ ⊢ e : W
   --  ──────────────────────────────────────────────────────────────────────────── [case-a]
-  --   Γ₁, Γ₂ ⊢ case_q v of { injᵢ xᵢ -> eᵢ; _ d -> e } : W
+  --   Γ₁, Γ₂ ⊢ case v of { injᵢ xᵢ -> eᵢ; _ d -> e } : W
   --
   -- Indices must belong to the sum and be distinct. Without a default every alternative occurs.
   -- The default excludes the matched indices without renumbering the remainder;
-  -- it must be nonempty. No allocation or retagging occurs, at any mode: the binders are
+  -- it must be nonempty. No allocation or retagging occurs: the binders are
   -- the block of v, with the tags of their alternatives (tag(xᵢ) = i).
-  | CaseA Mode Path [(Int,Path,VExpr)] (Maybe (Path,VExpr))
+  | CaseA Path [(Int,Path,VExpr)] (Maybe (Path,VExpr))
 
-  --   Γ₁ ⊢ v :q ⊕ᵢ∈J Aᵢ    Γ₂, x :q ⊕ᵢ∈J,i<k Aᵢ ⊢ e₁ : W    Γ₂, y :q ⊕ᵢ∈J,i≥k Aᵢ ⊢ e₂ : W
+  --   Γ₁ ⊢ v :^ ⊕ᵢ∈J Aᵢ    Γ₂, x :^ ⊕ᵢ∈J,i<k Aᵢ ⊢ e₁ : W    Γ₂, y :^ ⊕ᵢ∈J,i≥k Aᵢ ⊢ e₂ : W
   --  ─────────────────────────────────────────────────────────────────────────── [split-a]
-  --   Γ₁, Γ₂ ⊢ split_q v at k of { x -> e₁; y -> e₂ } : W
+  --   Γ₁, Γ₂ ⊢ split v at k of { x -> e₁; y -> e₂ } : W
   --
   -- Both sides must be nonempty. Both binders retain the original indices,
   -- pointer and runtime tags. Even singleton partitions keep their sum wrapper.
-  -- Like CaseA, this supports owned, borrowed and unique modes without repacking.
-  | SplitA Mode Path Int (Path,VExpr) (Path,VExpr)
+  | SplitA Path Int (Path,VExpr) (Path,VExpr)
 
-  --   Γ₁ ⊢ v :q L ~> S    Γ₂, s :q S ⊢ e₁ : W    Γ₂, l :q L ⊢ e₂ : W
+  --   Γ₁ ⊢ v :^ L ~> S    Γ₂, s :^ S ⊢ e₁ : W    Γ₂, l :^ L ⊢ e₂ : W
   --  ──────────────────────────────────────────────────────────────── [if-whnf]
-  --   Γ₁, Γ₂ ⊢ if-whnf_q v of { whnf s -> e₁; delay l -> e₂ } : W
+  --   Γ₁, Γ₂ ⊢ if-whnf v of { whnf s -> e₁; delay l -> e₂ } : W
   --
   -- Branches on whether a lazy value is in WHNF, by its tag (the strict tags come before the
-  -- thunks). Like `[split-a]`, the binders are the pointer of v at any mode, with their tags.
-  | IfWhnf Mode Path (Path,VExpr) (Path,VExpr)
+  -- thunks). Like `[split-a]`, the binders are the pointer of v, with their tags.
+  | IfWhnf Path (Path,VExpr) (Path,VExpr)
 
-  --   Γ₁ ⊢ v :q A*    Γ₂, x :q A ⊢ e : W
+  --   Γ₁ ⊢ v :^ A*    Γ₂, x :^ A ⊢ e : W
   --  ───────────────────────────────────── [deref]
-  --   Γ₁, Γ₂ ⊢ let_q ptr x = v in e : W
-  | Deref Mode VVal Path VExpr
+  --   Γ₁, Γ₂ ⊢ let ptr x = v in e : W
+  | Deref VVal Path VExpr
 
-  --   Γ₁ ⊢ v :q (μt⟨ā⟩. A)⟨B̄⟩    Γ₂, x :q A[μt⟨ā⟩. A / t][B̄/ā] ⊢ e : W
+  --   Γ₁ ⊢ v :^ (μt⟨ā⟩. A)⟨B̄⟩    Γ₂, x :^ A[μt⟨ā⟩. A / t][B̄/ā] ⊢ e : W
   --  ──────────────────────────────────────────────────────────────────── [unroll]
-  --   Γ₁, Γ₂ ⊢ let_q roll x = v in e : W
-  | Unroll Mode Path Path VExpr
+  --   Γ₁, Γ₂ ⊢ let roll x = v in e : W
+  | Unroll Path Path VExpr
 
   --   Γ₁ ⊢ v :^ Box V    Γ₂, x :^ V ⊢ e : W
   --  ──────────────────────────────────────── [bunbox]
-  --   Γ₁, Γ₂ ⊢ let^ box x = v in e : W
+  --   Γ₁, Γ₂ ⊢ let box x = v in e : W
   --
-  -- Reading the contents of a box is always borrowed. The paper's owned `[unbox]`, which keeps
+  -- Reading the contents of a box is borrowed, like every destructuring. The paper's owned `[unbox]`, which keeps
   -- the block as a credit, is `[unbox-ru]` and requires the box to be unique. Code generation
   -- copies `x` out of the block of `v` (see "Structural rules").
-  | Unbox Mode Path Path VExpr
+  | Unbox Path Path VExpr
 
   --   Γ₁ ⊢ v :q Scalar raw    Γ₂, x : raw ⊢ e : W
   --  ───────────────────────────────────────────── [unscalar]
   --   Γ₁, Γ₂ ⊢ let_q scalar x = v in e : W
   --
   -- Reading a scalar copies its contents, which are trivial: `x` is a root, not a part of `v`.
-  -- An owned read consumes the scalar (Koka's owned unbox, which frees a heap-backed one), and so
-  -- does a unique one.
+  -- The only destructuring with a mode: an owned read consumes the scalar (Koka's owned unbox,
+  -- which frees a heap-backed one), and so does a unique one.
   | Unscalar Mode Path Path VExpr
 
-  --   Γ₁ ⊢ v :q ∃ā. V    Γ₂, x :q V[b̄/ā] ⊢ e : W    b̄ ∉ ftv(Γ₂, W)
+  --   Γ₁ ⊢ v :^ ∃ā. V    Γ₂, x :^ V[b̄/ā] ⊢ e : W    b̄ ∉ ftv(Γ₂, W)
   --  ────────────────────────────────────────────────────────────────── [unpack]
-  --   Γ₁, Γ₂ ⊢ let_q pack[b̄] x = v in e : W
+  --   Γ₁, Γ₂ ⊢ let pack[b̄] x = v in e : W
   --
   -- For a variable scrutinee z, credit descriptions substitute pack[b̄] x for z.
-  | Unpack Mode VVal [TVar] Path VExpr
+  | Unpack VVal [TVar] Path VExpr
 
   --   Γ₁ ⊢ v :^ V    lᵢ : V    Γ₂ ⊢ eᵢ : W    Γ₂ ⊢ e : W
   --  ────────────────────────────────────────────────────── [case-lit]
@@ -707,13 +706,13 @@ data VExpr
 
   --   Γ₁ ⊢ v :^ T⟨B̄⟩    Cᵢ : ∀ā. V̄ᵢ -> T⟨ā⟩ ∈ Σ    Γ₂, x̄ᵢ :^ V̄ᵢ[B̄/ā] ⊢ eᵢ : W    Γ₂ ⊢ e : W
   --  ──────────────────────────────────────────────────────────────────────────────── [case-open]
-  --   Γ₁, Γ₂ ⊢ case^ v of { Cᵢ(x̄ᵢ) -> eᵢ; _ -> e } : W
+  --   Γ₁, Γ₂ ⊢ case v of { Cᵢ(x̄ᵢ) -> eᵢ; _ -> e } : W
   --
-  -- Matching on the tag of an open datatype, with a mandatory default. Always borrowed. An
+  -- Matching on the tag of an open datatype, with a mandatory default. An
   -- alternative binds one binder for each source field. For a variable v the binders are the
   -- fields of the product `v.C`, as `[proj]` would bind them (just `v.C` if there is one
   -- field), without binding the product.
-  | CaseOpen Mode Path [(Name,[Path],VExpr)] VExpr
+  | CaseOpen Path [(Name,[Path],VExpr)] VExpr
 
   --   Γ | ∅ ⊢ e : A*    ā ∉ ftv(Γ)
   --  ──────────────────────────────── [gen]
@@ -733,7 +732,7 @@ data VExpr
   -- placeholder in the hole. The paper's `[dropru]` is derived
   -- from `[if-unique]` and `[unbox-ru]` (`Reuse.dropReuse`):
   --
-  --   let r = drop-reuse x in e  ≜  let^ box x.contents = x in
+  --   let r = drop-reuse x in e  ≜  let box x.contents = x in
   --                                 let r = (if-unique x then (let @ r' = x in discard x.contents; ret r')
   --                                          else (drop x; ret no-reuse n)) in e
   | Drop Path VExpr

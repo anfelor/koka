@@ -16,8 +16,8 @@
    indices; its body is never copied.
 
    Finally, the tests of a nested pattern are scheduled by level. A chain is a nest
-   of borrowed tests with two alternatives that share one failure, interleaved with
-   the borrowed reads that bring their operands into scope: projections,
+   of tests with two alternatives that share one failure, interleaved with
+   the reads that bring their operands into scope: projections,
    dereferences, rolls, unboxes and cases with one alternative. Elaboration reads a
    field where it is first used, but unboxes a payload as soon as its tag is known,
    so the tests of sibling patterns are separated by reads, and the reads of their
@@ -53,17 +53,17 @@ matchE :: VExpr -> Match VExpr
 matchE expr
   = do e <- typedChildren matchE expr
        case e of
-         CaseA m v alts def
+         CaseA v alts def
            -> do (_,g) <- ask
                  t <- liftE (inferVar g v)
                  case t of
-                   A (ASum ts) -> partition m v ts (sortOn (\(i,_,_) -> i) alts) def
+                   A (ASum ts) -> partition v ts (sortOn (\(i,_,_) -> i) alts) def
                    _ -> return e
          _ -> return e
 
-partition :: Mode -> Path -> [(Int,AType)] -> [(Int,Path,VExpr)] -> Maybe (Path,VExpr) -> Match VExpr
-partition _ v _ [] (Just (d,e)) = return (renameE (Map.singleton d v) e)
-partition m v ts alts def
+partition :: Path -> [(Int,AType)] -> [(Int,Path,VExpr)] -> Maybe (Path,VExpr) -> Match VExpr
+partition v _ [] (Just (d,e)) = return (renameE (Map.singleton d v) e)
+partition v ts alts def
   = case splitAtIndex ts of
       Just k | canSplit k -> do
         let (ls,rs) = span ((< k) . fst) ts
@@ -71,10 +71,10 @@ partition m v ts alts def
             defaultFor ss = if any (\(i,_) -> i `notElem` selected) ss then def else Nothing
         let x = child v SLo
             y = child v SHi
-        e1 <- partition m x ls left (defaultFor ls)
-        e2 <- partition m y rs right (defaultFor rs)
-        return (SplitA m v k (x,e1) (y,e2))
-      _ -> return (nameParts (CaseA m v alts def))
+        e1 <- partition x ls left (defaultFor ls)
+        e2 <- partition y rs right (defaultFor rs)
+        return (SplitA v k (x,e1) (y,e2))
+      _ -> return (nameParts (CaseA v alts def))
   where
     selected = [i | (i,_,_) <- alts]
     -- A sparse default must fit wholly on one side of a pointer test, so that
@@ -103,7 +103,7 @@ splitAtIndex ts
 
 -- Partitioning changes the paths of branch binders. A continuation may already
 -- destructure that same part; select its established alternative instead of
--- binding the path twice. Unique eliminations must retain their ownership use.
+-- binding the path twice.
 reuseEstablished :: Scope -> VExpr -> VExpr
 reuseEstablished scope e
   | Just _ <- knownAlt scope e = reuseEstablished scope (reuseParts scope e)
@@ -127,7 +127,7 @@ levelE expr
 chain :: VExpr -> Maybe (VExpr,[VExpr -> Op],VExpr)
 chain expr
   = listToMaybe [ (failure,test s : ops,body)
-                | s <- testSides expr, sideMode s == Borrowed
+                | s <- testSides expr
                 , let (y,failure) = sideOther s
                 , not (any (`within` y) (fvE failure))
                 , let (ops,body) = collect failure (snd (sideTaken s))
@@ -138,7 +138,7 @@ collect :: VExpr -> VExpr -> ([VExpr -> Op],VExpr)
 collect failure expr
   = case (readStep expr, failingTo failure expr) of
       (Just (x,build,next),_) -> continue (const (op False build [x])) next
-      (_,Just s) | sideMode s == Borrowed -> continue (test s) (snd (sideTaken s))
+      (_,Just s) -> continue (test s) (snd (sideTaken s))
       _ -> ([],expr)
   where
     continue o next = let (ops,body) = collect failure next in (o : ops,body)
@@ -149,15 +149,15 @@ test s failure = op True (\success -> sideRebuild s success failure) [fst (sideT
 op :: Bool -> (VExpr -> VExpr) -> [Path] -> Op
 op isTest build xs = Op isTest build xs (fvE (build (Unreachable VUnit)))
 
--- Borrowed reads of variables cannot fail, call, yield, force or allocate.
+-- Reads of variables cannot fail, call, yield, force or allocate.
 readStep :: VExpr -> Maybe (Path,VExpr -> VExpr,VExpr)
 readStep expr
   = case expr of
-      Proj Borrowed v@(Var _) i x b -> Just (x,Proj Borrowed v i x,b)
-      Deref Borrowed v@(Var _) x b -> Just (x,Deref Borrowed v x,b)
-      Unroll Borrowed v x b -> Just (x,Unroll Borrowed v x,b)
-      Unbox Borrowed v x b -> Just (x,Unbox Borrowed v x,b)
-      CaseA Borrowed v [(i,x,b)] Nothing -> Just (x,\b' -> CaseA Borrowed v [(i,x,b')] Nothing,b)
+      Proj v@(Var _) i x b -> Just (x,Proj v i x,b)
+      Deref v@(Var _) x b -> Just (x,Deref v x,b)
+      Unroll v x b -> Just (x,Unroll v x,b)
+      Unbox v x b -> Just (x,Unbox v x,b)
+      CaseA v [(i,x,b)] Nothing -> Just (x,\b' -> CaseA v [(i,x,b')] Nothing,b)
       _ -> Nothing
 
 -- Level by level: the reads that the tests of a level need first needed there, then those
