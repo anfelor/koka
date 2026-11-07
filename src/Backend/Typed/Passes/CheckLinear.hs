@@ -261,7 +261,7 @@ leave xs u
        forM_ (M.toList peak) $ \(p,n) ->
          when (mine p && n > M.findWithDefault 0 p (refine tr [p] held)) (fail ("use of a consumed variable: " ++ show p))
        forM_ (S.toList (uUnique u)) $ \p -> forM_ zs $ \(z,m) ->
-         when (p `within` z && (p /= z || m /= Unique))
+         when (p `within` z && partMode tr z m p /= Unique)
            (fail ("unique use of a variable that is not unique: " ++ show p))
        return (Use (M.filterWithKey (\p _ -> not (mine p)) left) (M.filterWithKey (\p _ -> not (mine p)) peak)
                    (S.filter (not . mine) (uBorrowed u)) (S.filter (not . mine) (uUnique u)) (uDiverges u))
@@ -284,11 +284,21 @@ closed ps check
 
 -- variables
 
--- the mode of a variable: that of the longest variable on its path that is an owner
+-- The mode of a variable `x` below an owner `z` of mode `m`, as in the structural rules of the
+-- paper: a part that is all of `z` (`key`) has the mode of `z`, and any other part is at most
+-- owned. In particular, the contents of a unique box are not unique, as they are not all of
+-- it: only the box holds the only reference to its block (the paper's `[box]`).
+partMode :: Parts -> Path -> Mode -> Path -> Mode
+partMode tr z m x
+  | m == Unique && key tr x /= key tr z = Owned
+  | otherwise = m
+
+-- the mode of a variable: that of its part of the longest variable on its path that is an owner
 ownerMode :: Path -> L Mode
 ownerMode x
   = do os <- ask
-       case [m | p <- x : reverse (prefixes x), Just m <- [M.lookup p os]] of
+       tr <- get
+       case [partMode tr p m x | p <- x : reverse (prefixes x), Just m <- [M.lookup p os]] of
          (m:_) -> return m
          [] -> fail ("unbound variable " ++ show x)
 
