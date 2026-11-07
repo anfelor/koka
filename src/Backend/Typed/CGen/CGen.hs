@@ -886,30 +886,30 @@ genE cx dest expr
               let call = "kk_function_call(" <.> cty rct <.> ",(kk_function_t" <.> hcat [", " <.> cty ct | ct <- pcts] <.> ", kk_context_t*),"
                          <.> fx <.> ",(" <.> fx <.> hcat [", " <.> a | a <- args] <.> ", _ctx),_ctx)"
               return [block (("kk_function_t" <+> fx <+> "= kk_datatype_unbox(" <.> localName f <.> ");") : assignTo dest rct call)]
-      Proj _ v i x e -> genProjection cx dest v i x e
-      Unpack _ v tvs x e
+      Proj v i x e -> genProjection cx dest v i x e
+      Unpack v tvs x e
         -> do VExists bs body <- tyOf cx v
               let t = inst bs (map AVar tvs) body
               ve <- genV cx v
               genRead cx dest x t ve e
-      Deref _ v x e
+      Deref v x e
         -> do VPtr a <- tyOf cx v
               ve <- genV cx v
               let cx' = case v of
                           Var y -> shareAlias cx y x
                           _ -> cx
               genAlias cx' dest ve x (A a) e
-      Unroll _ v x e
+      Unroll v x e
         -> do A t <- tyOfName cx v
               a <- liftC (unrollT (cxEnv cx) t)
               genAlias (shareAlias cx v x) dest (localName v) x (A a) e
-      Unbox _ v x e -> genUnbox cx dest v x e
+      Unbox v x e -> genUnbox cx dest v x e
       Unscalar m v x e -> genUnscalar cx dest m v x e
       _ | Just (tests,failure) <- conjunction expr
         -> genConjunction cx dest tests failure
       SplitA{} -> failG "a split is a conjunction"
       -- the strict tags come before the thunks, and only strict alternatives are immediate
-      IfWhnf _ v (x,e1) (y,e2)
+      IfWhnf v (x,e1) (y,e2)
         -> do t <- tyOfName cx v
               [[ts@(A (ASum ss))],[tl@(A (ASum ls))]] <- liftC (altTypes (cxEnv cx) t expr)
               let ve = localName v
@@ -919,7 +919,7 @@ genE cx dest expr
               s1 <- genSumBranch cx dest v x ts e1
               s2 <- genSumBranch cx dest v y tl e2
               return [ifChain [("kk_likely(" <.> test <.> ")",s1)] s2]
-      CaseA _ v alts def
+      CaseA v alts def
         -> do t <- tyOfName cx v
               tss <- liftC (altTypes (cxEnv cx) t expr)
               let ve = localName v
@@ -937,7 +937,7 @@ genE cx dest expr
                 ([(_,body)],Nothing) -> return [block body]
                 _ -> return [block [tagDecl t tg ve, switchCases tg brs fallback]]
       -- a variable is a local, another value is copied into one
-      CaseV _ v alts
+      CaseV v alts
         -> do t@(VSum ts) <- tyOf cx v
               ct <- ctype t
               ve <- genV cx v
@@ -971,7 +971,7 @@ genE cx dest expr
       Plug{} -> failG "an operation"
       CtxCopy{} -> failG "an operation"
       Memoize{} -> failG "an operation"
-      CaseOpen _ v alts def
+      CaseOpen v alts def
         -> do let ve = localName v
               brs <- forM alts $ \(c,xs,e) ->
                        do tys <- openTypeArgs cx v
@@ -1034,7 +1034,7 @@ conjunction expr
     unused = Unreachable VUnit
     -- the payload of a sum value is read twice
     combinable s = case sideTest s of
-                     CaseV _ v _ -> case v of { Var _ -> True; _ -> False }
+                     CaseV v _ -> case v of { Var _ -> True; _ -> False }
                      _ -> True
 
 genConjunction :: Ctx -> Dest -> [TestSide] -> (Path,VExpr) -> G [Doc]
@@ -1058,14 +1058,14 @@ genConjunction cx dest sides (_,failure)
 twoWay :: Ctx -> VExpr -> G (Doc,(Path,Ty,Doc),(Path,Ty,Doc))
 twoWay cx expr
   = case expr of
-      SplitA _ v k (x,_) (y,_)
+      SplitA v k (x,_) (y,_)
         -> do t <- tyOfName cx v
               [[tl@(A ls)],[tr@(A rs)]] <- liftC (altTypes (cxEnv cx) t expr)
               let ve = localName v
               return (fromMaybe (tagRead t ve <+> "<" <+> int k) (pointerTest ve ls rs), alias v x tl, alias v y tr)
-      CaseA _ v [(i,x,_)] (Just (y,_)) -> tagged v i x y
-      CaseA _ v [(i,x,_),(_,y,_)] Nothing -> tagged v i x y
-      CaseV _ v@(Var _) [(i,x,_),(j,y,_)]
+      CaseA v [(i,x,_)] (Just (y,_)) -> tagged v i x y
+      CaseA v [(i,x,_),(_,y,_)] Nothing -> tagged v i x y
+      CaseV v@(Var _) [(i,x,_),(j,y,_)]
         -> do t@(VSum ts) <- tyOf cx v
               ct <- ctype t
               z <- genV cx v

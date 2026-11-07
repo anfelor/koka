@@ -127,4 +127,4 @@ caseSum cons shapes a branch
                                          y = child a (SInjA tag (cons !! i))
                                      e <- branch i y
                                      return (tag,y,e)) [0 .. length shapes - 1]
-              return (CaseA Owned a alts Nothing)
+              return (CaseA a alts Nothing)

@@ -755,7 +755,7 @@ elabBoxedCase info vargs v brs
                  [(_,con)] -> conBranch vargs con (Left z) (findBranch con brs)
                  _ | isLazyInfo info -> lazyCase vargs brs z cons
                    | otherwise -> sumCase vargs brs z cons (wildBody brs)
-       return (Deref Owned v p (Unroll Owned p z body))
+       return (Deref v p (Unroll p z body))
 
 -- A case on the alternatives `cons` of the boxed sum `z`. Those without a branch of their own
 -- take the default, if any; a case of the default alone is the default.
@@ -767,8 +767,8 @@ sumCase vargs brs z cons def
          Just d | null alts -> d
                 | length selected < length cons -> do y <- fresh "default"
                                                       e <- d
-                                                      return (CaseA Owned z alts (Just (y,e)))
-         _ -> return (CaseA Owned z alts Nothing)
+                                                      return (CaseA z alts (Just (y,e)))
+         _ -> return (CaseA z alts Nothing)
 
 -- A match on a lazy value tests whether it is in WHNF (`[if-whnf]`), and then matches on its
 -- strict alternatives or on its thunks. Only a lazy match can name thunks, as Koka forces the
@@ -786,7 +786,7 @@ lazyCase vargs brs z cons
        e1 <- sumCase vargs brs s stricts def
        e2 <- if null named && isNothing def then Unreachable <$> vt (typeOf (head brs))
              else sumCase vargs brs l thunks def
-       return (IfWhnf Owned z (s,e1) (l,e2))
+       return (IfWhnf z (s,e1) (l,e2))
 
 -- the body of the default branch
 wildBody :: [C.Branch] -> Maybe (E VExpr)
@@ -809,7 +809,7 @@ elabValueCase :: DataInfo -> [AType] -> VVal -> [C.Branch] -> E VExpr
 elabValueCase info vargs v brs
   = case dataInfoConstrs info of
       [con] -> conBranch vargs con (Right v) (findBranch con brs)
-      cons  -> CaseV Owned v . map snd . sortOn fst <$> mapM (valueAlt vargs brs v) (zip [0..] cons)
+      cons  -> CaseV v . map snd . sortOn fst <$> mapM (valueAlt vargs brs v) (zip [0..] cons)
 
 -- an alternative with the position of its branch in the source, to keep the order of the tests.
 -- The binder of a variable scrutinee is the path to the alternative, which names its constructor
@@ -829,7 +829,7 @@ elabOpenCase info vargs v brs
        def  <- case [b | b@(C.Branch [C.PatWild] _) <- brs] of
                  (b:_) -> branchBody b
                  []    -> failE "open match without default"
-       return (Deref Owned v p (CaseOpen Owned p alts def))
+       return (Deref v p (CaseOpen p alts def))
 
 -- one binder for each field of the scrutinee `d`: its path, which names the field
 -- (`Traversal.openSteps`)
@@ -885,11 +885,11 @@ openCon y exs exIds
 
 unboxK :: Path -> E (K,VVal)
 unboxK y = do p <- fresh "p"
-              return (Unbox Owned y p, Var p)
+              return (Unbox y p, Var p)
 
 unpackK :: VVal -> [TVar] -> E (K,VVal)
 unpackK v ids = do u <- fresh "e"
-                   return (Unpack Owned v ids u, Var u)
+                   return (Unpack v ids u, Var u)
 
 patExistIds :: C.Pattern -> [TVar]
 patExistIds (C.PatCon{ C.patExists = exists }) = map typevarId exists
@@ -914,7 +914,7 @@ destructure fields (k,p)
   = concat <$> sequence [do y <- case p of
                                    Var z -> return (child z (SField i f))
                                    _     -> fresh "field"
-                            bindField x s (k . Proj Borrowed p i y,Var y)
+                            bindField x s (k . Proj p i y,Var y)
                         | (i,(x,f,s)) <- zip [0..] fields]
 
 bindField :: Maybe TName -> VType -> (K,VVal) -> E [(Name,(K,VVal))]

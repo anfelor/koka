@@ -87,7 +87,7 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
                      Jump _ ts _ -> concatMap at ts
                      Call _ ts _ -> concatMap at ts
                      Gen vs _ -> map (VPtr . AVar) vs
-                     Unpack _ _ vs _ _ -> map (VPtr . AVar) vs
+                     Unpack _ vs _ _ -> map (VPtr . AVar) vs
                      _ -> []
     vt v = here ++ getConst (descendV (Const . avTypes) (Const . vt) v)
       where here = case v of
@@ -189,7 +189,7 @@ outside bound = filter (`S.notMember` bound)
 tvarsE :: S.Set TVar -> VExpr -> [TVar]
 tvarsE bound expr
   = case expr of
-      Unpack _ v tvs _ e  -> tvarsV bound v ++ tvarsE (with tvs) e
+      Unpack v tvs _ e  -> tvarsV bound v ++ tvarsE (with tvs) e
       Gen tvs e           -> tvarsE (with tvs) e
       Join r _ tvs ps e1 e2 -> outside bound (concatMap ftv (recResult r)) ++ outside (with tvs) (concat [ftv t | (_,_,t) <- ps]) ++ tvarsE (with tvs) e1 ++ tvarsE bound e2
       _ -> outside bound annotations ++ getConst (descendE (const (Const [])) (Const . tvarsV bound) (\_ e -> Const (tvarsE bound e)) expr)

@@ -16,11 +16,10 @@
   borrowed in `e1`; a `[let-yield]` is a `let` whose continuation is one of two branches,
   and `x` is only bound in the one where no effect yields.
 
-  Destructuring a dead owned variable moves its ownership to the binders
-  (mode owned). Otherwise the binders are borrowed from the scrutinee (mode
-  borrowed). A borrowed variable whose path passes through an owned variable `z` (the
-  longest such, its *owner*: see `Syntax.Path`) is only duplicated where `z` is given up while
-  it is still needed:
+  Destructuring a dead owned variable moves its ownership to the binders, which the
+  alternatives consume. Otherwise the binders are borrowed from the scrutinee. A borrowed
+  variable whose path passes through an owned variable `z` (the longest such, its *owner*: see
+  `Syntax.Path`) is only duplicated where `z` is given up while it is still needed:
   - where `z` is consumed (passed on, or moved by a `let` or a destructuring), it is
     duplicated before. A use of an alias of `z` (see below) needs `z` itself (`needs`), so `z`
     stays owned and the consumer gets another reference to `z` instead;
@@ -63,7 +62,7 @@ import Data.Maybe( isNothing, listToMaybe )
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Build( K, compose )
-import Backend.Typed.Traversal( Destruct(..), child, descendA, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsMode, dsScrut, fieldsAt, fvA, fvE, fvV, scrutVar, stepsFrom, takesContents, within )
+import Backend.Typed.Traversal( Destruct(..), child, descendA, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fieldsAt, fvA, fvE, fvV, scrutVar, stepsFrom, takesContents, within )
 import Backend.Typed.Passes.Common( isRead, paramModes, prefixes, trivialTy, NameSupply, dropValue, freshFor, perDef, freshPathFrom, nameParts, projectAll, scopeOf )
 import Backend.Typed.Env( Env(..), envOf, M, evalM, get, gets, lift, liftE, put, state, StateT, runStateT )
 import Backend.Typed.Query( Gamma, bindAll, inferV, altTypes, lockGamma, uniqueGamma )
@@ -157,7 +156,7 @@ percE :: PEnv -> VarSet -> VExpr -> P VExpr
 -- control never gets here, so nothing needs to be dropped
 percE _ _ expr@Unreachable{}
   = return expr
--- Materialize a scheduled borrowed selection before settling its owner. The
+-- Materialize a scheduled projection before settling its owner. The
 -- selected binding can then survive the transfer, rather than being read back
 -- from a backing snapshot afterward. A scalar read similarly copies trivial
 -- contents into an independent root before its owner is settled, and a read of the
@@ -167,12 +166,12 @@ percE pe owned expr@Unscalar{}
   = percE' pe owned expr
 percE pe owned expr@Unbox{}
   = percE' pe owned expr
-percE pe owned expr@(Deref _ (Var _) x (Unscalar _ z _ _))
+percE pe owned expr@(Deref (Var _) x (Unscalar _ z _ _))
   | x == z
   = percE' pe owned expr
 percE pe owned expr
   | Just ds <- destructVOf expr, productProjection expr
-  , dsMode ds == Borrowed, Var _ <- dsScrut ds
+  , Var _ <- dsScrut ds
   = percE' pe owned expr
 percE pe owned expr
   = do let live = fvE expr
@@ -237,7 +236,7 @@ settle pe owned expr z xs
                    missing = [f | f@(y,_,_) <- fields, M.notMember y (peGamma pe)]
                if null missing
                  then percE pe (S.union owned' (S.fromList [y | (y,_,_) <- fields])) expr
-                 else percE pe owned (projectAll M.empty Borrowed z missing expr)
+                 else percE pe owned (projectAll M.empty z missing expr)
            | not (pointer t) -> percE pe (S.union owned' (S.fromList (partsOf pe z))) expr
          (y:ys) -> percE pe (S.insert (foldr shorter y ys) owned') expr
          [] -> let discard = case [p | x <- xs, Just p <- [contentsOn x]] of
@@ -272,17 +271,15 @@ percE' pe owned expr
   = do let z = dsScrut ds
        t <- tyOfVar pe z
        tss <- liftE (altTypes (peEnv pe) t expr)
-       (m,es) <- destruct pe owned (Just z) expr [zip xs ts | ((xs,_),ts) <- zip (dsAlts ds) tss] (map snd (dsAlts ds))
-       return (dsBuild ds m z es)
+       dsBuild ds z <$> destruct pe owned (Just z) expr [zip xs ts | ((xs,_),ts) <- zip (dsAlts ds) tss] (map snd (dsAlts ds))
 percE' pe owned expr
   | Just ds <- destructVOf expr
   = atomic pe owned (dsScrut ds) (needs (restFv ds)) $ \pe1 own1 z ->
     do t <- typeOfV pe1 z
-       let expr' = nameParts (dsBuild ds (dsMode ds) z (map snd (dsAlts ds)))
+       let expr' = nameParts (dsBuild ds z (map snd (dsAlts ds)))
        case destructVOf expr' of
          Just ds' -> do tss <- liftE (altTypes (peEnv pe1) (V t) expr')
-                        (m,es) <- destruct pe1 own1 (valName z) expr' [zip xs ts | ((xs,_),ts) <- zip (dsAlts ds') tss] (map snd (dsAlts ds'))
-                        return (dsBuild ds' m z es)
+                        dsBuild ds' z <$> destruct pe1 own1 (valName z) expr' [zip xs ts | ((xs,_),ts) <- zip (dsAlts ds') tss] (map snd (dsAlts ds'))
          Nothing -> fail "expected a value destructuring"
 percE' pe owned expr
   = case expr of
@@ -408,7 +405,7 @@ atomic pe owned v liveRest cont
 restFv :: Destruct v -> VarSet
 restFv ds = S.unions [fvE e `S.difference` S.fromList xs | (xs,e) <- dsAlts ds]
 
-destruct :: PEnv -> VarSet -> Maybe Path -> VExpr -> [[(Path,Ty)]] -> [VExpr] -> P (Mode,[VExpr])
+destruct :: PEnv -> VarSet -> Maybe Path -> VExpr -> [[(Path,Ty)]] -> [VExpr] -> P [VExpr]
 destruct pe owned z expr binderss bodies
   = do let zOwned = case z of
                       Just x -> S.member x owned
@@ -420,10 +417,8 @@ destruct pe owned z expr binderss bodies
            moveAll  = zOwned && not (isRead expr) && not (productProjection expr) && all deadIn (zip binderss bodies)
        if moveAll
          then do let own = owned `S.difference` S.fromList zName
-                 es <- mapM (\(bs,e) -> percE (bind pe bs) (own `S.union` ownedOf pe bs) e) (zip binderss bodies)
-                 return (Owned,es)
-         else do es <- mapM (borrowedBody pe owned) (zip binderss bodies)
-                 return (Borrowed,es)
+                 mapM (\(bs,e) -> percE (bind pe bs) (own `S.union` ownedOf pe bs) e) (zip binderss bodies)
+         else mapM (borrowedBody pe owned) (zip binderss bodies)
 
 -- the binders are borrowed from the scrutinee (and from its owner)
 borrowedBody :: PEnv -> VarSet -> ([(Path,Ty)],VExpr) -> P VExpr

@@ -32,7 +32,7 @@ expr e
   | otherwise = typedChildren expr e
 
 projection :: VExpr -> Maybe (Path,VExpr)
-projection (Proj _ _ _ x b) = Just (x,b)
+projection (Proj _ _ x b) = Just (x,b)
 projection _ = Nothing
 
 -- bind deeply nested values first (C compilers limit the nesting of brackets)

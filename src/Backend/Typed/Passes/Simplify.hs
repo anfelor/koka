@@ -77,7 +77,7 @@ inlineApply :: VExpr -> VExpr
 inlineApply expr
   = case expr of
       Let f _ (Ret (Ptr _ (Lam ps _ body))) rest
-        -> let apply (Deref Owned (Var x) g (App h vs))
+        -> let apply (Deref (Var x) g (App h vs))
                  | x == f, g == h, length ps == length vs
                  , all (S.notMember f . fvV) vs
                  , all (\(p,_,_) -> all (S.notMember p . fvV) vs) ps
@@ -129,20 +129,20 @@ knownE known expr
                           _     -> shadow [x] known
                e2' = knownE known' e2
            in if isRet e1' && not (used x e2') then e2' else Let x t e1' e2'
-      Deref m v x e -> ifUsed x (Deref m v x) (knownE (shadow [x] known) e)
-      Unroll m v x e -> ifUsed x (Unroll m v x) (knownE (shadow [x] known) e)
-      CaseV _ v alts
+      Deref v x e -> ifUsed x (Deref v x) (knownE (shadow [x] known) e)
+      Unroll v x e -> ifUsed x (Unroll v x) (knownE (shadow [x] known) e)
+      CaseV v alts
         | Just (Inj i _ _) <- case v of { Var x -> valueAt known x; _ -> Just v }
         , ((x,e):_) <- [(x,e) | (j,x,e) <- alts, j == i]
         -> taken x e
-      CaseA _ v alts def
+      CaseA v alts def
         | Just (InjA i _ _) <- knownAt known v
         , ((x,e):_) <- [(x,e) | (j,x,e) <- alts, j == i] ++ maybe [] pure def
         -> taken x e
-      SplitA _ v k (x,e1) (y,e2)
+      SplitA v k (x,e1) (y,e2)
         | Just (InjA i _ _) <- knownAt known v
         -> if i < k then taken x e1 else taken y e2
-      IfWhnf _ v (x,e1) (y,e2)
+      IfWhnf v (x,e1) (y,e2)
         | Just (InjLazy d _ _) <- knownAt known v
         -> if d == Whnf then taken x e1 else taken y e2
       _ -> descend
