@@ -7,7 +7,7 @@
 -----------------------------------------------------------------------------
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
-{- Validation of `fip`, `fbip` and `tail` annotations on the final program, independently of
+{- Validation of `fip`, `fbip` and `tail` annotations from Reuse onward, independently of
   the frontend's check (`Core.CheckFBIP`), whose rules it follows.
 
   A FIP function makes no allocations or deallocations when its owned arguments are unique.

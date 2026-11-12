@@ -280,16 +280,16 @@ codeGenJS term flags sequential entry outBase core
 codeGenTyped :: Terminal -> Flags -> [Module] -> Module -> IO ()
 codeGenTyped term flags imports mod
   = do let newtypes = defsNewtypes (defsFromModules (mod:imports))
-           (tprog,msgs) = typedFromCore (parcReuse flags) newtypes (mapMaybe modCore imports) 1000000 (fromJust (modCore mod))
-           outDir       = dirname (modIfacePath mod)
+           (tprog,errors,warnings) = typedFromCore (parcReuse flags) newtypes (mapMaybe modCore imports) 1000000 (fromJust (modCore mod))
+           outDir                  = dirname (modIfacePath mod)
        when (showTyped flags) $ termInfo term (prettyElided tprog)
        -- the final IR, for debugging; written before validation so that it is kept on failure
        createDirectoryIfMissing True outDir
        writeDocW 120 (joinPath outDir (TC.ktFileName (modName mod) ++ ".ir")) (prettyElided tprog <.> linebreak)
-       mapM_ (\(phase,msg) -> termInfo term (text ("typed " ++ phase ++ ": " ++ msg))) msgs
-       -- FIP diagnostics are advisory, like the frontend's FIP warnings.
-       -- Structural/type/linearity failures invalidate the lowering boundary.
-       when (typedC flags && any (\(phase,_) -> phase `notElem` ["note","fip"]) msgs) $
+       mapM_ (\(phase,msg) -> termInfo term (text ("typed " ++ phase ++ ": " ++ msg))) (errors ++ warnings)
+       -- Warnings (such as FIP diagnostics) are advisory, like the frontend's FIP warnings.
+       -- Errors invalidate the lowering boundary.
+       when (typedC flags && not (null errors)) $
          raiseIO "typed backend validation failed; C generation stopped"
        when (typedC flags) $
          do let cores   = mapMaybe modCore (mod:imports)
