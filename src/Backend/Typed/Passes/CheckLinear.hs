@@ -183,17 +183,18 @@ refine tr keys m
       ((p,q):_) -> refine tr keys (M.filter (/= 0) (M.unionWith (+) (M.delete p m) (M.fromList [(r,m M.! p) | r <- partsToward tr p q])))
       [] -> m
 
--- Count the references to all parts of a variable as references to the variable, so that
--- alternatives that take a variable apart differently agree on it.
+-- Count the references to all parts of a variable as references to the variable. Like
+-- `[own-pair]` and `[own-child]` of the paper, read bottom-up, this happens only where a
+-- destructuring binds the parts, so that alternatives that take a variable apart differently
+-- agree on it.
 rollUp :: Parts -> Counts -> Counts
 rollUp tr m
   = case [(p,qs,n) | (p,n) <- M.toList m, let qs = siblingsOf tr p, not (null qs), all ((== Just n) . (`M.lookup` m)) qs] of
-      -- parts of different alternatives of a variable only meet in the maximum of `upper`
-      ((p@(Path x ss),qs,n):_) -> rollUp tr (M.insertWith max (key tr (Path x (init ss))) n (foldr M.delete m (p:qs)))
+      ((p@(Path x ss),qs,n):_) -> rollUp tr (M.insert (key tr (Path x (init ss))) n (foldr M.delete m (p:qs)))
       [] -> m
 
 plus :: Parts -> Counts -> Counts -> Counts
-plus tr a b = rollUp tr (refine tr [] (M.filter (/= 0) (M.unionWith (+) (refine tr (M.keys b) a) (refine tr (M.keys a) b))))
+plus tr a b = M.filter (/= 0) (M.unionWith (+) (refine tr (M.keys b) a) (refine tr (M.keys a) b))
 
 minus :: Parts -> Counts -> Counts -> Counts
 minus tr a b = plus tr a (M.map negate b)
@@ -571,6 +572,7 @@ destruct env g js q v alts
                                                 (M.union (ptFields tr) (M.fromList [(p,[y | (y,_,_) <- fs]) | (p,fs@(_:_)) <- fields])))
                            tr <- get
                            u <- checkE env (bindAll bs g) js q e
-                           return (not (trivialVar env g z) && any ((== zc) . key tr) ts, u)
+                           tr' <- get
+                           return (not (trivialVar env g z) && any ((== zc) . key tr) ts, u{ uNet = rollUp tr' (uNet u) })
       -- the binders borrow the variables of the scrutinee for the whole alternative
       _ -> uses [borrowedV env g v, branches =<< sequence [roots env Borrowed bs (checkE env (bindAll bs g) js q e) | (bs,e) <- alts], borrowedV env g v]

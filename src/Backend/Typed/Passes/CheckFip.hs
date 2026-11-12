@@ -50,7 +50,7 @@ import Common.Name
 import Common.NamePrim( nameTpInt, nameYielding, nameCoreDebug, nameCoreHnd, namePatternMatchError )
 import Common.Syntax( Fip(..), FipAlloc(..), fipAlloc, isFipTop )
 import Backend.Typed.Syntax
-import Backend.Typed.Traversal( descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsScrut, stepsFrom, within )
+import Backend.Typed.Traversal( descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsScrut, canonical, within )
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Passes.Common( trivialTy )
 import Backend.Typed.Env( Env, envOf, M, ask, asks, gets, liftE, local, modify, runM, state )
@@ -197,27 +197,12 @@ untracked t
     isIntA (ACon n []) = n == nameTpInt
     isIntA _ = False
 
--- `x` is an immediate value on this path: one of its binders that keeps its pointer has no block
+-- `x` is an immediate value on this path: one of its binders that is all of it (`canonical`)
+-- is of a trivial type
 immediate :: Path -> F Bool
 immediate x
-  = do g <- asks fGamma
-       return (or [noBlock a | (y,A a) <- M.toList g, y `within` x, all keepsPtr (stepsFrom x y)])
-  where
-    keepsPtr s = case s of
-                   SDeref  -> True
-                   SRoll   -> True
-                   SInjA _ _ -> True
-                   SRest   -> True
-                   SLo     -> True
-                   SHi     -> True
-                   SWhnf   -> True
-                   SDelay  -> True
-                   SPack   -> True
-                   _       -> False
-    noBlock a = case a of
-                  AUnit   -> True
-                  ASum ts -> all ((== AUnit) . snd) ts
-                  _       -> False
+  = do fe <- ask
+       return (or [trivialTy (fEnv fe) t | (y,t) <- M.toList (fGamma fe), y `within` x, canonical y == canonical x])
 
 isBorrowed :: Path -> F Bool
 isBorrowed x = asks (any (x `within`) . iBorrowed . fInfo)
