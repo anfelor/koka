@@ -33,8 +33,8 @@
     The result mode of an expression (`: W` owned, `:! W` unique, as for values) follows J in
     the same way: an expression in tail position has the mode of the expression around it (and
     the rules write `: W` for both), and one where J is reset is owned, unless the rule writes
-    `:!` (the bound expression of `[let-unique]`). Only `[ret]`, `[call]` and the operations
-    on contexts and cells have their own mode. A jump has either: the body of its join point is in tail position of the `join`, so it
+    `:!` (the bound expression of `[let-unique]`). Only `[ret]`, `[call]`, `[yielded]` and the
+    operations on contexts and cells have their own mode. A jump has either: the body of its join point is in tail position of the `join`, so it
     has the same mode as the jump. A unique result may be used as an owned one.
 
     The tag of a box z, tag(z), is determined by its path (`Traversal.boxTag`): it is i if z is
@@ -109,6 +109,8 @@
     duplicated or dropped (the runtime cannot drop a dummy, whose tags are garbage), and it is
     never live across a `[let-yield]` or a `let` whose bound expression has a type `Y V`, where
     the flag may change. The exception is `[cast-ev]`, which does not test the flag (see there).
+    A unique `Y W` (`:! Y W`) is unique unless it is the dummy: the dummy is shared, but it is
+    never inspected, and `[let-yield]` binds a unique `x :! W` where it is not the dummy.
 -}
 module Backend.Typed.Syntax where
 
@@ -584,22 +586,28 @@ data VExpr
   --  ──────────────────────────────────────────────────────────────────────── [let-yield]
   --   Γ₁, Γ₂ | J ⊢ let x : V = e₁ yielding e₃ in e₂ : W
   --
+  --   Γ₁, ^Γ₂ | ∅ ⊢ e₁ :! Y V    Γ₂, x :! V | J ⊢ e₂ : W    Γ₂ | J ⊢ e₃ : W
+  --  ──────────────────────────────────────────────────────────────────────── [let-yield-unique]
+  --   Γ₁, Γ₂ | J ⊢ let x : V = e₁ yielding e₃ in e₂ : W
+  --
   -- Koka's monadic bind, the only elimination of `Y V`: `e₁` may yield an effect, and then `e₃`
   -- runs instead of `e₂` (Koka's `if yielding() then e₃ else e₂`). While an effect yields, `e₁`
   -- returns a dummy value (see `[yielded]`), and `x` is not in scope in `e₃`, so the dummy is
   -- never inspected or dropped. `e₁` consumes Γ₁ in either case, as a function that yields first
   -- releases its owned arguments. Without a value to bind, the test is
   -- `let x : 𝟙 = ret (pure ()) yielding e₃ in e₂`. No variable of a type `Y U` or a cell is
-  -- live in `e₂` or `e₃`.
+  -- live in `e₂` or `e₃`. As for `[let-unique]`, the binder is unique if `e₁` returns a value
+  -- that is unique unless it is the dummy, which `x` never is.
   | LetYield Path VType VExpr VExpr VExpr
 
   --   W contains no credits or cells
   --  ──────────────────────────── [yielded]
-  --   ∅ | J ⊢ yielded : Y W
+  --   ∅ | J ⊢ yielded :q Y W
   --
   -- The dummy value of an expression that yields an effect, such as the yielding branch of a
   -- `[let-yield]` (in place of a coercion of the dummy that a call returns). The annotation is
-  -- `W`. The dummy is shared, so the result is owned (not unique). Code generation fills its
+  -- `W`. Its mode is either: the dummy is shared, but `:! Y W` only promises uniqueness where
+  -- the value is not the dummy (see "Effect yields" at the top). Code generation fills its
   -- pointers with Koka's shared `box-any`, which the runtime may drop.
   | Yielded VType
 
@@ -957,7 +965,7 @@ data Def
   --  ──────────────────────────────── [deffun]
   --   ⊢ fun f⟨ā⟩(x̄ :q̄ V̄) :q W = e
   --
-  -- The result mode q is owned or unique, and owned for a result `Y W`. Elaboration only
+  -- The result mode q is owned or unique (for a result `Y W`: unique unless the dummy). Elaboration only
   -- produces owned results (as Core has no unique ones), and so do imported functions; closures
   -- always have owned results.
   = DefFun{ defName :: Name, defParams :: [TVar], defArgs :: [(Path,Mode,VType)], defResMode :: Mode, defRes :: VType, defBody :: VExpr }

@@ -19,7 +19,7 @@
        in let c₁ = ctx-copy c₀ in jump j(c₁)
 
   The candidates are the owned or unique parameters of join points and the binders of `let`
-  (`[let-unique]`) of context type, and the unique parameters of the definition. A candidate is excluded if a borrowed use may demote it: `dup x`, a borrowed
+  (`[let-unique]`) and `[let-yield]` (`[let-yield-unique]`) of context type, and the unique parameters of the definition. A candidate is excluded if a borrowed use may demote it: `dup x`, a borrowed
   argument of a call or jump, or a capture of a recursive join point (which is borrowed). So is
   a name that is also bound by another binder, and a parameter of a recursive join point whose
   body has no `ctx-copy` (promoting it would only add a copy at the entry).
@@ -28,7 +28,8 @@
   into one is unique given U (`uniq`, as `CheckLinear.uniqueV`): the arguments of every jump
   to a non-recursive join point, those of the jumps in the body of a recursive one, and the
   results of the bound expression of a `let` (`tails`). A result is a value, an append or a
-  copy (which are unique), or a call that is unique if its function has a unique result, or a
+  copy (which are unique), `yielded` (unique unless the dummy, which never reaches a binder of
+  `[let-yield]`), or a call that is unique if its function has a unique result, or a
   worker with one (`UniqueWorkers`) whose unique parameters receive unique values; such a call
   is redirected to the worker. The jumps that enter a recursive join point are exempt: they copy an
   argument for a promoted parameter that is not unique, once per loop instead of once per
@@ -98,7 +99,7 @@ tails expr
       LetYield _ _ _ e2 e3 -> tails e2 ++ tails e3
       App{} -> [FOther]
       Gen{} -> [FOther]
-      Yielded{} -> [FOther]
+      Yielded{} -> [FUnique]
       CastEv{} -> [FOther]
       _ -> getConst (descendE (const (Const [])) (const (Const [])) (\_ e -> Const (tails e)) expr)
 
@@ -129,13 +130,15 @@ facts env js expr
                               Rec _ -> copyCount e1 > 0
            in Facts xs cands caps [(x,FVal v) | vs <- jumpArgs j iters, (x,v) <- zip xs vs]
               <> facts env body e1 <> facts env js' e2
-      Let x t e1 _ -> Facts [] [x | isCtx t] S.empty [(x,r) | r <- tails e1] <> sub
+      Let x t e1 _ -> bound x t e1 <> sub
+      LetYield x t e1 _ _ -> bound x t e1 <> sub
       Dup x _ -> demote [Var x] <> sub
       Call f _ vs -> demote (borrowed (paramModes env f (length vs)) vs)
       Jump j _ vs -> demote (borrowed (M.findWithDefault [] j js) vs)
       _ -> sub
   where
     sub = getConst (descendE (const (Const mempty)) (const (Const mempty)) (\xs e -> Const (Facts xs [] S.empty [] <> facts env js e)) expr)
+    bound x t e1 = Facts [] [x | isCtx t] S.empty [(x,r) | r <- tails e1]
     demote vs = mempty{ fDemoted = S.unions (map fvV vs) }
     borrowed ms vs = [v | (Borrowed,v) <- zip ms vs]
 
@@ -167,6 +170,7 @@ uniq u val
       Tuple vs -> all (uniq u) vs
       Pack _ _ w -> uniq u w
       Context _ _ -> True
+      Pure w -> uniq u w
       _ -> False
 
 -- a unique result given the unique binders
