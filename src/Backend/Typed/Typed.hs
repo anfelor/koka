@@ -28,6 +28,7 @@ import Backend.Typed.Elab.Lazy( lazyFuns )
 import Backend.Typed.Passes.Lazy( lazyProgram )
 import Backend.Typed.Passes.CheckTypes( checkProgram, checkTypes )
 import Backend.Typed.Passes.Simplify( simplifyProgram )
+import Backend.Typed.Passes.Yields( yieldsProgram )
 import Backend.Typed.Passes.Perceus( perceusProgram )
 import Backend.Typed.Passes.TailRec( tailRecProgram )
 import Backend.Typed.Passes.UniqueJoins( uniqueJoinsProgram, workerName )
@@ -58,6 +59,7 @@ typedFromCore enableReuse nt imports uniq core
           , purePass "anf" anfProgram
           , Pass "contify" contifyProgram
           , purePass "simplify" simplifyProgram
+          , purePass "yields" yieldsProgram
           , Require "linear" checkLinear
           , Pass "perceus" perceusProgram
           , purePass "tailrec" tailRecProgram
