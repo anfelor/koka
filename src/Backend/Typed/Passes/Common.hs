@@ -21,7 +21,7 @@ import Control.Monad.State( runState, state )
 import Backend.Typed.Syntax
 import Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents )
 import Backend.Typed.Traversal
-import Backend.Typed.Env( Env(..), M, unrollT, ask, local )
+import Backend.Typed.Env( Env(..), M, dataBody, ask, local )
 import Backend.Typed.Query( Gamma, bindAll, inferVar, inferV, altTypes, lamGamma, uniqueGamma, unboxRuGamma, copyRuGamma, lockGamma )
 import Backend.Typed.Pretty( ppr )
 import Common.Name( Name, newHiddenName )
@@ -43,7 +43,7 @@ resultMode env f
 
 -- values of these types need no references, also through named types
 trivialTy :: Env -> Ty -> Bool
-trivialTy env = isTrivialWith (either (const Nothing) Just . unrollT env)
+trivialTy env = isTrivialWith (either (const Nothing) Just . dataBody env)
 
 -- values of these types need no reference counting, where `unroll` gives the body of a
 -- named type if it is known (a type with a single constructor without fields, for example)
@@ -69,7 +69,6 @@ isTrivialWith unroll t
                    ASum ts   -> all (trivialA . snd) ts
                    ACon n _  -> n == nameTpReuse || maybe False trivialA (unroll a)
                    ALazy l b -> trivialA l && trivialA b
-                   AMu _ _ _ _ -> maybe False trivialA (unroll a)
                    ABox _    -> False
                    AScalar _ -> False
                    AFun _ _  -> False

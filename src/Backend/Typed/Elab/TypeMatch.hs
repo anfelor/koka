@@ -91,10 +91,6 @@ matchAWith tvs sub pat t
       ALazy l p -> case t of
                      ALazy k s -> matchAWith tvs sub l k >>= \sub' -> matchAWith tvs sub' p s
                      _ -> Nothing
-      AMu x as p ps -> case t of
-                         AMu y bs s ts | length as == length bs
-                           -> matchAWith tvs sub p (inst (y:bs) (map AVar (x:as)) s) >>= \sub' -> matchAs sub' ps ts
-                         _ -> Nothing
       AVar _    -> if pat == t then Just sub else Nothing
       AUnit     -> if pat == t then Just sub else Nothing
   where

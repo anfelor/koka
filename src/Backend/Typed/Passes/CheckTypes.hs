@@ -50,7 +50,6 @@ checkLayoutProgram p = concatMap check (programTypes p)
       AForall _ b -> atomic b
       ALam _ b -> atomic b
       ALazy l b -> atomic l ++ atomic b
-      AMu _ _ b ts -> concatMap atomic (b : ts)
       ACon _ ts -> concatMap atomic ts
       AApp _ ts -> concatMap atomic ts
       _ -> []
@@ -75,7 +74,6 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
       AForall _ b -> at b
       ALam _ b -> at b
       ALazy l b -> at l ++ at b
-      AMu _ _ b ts -> concatMap at (b : ts)
       ACon _ ts -> concatMap at ts
       AApp _ ts -> concatMap at ts
       _ -> []

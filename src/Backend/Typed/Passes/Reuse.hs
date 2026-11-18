@@ -30,7 +30,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( boxTag, child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut )
 import Backend.Typed.Passes.Common( trivialTy, defGamma, NameSupply, dropValue, freshFor, freshPathFrom, perBody, reuseParts, scopeOf )
-import Backend.Typed.Env( Env, envOf, boxContents, reuseSize, unrollT, M, ask, asks, evalM, get, gets, liftE, local, modify, put, state )
+import Backend.Typed.Env( Env, envOf, boxContents, reuseSize, dataBody, M, ask, asks, evalM, get, gets, liftE, local, modify, put, state )
 import Backend.Typed.Query( Gamma, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, inferE, noJoins )
 
 -- credits with the size of their block
@@ -163,7 +163,7 @@ ruE expr
                                 offer r n (dropReuse x r n) (Drop x) e
                   -- A single-constructor datatype (such as FIP padding) can hide
                   -- a reusable box. Unrolling transfers ownership without copying.
-                  Left _ | Right b@(ABox s) <- unrollT env a, Right _ <- reuseSize s
+                  Left _ | Right b@(ABox s) <- dataBody env a, Right _ <- reuseSize s
                     -> do let y = child x SRoll
                           g <- asks reGamma
                           reuseParts (scopeOf (M.keys g)) . Unroll x y <$> bind [(y,A b)] (ruE (Drop y e))

@@ -8,7 +8,7 @@
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents, collapse
-                          , unrollMu, isPtr, forallA, prodV, prodFields
+                          , isPtr, forallA, prodV, prodFields
                           , checkDupType, isShape, containsLinear, wellYield, unYield, eraseY
                           , applyA, vtInt, vtString, vtChar, vtFloat
                           ) where
@@ -77,14 +77,8 @@ traverseReuseContents f = goV
       ACon n ts -> ACon n <$> traverse goA ts
       ALam vs b -> ALam vs <$> goA b
       ALazy l b -> ALazy <$> goA l <*> goA b
-      AMu x vs b ts -> AMu x vs <$> goA b <*> traverse goA ts
       AUnit -> pure a
       AVar _ -> pure a
-
--- `A[f/t][B̄/ā]`, the unrolling of `(μt⟨ā⟩. A)⟨B̄⟩` with its recursive occurrences folded to `f`;
--- `f` is the type function `μt⟨ā⟩. A` itself, or the name that abbreviates it
-unrollMu :: AType -> TVar -> [TVar] -> AType -> [AType] -> AType
-unrollMu f t vs a bs = inst (t:vs) (f:bs) a
 
 forallA :: [TVar] -> AType -> AType
 forallA [] a  = a
@@ -133,7 +127,6 @@ substA sub a
       AForall tvs b -> AForall tvs (substA (foldr M.delete sub tvs) b)
       ALam tvs b    -> ALam tvs (substA (foldr M.delete sub tvs) b)
       ALazy l b     -> ALazy (substA sub l) (substA sub b)
-      AMu x tvs b ts -> AMu x tvs (substA (foldr M.delete sub (x:tvs)) b) (map (substA sub) ts)
       AUnit         -> AUnit
 
 -- type application, with β-reduction of type lambdas
@@ -146,7 +139,6 @@ applyA f ts
       ACon n ss -> ACon n (ss ++ ts)
       ALam vs b | length vs == length ts -> inst vs ts b
                 | length vs > length ts  -> ALam (drop (length ts) vs) (inst (take (length ts) vs) ts b)
-      AMu x vs b ss -> AMu x vs b (ss ++ ts)
       _         -> AApp (-1) ts
 
 ftvV :: VType -> [TVar]
@@ -176,7 +168,6 @@ ftvA a
       AForall vs b  -> filter (`notElem` vs) (ftvA b)
       ALam vs b     -> filter (`notElem` vs) (ftvA b)
       ALazy l b     -> ftvA l ++ ftvA b
-      AMu x vs b ts -> filter (`notElem` (x:vs)) (ftvA b) ++ concatMap ftvA ts
       AUnit         -> []
 
 isPtr :: VType -> Bool
@@ -281,8 +272,6 @@ eqA s t
       (ALam as a, ALam bs b) | length as == length bs
         -> eqA a (inst bs (map AVar as) b)
       (ALazy l a, ALazy k b)  -> eqA l k && eqA a b
-      (AMu x as a ss, AMu y bs b ts) | length as == length bs
-        -> eqA a (inst (y:bs) (map AVar (x:as)) b) && eqAs ss ts
       _ -> s == t
 
 -- The duplication rule: a variable of type `t` may be duplicated
@@ -329,7 +318,6 @@ containsLinear (A a) = case a of
   AForall _ b -> containsLinear (A b)
   ALam _ b -> containsLinear (A b)
   ALazy l b -> containsLinear (A l) || containsLinear (A b)
-  AMu _ _ b ts -> any (containsLinear . A) (b : ts)
   ACon _ ts -> any (containsLinear . A) ts
   AApp _ ts -> any (containsLinear . A) ts
   AVar _ -> False
@@ -362,7 +350,6 @@ wellYield t
       AForall _ b -> plainA b
       ALam _ b -> plainA b
       ALazy l b -> plainA l && plainA b
-      AMu _ _ b ts -> all plainA (b : ts)
       ACon _ ts -> all plainA ts
       AApp _ ts -> all plainA ts
       AScalar _ -> True
@@ -398,7 +385,6 @@ eraseY t
       ACon n ts -> ACon n (map eraseA ts)
       ALam vs b -> ALam vs (eraseA b)
       ALazy l b -> ALazy (eraseA l) (eraseA b)
-      AMu x vs b ts -> AMu x vs (eraseA b) (map eraseA ts)
       AScalar _ -> a
       AUnit -> a
       AVar _ -> a

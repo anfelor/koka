@@ -62,7 +62,6 @@ boxFunA a
       ACon _ _      -> a
       ALam _ _      -> a
       ALazy _ _     -> a
-      AMu _ _ _ _   -> a
 
 -- Koka's `box`: a raw value is boxed by itself, any other value as a shape, and a product of a
 -- single raw value or enumeration (`scalarField`) like that field

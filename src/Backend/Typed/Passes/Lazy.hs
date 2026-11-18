@@ -51,7 +51,7 @@ import Backend.Typed.Lazies( Lazies(..) )
 import Backend.Typed.Passes.Common( NameSupply, freshFor, freshPathFrom, perDef, substE )
 import Backend.Typed.Traversal( child, descendE, fvE, fvV, lamsV )
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Env( Env(..), envOf, unrollT, reuseSize, lazySides, M, asks, evalM, gets, liftE, local, modify, state )
+import Backend.Typed.Env( Env(..), envOf, dataBody, reuseSize, lazySides, M, asks, evalM, gets, liftE, local, modify, state )
 
 -- the lazy value of `lazy-eval-locked` and its type
 data LEnv = LEnv{ leEnv :: Env, leLazies :: Lazies, leLocked :: Maybe (Path,AType) }
@@ -198,7 +198,7 @@ indirect c a v
 conValue :: AType -> Int -> [VVal] -> L VVal
 conValue a k vs
   = do env <- asks leEnv
-       b <- liftE (unrollT env a)
+       b <- liftE (dataBody env a)
        (thunks,_) <- sidesOf a
        case lookup k thunks of
          Just (ABox VExists{}) -> fail ("a lazy constructor with existential fields: " ++ ppr (A a))
