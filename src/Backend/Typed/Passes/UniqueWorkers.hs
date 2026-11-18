@@ -20,8 +20,11 @@
   `UniqueJoins.uniqueScope`. A parameter that does not remain unique there (as a borrowed use
   demotes it) stays owned. A result that is a value but not unique is copied; a call is not
   copied, so every call in a tail position must have a unique result. The worker is only
-  created if it has fewer copies than `f`. Functions in which an effect may yield are left
-  out, as are functions with a unique result already.
+  created if it has fewer copies than `f`. Functions with a unique result already are left out.
+
+  A function in which an effect may yield returns `Y ctx`; its worker returns `:! Y ctx`,
+  unique unless the dummy (`yielded`, which is unique enough). A tail `pure v` with a `v` that
+  is not unique becomes `let c = ctx-copy v in ret (pure c)`.
 
   `f` itself is unchanged, for callers that cannot pass unique contexts and for other
   modules. `UniqueJoins` calls the worker where the arguments of its unique parameters are
@@ -31,15 +34,13 @@ module Backend.Typed.Passes.UniqueWorkers( uniqueWorkersProgram ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Data.Functor.Const( Const(..) )
-import Data.Functor.Identity( Identity(..) )
 import Data.Maybe( maybeToList )
-import Data.Monoid( Any(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Env( Env, envOf )
 import Backend.Typed.Traversal( descendE )
-import Control.Monad.State( evalState )
-import Backend.Typed.Passes.Common( freshFor )
+import Backend.Typed.Types( unYield )
+import Control.Monad.State( State, evalState, state )
+import Backend.Typed.Passes.Common( NameSupply, freshFor, freshPathFrom )
 import Backend.Typed.Passes.UniqueJoins( uniqueScope, Flow(..), tails, uniq, uniqF, copyCount, isCtx, workerName )
 
 uniqueWorkersProgram :: Program -> Program
@@ -54,10 +55,11 @@ uniqueWorkersProgram prog
 worker :: Env -> Def -> Maybe Def
 worker env def
   = case def of
-      DefFun{ defResMode = Owned, defRes = VCtx{}, defBody = body }
-        | not (yields body) -> promote [x | (x,Owned,t) <- defArgs def, isCtx t]
+      DefFun{ defResMode = Owned }
+        | isCtx ctxT -> promote [x | (x,Owned,t) <- defArgs def, isCtx t]
       _ -> Nothing
   where
+    (ctxT,mayYield) = unYield (defRes def)
     -- the greatest set of context parameters that remain unique in the body
     promote [] = Nothing
     promote cs
@@ -67,27 +69,30 @@ worker env def
       | otherwise = Nothing
       where
         ps = [(x,if x `elem` cs then Unique else m,t) | (x,m,t) <- defArgs def]
-        (u,body') = evalState (uniqueScope env ps (defBody def)) (freshFor def)
+        ((u,body'),body'') = evalState (do r@(u0,b) <- uniqueScope env ps (defBody def)
+                                           (,) r <$> mapRets (copy u0) b) (freshFor def)
         kept = filter (`S.member` u) cs
         result r = case r of
-                     FVal _ -> True
+                     FVal v -> copyable v
                      _ -> uniqF env u r
-        body'' = mapRets (\v -> if uniq u v then Ret v else CtxCopy v) body'
-
--- whether an effect may yield in an expression, outside of closures
-yields :: VExpr -> Bool
-yields expr
-  = case expr of
-      LetYield{} -> True
-      Yielded{} -> True
-      _ -> getAny (getConst (descendE (const (Const mempty)) (const (Const mempty)) (\_ e -> Const (Any (yields e))) expr))
+        copyable v = uniq u v || not mayYield || isPure v
+        isPure v = case v of
+                     Pure _ -> True
+                     _ -> False
+        -- a value that is not unique is copied (`copyable`)
+        copy :: S.Set Path -> VVal -> State NameSupply VExpr
+        copy u0 v = case v of
+                      _ | uniq u0 v -> return (Ret v)
+                      Pure w -> do c <- state (freshPathFrom "copy")
+                                   return (Let c ctxT (CtxCopy w) (Ret (Pure (Var c))))
+                      _ -> return (CtxCopy v)
 
 -- replace the values in the tail positions of an expression (see `UniqueJoins.tails`)
-mapRets :: (VVal -> VExpr) -> VExpr -> VExpr
+mapRets :: (VVal -> State NameSupply VExpr) -> VExpr -> State NameSupply VExpr
 mapRets f expr
   = case expr of
       Ret v -> f v
-      Let x t e1 e2 -> Let x t e1 (mapRets f e2)
-      LetYield x t e1 e2 e3 -> LetYield x t e1 (mapRets f e2) (mapRets f e3)
-      Gen{} -> expr
-      _ -> runIdentity (descendE pure pure (\_ e -> Identity (mapRets f e)) expr)
+      Let x t e1 e2 -> Let x t e1 <$> mapRets f e2
+      LetYield x t e1 e2 e3 -> LetYield x t e1 <$> mapRets f e2 <*> mapRets f e3
+      Gen{} -> return expr
+      _ -> descendE pure pure (\_ e -> mapRets f e) expr

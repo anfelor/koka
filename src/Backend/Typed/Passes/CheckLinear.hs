@@ -47,11 +47,12 @@
   dummy of a yield (`Y V`) is linear in the same way, and it must not be live across a
   `[let-yield]` or a `let` whose bound expression returns `Y U`, as the test reads a flag that
   they may change. An owned variable is unique in the
-  first branch of `IsUnique`; unique parameters and a `let` whose bound expression has a
-  unique result are unique too, and so are the binders that are the pointer of a unique
-  variable (`key`). An expression has a unique result (its result mode `q`, which follows the
-  join points in scope) if it returns a unique value (a unique variable or a fresh context),
-  appends or copies a context, or calls a function with a unique result in every tail position.
+  first branch of `IsUnique`; unique parameters and a `let` or `[let-yield]` whose bound
+  expression has a unique result are unique too, and so are the binders that are the pointer
+  of a unique variable (`key`). An expression has a unique result (its result mode `q`, which
+  follows the join points in scope) if it returns a unique value (a unique variable or a fresh
+  context), appends or copies a context, calls a function with a unique result, or is
+  `yielded`, in every tail position (a unique `Y V` is unique unless it is the dummy).
   The body of a definition has the definition's result mode. A context is plugged or appended only
   through a unique value. Any borrowed use of a unique variable, or of a variable on its path,
   may duplicate the reference, after which it is only owned.
@@ -443,15 +444,17 @@ checkE env g js q expr
                           let m = if S.member x (uUnique u2) then Unique else Owned
                           u1 <- checkE env g M.empty m e1
                           andThen u1 =<< leave [(x,m) | not (trivialTy env (V t))] u2
-      -- the binder is not in scope where an effect yields
+      -- the binder is not in scope where an effect yields; as for `Let`, it is unique if it is
+      -- used as unique (the dummy is unique enough, as it never reaches the binder)
       LetYield x t e1 e2 e3
         -> do notLiveAcrossYield g [e2,e3]
               u2 <- withOwners [(x,Owned)] (checkE env (M.insert x (V t) g) js q e2)
-                    >>= leave [(x,Owned) | not (trivialTy env (V t))]
+              let m = if S.member x (uUnique u2) then Unique else Owned
+              u2' <- leave [(x,m) | not (trivialTy env (V t))] u2
               u3 <- checkE env g js q e3
-              u1 <- checkE env g M.empty Owned e1
-              andThen u1 =<< branches [u2, u3]
-      Yielded _ -> ownedResult expr >> return noUse
+              u1 <- checkE env g M.empty m e1
+              andThen u1 =<< branches [u2', u3]
+      Yielded _ -> return noUse
       -- control never gets here, so every reference counts as consumed
       Unreachable _ -> return noUse{ uDiverges = True }
       Call f _ vs -> do when (q == Unique && resultMode env f /= Unique)
@@ -519,7 +522,7 @@ checkE env g js q expr
       -- appending and copying give a unique context, plugging and memoizing an owned value
       Append c d -> uses [uniqueV env g c, uniqueV env g d]
       CtxCopy c -> ownedV env g c
-      CastEv _ v -> ownedV env g v
+      CastEv _ v -> ownedResult expr >> ownedV env g v
       Plug c v -> ownedResult expr >> uses [uniqueV env g c, ownedV env g v]
       Memoize c _ _ v -> ownedResult expr >> uses [ownedV env g v, ownedV env g c]
       CaseLit v alts def -> before (borrowedV env g v) (branches =<< mapM (checkE env g js q) (def : map snd alts))

@@ -238,7 +238,6 @@ checkDef :: Env -> Def -> Either String ()
 checkDef env def
   = case def of
       DefFun _ _ _ Borrowed _ _ -> Left "borrowed result"
-      DefFun _ _ _ Unique (VYield _) _ -> Left "unique result that may be the dummy of a yield"
       DefFun _ _ args _ res body -> do signature [t | (_,_,t) <- args] res
                                        checkE env (M.fromList [(x,V t) | (x,_,t) <- args]) noJoins body res
       DefVal _ _ t body        -> signature [] t >> checkE env M.empty noJoins body t
