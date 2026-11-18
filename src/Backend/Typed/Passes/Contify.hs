@@ -69,6 +69,7 @@ tailOnly f e = occurs e && tails e
       | Just vs <- callOf f b = all (S.notMember f . fvV) vs
       | otherwise = case b of
           Let x _ e1 e2 -> not (occurs e1) && (x == f || tails e2)
+          LetYield x _ e1 e2 e3 -> not (occurs e1) && (x == f || tails e2) && tails e3
           Gen{} -> not (occurs b)
           Join _ _ _ ps e1 e2 -> (f `elem` [x | (x,_,_) <- ps] || not (occurs e1)) && tails e2
           _ -> getAll (getConst (descendE (Const . All . (/= f)) (Const . All . S.notMember f . fvV)

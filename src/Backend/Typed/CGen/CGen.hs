@@ -222,6 +222,8 @@ genV cx val
       Lit lit -> genLit lit
       NoReuse _ _ -> return "kk_reuse_null"
       TyApp v _ -> genV cx v
+      -- the representation of `Y V` is that of `V`
+      Pure v -> genV cx v
       Ptr _ v -> genA cx v
       Pack _ _ v -> genV cx v
       Inj i t v
@@ -259,7 +261,8 @@ genCtx cx b k
          _ -> do (ss,res,hole) <- genHolePath (bindVar cx nameHole (V (VPtr b))) k
                  return (stmtExpr ss (fromCctx ct ("kk_cctx_create(" <.> res <.> "," <.> hole <.> ",_ctx)")))
 
--- An operation on contexts or cells is a C expression (`genOperation`), and so is `ctx-copy`
+-- An operation on contexts or cells is a C expression (`genOperation`), and so are `cast-ev`
+-- (a no-op, as the representation of `Y V` is that of `V`) and `ctx-copy`
 -- followed by plugging the copy (`copyPlug`).
 isOperation :: VExpr -> Bool
 isOperation expr
@@ -267,6 +270,7 @@ isOperation expr
       Append{} -> True
       Plug{} -> True
       CtxCopy{} -> True
+      CastEv{} -> True
       Memoize{} -> True
       _ -> isJust (copyPlug expr)
 
@@ -281,6 +285,7 @@ genOperation cx expr
                       x <- fresh "c"
                       return (stmtExpr [cty ct <+> x <+> "=" <+> ce <.> ";", "kt_ctx_copy(&" <.> x <.> ".f0,&" <.> x <.> ".f1,_ctx);"] x)
       Memoize c _ k v -> genBox cx k (In c) v
+      CastEv _ v -> genV cx v
       _ -> failG ("not an operation: " ++ show expr)
 
 -- `let c' = ctx-copy c in c'[v]`: plugging a copy of `c`
@@ -970,6 +975,7 @@ genE cx dest expr
       Append{} -> failG "an operation"
       Plug{} -> failG "an operation"
       CtxCopy{} -> failG "an operation"
+      CastEv{} -> failG "an operation"
       Memoize{} -> failG "an operation"
       CaseOpen v alts def
         -> do let ve = localName v

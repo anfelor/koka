@@ -7,7 +7,7 @@
 -----------------------------------------------------------------------------
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Elab.Coerce( coerce, genVal, genPtr, applyFun ) where
+module Backend.Typed.Elab.Coerce( coerce, coerceInst, coerceExpr, genVal, genPtr, applyFun ) where
 
 import qualified Data.Map as M
 import Common.Name
@@ -34,9 +34,16 @@ genPtr t@(VPtr (AForall tvs _)) v
        return (Let x t (Gen tvs (Ret v)), Var x)
 genPtr _ v = return (id, v)
 
+-- A value is injected into `Y W` by `[pure]`. A value that may be the dummy of a yield is not
+-- coerced: `coerceExpr` tests the result of a call, or casts it where Koka does not test it.
 coerce :: VType -> VType -> VVal -> E (K,VVal)
 coerce from to v
   | alphaEq from to = return (id,v)
+  | VYield w <- to, not (snd (unYield from))
+  = do (k,v') <- coerce from w v
+       return (k, Pure v')
+  | VYield _ <- from
+  = failE ("cannot coerce " ++ ppr from ++ " to " ++ ppr to ++ " without a test for a yield")
   | not (isPtr from) && alphaEq to (boxrep from) = boxV from v
   | not (isPtr to) && alphaEq from (boxrep to) = unboxV to v
   | otherwise
@@ -119,6 +126,7 @@ boxLeaf t v
       VReuse _ _ _  -> Box v
       VCtx _ _ _  -> Box v
       VCell _ _   -> Box v
+      VYield _    -> Box v
 
 isMultiSum :: VType -> Bool
 isMultiSum (VSum ts) = length ts > 1
@@ -150,6 +158,7 @@ unboxAV t a
       VReuse _ _ _  -> unbox Unbox
       VCtx _ _ _  -> unbox Unbox
       VCell _ _   -> unbox Unbox
+      VYield _    -> unbox Unbox
   where
     unbox form = do x <- fresh "x"
                     return (form a x, Var x)
@@ -162,6 +171,54 @@ unboxLeaf t j y
        (k,w) <- unboxLeaf (snd (ts !! i)) (j - start) y
        return (k, Inj i t w)
   | otherwise = unboxAV t y
+
+-- whether two types differ only in their `Y`s, so that `[cast-ev]` relates them
+castable :: VType -> VType -> Bool
+castable from to = alphaEq (eraseY from) (eraseY to)
+
+-- The value `v` of a generic type instantiated at `from`, at its Koka instance `to`. The IR
+-- has no effects, so the `Y`s of `from` follow the effect variables of the generic type, while
+-- `to` follows their instances. Where these differ only in `Y` (an effect variable
+-- instantiated at a total effect, also under a type constructor, as in `list<(int) -> Y int>`
+-- at `list<(int) -> int>`), the value is cast (`[cast-ev]`): Koka does not test its results.
+coerceInst :: VType -> VType -> VVal -> E (K,VVal)
+coerceInst from to v
+  | not (alphaEq from to) && castable from to
+  = do x <- fresh "c"
+       return (Let x to (CastEv to v), Var x)
+  | otherwise = coerce from to v
+
+isYield :: VType -> Bool
+isYield = snd . unYield
+
+-- The expression `e : from` at the type `to`. Where `to` is `Y W`, a result `Y U` is tested for
+-- a yield (`[let-yield]`) and the yielding branch is `yielded`. Otherwise, Koka does not test
+-- the result: it knows that it cannot yield (such as the result of an effect-polymorphic
+-- function at a total effect, of a `deref`, or of a call that an erased `unsafe-total` makes
+-- look total), or the code tests the flag itself (`std/core/hnd`, and its `local-var` and
+-- `finally` where they are inlined: there the result may be a dummy, which `prompt-local-var`
+-- or `finally-prompt` receives). A result that differs from `to` only in `Y` is then cast
+-- (`[cast-ev]`, unless that would add a `Y`, which is `[pure]`). A coercion (such as an
+-- unboxing) would inspect a dummy, so it is tested, and the yielding branch passes on a dummy
+-- of the type `to` (`cast-ev` of `yielded`), as Koka does.
+coerceExpr :: VType -> VType -> VExpr -> E VExpr
+coerceExpr from to e
+  | alphaEq from to = return e
+  | castable from to && (isYield from || not (isYield to))
+  = do r <- fresh "r"
+       return (Let r from e (CastEv to (Var r)))
+  | VYield u <- from
+  = do r <- fresh "r"
+       (k,v) <- coerce u to (Var r)
+       d <- fresh "d"
+       let yielding = case to of
+                        VYield w -> Yielded w
+                        _ -> Let d (VYield to) (Yielded to) (CastEv to (Var d))
+       return (LetYield r u e (k (Ret v)) yielding)
+  | otherwise
+  = do r <- fresh "r"
+       (k,v) <- coerce from to (Var r)
+       return (Let r from e (k (Ret v)))
 
 ptrA :: VType -> AType
 ptrA (VPtr a) = a
@@ -186,11 +243,9 @@ wrapFun :: [TVar] -> [TVar] -> [(Mode,VType)] -> VType -> [(Mode,VType)] -> VTyp
 wrapFun tvs itvs ps r qs s v
   = do ys <- mapM (const (fresh "w")) qs
        (ks,args) <- unzip <$> mapM (\((_,q),(_,p),y) -> coerce q p (Var y)) (zip3 qs ps ys)
-       x  <- fresh "r"
-       (kr,res) <- coerce r s (Var x)
        call <- applyFun (AFun ps r) (tapp v (map AVar itvs)) args
-       let body = compose ks (Let x r call (kr (Ret res)))
-           lam  = Lam [(y,m,q) | (y,(m,q)) <- zip ys qs] s body
+       body <- compose ks <$> coerceExpr r s call
+       let lam  = Lam [(y,m,q) | (y,(m,q)) <- zip ys qs] s body
        genVal (VPtr (forallA tvs (AFun qs s))) lam
 
 -- Immediately applied coercion adapters need no closure. Bind arguments outside

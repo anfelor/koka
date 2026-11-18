@@ -24,18 +24,12 @@
     Γ ⊢ a :q A       the boxed value a has type A
     Γ ⊢ v :q V       the unboxed value v has type V; an owned value consumes Γ
     Γ | J ⊢ e : W    the expression e has unboxed type W and consumes every owned variable of Γ
-    Γ | J ⊢ʸ e : W   the same, where the result of e may be the dummy value of an effect yield
     Γ | J ⊢ e :! W   the same, where the result of e is unique
     ⊢ def            a top-level definition is well-typed
 
     `^Γ` marks every variable of Γ as borrowed. J is passed unchanged to every subexpression in
     tail position and omitted from the rules where that is all that happens; it is reset to ∅
-    where an expression is not in tail position. The mark `ʸ` follows J: it is passed unchanged
-    to every subexpression in tail position (and omitted from the rules), and where J is reset
-    to ∅ it is dropped unless the rule writes `⊢ʸ` (the bodies of definitions and closures and
-    the bound expression of `[let-yield]`). Only `[yielded]` requires it. Without the mark, a
-    position only excludes `[yielded]`: since the IR has no effects, a call bound by `[let]`
-    may still return a dummy, which `Yields` ensures is not inspected (see `[let-yield]`).
+    where an expression is not in tail position.
     The result mode of an expression (`: W` owned, `:! W` unique, as for values) follows J in
     the same way: an expression in tail position has the mode of the expression around it (and
     the rules write `: W` for both), and one where J is reset is owned, unless the rule writes
@@ -98,6 +92,22 @@
     context `ctx K` is a value, as it only writes into the blocks that K allocates; the
     operations `[ctx-append]`, `[plug]` and `[ctx-copy]` write to (or test) an existing path,
     so they are expressions, and nested operations are `let` chains.
+
+  Effect yields
+
+    While an effect yields (Koka's monadic translation), a call returns a dummy value and sets
+    a global flag: Koka's shared `box-any` in every pointer, and garbage in tags and raw
+    values. A function whose calls may yield (Koka's `isMonType`) returns `Y W`, a `W` or such
+    a dummy. `[pure]` injects a value into `Y W` and `[yielded]` is the dummy itself; only
+    `[let-yield]` eliminates `Y W`, by testing the flag after its bound expression, so a dummy
+    is never inspected. There is no subtyping: elaboration eta-expands a closure that does not
+    yield where one that may is expected. `Y` occurs only at the top of a type (`Types.wellYield`):
+    of an expression, a binder, or the result of a function type, so a type variable never
+    stands for `Y W` and parameters never have one. Its `W` contains no `Y`, credits or cells.
+    A variable of type `Y W` is linear, like a cell: it is consumed exactly once, never
+    duplicated or dropped (the runtime cannot drop a dummy, whose tags are garbage), and it is
+    never live across a `[let-yield]` or a `let` whose bound expression has a type `Y V`, where
+    the flag may change. The exception is `[cast-ev]`, which does not test the flag (see there).
 -}
 module Backend.Typed.Syntax where
 
@@ -199,6 +209,8 @@ data Side = Whnf | Delay
 -- - A full credit `◆n[k; p : V]` is also a credit `◇n[k; p : V]` that may be empty: a value of
 --   the former can be used where the latter is expected (`Query.expectV`), and branches that
 --   disagree on it agree on the latter.
+-- - `Y V` is a `V` or the dummy value of an effect yield, with the layout of `V` (see "Effect
+--   yields" at the top). It is not trivial, and it is linear like a cell.
 data VType = VPtr AType                 -- A*
            | VUnit                      -- 𝟙
            | VSum [(Con,VType)]         -- ⊕ᵢ Vᵢ, n-ary (a Koka value type with several constructors)
@@ -208,6 +220,7 @@ data VType = VPtr AType                 -- A*
            | VReuse Fill Int (Maybe Contents) -- ◇n[k; p : V] or ◆n[k; p : V]: if nonempty, an n-byte block with tag k containing p
            | VCtx Fill AType AType      -- ctx⟨A,B⟩ or ctx⁺⟨A,B⟩: an A with a hole of type B*, nonempty if full
            | VCell Int AType            -- cell_n⟨τ⟩: the n-byte block of a lazy value under evaluation
+           | VYield VType               -- Y V: a V, or the dummy value of an effect yield
            deriving (Eq,Show)
 
 -- raw types: the primitive value types of Koka (`TypeInfo.rawType`), named by their C type
@@ -397,7 +410,7 @@ data AVal
   -- as they are, so their layout is that of each field on its own.
   | OpenCon Name [AType] [VVal]
 
-  --   ⌊Γ⌋, x̄ : V̄ | ∅ ⊢ʸ e : W    q̄ = ·
+  --   ⌊Γ⌋, x̄ : V̄ | ∅ ⊢ e : W    q̄ = ·
   --  ───────────────────────────────────────── [lam]
   --   Γ ⊢ fn(x̄ :q̄ V̄) : W -> e : (q̄ V̄) -> W
   --
@@ -519,6 +532,13 @@ data VVal
   -- the context path in the headers of the blocks that K allocates on the path to the hole,
   -- which it locates by the position of `□` (no constructor or field names are involved).
   | Context AType VVal
+
+  --   Γ ⊢ v :q V
+  --  ───────────────────── [pure]
+  --   Γ ⊢ pure v :q Y V
+  --
+  -- A value that is not the dummy of a yield (see "Effect yields" at the top). A no-op at run time.
+  | Pure VVal
   deriving (Eq,Show)
 
 -- Whether a join point is recursive (`[join-rec]`), with its result type.
@@ -559,30 +579,27 @@ data VExpr
   -- operation with a unique result (`[ctx-append]`, `[ctx-copy]`).
   | Let Path VType VExpr VExpr
 
-  --   Γ₁, ^Γ₂ | ∅ ⊢ʸ e₁ : V    Γ₂, x : V | J ⊢ e₂ : W    Γ₂ | J ⊢ e₃ : W
+  --   Γ₁, ^Γ₂ | ∅ ⊢ e₁ : Y V    Γ₂, x : V | J ⊢ e₂ : W    Γ₂ | J ⊢ e₃ : W
   --  ──────────────────────────────────────────────────────────────────────── [let-yield]
   --   Γ₁, Γ₂ | J ⊢ let x : V = e₁ yielding e₃ in e₂ : W
   --
-  -- Koka's monadic bind: `e₁` may yield an effect, and then `e₃` runs instead of `e₂` (Koka's
-  -- `if yielding() then e₃ else e₂`). While an effect yields, `e₁` returns a dummy value (see
-  -- `[yielded]`), and `x` is not in scope in `e₃`, so the dummy is never inspected or dropped.
-  -- `e₁` consumes Γ₁ in either case, as a function that yields first releases its owned
-  -- arguments. Without a value to bind, the test is `let x : 𝟙 = ret () yielding e₃ in e₂`.
-  -- Elaboration moves the coercions of the result of `e₁` into `e₂` (`Yields`); a value that
-  -- may be a dummy is only bound by this rule.
+  -- Koka's monadic bind, the only elimination of `Y V`: `e₁` may yield an effect, and then `e₃`
+  -- runs instead of `e₂` (Koka's `if yielding() then e₃ else e₂`). While an effect yields, `e₁`
+  -- returns a dummy value (see `[yielded]`), and `x` is not in scope in `e₃`, so the dummy is
+  -- never inspected or dropped. `e₁` consumes Γ₁ in either case, as a function that yields first
+  -- releases its owned arguments. Without a value to bind, the test is
+  -- `let x : 𝟙 = ret (pure ()) yielding e₃ in e₂`. No variable of a type `Y U` or a cell is
+  -- live in `e₂` or `e₃`.
   | LetYield Path VType VExpr VExpr VExpr
 
   --   W contains no credits or cells
-  --  ──────────────────────── [yielded]
-  --   ∅ | J ⊢ʸ yielded : W
+  --  ──────────────────────────── [yielded]
+  --   ∅ | J ⊢ yielded : Y W
   --
-  -- The dummy is shared, so the result is owned (not unique), and it cannot stand for a credit
-  -- or cell, which would be created from nothing.
-  -- The dummy value of an expression that yields an effect, in the yielding branch of a
-  -- `[let-yield]` (in place of a coercion of the dummy that a call returns). It is only allowed
-  -- where the result may be a dummy (`⊢ʸ`): in the body of a definition or closure, in
-  -- the bound expression of `[let-yield]`, and in their tail positions. Code generation fills
-  -- its pointers with Koka's shared `box-any`, which the runtime may drop.
+  -- The dummy value of an expression that yields an effect, such as the yielding branch of a
+  -- `[let-yield]` (in place of a coercion of the dummy that a call returns). The annotation is
+  -- `W`. The dummy is shared, so the result is owned (not unique). Code generation fills its
+  -- pointers with Koka's shared `box-any`, which the runtime may drop.
   | Yielded VType
 
   --  ───────────────────────── [unreachable]
@@ -592,6 +609,25 @@ data VExpr
   -- forced value), so Γ is arbitrary: it may hold owned references, credits and cells, which
   -- no other form can discharge without filling them. Code generation aborts.
   | Unreachable VType
+
+  --   Γ ⊢ v : U    |U| = |V|
+  --  ──────────────────────────── [cast-ev]
+  --   Γ | J ⊢ cast-ev[V] v : V
+  --
+  -- Consumes `v` and adds or removes `Y`s anywhere in its type, without a test (`|·|` erases
+  -- every `Y`, `Types.eraseY`). A no-op at run time. The rule cannot be checked, since the IR
+  -- has no effects: the trust is in where elaboration emits it, which is where Koka knows that
+  -- a value cannot be the dummy of a yield. These are an instantiation of an effect variable
+  -- of a value (such as `hs : list<(int) -> Y int>` at a total effect, as `list<(int) -> int>`)
+  -- and the result of a call that Koka does not test: one at a total effect, or whose code
+  -- tests the flag itself (`std/core/hnd`, which is not translated to monadic form, and its
+  -- `local-var` and `finally` where they are inlined), or that an erased unsafe cast
+  -- (`unsafe-total`) makes look total. Outside `std/core/hnd`, a value from which it removes
+  -- a `Y` is therefore not a dummy, as long as Koka's effect typing holds and its unsafe casts
+  -- are used as documented. In `std/core/hnd`, a dummy may pass at a type variable, where it
+  -- is only passed on, duplicated or dropped (its pointers are `box-any`). `[pure]`, not
+  -- `cast-ev`, is the injection into `Y`.
+  | CastEv VType VVal
 
   --   f : ∀ā. (q̄ V̄) -> q W ∈ Σ    Γᵢ ⊢ vᵢ :qᵢ Vᵢ[B̄/ā]
   --  ───────────────────────────────────────────────── [call]
@@ -847,7 +883,7 @@ data VExpr
   -- after it. Its body cannot jump to outer joins, and its parameters may have any mode: a
   -- borrowed parameter is lent anew by every jump. A captured variable must not be bound
   -- again in e₂. Its result type W is annotated, as the jumps in its body need it. The
-  -- yield mark and the result mode of the context pass to its body. Recursive joins are introduced after
+  -- result mode of the context passes to its body. Recursive joins are introduced after
   -- Perceus, from the self tail calls of a function, and are closed until `JoinArgs` makes
   -- invariant borrowed parameters captures. (Not in the paper.)
   | Join Recursion Name [TVar] [(Path,Mode,VType)] VExpr VExpr
@@ -913,15 +949,16 @@ data VExpr
 
 -- Definitions `⊢ def`, with `f : ∀ā. (q̄ V̄) -> q W ∈ Σ` and `x : ∀ā. V ∈ Σ`
 data Def
-  --   x̄ :q̄ V̄ | ∅ ⊢ʸ e :q W
+  --   x̄ :q̄ V̄ | ∅ ⊢ e :q W
   --  ──────────────────────────────── [deffun]
   --   ⊢ fun f⟨ā⟩(x̄ :q̄ V̄) :q W = e
   --
-  -- The result mode q is owned or unique. Elaboration only produces owned results (as Core
-  -- has no unique ones), and so do imported functions; closures always have owned results.
+  -- The result mode q is owned or unique, and owned for a result `Y W`. Elaboration only
+  -- produces owned results (as Core has no unique ones), and so do imported functions; closures
+  -- always have owned results.
   = DefFun{ defName :: Name, defParams :: [TVar], defArgs :: [(Path,Mode,VType)], defResMode :: Mode, defRes :: VType, defBody :: VExpr }
 
-  --   ∅ | ∅ ⊢ʸ e : V
+  --   ∅ | ∅ ⊢ e : V
   --  ───────────────────────── [defval]
   --   ⊢ val x⟨ā⟩ : V = e
   --

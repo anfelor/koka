@@ -201,6 +201,7 @@ ruE expr
       Append{} -> plain
       Plug{} -> plain
       CtxCopy{} -> plain
+      CastEv{} -> plain
       Memoize{} -> plain
       Dup x e -> Dup x <$> ruE e
       -- destructuring forms are handled above

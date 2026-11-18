@@ -70,7 +70,6 @@ library
       Backend.Typed.Passes.TailRec
       Backend.Typed.Passes.UniqueJoins
       Backend.Typed.Passes.UniqueWorkers
-      Backend.Typed.Passes.Yields
       Backend.Typed.Pretty
       Backend.Typed.Query
       Backend.Typed.Syntax

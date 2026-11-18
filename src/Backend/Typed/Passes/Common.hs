@@ -63,6 +63,7 @@ isTrivialWith unroll t
                    VReuse _ _ _   -> False
                    VCtx _ _ _   -> False
                    VCell _ _    -> False
+                   VYield _     -> False
     trivialA a = case a of
                    AUnit     -> True
                    ASum ts   -> all (trivialA . snd) ts
@@ -117,6 +118,7 @@ mentionedE e = annotations ++ getConst (descendE (Const . (:[])) (Const . mentio
           Let _ t _ _ -> mentionedT t
           LetYield _ t _ _ _ -> mentionedT t
           Yielded t -> mentionedT t
+          CastEv t _ -> mentionedT t
           Unreachable t -> mentionedT t
           Call _ ts _ -> concatMap (mentionedT . VPtr) ts
           Jump _ ts _ -> concatMap (mentionedT . VPtr) ts
@@ -185,8 +187,10 @@ dropValue trivial fresh scope x t e
                 return (Let u VUnit (reuseParts scope (Unpack (Var x) bs y body)) e)
         VReuse _ _ _ -> return (Free x e)
         VCtx _ _ _ -> return (Drop x e)
-        -- a cell is linear and never dropped, which `Check` rejects
+        -- a cell or a value that may be the dummy of a yield is linear and never dropped, which
+        -- `Check` rejects
         VCell _ _ -> return (Drop x e)
+        VYield _ -> return (Drop x e)
         VUnit -> return e
         VRaw _ -> return e
 
@@ -245,6 +249,7 @@ substTypesE sub expr
       Let x t e1 e2         -> Let x (subst sub t) e1 e2
       LetYield x t e1 e2 e3 -> LetYield x (subst sub t) e1 e2 e3
       Yielded t             -> Yielded (subst sub t)
+      CastEv t v            -> CastEv (subst sub t) v
       Unreachable t         -> Unreachable (subst sub t)
       Call f ts vs          -> Call f (map (subst sub) ts) vs
       Join r j tvs ps e1 e2 -> Join (mapRecursion (subst sub) r) j tvs [(x,m,subst sub t) | (x,m,t) <- ps] e1 e2
@@ -438,6 +443,7 @@ substStepWith renameRoot recur scope sub expr
       Let x t e1 e2 -> Let x (substVType sub t) e1 e2
       LetYield x t e1 e2 e3 -> LetYield x (substVType sub t) e1 e2 e3
       Yielded t -> Yielded (substVType sub t)
+      CastEv t v -> CastEv (substVType sub t) v
       Unreachable t -> Unreachable (substVType sub t)
       Call f ts vs -> Call f (map (substAType sub) ts) vs
       Jump j ts vs -> Jump j (map (substAType sub) ts) vs
@@ -594,4 +600,5 @@ isRead expr
       Append{}    -> False
       Plug{}      -> False
       CtxCopy{}   -> False
+      CastEv{}    -> False
       Memoize{}   -> False

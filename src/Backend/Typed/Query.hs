@@ -9,7 +9,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- Type inference and typing-context queries shared by typed IR consumers.
 -- Keep inference in sync with the typing rules in Syntax.
-module Backend.Typed.Query( Gamma, noJoins, yieldJoins, bindAll, checkE, inferE, inferA, inferV, signature
+module Backend.Typed.Query( Gamma, noJoins, bindAll, checkE, inferE, inferA, inferV, signature
                           , inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma
                           , lamGamma
                           ) where
@@ -28,14 +28,11 @@ import Backend.Typed.Env( Env(..), Q, funSig, unrollT, lazySides, openFields, bo
 type Gamma = M.Map Path Ty
 
 -- J: the join points that can be jumped to (the variables they capture, including those of
--- the join points they jump to, their parameter types and their result type), and whether
--- the result may be the dummy value of an effect yield (`⊢ʸ`)
-data Joins = Joins{ jsPoints :: M.Map Name (S.Set Path,[TVar],[VType],VType), jsYield :: Bool }
+-- the join points they jump to, their parameter types and their result type)
+newtype Joins = Joins{ jsPoints :: M.Map Name (S.Set Path,[TVar],[VType],VType) }
 
--- ∅, and ∅ where the result may be a dummy (`⊢ʸ`)
-noJoins, yieldJoins :: Joins
-noJoins = Joins M.empty False
-yieldJoins = Joins M.empty True
+noJoins :: Joins
+noJoins = Joins M.empty
 
 bindAll :: [(Path,Ty)] -> Gamma -> Gamma
 bindAll bs g = foldr (uncurry M.insert) g bs
@@ -46,14 +43,14 @@ expect t1 t2 = unless (alphaEq t1 t2) (Left ("type mismatch:\n  expected: " ++ p
 -- jumps are only allowed in tail position: the joins are not visible in a let-bound
 -- expression, a lambda or a generalization
 checkE :: Env -> Gamma -> Joins -> VExpr -> VType -> Q ()
-checkE env g js e t = do mapM_ checkReuseTy (M.elems g)
-                         checkReuseTy (V t)
+checkE env g js e t = do mapM_ checkTy (M.elems g)
+                         checkTy (V t)
                          case e of
                            Ret v -> checkV env g v t
                            _ -> inferE env g js e >>= expectV env t
 
 inferE :: Env -> Gamma -> Joins -> VExpr -> Q VType
-inferE env g js e = do mapM_ checkReuseTy (M.elems g)
+inferE env g js e = do mapM_ checkTy (M.elems g)
                        inferExpr env g js e
 
 -- Forgetting a description, its tag, or that a credit is full or a context nonempty is allowed;
@@ -65,6 +62,7 @@ expectV _ expected actual
     forget (VReuse f _ p) (VReuse g n q) = VReuse (if f == MaybeEmpty then f else g) n (forgetDesc p q)
     forget (VCtx f _ _) (VCtx g a b) = VCtx (if f == MaybeEmpty then f else g) a b
     forget (VCell m _) (VCell n a) | m <= n = VCell m a
+    forget (VYield a) (VYield b) = VYield (forget a b)
     forget (VProd fs) (VProd gs) | length fs == length gs = VProd (zipWith (\(f,t) (_,u) -> (f,forget t u)) fs gs)
     forget (VSum ts) (VSum us) | length ts == length us = VSum (zipWith (\(c,t) (_,u) -> (c,forget t u)) ts us)
     forget (VExists as a) (VExists bs b) | length as == length bs
@@ -107,11 +105,10 @@ inferExpr env g js expr
       Ret v -> inferV env g v
       Let x t e1 e2 -> do checkE env g noJoins e1 t
                           inferE env (M.insert x (V t) g) js e2
-      LetYield x t e1 e2 e3 -> do checkE env g yieldJoins e1 t
+      LetYield x t e1 e2 e3 -> do checkE env g noJoins e1 (VYield t)
                                   branches env [inferE env (M.insert x (V t) g) js e2, inferE env g js e3]
-      Yielded t | not (jsYield js) -> Left "the dummy value of a yield where the result is inspected"
-                | containsLinear (V t) -> Left ("the dummy value of a yield at a type with credits or cells: " ++ ppr t)
-                | otherwise -> return t
+      Yielded t -> do checkTy (V (VYield t))
+                      return (VYield t)
       Unreachable t -> return t
       Call f tys vs -> do (ps,r) <- funSig env f tys
                           checkArgs env g ps vs
@@ -153,7 +150,8 @@ inferExpr env g js expr
       Lock z e -> do g' <- lockGamma g z
                      inferE env g' js e
       Join NonRec j tvs ps e1 e2
-                          -> do let xs = [x | (x,_,_) <- ps]
+                          -> do noYieldParams [p | (_,_,p) <- ps]
+                                let xs = [x | (x,_,_) <- ps]
                                 unless (S.disjoint (fvE e1 `S.difference` S.fromList xs) (S.fromList (bindersE e2)))
                                   (Left ("join point " ++ show j ++ " captures a variable that is bound again in its scope"))
                                 joinDescriptions j ps
@@ -163,7 +161,8 @@ inferExpr env g js expr
                                 t <$ checkE env g js{ jsPoints = M.insert j (caps,tvs,[p | (_,_,p) <- ps],t) (jsPoints js) } e2 t
       -- only itself is in scope in its body (its captures are borrowed, see `CheckLinear`)
       Join (Rec t) j tvs ps e1 e2
-                          -> do let xs = [x | (x,_,_) <- ps]
+                          -> do noYieldParams [p | (_,_,p) <- ps]
+                                let xs = [x | (x,_,_) <- ps]
                                     caps = S.filter (\y -> not (any (y `within`) xs)) (fvE e1)
                                 unless (S.disjoint caps (S.fromList (bindersE e2)))
                                   (Left ("recursive join point " ++ show j ++ " captures a variable that is bound again in its scope"))
@@ -189,6 +188,10 @@ inferExpr env g js expr
                        case (tc,td) of
                          (VCtx f a b, VCtx f' b' c') | alphaEq b b' -> return (VCtx (if f == Full then f else f') a c')
                          _ -> Left ("appending " ++ ppr td ++ " to " ++ ppr tc)
+      CastEv t v -> do checkTy (V t)
+                       s <- inferV env g v
+                       if alphaEq (eraseY s) (eraseY t) then return t
+                         else Left ("cast-ev of a value of type " ++ ppr s ++ " to " ++ ppr t)
       CtxCopy c -> do t <- inferV env g c
                       case t of
                         VCtx _ _ _ -> return t
@@ -219,9 +222,16 @@ joinDescriptions j ps
       (Left ("a description in the parameters of join point " ++ show j ++ " names a parameter"))
 
 -- Descriptions are local to a definition: the parameters and results of functions and
--- closures carry none, as their names would denote values of another scope.
-signature :: [VType] -> Q ()
-signature ts = unless (null (concatMap descriptions ts)) (Left "a description in the signature of a function or closure")
+-- closures carry none, as their names would denote values of another scope. Parameters are
+-- never the dummy of a yield.
+signature :: [VType] -> VType -> Q ()
+signature ps r
+  = do unless (null (concatMap descriptions (r : ps))) (Left "a description in the signature of a function or closure")
+       noYieldParams ps
+
+-- the parameters of a function, closure or join point are never `Y V`
+noYieldParams :: [VType] -> Q ()
+noYieldParams ps = forM_ ps $ \p -> when (snd (unYield p)) (Left ("a parameter that may be the dummy of a yield: " ++ ppr p))
 
 -- The two scrutinee categories share branch checking and existential escape checks.
 inferDestruct :: Env -> Gamma -> Joins -> VExpr -> Ty -> [([Path],VExpr)] -> Q VType
@@ -380,11 +390,19 @@ checkA :: Env -> Gamma -> AVal -> AType -> Q ()
 checkA env g val t = inferA env g val >>= expect t
 
 checkV :: Env -> Gamma -> VVal -> VType -> Q ()
-checkV env g val t = do checkReuseTy (V t)
+checkV env g val t = do checkTy (V t)
                         case (val,t) of
                           -- an empty credit satisfies every description
                           (NoReuse n _, VReuse MaybeEmpty m _) | n == m -> () <$ inferV env g val
                           _ -> inferV env g val >>= expectV env t
+
+-- the checks of a type at the top: its descriptions and where it has `Y`
+checkTy :: Ty -> Q ()
+checkTy ty
+  = do checkReuseTy ty
+       case ty of
+         V t | not (wellYield t) -> Left ("ill-formed type of a value that may be the dummy of a yield: " ++ ppr t)
+         _ -> return ()
 
 -- Descriptions are checked for layout, but never used as owned values. Their names need not be in
 -- scope: the type of a description is part of it.
@@ -407,6 +425,7 @@ checkReuseTy ty = case ty of
     VCtx _ a b -> checkReuseTy (A a) >> checkReuseTy (A b)
     VCell n a -> do when (n < 0) (Left "negative cell size")
                     checkReuseTy (A a)
+    VYield b -> checkReuseTy (V b)
     VUnit -> return ()
     VRaw _ -> return ()
   A a -> case a of
@@ -502,8 +521,8 @@ inferA env g val
              _ -> Left ("unknown open constructor " ++ show c)
       Lam ps r e -> do when (any containsLinear [t | x <- S.toList (fvA val), Just t <- [M.lookup x g]])
                          (Left "cannot capture reuse credits or cells in a closure")
-                       signature (r : [t | (_,_,t) <- ps])
-                       checkE env (lamGamma ps g) yieldJoins e r
+                       signature [t | (_,_,t) <- ps] r
+                       checkE env (lamGamma ps g) noJoins e r
                        return (AFun [(m,t) | (_,m,t) <- ps] r)
       BoxAt r v -> do tr <- inferV env g (Var r)
                       checkReuseTy (V tr)
@@ -551,6 +570,10 @@ inferV env g val
                           _ -> Left ("context of a non-pointer: " ++ ppr t)
       DupV v -> do unless (isGlob v) (Left ("dup of a value that is not a global: " ++ ppr val))
                    inferV env g v
+      Pure v -> do t <- inferV env g v
+                   let t' = VYield t
+                   checkTy (V t')
+                   return t'
       TyApp v tys -> do tv <- inferV env g v
                         case tv of
                           VPtr (AForall tvs a) | length tvs == length tys -> return (VPtr (inst tvs tys a))

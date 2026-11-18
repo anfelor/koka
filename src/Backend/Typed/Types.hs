@@ -9,7 +9,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents, collapse
                           , unrollMu, isPtr, forallA, prodV, prodFields
-                          , checkDupType, isShape, containsLinear
+                          , checkDupType, isShape, containsLinear, wellYield, unYield, eraseY
                           , applyA, vtInt, vtString, vtChar, vtFloat
                           ) where
 
@@ -64,6 +64,7 @@ traverseReuseContents f = goV
       VReuse fl n p -> VReuse fl n <$> f p
       VCtx fl a b -> VCtx fl <$> goA a <*> goA b
       VCell n a -> VCell n <$> goA a
+      VYield b -> VYield <$> goV b
       VUnit -> pure t
       VRaw _ -> pure t
     goA a = case a of
@@ -117,6 +118,7 @@ substV sub t
       VReuse f n p -> VReuse f n (fmap (substContents sub) p)
       VCtx f a b -> VCtx f (substA sub a) (substA sub b)
       VCell n a -> VCell n (substA sub a)
+      VYield b  -> VYield (substV sub b)
 
 substA :: Sub -> AType -> AType
 substA sub a
@@ -159,6 +161,7 @@ ftvV t
       VReuse _ _ p  -> maybe [] ftvContents p
       VCtx _ a b    -> ftvA a ++ ftvA b
       VCell _ a     -> ftvA a
+      VYield b      -> ftvV b
 
 ftvA :: AType -> [TVar]
 ftvA a
@@ -188,6 +191,7 @@ isPtr t
       VReuse _ _ _  -> False
       VCtx _ _ _  -> False
       VCell _ _   -> False
+      VYield _    -> False
 
 eqV :: VType -> VType -> Bool
 eqV s t
@@ -200,6 +204,7 @@ eqV s t
       (VReuse f n p, VReuse g m q) -> f == g && n == m && eqContentsMaybe p q
       (VCtx f a b, VCtx g c d) -> f == g && eqA a c && eqA b d
       (VCell n a, VCell m b) -> n == m && eqA a b
+      (VYield a, VYield b)   -> eqV a b
       _                      -> s == t
 
 -- Contents are descriptions, so only their structural forms need type substitution.
@@ -286,6 +291,7 @@ checkDupType t
   = case t of
       V (VReuse _ _ _) -> Left "dup of a reuse credit"
       V (VCell _ _) -> Left "dup of a cell"
+      V (VYield _) -> Left "dup of a value that may be the dummy of a yield"
       _ -> Right ()
 
 -- Boxed sum alternatives must have a tag determined by their construction: sums are flat and
@@ -302,7 +308,8 @@ isShape a = case a of
                 _ -> False
 
 -- Credits and cells have ownership but no reference count: duplication cannot create another
--- owner, so they are not stored in a heap block or captured by a closure.
+-- owner, so they are not stored in a heap block or captured by a closure. Nor is a value that
+-- may be the dummy of a yield (`Y V`), which is linear.
 containsLinear :: Ty -> Bool
 containsLinear (V v) = case v of
   VPtr a -> containsLinear (A a)
@@ -314,6 +321,7 @@ containsLinear (V v) = case v of
   VReuse _ _ _ -> True
   VCtx _ _ _ -> False
   VCell _ _ -> True
+  VYield _ -> True
 containsLinear (A a) = case a of
   ABox v -> containsLinear (V v)
   AScalar _ -> False
@@ -327,3 +335,70 @@ containsLinear (A a) = case a of
   AVar _ -> False
   AFun _ _ -> False
   AUnit -> False
+
+-- `Y` occurs only at the top of a type, or as the result of a function type, and `Y V` has no
+-- `Y`, credits or cells in `V` (see "Effect yields" in `Syntax`)
+wellYield :: VType -> Bool
+wellYield t
+  = case t of
+      VYield v -> plainV v && not (containsLinear (V v))
+      _ -> plainV t
+  where
+    plainV v = case v of
+      VYield _ -> False
+      VPtr a -> plainA a
+      VSum ts -> all (plainV . snd) ts
+      VProd fs -> all (plainV . snd) fs
+      VExists _ b -> plainV b
+      VReuse _ _ p -> maybe True (\(Contents _ _ s) -> plainV s) p
+      VCtx _ a b -> plainA a && plainA b
+      VCell _ a -> plainA a
+      VUnit -> True
+      VRaw _ -> True
+    plainA a = case a of
+      AFun ps r -> all (plainV . snd) ps && wellYield r
+      ABox v -> plainV v
+      ASum ts -> all (plainA . snd) ts
+      AForall _ b -> plainA b
+      ALam _ b -> plainA b
+      ALazy l b -> plainA l && plainA b
+      AMu _ _ b ts -> all plainA (b : ts)
+      ACon _ ts -> all plainA ts
+      AApp _ ts -> all plainA ts
+      AScalar _ -> True
+      AVar _ -> True
+      AUnit -> True
+
+-- the type `V` of `Y V`, and whether the type is one
+unYield :: VType -> (VType,Bool)
+unYield (VYield t) = (t,True)
+unYield t = (t,False)
+
+-- `|V|`: the type without any `Y`, also under boxes, type arguments and function types (`[cast-ev]`)
+eraseY :: VType -> VType
+eraseY t
+  = case t of
+      VYield v -> eraseY v
+      VPtr a -> VPtr (eraseA a)
+      VSum ts -> VSum [(c,eraseY s) | (c,s) <- ts]
+      VProd fs -> VProd [(f,eraseY s) | (f,s) <- fs]
+      VExists vs b -> VExists vs (eraseY b)
+      VReuse fl n p -> VReuse fl n (fmap (\(Contents k v s) -> Contents k v (eraseY s)) p)
+      VCtx fl a b -> VCtx fl (eraseA a) (eraseA b)
+      VCell n a -> VCell n (eraseA a)
+      VUnit -> t
+      VRaw _ -> t
+  where
+    eraseA a = case a of
+      ABox v -> ABox (eraseY v)
+      ASum ts -> ASum [(i,eraseA s) | (i,s) <- ts]
+      AFun ps r -> AFun [(m,eraseY p) | (m,p) <- ps] (eraseY r)
+      AForall vs b -> AForall vs (eraseA b)
+      AApp v ts -> AApp v (map eraseA ts)
+      ACon n ts -> ACon n (map eraseA ts)
+      ALam vs b -> ALam vs (eraseA b)
+      ALazy l b -> ALazy (eraseA l) (eraseA b)
+      AMu x vs b ts -> AMu x vs (eraseA b) (map eraseA ts)
+      AScalar _ -> a
+      AUnit -> a
+      AVar _ -> a

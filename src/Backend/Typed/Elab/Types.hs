@@ -74,6 +74,7 @@ recType name params body = AMu t params (foldA body) (map AVar params)
       VExists vs b  -> VExists vs (foldV b)
       VCtx f a b    -> VCtx f (foldA a) (foldA b)
       VCell n a     -> VCell n (foldA a)
+      VYield b      -> VYield (foldV b)
       VReuse _ _ _  -> v
       VUnit         -> v
       VRaw _        -> v

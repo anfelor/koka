@@ -115,6 +115,7 @@ isStatement e
       Append{} -> True
       Plug{} -> True
       CtxCopy{} -> True
+      CastEv{} -> True
       Memoize{} -> True
       _ -> False
 

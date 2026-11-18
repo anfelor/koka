@@ -86,6 +86,8 @@ inlineApply expr
            in case rest of
                 Let x t call e | S.notMember f (fvE e), Just body' <- apply call
                   -> Let x t body' e
+                LetYield x t call e2 e3 | S.notMember f (S.union (fvE e2) (fvE e3)), Just body' <- apply call
+                  -> LetYield x t body' e2 e3
                 _ | Just body' <- apply rest -> body'
                 _ -> expr
       _ -> expr

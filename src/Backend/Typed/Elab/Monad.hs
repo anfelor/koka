@@ -10,6 +10,7 @@
 
 module Backend.Typed.Elab.Monad( Env(..), St(..), E
                               , runE, failE, tr, env, withLocals, withFields, withTVars, withHole, inClosure
+                              , withResult, result
                               , fresh, freshName, recordSig, note, vt
                               ) where
 
@@ -28,9 +29,10 @@ import Backend.Typed.Elab.TypeInfo
 -- a value that contains the hole, or (`Nothing`) the address of the hole. They are not bound
 -- in the IR; their uses become parts of a `ctx` value.
 -- `envCaptured`: the locals that the innermost closure captures.
+-- `envResult`: the type at which an expression in tail position is elaborated (`withResult`).
 data Env = Env{ envNT :: Newtypes, envLocals :: S.Set Name, envTVars :: S.Set TVar, envSigs :: Sigs
               , envHoles :: M.Map Name (Maybe VVal), envCaptured :: S.Set Name
-              , envFields :: M.Map Name (K,VVal) }
+              , envFields :: M.Map Name (K,VVal), envResult :: VType }
 
 data St = St{ stUniq :: Int, stSigs :: Sigs, stNotes :: [String] }
 
@@ -69,6 +71,13 @@ inClosure = local (\e -> e{ envCaptured = envLocals e })
 
 withHole :: Name -> Maybe VVal -> E a -> E a
 withHole x v = local (\e -> e{ envHoles = M.insert x v (envHoles e) })
+
+-- the result type of the expressions in tail position
+withResult :: VType -> E a -> E a
+withResult t = local (\e -> e{ envResult = t })
+
+result :: E VType
+result = asks envResult
 
 withTVars :: [TVar] -> E a -> E a
 withTVars tvs = local (\e -> e{ envTVars = foldr S.insert (envTVars e) tvs })

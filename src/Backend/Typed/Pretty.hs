@@ -76,6 +76,7 @@ prettyV t
       VExists vs t -> parens (text "exists" <+> hsep (map tv vs) <.> text "." <+> prettyV t)
       VCtx f a b -> text ("ctx" ++ (if f == Full then "+" else "")) <.> angles (commaSep [prettyA a, prettyA b])
       VCell n a -> text ("cell" ++ show n) <.> angles (prettyA a)
+      VYield b  -> text "Y" <+> prettyV b
 
 prettyRaw :: Raw -> Doc
 prettyRaw r
@@ -149,6 +150,7 @@ prettyVal val
       NoReuse n p -> text "no-reuse" <.> int n <.> prettyContents p
       Hole        -> text "hole"
       Context _ v -> text "ctx" <+> atomVal v
+      Pure v      -> text "pure" <+> atomVal v
 
 atomAVal :: AVal -> Doc
 atomAVal v
@@ -164,6 +166,7 @@ atomVal v
       Ptr _ _   -> parens (prettyVal v)
       DupV _    -> parens (prettyVal v)
       Context _ _ -> parens (prettyVal v)
+      Pure _    -> parens (prettyVal v)
       _         -> prettyVal v
 
 prettyLit :: Lit -> Doc
@@ -215,6 +218,7 @@ prettyExpr expr
       Plug c v -> atomVal c <.> brackets (prettyVal v)
       Append c d -> atomVal c <+> text "++" <+> atomVal d
       CtxCopy c -> text "ctx-copy" <+> atomVal c
+      CastEv t v -> text "cast-ev" <.> brackets (prettyV t) <+> atomVal v
       Memoize c d k v -> text "memoize" <+> atomVal c <+> parens (side d <+> parens (text "inj" <.> int k <+> atomVal v))
       Gen vs e -> text "gen" <+> hsep (map tv vs) <.> text "." <+> align (prettyExpr e)
       CaseOpen v alts def -> caseOf (text "case") (pv v) ([(nm c <.> parens (commaSep (map pv xs)), e) | (c,xs,e) <- alts] ++ [(text "_", def)])
@@ -303,6 +307,7 @@ shortenE expr
       Let x t e1 e2 -> Let x (shortenT t) e1 e2
       LetYield x t e1 e2 e3 -> LetYield x (shortenT t) e1 e2 e3
       Yielded t -> Yielded (shortenT t)
+      CastEv t v -> CastEv (shortenT t) v
       Unreachable t -> Unreachable (shortenT t)
       Call f ts vs -> Call f (map shortenAT ts) vs
       Jump j ts vs -> Jump j (map shortenAT ts) vs

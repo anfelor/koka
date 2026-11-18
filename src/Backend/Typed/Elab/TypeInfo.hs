@@ -25,6 +25,7 @@ import Common.Syntax( dataDefIsValue )
 import Kind.Kind( Kind, kindStar, hasKindStarResult, isKindStar, extractKindFun )
 import Kind.Newtypes
 import Type.Type
+import Core.Core( isMonEffect )
 import Backend.Typed.Syntax
 import Backend.Typed.Types
 import Backend.Typed.Elab.Representation
@@ -68,12 +69,15 @@ elabHigher nt tp
       TApp (TVar tv) args | tvarStar tv -> AApp (tvarId tv) <$> elabArgsK nt (fst (extractKindFun (typevarKind tv))) args
       _              -> Left ("unsupported type constructor: " ++ show tp)
 
+-- The result of a function whose calls may yield, as Koka's monadic translation decides
+-- (`Core.isMonType`), may be the dummy of a yield (`Y W`).
 elabFunType :: Newtypes -> Type -> Tr AType
 elabFunType nt tp
   = case tp of
       TSyn _ _ t      -> elabFunType nt t
       TForall tvs rho -> forallA (map tvarId (filter tvarStar tvs)) <$> elabFunType nt rho
-      TFun pars _ res -> AFun <$> mapM (\(_,t) -> (,) Owned <$> elabType nt t) pars <*> elabType nt res
+      TFun pars eff res -> AFun <$> mapM (\(_,t) -> (,) Owned <$> elabType nt t) pars
+                                <*> ((if isMonEffect eff then VYield else id) <$> elabType nt res)
       _ -> do t <- elabType nt tp
               case t of
                 VPtr a -> Right a

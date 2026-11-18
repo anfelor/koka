@@ -53,6 +53,7 @@ descendV fa fv val
       TyApp v ts     -> (`TyApp` ts) <$> fv v
       DupV v         -> DupV <$> fv v
       Context b v    -> Context b <$> fv v
+      Pure v         -> Pure <$> fv v
       Hole           -> pure val
       Var _          -> pure val
       Glob _ _       -> pure val
@@ -131,6 +132,7 @@ descendB fn fv fb expr
       Append c d            -> Append <$> fv c <*> fv d
       Plug c v              -> Plug <$> fv c <*> fv v
       CtxCopy c             -> CtxCopy <$> fv c
+      CastEv t v            -> CastEv t <$> fv v
       Memoize c d k v       -> Memoize <$> fv c <*> pure d <*> pure k <*> fv v
   where
     plain e = snd <$> fb [] e
@@ -341,6 +343,7 @@ destructAOf expr
       Append{} -> Nothing
       Plug{} -> Nothing
       CtxCopy{} -> Nothing
+      CastEv{} -> Nothing
       Memoize{} -> Nothing
 
 destructVOf :: VExpr -> Maybe (Destruct VVal)
@@ -379,6 +382,7 @@ destructVOf expr
       Append{} -> Nothing
       Plug{} -> Nothing
       CtxCopy{} -> Nothing
+      CastEv{} -> Nothing
       Memoize{} -> Nothing
 
 -- An alternative of a test with two alternatives (`[case]`, `[case-a]` or `[split-a]`), taken
