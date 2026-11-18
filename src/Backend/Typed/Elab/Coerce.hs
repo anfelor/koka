@@ -36,14 +36,17 @@ genPtr _ v = return (id, v)
 
 -- A value is injected into `Y W` by `[pure]`. A value that may be the dummy of a yield is not
 -- coerced: `coerceExpr` tests the result of a call, or casts it where Koka does not test it.
+-- A function used where its results may yield (`addsY`) is cast (`[cast-ev]`), not
+-- eta-expanded: it does not yield, so the tests of its callers take the non-yielding branch.
 coerce :: VType -> VType -> VVal -> E (K,VVal)
 coerce from to v
   | alphaEq from to = return (id,v)
-  | VYield w <- to, not (snd (unYield from))
+  | VYield w <- to, not (isYield from)
   = do (k,v') <- coerce from w v
        return (k, Pure v')
   | VYield _ <- from
   = failE ("cannot coerce " ++ ppr from ++ " to " ++ ppr to ++ " without a test for a yield")
+  | addsY from to = castV to v
   | not (isPtr from) && alphaEq to (boxrep from) = boxV from v
   | not (isPtr to) && alphaEq from (boxrep to) = unboxV to v
   | otherwise
@@ -176,6 +179,28 @@ unboxLeaf t j y
 castable :: VType -> VType -> Bool
 castable from to = alphaEq (eraseY from) (eraseY to)
 
+-- `to` is `from` with `Y`s added to the results of functions (`V` to `Y V`), where function
+-- parameters are contravariant and all other types are compared as they are
+addsY :: VType -> VType -> Bool
+addsY from to
+  | alphaEq from to = True
+  | VYield t <- to, not (isYield from) = addsY from t
+  | VYield f <- from, VYield t <- to = addsY f t
+  | VPtr a <- from, VPtr b <- to = addsA a b
+  | otherwise = False
+  where
+    addsA (AFun ps r) (AFun qs s)
+      = length ps == length qs && and [m == n && addsY q p | ((m,p),(n,q)) <- zip ps qs] && addsY r s
+    addsA (AForall as a) (AForall bs b)
+      = length as == length bs && addsA a (inst bs (map AVar as) b)
+    addsA _ _ = False
+
+-- `v` at the type `to` (`[cast-ev]`)
+castV :: VType -> VVal -> E (K,VVal)
+castV to v
+  = do x <- fresh "c"
+       return (Let x to (CastEv to v), Var x)
+
 -- The value `v` of a generic type instantiated at `from`, at its Koka instance `to`. The IR
 -- has no effects, so the `Y`s of `from` follow the effect variables of the generic type, while
 -- `to` follows their instances. Where these differ only in `Y` (an effect variable
@@ -183,9 +208,7 @@ castable from to = alphaEq (eraseY from) (eraseY to)
 -- at `list<(int) -> int>`), the value is cast (`[cast-ev]`): Koka does not test its results.
 coerceInst :: VType -> VType -> VVal -> E (K,VVal)
 coerceInst from to v
-  | not (alphaEq from to) && castable from to
-  = do x <- fresh "c"
-       return (Let x to (CastEv to v), Var x)
+  | not (alphaEq from to) && castable from to = castV to v
   | otherwise = coerce from to v
 
 isYield :: VType -> Bool
