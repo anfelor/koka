@@ -35,7 +35,7 @@ import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( child, TestSide(..), boxTag, canonical, failingTo, fvA, fvE, fvV, holes, testSides, within )
 import Backend.Typed.Types( Types(..), inst, isShape )
-import Backend.Typed.Env( Env(..), envOf, unrollT, openFields, boxContents, reuseSize, M, get, gets, liftE, modify, put, runM, state )
+import Backend.Typed.Env( Env(..), envOf, dataBody, openFields, boxContents, reuseSize, M, get, gets, liftE, modify, put, runM, state )
 import Backend.Typed.Query( Gamma, inferE, inferV, inferVar, noJoins, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 import Backend.Typed.Layout
 import Backend.Typed.CGen.Layout hiding( dupExpr, dropStmt )
@@ -143,7 +143,7 @@ pointerShape env t
     shape seen a = case a of
       ACon n _ | not (S.member n seen)
                , Just TypeDef{} <- M.lookup n (envTypes env)
-               , Right b <- unrollT env a -> shape (S.insert n seen) b
+               , Right b <- dataBody env a -> shape (S.insert n seen) b
       _ -> Nothing
 
 -- The statement of `dup x`, if `x` needs one. Like aggregate dup helpers, keep field dups
@@ -906,7 +906,7 @@ genE cx dest expr
               genAlias cx' dest ve x (A a) e
       Unroll v x e
         -> do A t <- tyOfName cx v
-              a <- liftC (unrollT (cxEnv cx) t)
+              a <- liftC (dataBody (cxEnv cx) t)
               genAlias (shareAlias cx v x) dest (localName v) x (A a) e
       Unbox v x e -> genUnbox cx dest v x e
       Unscalar m v x e -> genUnscalar cx dest m v x e

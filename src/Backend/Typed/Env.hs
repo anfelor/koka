@@ -10,7 +10,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 -- The global environment of a typed IR program, queries on it and on types that need no
 -- typing context, and the monad for typed IR consumers.
-module Backend.Typed.Env( Env(..), Q, envOf, funSig, unrollT, lazySides, openFields, boxContents, reuseSize, noHeapCredit
+module Backend.Typed.Env( Env(..), Q, envOf, funSig, dataBody, lazySides, openFields, boxContents, reuseSize, noHeapCredit
                         , M, runM, evalM, liftE
                         , module Control.Monad.Reader, module Control.Monad.State
                         ) where
@@ -56,25 +56,21 @@ funSig env f tys
       Just sig -> Left ("call of " ++ show f ++ " with " ++ show (length tys) ++ " type arguments: " ++ show sig)
       Nothing  -> Left ("unknown function: " ++ show f)
 
--- `unroll(τ)` of a recursive type, also by its name (δ), when the unrolling folds back to it
-unrollT :: Env -> AType -> Q AType
-unrollT env t
+-- `A[B̄/ā]` for a datatype `T⟨B̄⟩` with `data T⟨ā⟩ := A ∈ Σ`
+dataBody :: Env -> AType -> Q AType
+dataBody env t
   = case t of
-      AMu x vs a bs | length vs == length bs
-        -> return (unrollMu (if null vs then t else ALam vs (AMu x vs a (map AVar vs))) x vs a bs)
       ACon n args -> case M.lookup n (envTypes env) of
                        Just (TypeDef _ tvs (Just body)) | length tvs == length args
-                         -> case body of
-                              AMu x vs a bs | bs == map AVar tvs -> return (unrollMu (ACon n []) x vs a args)
-                              _ -> unrollT env (inst tvs args body)
+                         -> return (inst tvs args body)
                        Just _  -> Left ("cannot unroll abstract type " ++ show n)
                        Nothing -> Left ("unknown type " ++ show n)
       _ -> Left ("unroll of " ++ ppr (A t))
 
--- the thunks and the strict alternatives of a lazy type, `unroll(τ) = L ~> S`
+-- the thunks and the strict alternatives of a lazy datatype `T⟨B̄⟩`, `data T⟨ā⟩ := L ~> S`
 lazySides :: Env -> AType -> Q ([(Int,AType)],[(Int,AType)])
 lazySides env t
-  = do b <- unrollT env t
+  = do b <- dataBody env t
        case b of
          ALazy (ASum l) (ASum s) -> return (l,s)
          _ -> Left ("not a lazy type: " ++ ppr (A t))

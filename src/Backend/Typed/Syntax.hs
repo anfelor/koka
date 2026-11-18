@@ -19,7 +19,7 @@
 
     Γ ::= ∅ | Γ, x :q V | Γ, x :q A             variables
     J ::= ∅ | J, j : Γ_c; ∀ā. (q̄ V̄) -> W       join points in scope, with their captures
-    Σ                                          signatures (`Sigs`)
+    Σ                                          signatures (`Sigs`) and datatype declarations (`TypeDefs`)
 
     Γ ⊢ a :q A       the boxed value a has type A
     Γ ⊢ v :q V       the unboxed value v has type V; an owned value consumes Γ
@@ -152,19 +152,16 @@ owning m
 --   passed around.
 -- - `λā.A` only occurs as the argument of a higher-kinded variable, and applying it is
 --   β-reduction: `a⟨B̄⟩[λb̄.A / a] = A[B̄/b̄]`. A partial application `T⟨B̄⟩` is also allowed there.
--- - `μt⟨ā⟩. A` is a recursive type of the kind of ā, so that a recursive occurrence may be
---   applied to other arguments (a nested datatype); its instance `(μt⟨ā⟩. A)⟨B̄⟩` unrolls to
---   `unroll((μt⟨ā⟩. A)⟨B̄⟩) = A[μt⟨ā⟩. A / t][B̄/ā]`, where `μt⟨ā⟩. A` stands for
---   `λā. (μt⟨ā⟩. A)⟨ā⟩`. It only relates to its unrolling by `[roll]` and `[unroll]`.
--- - `T⟨B̄⟩` with a definition `T⟨ā⟩ := A` (`TypeDef`) is an abbreviation of `A[B̄/ā]` (δ). Types
---   stay folded: two names are compared by name, and a name is unfolded only where a rule needs
---   a recursive type. The body of a datatype is `(μt⟨ā⟩. A)⟨ā⟩`, whose recursive occurrences
---   `t⟨C̄⟩` fold back to `T⟨C̄⟩`: `unroll(T⟨B̄⟩) = A[T/t][B̄/ā]` (`Query.unrollT`), which is
---   δ-equal to the unrolling of `(μt⟨ā⟩. A)⟨B̄⟩`.
+-- - `T⟨B̄⟩` with a declaration `data T⟨ā⟩ := A ∈ Σ` (`TypeDef`) is a datatype. Recursion is
+--   only through names: A may mention any declared type, including T, at any arguments (mutually
+--   recursive and nested datatypes). Named types are compared by name, and the typing rules
+--   relate `T⟨B̄⟩` to `A[B̄/ā]` only by `[roll]`, `[unroll]`, `[memoize]` and `[memoize-delay]`
+--   (iso-recursive by name). Queries that compute facts about a type (layout, triviality) may
+--   look up the declaration as well (`Env.dataBody`).
 -- - A lazy sum `L ~> S` (the paper's `A ~F> (B + t)`) is one flat sum at run time, whose tags
 --   are split into the thunks L = ⊕ⱼ Box Vⱼ and the strict alternatives S = ⊕ᵢ Aᵢ. Both are
 --   shapes (sums, nonempty), and every tag of S is smaller than every tag of L, so the
---   smallest tag of L separates them. A lazy datatype unrolls to one, with the indirection
+--   smallest tag of L separates them. A lazy datatype is declared as one, with the indirection
 --   `Box(τ*)` among the thunks. It is introduced by `[whnf]` and `[delay]`, and eliminated by
 --   `[if-whnf]`. Elaboration pads the contents V of a thunk `Box V` whose block would be
 --   smaller than that of the indirection (`Elab.TypeInfo.conFieldTypes`), so that an
@@ -180,7 +177,6 @@ data AType = ABox VType                 -- Box V
            | AApp TVar [AType]          -- a⟨B̄⟩, an applied higher-kinded variable
            | ACon Name [AType]          -- T⟨B̄⟩, a named type
            | ALam [TVar] AType          -- λā. A, a partially applied type
-           | AMu TVar [TVar] AType [AType] -- (μt⟨ā⟩. A)⟨B̄⟩, a recursive type
            deriving (Eq,Show)
 
 -- the sides of a lazy sum `L ~> S`: its strict alternatives S (`whnf`) and its thunks L (`delay`)
@@ -251,9 +247,8 @@ data Fill = Full | MaybeEmpty
 data Ty = A AType | V VType
           deriving (Eq,Show)
 
--- a named type `T⟨ā⟩ := A` (see `AType`); without a body (`int`, `string`, ...) it is
--- abstract. The body of a datatype is a recursive type, which unrolls to a lazy sum for a lazy
--- datatype.
+-- a datatype declaration `data T⟨ā⟩ := A` (see `AType`), whose body is a lazy sum for a lazy
+-- datatype; without a body (`int`, `string`, open types, ...) the named type is abstract.
 data TypeDef = TypeDef{ tdefName :: Name, tdefParams :: [TVar], tdefBody :: Maybe AType }
              deriving (Show)
 
@@ -375,11 +370,11 @@ data AVal
   --   Γ ⊢ injᵢ v : ⊕ⱼ Aⱼ
   | InjA Int AType AVal
 
-  --   Γ ⊢ v : A[μt⟨ā⟩. A / t][B̄/ā]
-  --  ──────────────────────────────── [roll]
-  --   Γ ⊢ roll v : (μt⟨ā⟩. A)⟨B̄⟩
+  --   data T⟨ā⟩ := A ∈ Σ    Γ ⊢ v : A[B̄/ā]
+  --  ─────────────────────────────────────── [roll]
+  --   Γ ⊢ roll v : T⟨B̄⟩
   --
-  -- A no-op at run time. The annotation is the recursive type, usually by its name `T⟨B̄⟩`.
+  -- A no-op at run time. The annotation `T⟨B̄⟩` is the datatype.
   | Roll AType AVal
 
   --       Γ ⊢ v : S                          Γ ⊢ v : L
@@ -717,8 +712,8 @@ data VExpr
   --   Γ₁, Γ₂ ⊢ let ptr x = v in e : W
   | Deref VVal Path VExpr
 
-  --   Γ₁ ⊢ v :^ (μt⟨ā⟩. A)⟨B̄⟩    Γ₂, x :^ A[μt⟨ā⟩. A / t][B̄/ā] ⊢ e : W
-  --  ──────────────────────────────────────────────────────────────────── [unroll]
+  --   data T⟨ā⟩ := A ∈ Σ    Γ₁ ⊢ v :^ T⟨B̄⟩    Γ₂, x :^ A[B̄/ā] ⊢ e : W
+  --  ──────────────────────────────────────────────────────────────── [unroll]
   --   Γ₁, Γ₂ ⊢ let roll x = v in e : W
   | Unroll Path Path VExpr
 
@@ -936,13 +931,13 @@ data VExpr
   -- unique parameter.
   | CtxCopy VVal
 
-  --   Γ ⊢ v : V    unroll(τ) = L ~> S    Sₖ = Box V    |V| ≤ n
-  --  ───────────────────────────────────────────────────────── [memoize]
-  --   Γ, c : cell_n⟨τ⟩ | J ⊢ memoize c (whnf (injₖ v)) : τ*
+  --   data T⟨ā⟩ := L ~> S ∈ Σ    Sₖ[B̄/ā] = Box V    Γ ⊢ v : V    |V| ≤ n
+  --  ──────────────────────────────────────────────────────────────────── [memoize]
+  --   Γ, c : cell_n⟨T⟨B̄⟩⟩ | J ⊢ memoize c (whnf (injₖ v)) : T⟨B̄⟩*
   --
-  --   Γ ⊢ v : V    unroll(τ) = L ~> S    Lₖ = Box V    |V| ≤ n
-  --  ───────────────────────────────────────────────────────── [memoize-delay]
-  --   Γ, c : cell_n⟨τ⟩ | J ⊢ memoize c (delay (injₖ v)) : τ*
+  --   data T⟨ā⟩ := L ~> S ∈ Σ    Lₖ[B̄/ā] = Box V    Γ ⊢ v : V    |V| ≤ n
+  --  ──────────────────────────────────────────────────────────────────── [memoize-delay]
+  --   Γ, c : cell_n⟨T⟨B̄⟩⟩ | J ⊢ memoize c (delay (injₖ v)) : T⟨B̄⟩*
   --
   -- Writes the alternative k over the block of the cell in place, keeping its reference count,
   -- and releases the cell: the result is its reference, now a value. A strict k is the paper's

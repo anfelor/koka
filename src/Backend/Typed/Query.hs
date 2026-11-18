@@ -23,7 +23,7 @@ import Backend.Typed.Syntax
 import Backend.Typed.Traversal( bindersE, boxTag, child, destructAOf, destructVOf, dsAlts, dsScrut, fvA, fvE, fvV, holes, isGlob, jumpArgs, within )
 import Backend.Typed.Types
 import Backend.Typed.Pretty( ppr )
-import Backend.Typed.Env( Env(..), Q, funSig, unrollT, lazySides, openFields, boxContents, reuseSize, noHeapCredit )
+import Backend.Typed.Env( Env(..), Q, funSig, dataBody, lazySides, openFields, boxContents, reuseSize, noHeapCredit )
 
 type Gamma = M.Map Path Ty
 
@@ -281,7 +281,7 @@ altTypes env t expr
           (Left "incomplete boxed case")
         return ([[A t] | i <- indices, Just t <- [lookup i ts]] ++ maybe [] (const [[A (ASum rest)]]) def)
       (Deref{}, V (VPtr a)) -> return [[A a]]
-      (Unroll{}, A a) -> do b <- unrollT env a
+      (Unroll{}, A a) -> do b <- dataBody env a
                             return [[A b]]
       (Unbox{}, A (ABox s)) -> return [[V s]]
       (Unscalar{}, A (AScalar r)) -> return [[V (VRaw r)]]
@@ -437,7 +437,6 @@ checkReuseTy ty = case ty of
     ALam _ b -> checkReuseTy (A b)
     ALazy l b -> do checkLazy a
                     checkReuseTy (A l) >> checkReuseTy (A b)
-    AMu _ _ b ts -> mapM_ (checkReuseTy . A) (b : ts)
     ACon _ ts -> mapM_ (checkReuseTy . A) ts
     AApp _ ts -> mapM_ (checkReuseTy . A) ts
     AVar _ -> return ()
@@ -496,7 +495,7 @@ inferA env g val
       InjA i a v -> case a of
                       ASum ts | Just t <- lookup i ts -> checkShape a >> checkA env g v t >> return a
                       _ -> Left ("invalid boxed injection into " ++ ppr a)
-      Roll a v -> do b <- unrollT env a
+      Roll a v -> do b <- dataBody env a
                      checkA env g v b
                      return a
       InjLazy d a v -> case a of
