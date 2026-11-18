@@ -100,8 +100,9 @@
     values. A function whose calls may yield (Koka's `isMonType`) returns `Y W`, a `W` or such
     a dummy. `[pure]` injects a value into `Y W` and `[yielded]` is the dummy itself; only
     `[let-yield]` eliminates `Y W`, by testing the flag after its bound expression, so a dummy
-    is never inspected. There is no subtyping: elaboration eta-expands a closure that does not
-    yield where one that may is expected. `Y` occurs only at the top of a type (`Types.wellYield`):
+    is never inspected. There is no subtyping: where a closure that does not yield is expected to
+    possibly yield, elaboration casts it (`[cast-ev]`), or eta-expands it where its parameters or
+    result also need a coercion. `Y` occurs only at the top of a type (`Types.wellYield`):
     of an expression, a binder, or the result of a function type, so a type variable never
     stands for `Y W` and parameters never have one. Its `W` contains no `Y`, credits or cells.
     A variable of type `Y W` is linear, like a cell: it is consumed exactly once, never
@@ -625,8 +626,11 @@ data VExpr
   -- (`unsafe-total`) makes look total. Outside `std/core/hnd`, a value from which it removes
   -- a `Y` is therefore not a dummy, as long as Koka's effect typing holds and its unsafe casts
   -- are used as documented. In `std/core/hnd`, a dummy may pass at a type variable, where it
-  -- is only passed on, duplicated or dropped (its pointers are `box-any`). `[pure]`, not
-  -- `cast-ev`, is the injection into `Y`.
+  -- is only passed on, duplicated or dropped (its pointers are `box-any`). Elaboration also
+  -- adds `Y`s to the results of a function (contravariantly, removes them from the results of
+  -- its parameters) where it is used as one that may yield, such as `(a) -> b` as
+  -- `(a) -> Y b`: it does not yield, so the tests of its callers take the non-yielding branch.
+  -- `[pure]`, not `cast-ev`, is the injection into `Y` at the top of a type.
   | CastEv VType VVal
 
   --   f : ∀ā. (q̄ V̄) -> q W ∈ Σ    Γᵢ ⊢ vᵢ :qᵢ Vᵢ[B̄/ā]
