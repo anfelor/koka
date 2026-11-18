@@ -222,6 +222,9 @@ genV cx val
       Lit lit -> genLit lit
       NoReuse _ _ -> return "kk_reuse_null"
       TyApp v _ -> genV cx v
+      -- every pointer is a `kk_box_t`, `any*` included
+      Up v -> genV cx v
+      Down _ v -> genV cx v
       -- the representation of `Y V` is that of `V`
       Pure v -> genV cx v
       Ptr _ v -> genA cx v

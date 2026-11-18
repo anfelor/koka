@@ -347,9 +347,9 @@ nameHole :: Path
 nameHole = root (newHiddenName "hole")
 
 -- Values `Γ ⊢ v :q t`. A borrowed value is structural: a variable, a global, a literal, `()`,
--- a function, a type application of one of these, or a tuple, injection or pack of borrowed
+-- a function, a type application of one of these, or a tuple, injection, pack or cast of borrowed
 -- values (as in the paper). A unique value is a variable, a context `ctx K`, `()`, a literal
--- of a trivial type, or a tuple, injection or pack of unique values. All other values are owned.
+-- of a trivial type, or a tuple, injection, pack or cast of unique values. All other values are owned.
 --
 -- Boxed values `Γ ⊢ a :q A`; boxed variables occur only as named operands.
 data AVal
@@ -486,6 +486,23 @@ data VVal
   -- The paper's `[inst]`, on pointers so that it preserves the memory layout and applies to a
   -- variable without a boxed one.
   | TyApp VVal [AType]
+
+  --   Γ ⊢ v :q A*                    Γ ⊢ v :q any*
+  --  ──────────────────── [up]       ───────────────────── [down]
+  --   Γ ⊢ up v :q any*                Γ ⊢ down[B] v :q B*
+  --
+  -- Casts to and from the top type `any` (Koka's `any`, an abstract named type, so a value of
+  -- type `any*` can only be passed around), for front ends whose typing the IR cannot express,
+  -- such as erased dependent types. No-ops at run time that keep the mode of their argument:
+  -- every pointer has the uniform representation. `[up]` is safe. `[down]` is unchecked: the
+  -- trust is in where the front end emits it, where the source's typing shows that the value
+  -- is a `B` (for example in the branch of a match that refined an index). Moving the cast is
+  -- harmless, but a destructuring of its result must not be hoisted above that test. There is
+  -- no subtyping, and a deep cast is `down[T⟨B⟩] (up v)`. To match on a downcast with reuse,
+  -- bind it at the owner (`let x : B* = ret (down[B] z)`), as the binders of a destructuring
+  -- of `down[B] z` itself are roots that borrow `z`.
+  | Up VVal
+  | Down AType VVal
 
   --   x : ∀ā. V ∈ Σ
   --  ────────────────────────────── [dup-glob]

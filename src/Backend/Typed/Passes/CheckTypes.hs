@@ -94,6 +94,7 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
       where here = case v of
                      Glob _ ts -> concatMap at ts
                      TyApp _ ts -> concatMap at ts
+                     Down b _ -> at b
                      Context a _ -> at a
                      Ptr a _ -> at a
                      Inj _ t _ -> [t]
@@ -216,6 +217,7 @@ tvarsV bound val
       Ptr a _     -> ftv a
       Pack t ts _ -> ftv t ++ concatMap ftv ts
       TyApp _ ts  -> concatMap ftv ts
+      Down b _    -> ftv b
       Context b _ -> ftv b
       NoReuse _ c -> maybe [] (\(Contents _ p t) -> tvarsV bound p ++ ftv t) c
       _           -> []

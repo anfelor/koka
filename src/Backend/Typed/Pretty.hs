@@ -144,6 +144,8 @@ prettyVal val
       Ptr _ v    -> text "ptr" <+> atomAVal v
       Pack _ ts v -> text "pack" <.> tyArgs ts <+> atomVal v
       TyApp v ts  -> atomVal v <.> tyArgs ts
+      Up v        -> text "up" <+> atomVal v
+      Down b v    -> text "down" <.> tyArgs [b] <+> atomVal v
       DupV v      -> text "dup" <+> atomVal v
       NoReuse n p -> text "no-reuse" <.> int n <.> prettyContents p
       Hole        -> text "hole"
@@ -165,6 +167,8 @@ atomVal v
       DupV _    -> parens (prettyVal v)
       Context _ _ -> parens (prettyVal v)
       Pure _    -> parens (prettyVal v)
+      Up _      -> parens (prettyVal v)
+      Down _ _  -> parens (prettyVal v)
       _         -> prettyVal v
 
 prettyLit :: Lit -> Doc
@@ -321,6 +325,7 @@ shortenV val
       Ptr a v -> Ptr (shortenAT a) (shortenA v)
       Pack t ts v -> Pack (shortenT t) (map shortenAT ts) (shortenV v)
       TyApp v ts -> TyApp (shortenV v) (map shortenAT ts)
+      Down b v -> Down (shortenAT b) (shortenV v)
       Context b v -> Context (shortenAT b) (shortenV v)
       NoReuse n p -> NoReuse n (fmap shortenC p)
       _ -> mapV shortenA shortenV val
