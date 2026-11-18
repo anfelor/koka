@@ -12,7 +12,7 @@ module Backend.Typed.Elab.Representation( rep, boxrep, boxA, shapeLeaves, leafCo
                                         , scalarField, varV, atAny, sumOf
                                         , tapp, injA, caseSum ) where
 
-import Common.NamePrim( nameTpAny )
+import Backend.Typed.Types( atAny )
 import Backend.Typed.Syntax
 import Backend.Typed.Layout( leaves, isEnum )
 import Backend.Typed.Traversal( child )
@@ -29,9 +29,6 @@ sumAlts ts = zip [1..] ts
 sumOf :: [AType] -> AType
 sumOf [a] = a
 sumOf ts = ASum (sumAlts ts)
-
-atAny :: AType
-atAny = ACon nameTpAny []
 
 -- the boxed type that instantiates a type variable for a Koka type argument of type `V` (Koka's
 -- `box`); a closure there takes and returns `boxrep`s of its types (Koka's `boxedFunType`).

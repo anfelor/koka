@@ -171,6 +171,8 @@ uniq u val
       Pack _ _ w -> uniq u w
       Context _ _ -> True
       Pure w -> uniq u w
+      Up w -> uniq u w
+      Down _ w -> uniq u w
       _ -> False
 
 -- a unique result given the unique binders

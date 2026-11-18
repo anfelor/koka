@@ -354,6 +354,8 @@ ownedV env g val
       Ptr _ _ -> children
       Pack _ _ _ -> children
       TyApp _ _ -> children
+      Up _ -> children
+      Down _ _ -> children
       Hole -> return noUse
       Context _ k -> ownedV env g k
       Pure v -> ownedV env g v
@@ -395,6 +397,8 @@ uniqueV env g val
       Pack _ _ w -> uniqueV env g w
       Context _ k -> ownedV env g k
       Pure w -> uniqueV env g w
+      Up w -> uniqueV env g w
+      Down _ w -> uniqueV env g w
       _ -> fail ("unique use of a value that is not unique: " ++ show val)
 
 borrowedV :: Env -> Gamma -> VVal -> L Use
@@ -408,6 +412,8 @@ borrowedV env g val
       Inj _ _ w -> borrowedV env g w
       Tuple vs -> uses (map (borrowedV env g) vs)
       Pack _ _ w -> borrowedV env g w
+      Up w -> borrowedV env g w
+      Down _ w -> borrowedV env g w
       _ -> fail ("borrowed use of a value that is not structural: " ++ show val)
 
 -- closures only have owned parameters

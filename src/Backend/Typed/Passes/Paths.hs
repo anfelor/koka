@@ -147,6 +147,7 @@ renV global ren val
       Ptr a v -> Ptr (tyA a) <$> renA global ren v
       Pack t ts v -> Pack (tyV t) (map tyA ts) <$> renV global ren v
       TyApp v ts -> (`TyApp` map tyA ts) <$> renV global ren v
+      Down b v -> Down (tyA b) <$> renV global ren v
       Context b v -> Context (tyA b) <$> renV global ren v
       NoReuse n p -> pure (NoReuse n (fmap (replaceContents sub) p))
       _ -> descendV (renA global ren) (renV global ren) val

@@ -16,7 +16,7 @@ module Backend.Typed.Layout( leaves, isEnum, CT(..), EnumSize(..), enumBytes, la
                            ) where
 
 import Data.List( foldl', sortOn )
-import Data.Ord( Down(..) )
+import qualified Data.Ord as Ord
 import Backend.Typed.Syntax
 
 -- leaves of a product
@@ -113,7 +113,7 @@ orderFields :: [(Int,CT)] -> [(Int,CT)]
 orderFields fs
   = [f | f@(_,ct) <- fs, scanOf ct > 0, not (rawOf ct)] ++
     [f | f@(_,ct) <- fs, scanOf ct > 0, rawOf ct] ++
-    sortOn (Down . snd . sizeAlign . snd) [f | f@(_,ct) <- fs, scanOf ct == 0, notUnit ct]
+    sortOn (Ord.Down . snd . sizeAlign . snd) [f | f@(_,ct) <- fs, scanOf ct == 0, notUnit ct]
   where
     notUnit CUnit = False
     notUnit _ = True
