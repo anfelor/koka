@@ -131,6 +131,7 @@ renE global ren expr
       Let x t e1 e2 -> Let x (replaceVType sub t) e1 e2
       LetYield x t e1 e2 e3 -> LetYield x (replaceVType sub t) e1 e2 e3
       Yielded t -> Yielded (replaceVType sub t)
+      CastEv t v -> CastEv (replaceVType sub t) v
       Unreachable t -> Unreachable (replaceVType sub t)
       Call f ts vs -> Call f (map (replaceAType sub) ts) vs
       Join r j tvs ps e1 e2 -> Join (mapRecursion (replaceVType sub) r) j tvs [(x,m,replaceVType sub t) | (x,m,t) <- ps] e1 e2

@@ -311,6 +311,7 @@ fipE expr
       Append c d -> operands [c,d]
       Plug c v -> operands [c,v]
       CtxCopy c -> operands [c]
+      CastEv _ v -> operands [v]
       Memoize _ _ _ w -> operands [w]
       _ -> fail ("unexpected expression: " ++ ppr expr)
   where

@@ -47,10 +47,11 @@ rep t
 boxrep :: VType -> VType
 boxrep t = VPtr (rep t)
 
+-- a result that may be the dummy of a yield stays one (`Y (boxrep W)`)
 boxFunA :: AType -> AType
 boxFunA a
   = case a of
-      AFun ps r     -> AFun [(m,boxrep p) | (m,p) <- ps] (boxrep r)
+      AFun ps r     -> AFun [(m,boxrep p) | (m,p) <- ps] (case r of { VYield w -> VYield (boxrep w); _ -> boxrep r })
       AForall tvs b -> AForall tvs (boxFunA b)
       ABox _        -> a
       AScalar _     -> a
@@ -107,6 +108,7 @@ shapeLeaves t
       VReuse _ _ _  -> [ABox t]
       VCtx _ _ _  -> [ABox t]
       VCell _ _   -> [ABox t]
+      VYield _    -> [ABox t]
 
 tapp :: VVal -> [AType] -> VVal
 tapp v []  = v

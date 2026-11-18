@@ -14,13 +14,14 @@ module Backend.Typed.Passes.CheckTypes( checkProgram, checkTypes ) where
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
+import Data.Monoid( Any(..) )
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( descendA, descendB, descendE, descendV, pathOf, scrutVar )
 import Backend.Typed.Types( Types(..) )
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Env( Env, envOf )
-import Backend.Typed.Query( checkE, signature, yieldJoins )
+import Backend.Typed.Query( checkE, signature, noJoins )
 import Backend.Typed.Layout( layout, checkLayout )
 
 checkProgram :: Program -> [String]
@@ -39,6 +40,7 @@ checkLayoutProgram p = concatMap check (programTypes p)
       VSum ts -> concatMap (inner . snd) ts
       VCtx _ a b -> atomic a ++ atomic b
       VCell _ a -> atomic a
+      VYield b -> inner b
       VReuse _ _ d -> maybe [] (\(Contents _ _ s) -> inner s) d
       _ -> []
     atomic a = case a of
@@ -82,6 +84,7 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
                      Let _ t _ _ -> [t]
                      LetYield _ t _ _ _ -> [t]
                      Yielded t -> [t]
+                     CastEv t _ -> [t]
                      Unreachable t -> [t]
                      Join r _ _ ps _ _ -> recResult r ++ map (\(_,_,t) -> t) ps
                      Jump _ ts _ -> concatMap at ts
@@ -199,6 +202,7 @@ tvarsE bound expr
       Let _ t _ _        -> ftv t
       LetYield _ t _ _ _ -> ftv t
       Yielded t          -> ftv t
+      CastEv t _         -> ftv t
       Unreachable t      -> ftv t
       Call _ ts _        -> concatMap ftv ts
       Jump _ ts _        -> concatMap ftv ts
@@ -234,6 +238,7 @@ checkDef :: Env -> Def -> Either String ()
 checkDef env def
   = case def of
       DefFun _ _ _ Borrowed _ _ -> Left "borrowed result"
-      DefFun _ _ args _ res body -> do signature (res : [t | (_,_,t) <- args])
-                                       checkE env (M.fromList [(x,V t) | (x,_,t) <- args]) yieldJoins body res
-      DefVal _ _ t body        -> signature [t] >> checkE env M.empty yieldJoins body t
+      DefFun _ _ _ Unique (VYield _) _ -> Left "unique result that may be the dummy of a yield"
+      DefFun _ _ args _ res body -> do signature [t | (_,_,t) <- args] res
+                                       checkE env (M.fromList [(x,V t) | (x,_,t) <- args]) noJoins body res
+      DefVal _ _ t body        -> signature [] t >> checkE env M.empty noJoins body t

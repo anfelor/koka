@@ -15,7 +15,8 @@ import Data.List( find, sortOn, partition )
 import Data.Maybe( isNothing, listToMaybe )
 import Control.Monad( foldM, unless )
 import Common.Name
-import Common.NamePrim( nameFieldAddrOf, nameCCtxHoleCreate, nameCCtxCreate, nameCCtxExtend, nameCCtxApply, nameCCtxEmpty, nameCCtxCompose, nameCCtxComposeExtend )
+import Common.NamePrim( nameFieldAddrOf, nameCCtxHoleCreate, nameCCtxCreate, nameCCtxExtend, nameCCtxApply, nameCCtxEmpty, nameCCtxCompose, nameCCtxComposeExtend
+                      , nameYielding, nameTrue, nameFalse )
 import Common.Syntax( isDefFun, ParamInfo(..) )
 import qualified Common.Syntax as Syntax
 import Kind.Newtypes
@@ -45,7 +46,7 @@ elabProgram :: Newtypes -> [C.Core] -> C.Core -> (Program,[String],[String])
 elabProgram nt imports core
   = let defs    = map closeDef (filter (not . isContextAccessor) (C.flattenDefGroups (C.coreProgDefs core)))
         isigs   = M.fromList [(n,withModes modes sig) | (n,(tp,isFun,modes)) <- M.toList (importSigs (core:imports)), Right sig <- [typeSig nt tp isFun]]
-        env0    = Env nt S.empty S.empty isigs M.empty S.empty M.empty
+        env0    = Env nt S.empty S.empty isigs M.empty S.empty M.empty VUnit
         (tdefs,tdefErrs) = typeDefs nt
         run (sigs,ds,errs,notes) def
           = let label msg = show (C.defName def) ++ ": " ++ msg
@@ -151,17 +152,29 @@ funSig tp
 
 -- expressions
 
+-- an expression at its own type
 elabExpr :: C.Expr -> E VExpr
-elabExpr expr
+elabExpr e = do t <- vt (typeOf e)
+                elabExprAt t e
+
+-- An expression at the type `t`, which its expressions in tail position take (`result`): the
+-- result of each is coerced there, so that a result that may be the dummy of a yield (`Y W`)
+-- is tested where it is coerced.
+elabExprAt :: VType -> C.Expr -> E VExpr
+elabExprAt t e = withResult t (elabTail e)
+
+-- an expression in tail position, at the type `result` (including the bodies of join points)
+elabTail :: C.Expr -> E VExpr
+elabTail expr
   = case expr of
-      C.Let [] body -> elabExpr body
+      C.Let [] body -> elabTail body
       C.Let (C.DefNonRec (C.Def{ C.defName = j, C.defExpr = lam }) : dgs) body | isJoinName j, Just (tvs,pars,e1) <- splitLam lam
         -> do let linear = linearContexts e1
                   tvs'   = [typevarId tv | tv <- tvs, tvarStar tv]
               (ps,e1') <- withTVars tvs' $
                           do ps <- mapM (\p -> (\t -> (root (getName p),paramMode Own (S.member (getName p) linear),t)) <$> vt (tnameType p)) pars
-                             (,) ps <$> withLocals (map getName pars) (elabExpr e1)
-              Join NonRec j tvs' ps e1' <$> elabExpr (C.Let dgs body)
+                             (,) ps <$> withLocals (map getName pars) (elabTail e1)
+              Join NonRec j tvs' ps e1' <$> elabTail (C.Let dgs body)
       C.App f args | (Just (TName j tp,_),tys) <- splitTypeApp f, isJoinName j, Just (pars,_,_) <- splitFunType (typeOf f)
         -> do tys' <- instArgs tp tys
               (ks,vs) <- unzip <$> mapM (\((_,ptp),arg) -> do t <- vt ptp
@@ -171,36 +184,64 @@ elabExpr expr
         -> elabLet def (C.Let dgs body)
       C.Let (C.DefRec defs : _) _
         -> failE ("local recursive definition: " ++ show (map C.defName defs))
-      C.TypeLam tvs e | not (any tvarStar tvs) -> elabExpr e
-      C.TypeLam tvs e | not (isValue expr) -> elabGen [typevarId tv | tv <- tvs, tvarStar tv] e (typeOf expr)
+      C.TypeLam tvs e | not (any tvarStar tvs) -> elabTail e
+      C.TypeLam tvs e | not (isValue expr) -> elabGen [typevarId tv | tv <- tvs, tvarStar tv] e (typeOf expr) >>= atResult (typeOf expr)
       C.Case [scrut] brs -> elabCase scrut brs
-      C.Var (TName x tp) _ | x == nameUnreachable -> Unreachable <$> vt tp
+      C.Var (TName x _) _ | x == nameUnreachable -> Unreachable <$> result
       C.Case _ _ -> failE "case with multiple scrutinees after matching"
       C.App f args | not (isConApp f) -> elabApp f args (typeOf expr)
       _ -> do (k,v) <- elabVal expr
-              return (k (Ret v))
+              t <- vt (typeOf expr)
+              k <$> retAt t v
+
+-- a value of type `t` at the type `result`
+retAt :: VType -> VVal -> E VExpr
+retAt t v = do r <- result
+               (k,w) <- coerce t r v
+               return (k (Ret w))
+
+-- an expression of the Koka type `tp` at the type `result`
+atResult :: Type -> VExpr -> E VExpr
+atResult tp e = do t <- vt tp
+                   r <- result
+                   coerceExpr t r e
+
+-- Koka's test for a yield, `match yielding() { True -> e₃; False -> e₂ }`: `e₂` and `e₃`
+yieldTest :: C.Expr -> Maybe (C.Expr,C.Expr)
+yieldTest expr
+  = case expr of
+      C.Let [] e -> yieldTest e
+      C.Case [C.App f []] brs | isPrim nameYielding f -> (,) <$> branch nameFalse brs <*> branch nameTrue brs
+      _ -> Nothing
+  where
+    branch c brs = listToMaybe ([e | C.Branch [C.PatCon pc _ _ _ _ _ _ _] [C.Guard _ e] <- brs, getName pc == c]
+                                ++ [e | C.Branch [C.PatWild] [C.Guard _ e] <- brs])
 
 -- The parts of a context under construction are not bound: their uses become parts of the
--- `ctx` value (see `elabCtx`).
+-- `ctx` value (see `elabCtx`). Koka's test for a yield after `val x = e₁` (whose yielding
+-- branch does not use `x`) is a `[let-yield]`, which elaborates `e₁` at `Y V`.
 elabLet :: C.Def -> C.Expr -> E VExpr
 elabLet def body
   = do en <- env
        let x = C.defName def
-       if isFieldAddr en (C.defExpr def) then withHole x Nothing (elabExpr body)
+       if isFieldAddr en (C.defExpr def) then withHole x Nothing (elabTail body)
        else if hasHole en (C.defExpr def)
          then do (k,v) <- elabVal (C.defExpr def)
-                 k <$> withHole x (Just v) (elabExpr body)
+                 k <$> withHole x (Just v) (elabTail body)
        -- Match binds a pattern variable where the source first needs it (`Match.guardChain`):
        -- the field is read there, once. Its binder stays a part of the box (`[fst]`, `[snd]`); a `let`
        -- would bind an owned root and acquire a reference.
        else if fieldAlias en (C.defExpr def)
          then do t <- vt (C.defType def)
                  (k,v) <- elabValAt t (C.defExpr def)
-                 k <$> withFields [(x,(id,v))] (elabExpr body)
-         else do t  <- vt (C.defType def)
-                 e1 <- elabExprAt t (C.defExpr def)
-                 e2 <- withLocals [x] (elabExpr body)
-                 return (Let (root x) t e1 e2)
+                 k <$> withFields [(x,(id,v))] (elabTail body)
+         else do t <- vt (C.defType def)
+                 case yieldTest body of
+                   Just (e2,e3) | not (S.member x (S.map getName (CV.fv e3)))
+                     -> do e1 <- elabExprAt (VYield t) (C.defExpr def)
+                           LetYield (root x) t e1 <$> withLocals [x] (elabTail e2) <*> elabTail e3
+                   _ -> do e1 <- elabExprAt t (C.defExpr def)
+                           Let (root x) t e1 <$> withLocals [x] (elabTail body)
   where
     fieldAlias en (C.Var (TName y _) _) = M.member y (envFields en)
     fieldAlias _ _ = False
@@ -215,17 +256,6 @@ elabGen tvs e tp
                  return (Gen tvs' body)
          _ -> failE ("type abstraction at the monomorphic type " ++ ppr target)
 
-elabExprAt :: VType -> C.Expr -> E VExpr
-elabExprAt t e
-  = do e' <- elabExpr e
-       t0 <- vt (typeOf e)
-       case e' of
-         _ | alphaEq t0 t -> return e'
-         Unreachable _ -> return (Unreachable t)
-         _ -> do r <- fresh "g"
-                 (k,v) <- coerce t0 t (Var r)
-                 return (Let r t0 e' (k (Ret v)))
-
 isConApp :: C.Expr -> Bool
 isConApp (C.Con _ _)     = True
 isConApp (C.TypeApp e _) = isConApp e
@@ -233,16 +263,17 @@ isConApp _               = False
 
 -- applications
 
+-- an application at the type `result`
 elabApp :: C.Expr -> [C.Expr] -> Type -> E VExpr
 elabApp f args resTp
   | isPrim nameCCtxEmpty f
   = do t <- vt resTp
        b <- holeType t
-       return (Ret (Context b Hole))
+       retAt t (Context b Hole)
   | isPrim nameCCtxCreate f, [res,addr] <- args
-  = elabCtx Nothing res addr resTp
+  = elabCtx Nothing res addr resTp >>= atResult resTp
   | isPrim nameCCtxExtend f, [acc,res,addr] <- args
-  = elabCtx (Just (isLinearContextPrim f, acc)) res addr resTp
+  = elabCtx (Just (isLinearContextPrim f, acc)) res addr resTp >>= atResult resTp
   | isPrim nameCCtxApply f, [acc,_] <- args
   = do t <- vt (typeOf acc)
        (a,b) <- case t of
@@ -250,13 +281,13 @@ elabApp f args resTp
                   _ -> failE ("plugging a non-context: " ++ ppr t)
        let shared = not (isLinearContextPrim f)
        callWith (\[c,v] -> do (k,c') <- ctxCopy shared t c
-                              return (k (Plug c' v))) [t, VPtr b] (VPtr a) args resTp
+                              return (k (Plug c' v))) [t, VPtr b] (VPtr a) args
   | isPrim nameCCtxCompose f
   = do t <- vt resTp
        ts@[tc,td] <- mapM (vt . typeOf) args
        callWith (\[c,d] -> do (kc,c') <- ctxCopy True tc c
                               (kd,d') <- ctxCopy True td d
-                              return (kc (kd (Append c' d')))) ts t args resTp
+                              return (kc (kd (Append c' d')))) ts t args
   | any (`isPrim` f) [nameCCtxHoleCreate, nameFieldAddrOf]
   = failE "a hole outside of a context"
   -- extends with the hole of a context that may be shared, without copying its path
@@ -270,10 +301,10 @@ elabApp f args resTp
                  e <- env
                  let copies = [m == Unique && captured e arg | ((m,_),arg) <- zip ps args] ++ repeat False
                  callWith (\vs -> do (ks,vs') <- unzip <$> sequence (zipWith3 ctxCopy copies params vs)
-                                     return (compose ks (Call g tysD vs'))) params res args resTp
+                                     return (compose ks (Call g tysD vs'))) params res args
          _ -> do (k1,fv) <- elabVal f
                  (params,res) <- funType f
-                 body <- callWith (applyFun (AFun params res) fv) (map snd params) res args resTp
+                 body <- callWith (applyFun (AFun params res) fv) (map snd params) res args
                  return (k1 body)
 
 globalOf :: C.Expr -> E (Maybe (Name,Sig,Type,[Type]))
@@ -340,15 +371,15 @@ funType f = do t <- vt (typeOf f)
                  VPtr (AFun params res) -> return (params,res)
                  _ -> failE ("expecting a function value: " ++ ppr t)
 
-callWith :: ([VVal] -> E VExpr) -> [VType] -> VType -> [C.Expr] -> Type -> E VExpr
-callWith call params res args resTp
+-- A call of the arguments `args` at the types `params`, whose result of type `res` is
+-- coerced to the type `result` (`coerceExpr`, which tests a result that may be the dummy of a
+-- yield where Koka does not).
+callWith :: ([VVal] -> E VExpr) -> [VType] -> VType -> [C.Expr] -> E VExpr
+callWith call params res args
   = do (ks,vs) <- unzip <$> mapM (\(p,arg) -> elabValAt p arg) (zip params args)
-       expect <- vt resTp
-       r <- fresh "r"
-       (kr,vr) <- coerce res expect (Var r)
+       expect <- result
        app <- call vs
-       let body = if alphaEq res expect then app else Let r res app (kr (Ret vr))
-       return (compose ks body)
+       compose ks <$> coerceExpr res expect app
 
 splitTypeApp :: C.Expr -> (Maybe (TName,C.VarInfo),[Type])
 splitTypeApp expr
@@ -400,7 +431,7 @@ elabVal expr
               if null tys' then return (k1,v)
                 else do a <- ptrType (typeOf e)
                         expect <- vt (typeOf expr)
-                        (k2,v') <- coerce (VPtr (instA a tys')) expect (tapp v tys')
+                        (k2,v') <- coerceInst (VPtr (instA a tys')) expect (tapp v tys')
                         return (k1 . k2,v')
       C.TypeLam tvs e | not (any tvarStar tvs) -> elabVal e
       C.Lam pars _ body -> do t <- vt (typeOf expr)
@@ -501,9 +532,9 @@ elabNamed e x tp info tys
                                            let a = AFun [(Owned,p) | p <- params] res
                                            f <- if any ((/= Owned) . fst) ps then Ptr a <$> etaOwned x tysD params res
                                                                              else return (tapp (Ptr (forallA tvs (AFun ps r)) (Fun x)) tysD)
-                                           coerce (VPtr a) expect f
+                                           coerceInst (VPtr a) expect f
                    SigVal _ _     -> do (tysD,t) <- instVal x sig tp tys
-                                        coerce t expect (Glob x tysD)
+                                        coerceInst t expect (Glob x tysD)
                    SigCon _ _ _   -> failE ("constructor used as a variable: " ++ show x)
 
 -- closures only have owned parameters ([fun]): wrap a function that borrows (or takes a unique argument)
@@ -516,7 +547,7 @@ instLocal :: VVal -> Type -> [AType] -> VType -> E (K,VVal)
 instLocal v _ [] _ = return (id,v)
 instLocal v tp tys' expect
   = do a <- ptrType tp
-       coerce (VPtr (instA a tys')) expect (TyApp v tys')
+       coerceInst (VPtr (instA a tys')) expect (TyApp v tys')
 
 ptrType :: Type -> E AType
 ptrType tp = do t <- vt tp
@@ -727,8 +758,9 @@ isWild :: C.Pattern -> Bool
 isWild C.PatWild = True
 isWild _         = False
 
+-- the body of a branch, in tail position
 branchBody :: C.Branch -> E VExpr
-branchBody (C.Branch _ [C.Guard _ e]) = elabExpr e
+branchBody (C.Branch _ [C.Guard _ e]) = elabTail e
 branchBody _ = failE "unexpected guards after matching"
 
 elabLitCase :: VVal -> [C.Branch] -> E VExpr
@@ -784,7 +816,7 @@ lazyCase vargs brs z cons
            named = [c | (_,c) <- thunks, any (matches c) brs]
            def = wildBody brs
        e1 <- sumCase vargs brs s stricts def
-       e2 <- if null named && isNothing def then Unreachable <$> vt (typeOf (head brs))
+       e2 <- if null named && isNothing def then Unreachable <$> result
              else sumCase vargs brs l thunks def
        return (IfWhnf z (s,e1) (l,e2))
 

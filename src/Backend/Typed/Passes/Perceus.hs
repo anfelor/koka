@@ -46,7 +46,8 @@
   and its cell is a new owned root. So `lazy-eval-locked` takes the fields of
   the lazy value under evaluation without duplicating them, as Koka's Parc does. A cell is linear: it is never copied, and a
   dead cell is an error (it must be filled by `memoize`, or freed in the unique branch of a
-  test, where it is a credit). The branches of `if-unique` own the same variables.
+  test, where it is a credit). So is a value that may be the dummy of a yield (`Y V`), which is
+  never duplicated or dropped. The branches of `if-unique` own the same variables.
 
   The body of a join point is closed and processed like the body of a function; a jump
   is like a call, but nothing follows it, so owned variables are only dropped before it.
@@ -111,6 +112,7 @@ dropNames pe xs e = foldM step e (reverse xs)
     step body x = do t <- tyOfVar pe x
                      case t of
                        V (VCell _ _) -> fail ("a cell that is not filled: " ++ show x)
+                       V (VYield _) -> fail ("an unused value that may be the dummy of a yield: " ++ show x)
                        _ -> return ()
                      let discard = dropValue (trivialTy (peEnv pe)) (fresh "d") (scopeOf (M.keys (peGamma pe))) x t body
                      case (t,partsOf pe x) of
@@ -201,6 +203,7 @@ consumedWith expr z x
       Append{}   -> True
       Plug{}     -> True
       CtxCopy{}  -> True
+      CastEv{}   -> True
       Memoize{}  -> True
       App f _    -> x /= f
       Jump{}     -> True
@@ -343,6 +346,7 @@ percE' pe owned expr
       Append c d -> operation [(Unique,c),(Unique,d)] (\[c',d'] -> Append c' d')
       Plug c v -> operation [(Unique,c),(Owned,v)] (\[c',v'] -> Plug c' v')
       CtxCopy c -> operation [(Owned,c)] (\[c'] -> CtxCopy c')
+      CastEv t v -> operation [(Owned,v)] (\[v'] -> CastEv t v')
       Memoize c d i v -> operation [(Owned,c),(Owned,v)] (\[c',v'] -> Memoize c' d i v')
       _ -> fail "unexpected destructuring form"
   where
@@ -370,6 +374,7 @@ dupsOf pe xs = concat <$> mapM one xs
                case t of
                  _ | trivialTy (peEnv pe) t -> return []
                  V (VCell _ _) -> fail ("duplication of a cell: " ++ show x)
+                 V (VYield _) -> fail ("duplication of a value that may be the dummy of a yield: " ++ show x)
                  _ -> return [x]
 
 -- the dups at the start of the bound expression of a `let` come before the `let`, so that

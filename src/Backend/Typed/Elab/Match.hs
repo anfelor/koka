@@ -19,12 +19,17 @@
   The rows after a guard that can fail are matched again wherever the guard ends
   up. If that duplicates tests, they become a join point of their own instead
   (`fallback`), which every failure of the rows before jumps to.
+
+  Koka's test for a yield, `match yielding() { True -> e₃; False -> e₂ }`, is already a
+  one-level match: it stays a match on `yielding()` (without the unused aliases of its
+  patterns), which elaboration turns into `[let-yield]`.
 -}
 module Backend.Typed.Elab.Match( matchCore ) where
 
 import Data.List( nubBy, findIndex, partition )
 import qualified Data.Set as S
 import Common.Name
+import Common.NamePrim( nameYielding )
 import Backend.Typed.Elab.Common( nameUnreachable, isJoinName )
 import Common.Unique
 import Kind.Newtypes( Newtypes, newtypesLookupAny )
@@ -59,12 +64,29 @@ matchExpr nt expr
       TypeLam tvs e     -> TypeLam tvs <$> go e
       TypeApp e tps     -> (\e' -> TypeApp e' tps) <$> go e
       Let dgs body      -> Let <$> mapM (matchDefGroup nt) dgs <*> go body
+      Case [scrut] brs | Just brs' <- yieldTest scrut brs
+                        -> Case [scrut] <$> mapM (matchBranch nt) brs'
       Case scruts brs   -> do scruts' <- mapM go scruts
                               brs'    <- mapM (matchBranch nt) brs
                               matchCase (Env nt (typeOf expr) (unreachable (typeOf expr))) scruts' brs'
       _                 -> return expr
   where
     go = matchExpr nt
+
+-- the branches of a test for a yield, with their patterns `True`, `False` or `_`
+yieldTest :: Expr -> [Branch] -> Maybe [Branch]
+yieldTest scrut brs
+  = case scrut of
+      App (Var y _) [] | getName y == nameYielding -> mapM simple brs
+      _ -> Nothing
+  where
+    simple (Branch [p] [Guard t e]) | isExprTrue t = (\p' -> Branch [p'] [Guard t e]) <$> pat e p
+    simple _ = Nothing
+    pat e p = case p of
+                PatVar x q | not (tnamesMember x (freeLocals e)) -> pat e q
+                PatCon{ patConPatterns = [] } -> Just p
+                PatWild -> Just p
+                _ -> Nothing
 
 matchBranch :: Newtypes -> Branch -> Unique Branch
 matchBranch nt (Branch pats guards)
