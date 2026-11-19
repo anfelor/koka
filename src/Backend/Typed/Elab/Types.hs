@@ -16,7 +16,7 @@ import Control.Monad( forM_, unless, when )
 import Data.List( partition )
 import Common.Syntax( dataDefIsOpen )
 import Kind.Newtypes
-import Type.Type( typevarId, conInfoName, conInfoIsLazy, dataInfoIsLazy )
+import Type.Type( ConInfo, typevarId, conInfoName, conInfoParams, conInfoIsLazy, dataInfoIsLazy )
 import Backend.Typed.Syntax
 import Backend.Typed.Env( reuseSize )
 import Backend.Typed.Elab.TypeInfo
@@ -42,7 +42,13 @@ typeDef nt info
   = do body <- refBody nt info
        when (isLazyInfo info) (lazyDef nt info)
        let params = map typevarId (filter tvarStar (dataInfoParams info))
-       return (TypeDef (dataInfoName info) params body)
+       labels <- mapM (conLabel nt (paramArgs info)) (dataInfoConstrs info)
+       return (TypeDef (dataInfoName info) params body labels)
+
+conLabel :: Newtypes -> [AType] -> ConInfo -> Tr ConLabel
+conLabel nt vargs con
+  = do fields <- if null (conInfoParams con) then return [] else conFieldTypes nt vargs con
+       return (ConLabel (conInfoName con) (take (length fields) (conFieldNames con)))
 
 -- A lazy type `L ~> S` has strict constructors, which come before its lazy ones (the thunks,
 -- among them the indirection), and every thunk is a box with a block, which evaluation locks.

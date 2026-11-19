@@ -215,9 +215,17 @@ data Ty = A AType | V VType
           deriving (Eq,Show)
 
 -- a datatype declaration `data T⟨ā⟩ := A` (see `AType`). A lazy datatype has a lazy sum as its
--- body. Without a body (`int`, `string`, open types, ...) the named type is abstract.
-data TypeDef = TypeDef{ tdefName :: Name, tdefParams :: [TVar], tdefBody :: Maybe AType }
+-- body. Without a body (`int`, `string`, open types, ...) the named type is abstract. The labels
+-- of its constructors name the paths into its values (see `Path`).
+data TypeDef = TypeDef{ tdefName :: Name, tdefParams :: [TVar], tdefBody :: Maybe AType, tdefLabels :: [ConLabel] }
              deriving (Show)
+
+-- The label of a constructor: its name and the names of its fields (as in `conFieldNames`). A
+-- datatype has the labels of its constructors in the order of their tags, which start at 1.
+-- Printed paths name an alternative of a value of the datatype by its constructor, and a field
+-- of the alternative by the name of the field.
+data ConLabel = ConLabel{ lblCon :: Name, lblFields :: [Field] }
+              deriving (Show)
 
 type TypeDefs = M.Map Name TypeDef
 
@@ -279,8 +287,9 @@ instance Eq Con where
 instance Ord Con where
   compare _ _ = EQ
 
+-- shown by its stem, which is unique within its datatype
 instance Show Con where
-  show (Con c) = show (unqualify c)
+  show (Con c) = show (unqualifyFull c)
 
 -- an alternative without a constructor of its own, named by its tag
 tagCon :: Int -> Con

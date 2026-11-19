@@ -48,7 +48,7 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import qualified Common.NameMap as NM
 import Kind.Newtypes( newtypesTypeDefs )
-import Backend.Typed.Pretty( prettyElided )
+import Backend.Typed.Pretty( prettyProgram )
 
 import Compile.Options
 import Compile.Module( Definitions(..), Module(..), modCoreImports, defsFromModules )
@@ -284,10 +284,10 @@ codeGenTyped term flags imports mod
   = do let newtypes = defsNewtypes (defsFromModules (mod:imports))
            (tprog,errors,warnings) = typedFromCore (parcReuse flags) newtypes (mapMaybe modCore imports) 1000000 (fromJust (modCore mod))
            outDir                  = dirname (modIfacePath mod)
-       when (showTyped flags) $ termInfo term (prettyElided tprog)
+       when (showTyped flags) $ termInfo term (prettyProgram tprog)
        -- the final IR, for debugging; written before validation so that it is kept on failure
        createDirectoryIfMissing True outDir
-       writeDocW 120 (joinPath outDir (TC.ktFileName (modName mod) ++ ".ir")) (prettyElided tprog <.> linebreak)
+       writeDocW 120 (joinPath outDir (TC.ktFileName (modName mod) ++ ".ir")) (prettyProgram tprog <.> linebreak)
        mapM_ (\(phase,msg) -> termInfo term (text ("typed " ++ phase ++ ": " ++ msg))) (errors ++ warnings)
        -- Warnings (such as FIP diagnostics) are advisory, like the frontend's FIP warnings.
        -- Errors invalidate the lowering boundary.
