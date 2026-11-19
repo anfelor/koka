@@ -275,7 +275,7 @@ wrapFun tvs itvs ps r qs s v
 -- the lambda's scope first, so its parameters cannot capture names in later arguments.
 -- A top-level function is called directly rather than through its static closure. Any
 -- other function value of type `a` is bound first, so that the closure that `[app]`
--- consumes is a part of a variable, which can be duplicated (`[dup]` is on pointers).
+-- consumes is a child of a variable, which can be duplicated (`[dup]` is on pointers).
 applyFun :: AType -> VVal -> [VVal] -> E VExpr
 applyFun _ (Ptr _ (Lam ps _ body)) args
   = do xs <- mapM (const (fresh "arg")) args

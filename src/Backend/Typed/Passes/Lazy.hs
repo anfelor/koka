@@ -160,7 +160,7 @@ cellE cs expr
     operands e = getConst (descendE (Const . S.singleton) (Const . fvV) (\_ _ -> Const S.empty) e)
 
 -- Lock the box `b` of a lazy alternative of the lazy value `x` in `e`, whose uses of `x` become
--- uses of the cell `b.credit`. The box is a part of `x`, so only `x` itself is renamed.
+-- uses of the cell `b.credit`. The box is a descendant of `x`, so only `x` itself is renamed.
 lock :: (Path,Int,AType) -> Path -> VExpr -> L VExpr
 lock (x,n,a) b e
   = do let c = child b SCredit

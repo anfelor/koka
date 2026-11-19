@@ -245,7 +245,7 @@ eqContents p0 q0 = go (collapse p0) (collapse q0)
       (Down a x, Down b y) -> eqA a b && go x y
       _ -> p == q
 
--- The normal form of a description: a value built from the parts of a variable is that
+-- The normal form of a description: a value built from the children of a variable is that
 -- variable, as in `(z.f₀, ..., z.fₙ₋₁) = z` and `injᵢ z.injᵢ = z`.
 collapse :: VVal -> VVal
 collapse v

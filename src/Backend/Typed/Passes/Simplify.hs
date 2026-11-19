@@ -12,7 +12,7 @@
   Pattern matching binds many aliases (such as the whole scrutinee); an alias that
   is still live keeps the scrutinee alive, so destructuring could not take ownership.
   Roots are unique throughout a definition. Substitution renames descendant paths
-  and descriptions too, and reuses destructured parts already in scope.
+  and descriptions too, and reuses destructured children already in scope.
 
   Before that, join points with at most one jump are inlined: the jump becomes a binding
   of the parameters to the arguments (aliases that copy propagation then removes), and

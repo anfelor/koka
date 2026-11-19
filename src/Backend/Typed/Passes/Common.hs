@@ -150,8 +150,8 @@ mentionedA a = case a of
           _ -> []
 
 -- Discard an owned value by destructuring it down to boxed operands and credits.
--- Parts use their canonical paths, reusing those already in scope. Sequencing
--- a sum or existential drop needs a fresh root from the caller. Parts of a trivial
+-- Children use their canonical paths, reusing those already in scope. Sequencing
+-- a sum or existential drop needs a fresh root from the caller. Children of a trivial
 -- type (`trivialTy`) are not discarded.
 dropValue :: Monad m => (Ty -> Bool) -> m Path -> Scope -> Path -> Ty -> VExpr -> m VExpr
 dropValue trivial _ _ _ t e
@@ -161,16 +161,16 @@ dropValue trivial fresh scope x t e
       A _ -> return (Drop x e)
       V v -> case v of
         VPtr a -> do let y = child x SDeref
-                     return (reuseParts scope (Deref (Var x) y (Drop y e)))
+                     return (reuseChildren scope (Deref (Var x) y (Drop y e)))
         VProd{} -> do let fields = [f | f@(_,_,s) <- fieldsAt x v, not (trivial (V s))]
-                          parts = M.union (scopeOf [y | (y,_,_) <- fields]) scope
-                      body <- foldM (\rest (y,_,s) -> dropValue trivial fresh parts y (V s) rest) e (reverse fields)
+                          inner = M.union (scopeOf [y | (y,_,_) <- fields]) scope
+                      body <- foldM (\rest (y,_,s) -> dropValue trivial fresh inner y (V s) rest) e (reverse fields)
                       return (projectAll scope x fields body)
         VSum ts -> do u <- fresh
                       alts <- mapM dropAlt (zip [0..] ts)
                       -- A continuation can bind roots. Keep it outside the case,
                       -- rather than copying its binders into every alternative.
-                      return (Let u VUnit (reuseParts scope (CaseV (Var x) alts)) e)
+                      return (Let u VUnit (reuseChildren scope (CaseV (Var x) alts)) e)
           where
             dropAlt (i,(c,s)) = do let y = child x (SInjV i c)
                                    body <- dropValue trivial fresh (M.insert y Nothing scope) y (V s) (Ret UnitV)
@@ -184,7 +184,7 @@ dropValue trivial fresh scope x t e
                     bs = take (length tvs) [start,start-1 ..]
                     s' = inst tvs (map AVar bs) s
                 body <- dropValue trivial fresh (M.insert y Nothing scope) y (V s') (Ret UnitV)
-                return (Let u VUnit (reuseParts scope (Unpack (Var x) bs y body)) e)
+                return (Let u VUnit (reuseChildren scope (Unpack (Var x) bs y body)) e)
         VReuse _ _ _ -> return (Free x e)
         VCtx _ _ _ -> return (Drop x e)
         -- a cell or a value that may be the dummy of a yield is linear and never dropped, which
@@ -196,7 +196,7 @@ dropValue trivial fresh scope x t e
 
 -- project fields of a product variable around an expression, reusing those in scope
 projectAll :: Scope -> Path -> [(Path,Int,VType)] -> VExpr -> VExpr
-projectAll scope x fields body = foldr (\(y,i,_) e -> reuseParts scope (Proj (Var x) i y e)) body fields
+projectAll scope x fields body = foldr (\(y,i,_) e -> reuseChildren scope (Proj (Var x) i y e)) body fields
 
 -- A `[let-yield]` as the `let` that is taken if no effect yields, and its yielding branch,
 -- which is cold.
@@ -210,7 +210,7 @@ yieldingAlts expr
 altBodies :: [(Int,Path,VExpr)] -> [VExpr]
 altBodies alts = [e | (_,_,e) <- sortOn (\(i,_,_) -> i) alts]
 
--- the part of a value at steps from it, if the value shows it
+-- the descendant of a value at steps from it, if the value shows it
 project :: VVal -> [Step] -> Maybe VVal
 project v [] = Just v
 project v (s:ss)
@@ -221,7 +221,7 @@ project v (s:ss)
       (Pack _ _ w, SPack) -> project w ss
       _ -> Nothing
 
--- the known value of a variable: the part of the known value of the longest prefix of its path
+-- the known value of a variable: the descendant of the known value of the longest prefix of its path
 valueAt :: M.Map Path VVal -> Path -> Maybe VVal
 valueAt vals (Path x ss)
   = case [w | k <- [length ss, length ss - 1 .. 0], Just v <- [M.lookup (Path x (take k ss)) vals], Just w <- [project v (drop k ss)]] of
@@ -372,7 +372,7 @@ substAType sub a = case substVType sub (VPtr a) of
 substName :: Subst -> Path -> Path
 substName sub x = maybe x varOf (sub x)
 
--- The parts in scope, and (for a residual boxed sum) its excluded tags.
+-- The variables in scope, and (for a residual boxed sum) its excluded tags.
 -- Keep this information lexical: the same path can be bound in separate branches.
 type Scope = M.Map Path (Maybe [Int])
 
@@ -402,16 +402,16 @@ knownAlt scope expr = do
                 , all (\s -> M.member (foldl child z s) scope) ss
                 , [SRest] `notElem` ss || M.lookup (child z SRest) scope == Just (Just indices)]
 
--- Reuse parts while constructing a destructuring form.
-reuseParts :: Scope -> VExpr -> VExpr
-reuseParts scope expr = case knownAlt scope expr of
+-- Reuse children already in scope while constructing a destructuring form.
+reuseChildren :: Scope -> VExpr -> VExpr
+reuseChildren scope expr = case knownAlt scope expr of
   Just i -> snd (getConst (descendB (const (Const [])) (const (Const [])) (\bs e -> Const [(bs,e)]) expr) !! i)
   Nothing -> expr
 
 -- Retarget a newly constructed destructuring and its continuation. Existing root
 -- binders (including those of non-variable scrutinees) keep their identity.
-nameParts :: VExpr -> VExpr
-nameParts expr = runIdentity (descendB Identity Identity branch expr)
+nameChildren :: VExpr -> VExpr
+nameChildren expr = runIdentity (descendB Identity Identity branch expr)
   where
     branch bs e = let xs = [fromMaybe x (pathOf (scrutVar expr) step) | (x,step) <- bs]
                       ren = M.fromList [(x,y) | ((x,_),y) <- zip bs xs, x /= y]
@@ -433,7 +433,7 @@ substEIn = substStep substEIn
 substStep :: SubstExpr -> SubstExpr
 substStep = substStepWith id
 
--- A copy also gives each root binder a new name. Canonical parts and all
+-- A copy also gives each root binder a new name. Canonical children and all
 -- description annotations follow the same substitution as ordinary operands.
 substStepWith :: (Path -> Path) -> SubstExpr -> SubstExpr
 substStepWith renameRoot recur scope sub expr
@@ -494,7 +494,7 @@ renameV = replaceV . M.map Var
 renameE :: M.Map Path Path -> VExpr -> VExpr
 renameE = replaceE . M.map Var
 
--- rename a variable and its parts, also where they are bound
+-- rename a variable and its descendants, also where they are bound
 renamePath :: Path -> Path -> VExpr -> VExpr
 renamePath x y = renameE (M.singleton x y)
 

@@ -33,7 +33,7 @@ keptLeaves rt t v
 
 -- The value of each leaf of a value of type `t`, as a value in normal form (`collapse`) and
 -- the index of a leaf in it: equal descriptions have equal bits. A variable of a product or
--- existential type is expanded into the variables at its parts. Sums stay whole fields, so
+-- existential type is expanded into its children. Sums stay whole fields, so
 -- their inactive slots are kept safe.
 leafValues :: VType -> VVal -> [(VVal,Int)]
 leafValues t v
