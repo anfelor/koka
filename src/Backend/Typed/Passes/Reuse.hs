@@ -29,7 +29,7 @@ import Data.Maybe( fromMaybe )
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( boxTag, child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut )
-import Backend.Typed.Passes.Common( trivialTy, defGamma, NameSupply, dropValue, freshFor, freshPathFrom, perBody, reuseParts, scopeOf )
+import Backend.Typed.Passes.Common( trivialTy, defGamma, NameSupply, dropValue, freshFor, freshPathFrom, perBody, reuseChildren, scopeOf )
 import Backend.Typed.Env( Env, envOf, boxContents, reuseSize, dataBody, M, ask, asks, evalM, get, gets, liftE, local, modify, put, state )
 import Backend.Typed.Query( Gamma, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, inferE, noJoins )
 
@@ -166,7 +166,7 @@ ruE expr
                   Left _ | Right b@(ABox s) <- dataBody env a, Right _ <- reuseSize s
                     -> do let y = child x SRoll
                           g <- asks reGamma
-                          reuseParts (scopeOf (M.keys g)) . Unroll x y <$> bind [(y,A b)] (ruE (Drop y e))
+                          reuseChildren (scopeOf (M.keys g)) . Unroll x y <$> bind [(y,A b)] (ruE (Drop y e))
                   Left _ -> Drop x <$> ruE e
       Free r e
         -> do t <- typeOfName r

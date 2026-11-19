@@ -229,7 +229,7 @@ elabLet def body
          then do (k,v) <- elabVal (C.defExpr def)
                  k <$> withHole x (Just v) (elabTail body)
        -- Match binds a pattern variable where the source first needs it (`Match.guardChain`):
-       -- the field is read there, once. Its binder stays a part of the box (`[fst]`, `[snd]`); a `let`
+       -- the field is read there, once. Its binder stays a child of the box (`[fst]`, `[snd]`); a `let`
        -- would bind an owned root and acquire a reference.
        else if fieldAlias en (C.defExpr def)
          then do t <- vt (C.defType def)

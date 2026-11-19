@@ -179,7 +179,7 @@ injAStep i (Path x ss)
       (SInjA _ c : _) -> SInjA i c
       _ -> error ("Backend.Typed.Traversal.injAStep: the binder " ++ show (Path x ss) ++ " is not an alternative")
 
--- the other part of the parent of a part of a box
+-- the other child of the parent of a child of a box
 sibling :: Step -> Maybe Step
 sibling s
   = case s of
@@ -187,7 +187,7 @@ sibling s
       SCredit   -> Just SContents
       _         -> Nothing
 
--- A part without a sibling is all of its parent (in its alternative), so a use of it is a use
+-- A child without a sibling is all of its parent (in its alternative), so a use of it is a use
 -- of the parent. A field of a product has siblings, as products have at least two fields where
 -- elaboration generates them (`[proj]`).
 canonical :: Path -> Path
@@ -197,11 +197,11 @@ canonical (Path x ss) = Path x (reverse (dropWhile (not . hasSibling) (reverse s
                      SField _ _ -> True
                      _ -> isJust (sibling s)
 
--- `x` is `y` or one of its parts
+-- `x` is `y` or one of its descendants
 within :: Path -> Path -> Bool
 within (Path x ss) (Path y ts) = x == y && ts `isPrefixOf` ss
 
--- the steps from a variable to one of its parts
+-- the steps from a variable to one of its descendants
 stepsFrom :: Path -> Path -> [Step]
 stepsFrom (Path _ ts) (Path _ ss) = drop (length ts) ss
 

@@ -9,14 +9,14 @@
 
 {- Drop specialization (after Perceus, before reuse).
 
-  Perceus takes the parts of the contents of a box `z` that it gives up by duplicating them
+  Perceus takes the descendants of the contents of a box `z` that it gives up by duplicating them
   and dropping the box:
 
     dup x₁; ..; dup xₙ; drop z; e
 
-  If the box is unique, the dups and the drop cancel out: the parts are taken without
+  If the box is unique, the dups and the drop cancel out: the descendants are taken without
   reference counting, and the block becomes a reuse credit, which still contains them. The
-  other parts of the contents are dropped. Both branches leave the parts owned, and continue
+  other descendants of the contents are dropped. Both branches leave them owned, and continue
   at a join point that takes the credit:
 
     join j(r : ◇n[k; z.contents : V]) = free r; e
@@ -29,7 +29,7 @@
   original code. Freeing the credit releases the block, unless `Reuse` uses it for an
   allocation in `e`.
 
-  As in Koka's Parc, a part that is under a pointer in the contents is duplicated in the
+  As in Koka's Parc, a descendant that is under a pointer in the contents is duplicated in the
   unique branch as well, and the box on the way to it is dropped, which is specialized in turn: the
   unique branch of a nested pattern reuses the inner block too.
 -}
@@ -67,7 +67,7 @@ dsE expr
            -> compose (map Dup others) <$> specialize (zip inside ways) z s n e
          _ -> typedChildren dsE expr
 
--- The dups of parts of the contents of a box `z` (among other dups) that Perceus makes
+-- The dups of descendants of the contents of a box `z` (among other dups) that Perceus makes
 -- before it drops `z`, with the type of the contents and the size of the block.
 transferOf :: Gamma -> VExpr -> Maybe ([Path],[Path],Path,VType,Int,VExpr)
 transferOf g expr
@@ -82,13 +82,13 @@ transferOf g expr
     dupsThenDrop (Drop z e) = Just ([],z,e)
     dupsThenDrop _ = Nothing
 
--- How the unique branch takes a duplicated part of the contents
+-- How the unique branch takes a duplicated descendant of the contents
 data Way = Moved             -- passed on
-         | Covered           -- duplicated, as a part of another duplicated part
+         | Covered           -- duplicated, as a descendant of another duplicated one
          | Under Path Path   -- duplicated, under a pointer in the contents: the pointer and the
                              -- box on the way (its dereference, through destructurings that keep it)
 
--- the way of a duplicated part `x` of the contents `p` with duplicated parts `xs`, unless
+-- the way of a duplicated descendant `x` of the contents `p` with duplicated descendants `xs`, unless
 -- there is no box on the way to it under a pointer.
 wayTo :: Path -> [Path] -> Path -> Maybe Way
 wayTo p xs x
@@ -99,10 +99,10 @@ wayTo p xs x
                                  (bs,_:_) -> Just (Under (foldl child p as) (foldl child p (as ++ bs)))
                                  _ -> Nothing
 
--- In the unique branch, a part under a pointer is duplicated, and its box is dropped after
--- the dups of its parts (so that the drop is specialized as well).
+-- In the unique branch, a descendant under a pointer is duplicated, and its box is dropped after
+-- the dups of its descendants (so that the drop is specialized as well).
 specialize :: [(Path,Way)] -> Path -> VType -> Int -> VExpr -> D VExpr
-specialize parts z s n e
+specialize ways z s n e
   = do (_,g) <- ask
        j <- state (freshNameFrom "dsj")
        r <- fresh "r"
@@ -110,19 +110,19 @@ specialize parts z s n e
            r' = child z SCredit
            payload = Just (Contents (Just (boxTag z)) (Var p) s)
            t = VReuse MaybeEmpty n payload
-           moved = [x | (x,Moved) <- parts]
-           unders = [(q,b) | (_,Under q b) <- parts]
-           covered = [Dup x | (x,Covered) <- parts]
-           dups b = [Dup x | (x,Under _ b') <- parts, b' == b]
+           moved = [x | (x,Moved) <- ways]
+           unders = [(q,b) | (_,Under q b) <- ways]
+           covered = [Dup x | (x,Covered) <- ways]
+           dups b = [Dup x | (x,Under _ b') <- ways, b' == b]
        g' <- liftE (unboxRuGamma g z)
        taken <- withGamma g' (dropExcept (moved ++ nub (map fst unders)) p s
                   (compose covered (compose [compose (dups b) . Drop b | b <- nub (map snd unders)] (Jump j [] [Var r']))))
        unique <- dsE (UnboxRu z taken)
-       let shared = compose (map (Dup . fst) parts) (Drop z (Jump j [] [NoReuse n payload]))
+       let shared = compose (map (Dup . fst) ways) (Drop z (Jump j [] [NoReuse n payload]))
        body <- bind [(r,V t)] (dsE (Free r e))
        return (Join NonRec j [] [(r,Owned,t)] body (IsUnique z unique shared))
 
--- Drop `v : t` except for its parts `xs`, which the unique branch passes on.
+-- Drop `v : t` except for its descendants `xs`, which the unique branch passes on.
 dropExcept :: [Path] -> Path -> VType -> VExpr -> D VExpr
 dropExcept xs v t e
   = do (env,g) <- ask

@@ -39,7 +39,7 @@ import Data.Maybe( listToMaybe )
 import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( TestSide(..), child, descendE, failingTo, fvE, testSides, within )
-import Backend.Typed.Passes.Common( mapAll, mapLams, defGamma, typedChildren, Scope, bindScope, defScope, knownAlt, nameParts, perDef, renameE, reuseParts, scopeOf )
+import Backend.Typed.Passes.Common( mapAll, mapLams, defGamma, typedChildren, Scope, bindScope, defScope, knownAlt, nameChildren, perDef, renameE, reuseChildren, scopeOf )
 import Backend.Typed.Env( Env, envOf, M, ask, evalM, liftE )
 import Backend.Typed.Query( Gamma, inferVar )
 import Backend.Typed.Layout( shapeIsHeap )
@@ -74,7 +74,7 @@ partition v ts alts def
         e1 <- partition x ls left (defaultFor ls)
         e2 <- partition y rs right (defaultFor rs)
         return (SplitA v k (x,e1) (y,e2))
-      _ -> return (nameParts (CaseA v alts def))
+      _ -> return (nameChildren (CaseA v alts def))
   where
     selected = [i | (i,_,_) <- alts]
     -- A sparse default must fit wholly on one side of a pointer test, so that
@@ -102,11 +102,11 @@ splitAtIndex ts
                  | otherwise = Nothing
 
 -- Partitioning changes the paths of branch binders. A continuation may already
--- destructure that same part; select its established alternative instead of
+-- destructure that same variable; select its established alternative instead of
 -- binding the path twice.
 reuseEstablished :: Scope -> VExpr -> VExpr
 reuseEstablished scope e
-  | Just _ <- knownAlt scope e = reuseEstablished scope (reuseParts scope e)
+  | Just _ <- knownAlt scope e = reuseEstablished scope (reuseChildren scope e)
   | otherwise = runIdentity (descendE Identity (Identity . value) branch e)
   where
     branch xs b = Identity (reuseEstablished (bindScope e xs scope) b)

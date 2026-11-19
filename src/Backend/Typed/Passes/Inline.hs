@@ -10,8 +10,8 @@
 {- Inlining of structural values (the last pass).
 
   A structural value (variables, pairs, injections, `()` and literals) is rebuilt from its
-  parts at no cost, so `let x = ret v` becomes `e[x := v]`, at any type and however often `x`
-  is used: a destructuring of `x` is that of `v`, which selects its alternative. A part of `x` is the part of `v` at its steps
+  children at no cost, so `let x = ret v` becomes `e[x := v]`, at any type and however often `x`
+  is used: a destructuring of `x` is that of `v`, which selects its alternative. A descendant of `x` is the descendant of `v` at its steps
   (`valueAt`). A name denotes the same value in the whole definition, so the substitution
   applies everywhere, including the descriptions that name `x` out of its scope.
 

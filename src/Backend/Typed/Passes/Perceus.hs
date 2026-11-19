@@ -23,13 +23,13 @@
   - where `z` is consumed (passed on, or moved by a `let` or a destructuring), it is
     duplicated before. A use of an alias of `z` (see below) needs `z` itself (`needs`), so `z`
     stays owned and the consumer gets another reference to `z` instead;
-  - where `z` is dead and not a pointer, its parts that are bound take over its ownership
+  - where `z` is dead and not a pointer, its children that are bound take over its ownership
     (`z.fst` and `z.snd` once `z` is destructured);
   - where `z` is a dead pointer, a live alias of `z` (its pointer at a boxed type, from
     `[deref]`, `[unroll]`, `[case-a]` or `[split-a]`) takes over its ownership. Otherwise the
     variables are duplicated and `z` is dropped. Where a variable is in the contents of a box `y`
     on the way to it (an alias of `z` or `z` itself), `y` is dropped instead, which drop
-    specialization turns into a move of the duplicated parts (and `y` into a reuse credit) if `y`
+    specialization turns into a move of the duplicated descendants (and `y` into a reuse credit) if `y`
     is unique.
   So a test such as `is-red(r)` does not duplicate `r`, and a nested pattern reuses the
   inner block where the outer value is dead. Reading the contents of a box is always
@@ -64,7 +64,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Build( K, compose )
 import Backend.Typed.Traversal( Destruct(..), child, descendA, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fieldsAt, fvA, fvE, fvV, scrutVar, stepsFrom, takesContents, within )
-import Backend.Typed.Passes.Common( isRead, paramModes, prefixes, trivialTy, NameSupply, dropValue, freshFor, perDef, freshPathFrom, nameParts, projectAll, scopeOf )
+import Backend.Typed.Passes.Common( isRead, paramModes, prefixes, trivialTy, NameSupply, dropValue, freshFor, perDef, freshPathFrom, nameChildren, projectAll, scopeOf )
 import Backend.Typed.Env( Env(..), envOf, M, evalM, get, gets, lift, liftE, put, state, StateT, runStateT )
 import Backend.Typed.Query( Gamma, bindAll, inferV, altTypes, lockGamma, uniqueGamma )
 import Backend.Typed.Types( inst, isPtr )
@@ -104,8 +104,8 @@ typeOfV :: PEnv -> VVal -> P VType
 typeOfV pe v = liftE (inferV (peEnv pe) (peGamma pe) v)
 
 -- Discard variables using their types, expanding unboxed aggregates into moves. An
--- aggregate whose parts are bound is discarded by discarding its parts. A product
--- may have only one projection in scope, so expand its drop to cover both parts.
+-- aggregate whose children are bound is discarded by discarding its children. A product
+-- may have only one projection in scope, so expand its drop to cover all fields.
 dropNames :: PEnv -> [Path] -> VExpr -> P VExpr
 dropNames pe xs e = foldM step e (reverse xs)
   where
@@ -115,14 +115,14 @@ dropNames pe xs e = foldM step e (reverse xs)
                        V (VYield _) -> fail ("an unused value that may be the dummy of a yield: " ++ show x)
                        _ -> return ()
                      let discard = dropValue (trivialTy (peEnv pe)) (fresh "d") (scopeOf (M.keys (peGamma pe))) x t body
-                     case (t,partsOf pe x) of
+                     case (t,childrenOf pe x) of
                        (V VProd{},_) -> discard
                        (_,ps@(_:_)) | not (pointer t) -> dropNames pe ps body
                        _ -> discard
 
--- the parts of a variable that are bound and not of a trivial type
-partsOf :: PEnv -> Path -> [Path]
-partsOf pe z
+-- the children of a variable that are bound and not of a trivial type
+childrenOf :: PEnv -> Path -> [Path]
+childrenOf pe z
   = [x | (x,t) <- takeWhile ((`within` z) . fst) (M.toAscList (M.dropWhileAntitone (<= z) (peGamma pe)))
        , length (stepsFrom z x) == 1, not (trivialTy (peEnv pe) t)]
 
@@ -178,12 +178,12 @@ percE pe owned expr
 percE pe owned expr
   = do let live = fvE expr
            deps = [(x,z) | x <- S.toList live, Just z <- [ownerOf pe owned x]]
-           -- Release unrelated dead owners before settling the live borrowed parts:
+           -- Release unrelated dead owners before settling the live borrowed descendants:
            -- dropping one can make another box unique when its fields are taken.
            dead = owned `S.difference` (live `S.union` S.fromList (map snd deps))
            retained = owned `S.difference` dead
        body <- case [z | (_,z) <- deps, not (S.member z live)] of
-         -- each branch of a destructuring of a part of `z` settles `z` with what it uses (a
+         -- each branch of a destructuring of a descendant of `z` settles `z` with what it uses (a
          -- lock has no branches)
          (z:_) | Just x <- scrutVar expr, isNothing (takesContents expr), x /= z, x `within` z -> percE' pe retained expr
                | otherwise -> settle pe retained expr z [x | (x,z') <- deps, z' == z]
@@ -227,7 +227,7 @@ neededAlt :: [Path] -> VExpr -> VarSet
 neededAlt xs e = needs (S.filter (\y -> not (any (y `within`) xs)) (fvE e))
 
 -- The owned `z` is dead but the variables `xs` borrowed from it are still needed (see the
--- top): its bound parts, its shortest live alias or the contents of a box take over its
+-- top): its bound children, its shortest live alias or the contents of a box take over its
 -- ownership, and the other variables are duplicated.
 settle :: PEnv -> VarSet -> VExpr -> Path -> [Path] -> P VExpr
 settle pe owned expr z xs
@@ -240,7 +240,7 @@ settle pe owned expr z xs
                if null missing
                  then percE pe (S.union owned' (S.fromList [y | (y,_,_) <- fields])) expr
                  else percE pe owned (projectAll M.empty z missing expr)
-           | not (pointer t) -> percE pe (S.union owned' (S.fromList (partsOf pe z))) expr
+           | not (pointer t) -> percE pe (S.union owned' (S.fromList (childrenOf pe z))) expr
          (y:ys) -> percE pe (S.insert (foldr shorter y ys) owned') expr
          [] -> let discard = case [p | x <- xs, Just p <- [contentsOn x]] of
                                (Path r ss:_) -> return . Drop (Path r (init ss))
@@ -279,7 +279,7 @@ percE' pe owned expr
   | Just ds <- destructVOf expr
   = atomic pe owned (dsScrut ds) (needs (restFv ds)) $ \pe1 own1 z ->
     do t <- typeOfV pe1 z
-       let expr' = nameParts (dsBuild ds z (map snd (dsAlts ds)))
+       let expr' = nameChildren (dsBuild ds z (map snd (dsAlts ds)))
        case destructVOf expr' of
          Just ds' -> do tss <- liftE (altTypes (peEnv pe1) (V t) expr')
                         dsBuild ds' z <$> destruct pe1 own1 (valName z) expr' [zip xs ts | ((xs,_),ts) <- zip (dsAlts ds') tss] (map snd (dsAlts ds'))
@@ -335,8 +335,8 @@ percE' pe owned expr
       Lock z e
         -> do unless (S.member z owned) (fail ("lock of a box that is not owned: " ++ show z))
               g' <- liftE (lockGamma (peGamma pe) z)
-              let parts = [b | b@(x,_) <- M.toList g', x `elem` [child z SContents, child z SCredit]]
-                  owned' = S.delete z owned `S.union` ownedOf pe parts
+              let children = [b | b@(x,_) <- M.toList g', x `elem` [child z SContents, child z SCredit]]
+                  owned' = S.delete z owned `S.union` ownedOf pe children
               Lock z <$> percE pe{ peGamma = g' } owned' e
       Dup x e -> Dup x <$> percE pe (S.insert x owned) e
       CaseLit v alts def
@@ -357,7 +357,7 @@ percE' pe owned expr
 
 -- Duplicate the variables `xs` in place for an expression, which takes the new references as
 -- owned; `k` comes between the duplications and the expression. A variable of a trivial
--- type needs no references, and a cell is never duplicated. A part of another of the
+-- type needs no references, and a cell is never duplicated. A descendant of another of the
 -- variables is not duplicated: it is borrowed from the duplicated one (the owned variables
 -- never overlap).
 withDups :: PEnv -> VarSet -> [Path] -> (VExpr -> P VExpr) -> VExpr -> P VExpr

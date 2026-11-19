@@ -16,16 +16,16 @@
   parameter, or a binder of a destructuring of a value that is not a variable) holds a
   reference that may only be inspected.
 
-  The variables at the steps from a variable are its parts: a reference to a variable is one
-  reference to each of its parts (all fields of a product, the contents and the credit of a
-  box, and the only part at any other step), so consuming a part takes it out of its parent,
-  and a parent is consumed once all of its parts are. The binder of `[deref]`, `[unroll]`,
+  The variables one step below a variable are its children: a reference to a variable is one
+  reference to each of its children (all fields of a product, the contents and the credit of a
+  box, and the only child at any other step), so consuming a child takes it out of its parent,
+  and a parent is consumed once all of its children are. The binder of `[deref]`, `[unroll]`,
   `[case-a]` or `[split-a]` of a boxed value is the pointer of its scrutinee, and that of
-  `[unpack]` is its scrutinee, so consuming or testing it consumes or tests the scrutinee (`key`). So does a part whose
+  `[unpack]` is its scrutinee, so consuming or testing it consumes or tests the scrutinee (`key`). So does a child whose
   siblings are of a trivial type, which is determined from the type of the parent: a `[case-open]`
   binds only its fields, not the product around them. In an alternative whose binder of a trivial type is all of
   the scrutinee (`Nothing`), the scrutinee needs no references. A destructuring of a variable
-  therefore needs no mode: it only reads the scrutinee, and its alternatives consume the parts
+  therefore needs no mode: it only reads the scrutinee, and its alternatives consume the children
   they take over. `Unscalar` copies the trivial contents of a scalar into a root, so its mode
   matters: an owned read consumes the scalar. The binders of a destructuring of a value that is
   not a variable are borrowed roots, which borrow the variables of the value for the whole
@@ -33,12 +33,12 @@
 
   `dup x` gives `x` one more reference under the same name, so a variable may hold several:
   the references are counted (`Counts`), where a reference to a variable stands for one to
-  each of its parts (`refine`). After `dup z.left; drop z`, for example, `z.left` still holds
-  a reference, and so does `z.left` after a `let` that consumes the other parts of `z`.
+  each of its children (`refine`). After `dup z.left; drop z`, for example, `z.left` still holds
+  a reference, and so does `z.left` after a `let` that consumes the other children of `z`.
 
   A unique variable is owned and holds the only reference to its block, so `UnboxRu` may
   take its contents and keep its block as a credit: it splits `z` into its contents and its
-  block `z.credit`, which the body consumes as the parts of `z` (`z` itself is out of
+  block `z.credit`, which the body consumes as the children of `z` (`z` itself is out of
   scope). `CopyRu` only reads the block of `z` and binds a copy of it as a new root. `Lock`
   is checked like `UnboxRu`, but needs an owned box, and its block is a cell. A cell is
   linear: it is owned and not trivial, so it must be consumed (as `Check` rejects a dup or a
@@ -75,7 +75,7 @@
   any number of times. A jump is checked like a call that also passes the captured variables.
 
   Descriptions need no check here: a root is bound only once in a definition (`CheckTypes`)
-  and the variables at its paths always denote its parts, so a name in a description denotes
+  and the variables at its paths always denote its descendants, so a name in a description denotes
   the same value everywhere. Only a jump binds variables again, the parameters of its join
   point, which descriptions in their types do not name (`[join]`), and descriptions do not
   cross definitions, as signatures of functions and closures carry none (`Query.signature`).
@@ -101,13 +101,13 @@ import Backend.Typed.Query( Gamma, bindAll, inferV, inferA, inferVar, inferAVar,
 -- join point the variables it captures
 type Owners = M.Map Path Mode
 
--- the parts recorded where a destructuring binds a part of their parent (a path denotes the same
--- part in the whole definition, see `Syntax.Path`): those of a trivial type, and the fields of
--- each product
-data Parts = Parts{ ptTrivial :: S.Set Path, ptFields :: M.Map Path [Path] }
+-- the children recorded where a destructuring binds a child of their parent (a path denotes the
+-- same child in the whole definition, see `Syntax.Path`): those of a trivial type, and the fields
+-- of each product
+data Children = Children{ chTrivial :: S.Set Path, chFields :: M.Map Path [Path] }
 
 -- numbers of references to variables (`key`) that do not overlap, without zeros; a reference
--- to a variable is one to each of its parts (`refine`)
+-- to a variable is one to each of its children (`refine`)
 type Counts = M.Map Path Int
 
 -- How a term uses variables: the references it consumes (negative for those it creates with
@@ -116,7 +116,7 @@ type Counts = M.Map Path Int
 -- ends in `unreachable`, which consumes all other references (`uDiverges`).
 data Use = Use{ uNet :: Counts, uPeak :: Counts, uBorrowed :: S.Set Path, uUnique :: S.Set Path, uDiverges :: Bool }
 
-type L a = M Owners Parts a
+type L a = M Owners Children a
 
 -- the modes of the parameters of the join points in scope, and the variables they capture
 -- with their modes
@@ -133,7 +133,7 @@ checkDef env def
         -> run (M.fromList [(x,V t) | (x,_,t) <- args]) (params env args) q body
       DefVal _ _ _ body -> run M.empty [] Owned body
   where
-    run g ps q body = evalM (closed ps (checkE env g M.empty q body)) M.empty (Parts S.empty M.empty)
+    run g ps q body = evalM (closed ps (checkE env g M.empty q body)) M.empty (Children S.empty M.empty)
 
 -- the parameters that are not of a trivial type
 params :: Env -> [(Path,Mode,VType)] -> [(Path,Mode)]
@@ -151,20 +151,20 @@ destructed g z@(Path _ zs) bs
 
 -- references
 
--- the other parts of the parent of a variable that are not of a trivial type
-siblingsOf :: Parts -> Path -> [Path]
+-- the other children of the parent of a variable that are not of a trivial type
+siblingsOf :: Children -> Path -> [Path]
 siblingsOf tr p@(Path x ss@(_:_))
-  = [q | q <- others, S.notMember q (ptTrivial tr)]
+  = [q | q <- others, S.notMember q (chTrivial tr)]
   where
     parent = Path x (init ss)
     others = case last ss of
-               SField _ _ -> [q | q <- M.findWithDefault [] parent (ptFields tr), q /= p]
+               SField _ _ -> [q | q <- M.findWithDefault [] parent (chFields tr), q /= p]
                s -> [child parent t | Just t <- [sibling s]]
 siblingsOf _ _ = []
 
--- A part without siblings (that are not of a trivial type) is all of its parent, so a use of
+-- A child without siblings (that are not of a trivial type) is all of its parent, so a use of
 -- it is a use of the parent: references are counted for the parent.
-key :: Parts -> Path -> Path
+key :: Children -> Path -> Path
 key tr p@(Path x ss)
   | not (null ss), null (siblingsOf tr p) = key tr (Path x (init ss))
   | otherwise = p
@@ -172,39 +172,40 @@ key tr p@(Path x ss)
 keyOf :: Path -> L Path
 keyOf x = gets (\tr -> key tr x)
 
--- the parts of `p` on the way to a variable `q` below it, which together make up `p`
-partsToward :: Parts -> Path -> Path -> [Path]
-partsToward tr p@(Path _ ss) (Path _ ts) = go p (drop (length ss) ts)
+-- the children of the variables on the way from `p` to a variable `q` below it, which together
+-- make up `p`
+childrenToward :: Children -> Path -> Path -> [Path]
+childrenToward tr p@(Path _ ss) (Path _ ts) = go p (drop (length ss) ts)
   where
     go v [] = [v]
     go v (s:rest) = [key tr q | q <- siblingsOf tr (child v s)] ++ go (child v s) rest
 
 -- Count the references to a variable with one of the `keys` (or another variable of the
--- counts) below it as references to its parts.
-refine :: Parts -> [Path] -> Counts -> Counts
+-- counts) below it as references to its children.
+refine :: Children -> [Path] -> Counts -> Counts
 refine tr keys m
   = case [(p,q) | p <- M.keys m, q <- keys ++ M.keys m, q /= p, q `within` p] of
-      ((p,q):_) -> refine tr keys (M.filter (/= 0) (M.unionWith (+) (M.delete p m) (M.fromList [(r,m M.! p) | r <- partsToward tr p q])))
+      ((p,q):_) -> refine tr keys (M.filter (/= 0) (M.unionWith (+) (M.delete p m) (M.fromList [(r,m M.! p) | r <- childrenToward tr p q])))
       [] -> m
 
--- Count the references to all parts of a variable as references to the variable. Like
+-- Count the references to all children of a variable as references to the variable. Like
 -- `[own-pair]` and `[own-child]` of the paper, read bottom-up, this happens only where a
--- destructuring binds the parts, so that alternatives that take a variable apart differently
+-- destructuring binds the children, so that alternatives that take a variable apart differently
 -- agree on it.
-rollUp :: Parts -> Counts -> Counts
+rollUp :: Children -> Counts -> Counts
 rollUp tr m
   = case [(p,qs,n) | (p,n) <- M.toList m, let qs = siblingsOf tr p, not (null qs), all ((== Just n) . (`M.lookup` m)) qs] of
       ((p@(Path x ss),qs,n):_) -> rollUp tr (M.insert (key tr (Path x (init ss))) n (foldr M.delete m (p:qs)))
       [] -> m
 
-plus :: Parts -> Counts -> Counts -> Counts
+plus :: Children -> Counts -> Counts -> Counts
 plus tr a b = M.filter (/= 0) (M.unionWith (+) (refine tr (M.keys b) a) (refine tr (M.keys a) b))
 
-minus :: Parts -> Counts -> Counts -> Counts
+minus :: Children -> Counts -> Counts -> Counts
 minus tr a b = plus tr a (M.map negate b)
 
--- the larger number of references to each part (a missing one is 0)
-upper :: Parts -> Counts -> Counts -> Counts
+-- the larger number of references to each variable (a missing one is 0)
+upper :: Children -> Counts -> Counts -> Counts
 upper tr a b = M.filter (> 0) (M.unionWith max (refine tr ks a) (refine tr ks b))
   where
     ks = M.keys a ++ M.keys b
@@ -266,7 +267,7 @@ leave xs u
        forM_ (M.toList peak) $ \(p,n) ->
          when (mine p && n > M.findWithDefault 0 p (refine tr [p] held)) (fail ("use of a consumed variable: " ++ show p))
        forM_ (S.toList (uUnique u)) $ \p -> forM_ zs $ \(z,m) ->
-         when (p `within` z && partMode tr z m p /= Unique)
+         when (p `within` z && childMode tr z m p /= Unique)
            (fail ("unique use of a variable that is not unique: " ++ show p))
        return (Use (M.filterWithKey (\p _ -> not (mine p)) left) (M.filterWithKey (\p _ -> not (mine p)) peak)
                    (S.filter (not . mine) (uBorrowed u)) (S.filter (not . mine) (uUnique u)) (uDiverges u))
@@ -290,20 +291,21 @@ closed ps check
 -- variables
 
 -- The mode of a variable `x` below an owner `z` of mode `m`, as in the structural rules of the
--- paper: a part that is all of `z` (`key`) has the mode of `z`, and any other part is at most
+-- paper: a descendant that is all of `z` (`key`) has the mode of `z`, and any other is at most
 -- owned. In particular, the contents of a unique box are not unique, as they are not all of
 -- it: only the box holds the only reference to its block (the paper's `[box]`).
-partMode :: Parts -> Path -> Mode -> Path -> Mode
-partMode tr z m x
+childMode :: Children -> Path -> Mode -> Path -> Mode
+childMode tr z m x
   | m == Unique && key tr x /= key tr z = Owned
   | otherwise = m
 
--- the mode of a variable: that of its part of the longest variable on its path that is an owner
+-- the mode of a variable: its mode as a descendant of the longest variable on its path that is
+-- an owner
 ownerMode :: Path -> L Mode
 ownerMode x
   = do os <- ask
        tr <- get
-       case [partMode tr p m x | p <- x : reverse (prefixes x), Just m <- [M.lookup p os]] of
+       case [childMode tr p m x | p <- x : reverse (prefixes x), Just m <- [M.lookup p os]] of
          (m:_) -> return m
          [] -> fail ("unbound variable " ++ show x)
 
@@ -469,7 +471,7 @@ checkE env g js q expr
       Jump j _ vs -> case M.lookup j js of
                      Just (ms,caps) -> args caps ms vs
                      Nothing -> fail ("jump to unknown join point " ++ show j)
-      -- the captured variables that are not parts of other captured variables, including those
+      -- the captured variables that are not descendants of other captured variables, including those
       -- of the join points that the body jumps to
       Join NonRec j _ ps e1 e2
                         -> do let fvs = S.toList (S.union (fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps])
@@ -510,7 +512,7 @@ checkE env g js q expr
                            u2 <- before (consume env g r) (checkE env g js q e2)
                            before (readVar env g r) (branches [u1, u2])
       -- a unique use of `z` that splits it into its contents and its block `z.credit`, which
-      -- the body consumes as parts of `z`
+      -- the body consumes as children of `z`
       UnboxRu z e
         -> do g' <- liftE (unboxRuGamma g z)
               u <- uniqueName env g z
@@ -545,8 +547,8 @@ checkE env g js q expr
                             [inspect env g x | (x,Borrowed) <- caps])
     -- A variable is captured unique if the body uses it as unique (the jump then uses it as
     -- unique), borrowed if the body does not consume it, and owned otherwise, once for each
-    -- reference that the body consumes, at the parts it consumes them (the body may consume
-    -- one part more often than another). (An owned variable that is captured borrowed is not
+    -- reference that the body consumes, at the children it consumes them (the body may consume
+    -- one child more often than another). (An owned variable that is captured borrowed is not
     -- consumed by the jump, which its scope then rejects.)
     captured :: Use -> Path -> L [(Path,Mode)]
     captured u x
@@ -570,7 +572,7 @@ notLiveAcrossYield g es
                  VYield _ -> True
                  _ -> False
 
--- The binders of a destructuring of a variable are its parts, which the scrutinee only reads.
+-- The binders of a destructuring of a variable are its children, which the scrutinee only reads.
 -- The binders of a destructuring of another value are new borrowed roots.
 destruct :: Env -> Gamma -> Joins -> Mode -> VVal -> [([(Path,Ty)],VExpr)] -> L Use
 destruct env g js q v alts
@@ -590,13 +592,13 @@ destruct env g js q v alts
                   where
                     scrutinee | trivialVar env g z = return noUse
                               | otherwise = readVar env g z
-                    -- The parts of a trivial type need no references. A binder of a trivial type
+                    -- The children of a trivial type need no references. A binder of a trivial type
                     -- that is all of `z` (see `key`) makes `z` trivial in its alternative.
                     alt zc bs e
                       = do let ts = [x | (x,t) <- bs, trivialTy env t]
                                fields = [(p,fieldsAt p t) | Just (p,t) <- [destructed g z bs]]
-                           modify (\tr -> Parts (S.unions [ptTrivial tr, S.fromList ts, S.fromList [y | (_,fs) <- fields, (y,_,u) <- fs, trivialTy env (V u)]])
-                                                (M.union (ptFields tr) (M.fromList [(p,[y | (y,_,_) <- fs]) | (p,fs@(_:_)) <- fields])))
+                           modify (\tr -> Children (S.unions [chTrivial tr, S.fromList ts, S.fromList [y | (_,fs) <- fields, (y,_,u) <- fs, trivialTy env (V u)]])
+                                                (M.union (chFields tr) (M.fromList [(p,[y | (y,_,_) <- fs]) | (p,fs@(_:_)) <- fields])))
                            tr <- get
                            u <- checkE env (bindAll bs g) js q e
                            tr' <- get

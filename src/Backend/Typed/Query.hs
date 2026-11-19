@@ -171,7 +171,7 @@ inferExpr env g js expr
                                 let self = M.insert j (caps,tvs,[p | (_,_,p) <- ps],t)
                                 checkE env (bindAll [(x,V p) | (x,_,p) <- ps] g) js{ jsPoints = self M.empty } e1 t
                                 t <$ checkE env g js{ jsPoints = self (jsPoints js) } e2 t
-      -- the captured variables must still be in scope (`[unbox-ru]` and `[lock]` split a box into its parts)
+      -- the captured variables must still be in scope (`[unbox-ru]` and `[lock]` split a box into its children)
       Jump j ts vs -> case M.lookup j (jsPoints js) of
                      Just (caps,tvs,ps,t) -> do forM_ (S.toList caps) $ \x ->
                                                   unless (M.member x g) (Left ("jump to " ++ show j ++ ", which captures " ++ show x ++ ", out of its scope"))

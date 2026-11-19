@@ -11,7 +11,7 @@
   `ExpandReuse`).
 
   The test that makes a credit (Lean's `reset`) leaves it empty in the shared branch. `DropSpec`
-  makes the test the scope of a join point that takes the credit (besides the parts that it
+  makes the test the scope of a join point that takes the credit (besides the variables that it
   passes on, and the credits that `Reuse` adds):
 
     join j(ȳ,r : ◇n[k; z.contents : V]) = e
