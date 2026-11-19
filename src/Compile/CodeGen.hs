@@ -276,7 +276,7 @@ codeGenJS term flags sequential entry outBase core
 
 
 {---------------------------------------------------------------
-  Typed backend check
+  Typed C code generation
 ---------------------------------------------------------------}
 
 codeGenTyped :: Terminal -> Flags -> [Module] -> Module -> IO ()
@@ -284,31 +284,28 @@ codeGenTyped term flags imports mod
   = do let newtypes = defsNewtypes (defsFromModules (mod:imports))
            (tprog,errors,warnings) = typedFromCore (parcReuse flags) newtypes (mapMaybe modCore imports) 1000000 (fromJust (modCore mod))
            outDir                  = dirname (modIfacePath mod)
-       when (showTyped flags) $ termInfo term (prettyProgram tprog)
        -- the final IR, for debugging; written before validation so that it is kept on failure
        createDirectoryIfMissing True outDir
        writeDocW 120 (joinPath outDir (TC.ktFileName (modName mod) ++ ".ir")) (prettyProgram tprog <.> linebreak)
        mapM_ (\(phase,msg) -> termInfo term (text ("typed " ++ phase ++ ": " ++ msg))) (errors ++ warnings)
        -- Warnings (such as FIP diagnostics) are advisory, like the frontend's FIP warnings.
        -- Errors invalidate the lowering boundary.
-       when (typedC flags && not (null errors)) $
+       unless (null errors) $
          raiseIO "typed backend validation failed; C generation stopped"
-       when (typedC flags) $
-         do let cores   = mapMaybe modCore (mod:imports)
-                externs = M.fromList [(Core.externalName x, TC.External (Core.externalFormat x) (Core.externalType x)) | c <- cores, x@(Core.External{}) <- Core.coreProgExternals c]
-                ktHeader m = TC.ktFileName m ++ ".h"
-                cenv    = TC.CEnv (modName mod)
-                                  ([moduleNameToPath (modName mod) ++ ".h"] ++ map (ktHeader . modName) imports)
-                                  (map (TC.ktInitName . modName) imports)
-                                  externs newtypes (map snd (NM.toList (newtypesTypeDefs newtypes)) ++ [info | c <- cores, Core.TypeDefGroup tds <- Core.coreProgTypeDefs c, Core.Data info <- tds])
-                                  -- as the C backend (`Backend.C.FromCore.genTopGroup`)
-                                  (S.fromList [Core.defName d | Core.DefNonRec d <- Core.coreProgDefs (fromJust (modCore mod)),
-                                                                Core.defInline d == InlineAlways || Core.isInlineable 5 d])
-                (hdr,csrc,errs) = TC.cgenModule cenv tprog
-            unless (null errs) $ raiseIO ("typed C generation failed: " ++ intercalate "\n" errs)
-            writeFile (joinPath outDir (ktHeader (modName mod))) hdr
-            writeFile (joinPath outDir (TC.ktFileName (modName mod) ++ ".c")) csrc
-            mapM_ (\err -> termInfo term (text ("typed cgen: " ++ err))) errs
+       let cores   = mapMaybe modCore (mod:imports)
+           externs = M.fromList [(Core.externalName x, TC.External (Core.externalFormat x) (Core.externalType x)) | c <- cores, x@(Core.External{}) <- Core.coreProgExternals c]
+           ktHeader m = TC.ktFileName m ++ ".h"
+           cenv    = TC.CEnv (modName mod)
+                             ([moduleNameToPath (modName mod) ++ ".h"] ++ map (ktHeader . modName) imports)
+                             (map (TC.ktInitName . modName) imports)
+                             externs newtypes (map snd (NM.toList (newtypesTypeDefs newtypes)) ++ [info | c <- cores, Core.TypeDefGroup tds <- Core.coreProgTypeDefs c, Core.Data info <- tds])
+                             -- as the C backend (`Backend.C.FromCore.genTopGroup`)
+                             (S.fromList [Core.defName d | Core.DefNonRec d <- Core.coreProgDefs (fromJust (modCore mod)),
+                                                           Core.defInline d == InlineAlways || Core.isInlineable 5 d])
+           (hdr,csrc,errs) = TC.cgenModule cenv tprog
+       unless (null errs) $ raiseIO ("typed C generation failed: " ++ intercalate "\n" errs)
+       writeFile (joinPath outDir (ktHeader (modName mod))) hdr
+       writeFile (joinPath outDir (TC.ktFileName (modName mod) ++ ".c")) csrc
 
 -- The typed backend uses a separate entry point, but its modules are compiled
 -- by the same per-module action and linked by the same linker as regular C.
