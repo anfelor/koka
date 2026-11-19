@@ -320,7 +320,7 @@ moduleCodeGen mainEntries parsedMap tcheckedMap optimizedMap codegenMap
                   mbEntry <- getMainEntry (defsGamma defs) mainEntries mod
                   seqIO   <- sequentialIO
                   -- the typed backend only generates C, and the Core of other targets differs (e.g. closures for TRMC on js)
-                  when (isTargetC (targetFromFlags flags) && (checkTyped flags || showTyped flags || typedC flags)) $
+                  when (isTargetC (targetFromFlags flags) && typedC flags) $
                     do allImports <- moduleWaitForImports True optimizedMap [] (modImportNames mod)
                        pooledIO $ codeGenTyped term flags allImports mod
                   link    <- pooledIO $ codeGen term flags seqIO
