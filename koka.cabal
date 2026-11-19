@@ -30,6 +30,7 @@ library
       Backend.C.ParcReuseSpec
       Backend.CSharp.FromCore
       Backend.JavaScript.FromCore
+      Backend.Typed.Annotate
       Backend.Typed.CGen.CGen
       Backend.Typed.CGen.Koka
       Backend.Typed.CGen.Layout
@@ -48,6 +49,7 @@ library
       Backend.Typed.Env
       Backend.Typed.Layout
       Backend.Typed.Lazies
+      Backend.Typed.Parse
       Backend.Typed.Passes.Anf
       Backend.Typed.Passes.CheckFip
       Backend.Typed.Passes.CheckLinear

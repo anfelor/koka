@@ -216,7 +216,7 @@ data Ty = A AType | V VType
 
 -- a datatype declaration `data T⟨ā⟩ := A` (see `AType`). A lazy datatype has a lazy sum as its
 -- body. Without a body (`int`, `string`, open types, ...) the named type is abstract. The labels
--- of its constructors name the paths into its values (see `Path`).
+-- of its constructors name the paths into its values (see `Path`); an abstract type has none.
 data TypeDef = TypeDef{ tdefName :: Name, tdefParams :: [TVar], tdefBody :: Maybe AType, tdefLabels :: [ConLabel] }
              deriving (Show)
 
