@@ -16,7 +16,7 @@ import Data.Maybe( isNothing, listToMaybe )
 import Control.Monad( foldM, unless )
 import Common.Name
 import Common.NamePrim( nameFieldAddrOf, nameCCtxHoleCreate, nameCCtxCreate, nameCCtxExtend, nameCCtxApply, nameCCtxEmpty, nameCCtxCompose, nameCCtxComposeExtend
-                      , nameYielding, nameTrue, nameFalse )
+                      , nameYielding, nameTrue, nameFalse, nameEffectOpen )
 import Common.Syntax( isDefFun, ParamInfo(..) )
 import qualified Common.Syntax as Syntax
 import Kind.Newtypes
@@ -37,14 +37,14 @@ import Backend.Typed.Elab.Representation
 import Backend.Typed.Elab.Monad
 import Backend.Typed.Elab.Coerce
 import Backend.Typed.Elab.Lazy( whnfTests )
-import Backend.Typed.Elab.Common( isValue, linearContexts, isLinearContextPrim, nameUnreachable, isJoinName )
+import Backend.Typed.Elab.Common( isValue, identityCast, isPrim, linearContexts, isLinearContextPrim, nameUnreachable, isJoinName )
 import Backend.Typed.Pretty( ppr )
 
 -- programs
 
 elabProgram :: Newtypes -> [C.Core] -> C.Core -> (Program,[String],[String])
 elabProgram nt imports core
-  = let defs    = map closeDef (filter (not . isContextAccessor) (C.flattenDefGroups (C.coreProgDefs core)))
+  = let defs    = map closeDef (filter (not . isLeftOut) (C.flattenDefGroups (C.coreProgDefs core)))
         isigs   = M.fromList [(n,withModes modes sig) | (n,(tp,isFun,modes)) <- M.toList (importSigs (core:imports)), Right sig <- [typeSig nt tp isFun]]
         env0    = Env nt S.empty S.empty isigs M.empty S.empty M.empty VUnit
         (tdefs,tdefErrs) = typeDefs nt
@@ -61,9 +61,11 @@ closeDef :: C.Def -> C.Def
 closeDef def = TV.subNew [(tv,typeAny) | tv <- TV.tvsList (TV.ftv def), tvarStar tv] TV.|-> def
 
 -- Koka's accessors of the fields of its abstract `cctx` would expose the hole. A context is
--- abstract in the IR, so they are left out.
-isContextAccessor :: C.Def -> Bool
-isContextAccessor def = C.defName def `elem` [newLocallyQualified "std/core/types" "cctx" f | f <- ["res","holeptr"]]
+-- abstract in the IR, so they are left out. So is the definition of `@open`, declared at
+-- `a -> e2 b`: it is only applied, and its applications are elaborated as their argument
+-- (`identityCast`).
+isLeftOut :: C.Def -> Bool
+isLeftOut def = C.defName def `elem` (nameEffectOpen : [newLocallyQualified "std/core/types" "cctx" f | f <- ["res","holeptr"]])
 
 elabDef :: C.Def -> E (Def,Sig)
 elabDef def
@@ -189,7 +191,9 @@ elabTail expr
       C.Case [scrut] brs -> elabCase scrut brs
       C.Var (TName x _) _ | x == nameUnreachable -> Unreachable <$> result
       C.Case _ _ -> failE "case with multiple scrutinees after matching"
-      C.App f args | not (isConApp f) -> elabApp f args (typeOf expr)
+      -- an identity external changes only effects: the tails of its argument are coerced to `result`
+      _ | Just g <- identityCast expr, not (isValue g) -> elabTail g
+      C.App f args | not (isConApp f), isNothing (identityCast expr) -> elabApp f args (typeOf expr)
       _ -> do (k,v) <- elabVal expr
               t <- vt (typeOf expr)
               k <$> retAt t v
@@ -263,9 +267,14 @@ isConApp _               = False
 
 -- applications
 
--- an application at the type `result`
+-- An application at the type `result`. A function under an identity external (such as
+-- `.open`) is called as it is: its result is coerced to `result`, and tested for a yield
+-- where `result` may yield, as Koka's monadic translation decided from the identity
+-- external's type.
 elabApp :: C.Expr -> [C.Expr] -> Type -> E VExpr
 elabApp f args resTp
+  | Just g <- identityCast f
+  = elabApp g args resTp
   | isPrim nameCCtxEmpty f
   = do t <- vt resTp
        b <- holeType t
@@ -444,6 +453,13 @@ elabVal expr
               (kg,v) <- genVal t lam
               return (k . kg,v)
       C.TypeLam tvs e | isValue e -> elabTypeLam [typevarId tv | tv <- tvs, tvarStar tv] e (typeOf expr)
+      -- an identity external changes only effects: its argument, cast where it differs in `Y`
+      _ | Just g <- identityCast expr, isValue g
+        -> do (k1,v) <- elabVal g
+              from <- vt (typeOf g)
+              to <- vt (typeOf expr)
+              (k2,v') <- coerceInst from to v
+              return (k1 . k2,v')
       _ -> do t <- vt (typeOf expr)
               x <- fresh "a"
               e <- elabExpr expr
@@ -733,12 +749,6 @@ hasHole en expr
       C.App f [] | isPrim nameCCtxHoleCreate f -> True
       C.App f args | isConApp f -> any (hasHole en) args
       C.Var x _ -> maybe False (/= Nothing) (M.lookup (getName x) (envHoles en))
-      _ -> False
-
-isPrim :: Name -> C.Expr -> Bool
-isPrim name f
-  = case stripTypeApp f of
-      C.Var (TName g _) _ -> g == name
       _ -> False
 
 -- matching

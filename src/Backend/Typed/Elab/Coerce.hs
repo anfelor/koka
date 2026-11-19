@@ -217,8 +217,8 @@ isYield = snd . unYield
 -- The expression `e : from` at the type `to`. Where `to` is `Y W`, a result `Y U` is tested for
 -- a yield (`[let-yield]`) and the yielding branch is `yielded`. Otherwise, Koka does not test
 -- the result: it knows that it cannot yield (such as the result of an effect-polymorphic
--- function at a total effect, of a `deref`, or of a call that an erased `unsafe-total` makes
--- look total), or the code tests the flag itself (`std/core/hnd`, and its `local-var` and
+-- function at a total effect, of a `deref`, or of a call through `unsafe-total-cast`, which
+-- makes it look total), or the code tests the flag itself (`std/core/hnd`, and its `local-var` and
 -- `finally` where they are inlined: there the result may be a dummy, which `prompt-local-var`
 -- or `finally-prompt` receives). A result that differs from `to` only in `Y` is then cast
 -- (`[cast-ev]`, unless that would add a `Y`, which is `[pure]`). A coercion (such as an
