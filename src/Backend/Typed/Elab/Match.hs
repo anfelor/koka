@@ -30,7 +30,7 @@ import Data.List( nubBy, findIndex, partition )
 import qualified Data.Set as S
 import Common.Name
 import Common.NamePrim( nameYielding )
-import Backend.Typed.Elab.Common( nameUnreachable, isJoinName )
+import Backend.Typed.Elab.Common( nameUnreachable, isJoinName, isPrim )
 import Common.Unique
 import Kind.Newtypes( Newtypes, newtypesLookupAny )
 import Type.Type
@@ -77,7 +77,7 @@ matchExpr nt expr
 yieldTest :: Expr -> [Branch] -> Maybe [Branch]
 yieldTest scrut brs
   = case scrut of
-      App (Var y _) [] | getName y == nameYielding -> mapM simple brs
+      App f [] | isPrim nameYielding f -> mapM simple brs
       _ -> Nothing
   where
     simple (Branch [p] [Guard t e]) | isExprTrue t = (\p' -> Branch [p'] [Guard t e]) <$> pat e p

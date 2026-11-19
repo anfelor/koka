@@ -8,13 +8,13 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 -- Internal names and structural queries shared by the Core-to-typed-IR passes.
-module Backend.Typed.Elab.Common( isValue, isConExpr, linearContexts, isLinearContextPrim, nameUnreachable, isJoinName ) where
+module Backend.Typed.Elab.Common( isValue, isConExpr, identityCast, isPrim, linearContexts, isLinearContextPrim, nameUnreachable, isJoinName ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.List( isInfixOf )
 import Common.Name
-import Common.NamePrim( nameCCtxApply, nameCCtxExtend )
+import Common.NamePrim( nameCCtxApply, nameCCtxExtend, nameEffectOpen )
 import Core.Core( Expr(..), TName(..), VarInfo(..), Branch(..), Guard(..), Def(..), DefGroup(..), flattenDefGroups )
 
 -- marks an impossible alternative in Core; elaboration turns it into `[unreachable]`
@@ -33,8 +33,38 @@ isValue expr
       Lam _ _ _     -> True
       TypeLam _ e   -> isValue e
       TypeApp e _   -> isValue e
-      App f args    -> isConExpr f && all isValue args
+      App f args | Just arg <- identityCast expr -> isValue arg
+                 | otherwise -> isConExpr f && all isValue args
       _             -> False
+
+-- The argument of `.open` or an identity external (`isIdentityFun`, also
+-- `.open(cast-ev1)`), which changes at most the effects in the type of its argument.
+-- `Core.Simplify` erases these applications for the other backends.
+identityCast :: Expr -> Maybe Expr
+identityCast expr
+  = case expr of
+      App f [arg] | isIdentityFun f -> Just arg
+      _ -> Nothing
+
+-- `.open` or an identity external (`inline "#1"`, such as `unsafe-total-cast` or
+-- `pretend-decreasing`), or one applied to another (`.open(cast-ev1)`): applied to one
+-- argument, it changes at most the effects in its type.
+isIdentityFun :: Expr -> Bool
+isIdentityFun f
+  = case f of
+      TypeApp (Var _ (InfoExternal "#1")) _ -> True
+      TypeApp (Var g _) _ -> getName g == nameEffectOpen
+      App g [h] -> isIdentityFun g && isIdentityFun h
+      _ -> False
+
+-- a primitive, possibly under an identity external (such as `.open(yielding)`)
+isPrim :: Name -> Expr -> Bool
+isPrim name f
+  = case f of
+      Var (TName g _) _ -> g == name
+      TypeApp g _ -> isPrim name g
+      _ | Just g <- identityCast f -> isPrim name g
+      _ -> False
 
 isConExpr :: Expr -> Bool
 isConExpr (Con _ _)     = True
@@ -48,6 +78,7 @@ isLinearContextPrim f
   = case f of
       TypeApp g _ -> isLinearContextPrim g
       Var (TName g _) (InfoExternal fmt) -> g `elem` [nameCCtxApply, nameCCtxExtend] && "_linear(" `isInfixOf` fmt
+      _ | Just g <- identityCast f -> isLinearContextPrim g
       _ -> False
 
 -- The variables whose contexts are plugged or extended in place, directly or by a join point
