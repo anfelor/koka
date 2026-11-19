@@ -23,7 +23,7 @@
 
   Messages print values, types and expressions without a program, with all their steps.
 -}
-module Backend.Typed.Pretty( ppr, prettyProgram ) where
+module Backend.Typed.Pretty( ppr, prettyProgram, reserved ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -57,18 +57,19 @@ ppr x = show (pretty x)
 nm :: Name -> Doc
 nm n = text (escape (show n))
 
--- a name in backquotes if it could be read as a keyword or another token
+-- a name in backquotes if it could be read as a keyword or another token (an operator in
+-- parentheses could be read as that of a sum or product)
 escape :: String -> String
 escape s = if reserved s then "`" ++ s ++ "`" else s
 
 reserved :: String -> Bool
-reserved s = s `elem` keywords || any numbered ["v","inj","inj-a","reuse","reuse!","no-reuse","cell"]
+reserved s = null s || "(" `isPrefixOf` s || s `elem` keywords || "box@" `isPrefixOf` s || any numbered ["v","inj","inj-a","reuse","no-reuse","cell"]
   where
     numbered p = p `isPrefixOf` s && not (null (drop (length p) s)) && all isDigit (drop (length p) s)
     keywords = words ("ret let in of case split at if-whnf whnf delay ptr roll box scalar pack dup drop free"
                       ++ " if-unique if-full then else join rec jump fn gen forall exists yielded unreachable"
-                      ++ " yielding cast-ev memoize ctx ctx+ ctx-copy hole pure up down lock @ @copy _"
-                      ++ " module data con fun val Box Scalar I Y"
+                      ++ " yielding cast-ev memoize ctx ctx-copy hole pure up down lock @ @copy _"
+                      ++ " module data con fun val Box Scalar I Y NaN Infinity"
                       ++ " char ssize_t intptr_t float64 float32 int64 int32 int16 int8 uint8")
 
 -- a path with all its steps
@@ -102,14 +103,18 @@ shortSteps fields = go []
     toBox s = s `elem` [SDeref, SRoll]
 
 -- The paths of a definition: shortened, unless another binder of the definition would print the
--- same.
+-- same, shortened or with all its steps. Steps compare by tag and index, so a path prints with
+-- the constructors and fields of its binder.
 defPaths :: Fields -> Def -> PP
-defPaths fields def = pathDoc
+defPaths fields def = pathDoc . asBound
   where
+    asBound x = M.findWithDefault x x bound
+    bound = M.fromList [(y,y) | y <- xs]
     pathDoc x = let s = short x
                 in if all (== x) (M.findWithDefault [] s binders) then text s else fullPath x
     short (Path r ss) = intercalate "." (escape (show r) : shortSteps fields ss)
-    binders = M.fromListWith (++) [(short x,[x]) | x <- params ++ bindersE (defBody def)]
+    binders = M.fromListWith (++) ([(short x,[x]) | x <- xs] ++ [(show (fullPath x),[x]) | x <- xs])
+    xs = params ++ bindersE (defBody def)
     params = case def of
                DefFun{ defArgs = ps } -> [x | (x,_,_) <- ps]
                DefVal{} -> []
@@ -169,7 +174,7 @@ prettyV pp t
 -- a component of a sum or product with its label, unless that is the default one for its
 -- position (`tagCon`, `posField`)
 labelled :: String -> String -> Doc -> Doc
-labelled l def d = if l == def then d else text l <.> colon <+> d
+labelled l def d = if l == def then d else text (escape l) <.> colon <+> d
 
 -- an n-ary sum or product; one with a single component ends with the operator
 infixes :: String -> [Doc] -> Doc
@@ -241,6 +246,7 @@ prettyVal pp val
       UnitV      -> text "()"
       Lit l      -> prettyLit l
       Inj i _ v  -> text "inj" <.> int i <+> atomVal pp v
+      Tuple [v]  -> parens (prettyVal pp v <.> comma)   -- not a value in parentheses
       Tuple vs   -> parens (commaSep (map (prettyVal pp) vs))
       Ptr _ v    -> text "ptr" <+> atomAVal pp v
       Pack _ ts v -> text "pack" <.> tyArgs pp ts <+> atomVal pp v
@@ -353,7 +359,8 @@ prettyDef pp def
 
 -- The declaration of a datatype, whose alternatives are labelled by their constructors instead
 -- of their tags: the tags are those of the labels, in order (and in a lazy sum `L ~> S`, those of
--- S come first). The only field of a constructor is labelled in its box, as it is no product.
+-- S come first), with their local qualifiers. The only field of a constructor is labelled in its
+-- box, as it is no product.
 prettyTypeDef :: TypeDef -> Doc
 prettyTypeDef (TypeDef n vs body labels)
   = text "data" <+> nm n <.> tyParams vs <.> maybe empty (\b -> text " :=" <+> labelledBody b) body
@@ -365,9 +372,9 @@ prettyTypeDef (TypeDef n vs body labels)
           _         -> alt 1 b
     alt i t
       = case drop (i-1) labels of
-          ConLabel c fs : _ -> text (show (Con c)) <.> colon <+> shape fs t
+          ConLabel c fs : _ -> nm (unqualify c) <.> colon <+> shape fs t
           [] -> int i <.> colon <+> atomA fullPath t
-    shape [f] (ABox v) = text "Box" <.> parens (text (show f) <.> colon <+> prettyV fullPath v)
+    shape [f] (ABox v) = text "Box" <.> parens (text (escape (show f)) <.> colon <+> prettyV fullPath v)
     shape _ t = atomA fullPath t
 
 -- a signature without a definition: an external function or value, or a constructor of an open

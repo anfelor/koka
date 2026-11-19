@@ -42,7 +42,8 @@ typeDef nt info
   = do body <- refBody nt info
        when (isLazyInfo info) (lazyDef nt info)
        let params = map typevarId (filter tvarStar (dataInfoParams info))
-       labels <- mapM (conLabel nt (paramArgs info)) (dataInfoConstrs info)
+       -- only datatypes with a body have values to destructure
+       labels <- maybe (return []) (const (mapM (conLabel nt (paramArgs info)) (dataInfoConstrs info))) body
        return (TypeDef (dataInfoName info) params body labels)
 
 conLabel :: Newtypes -> [AType] -> ConInfo -> Tr ConLabel
