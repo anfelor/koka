@@ -20,8 +20,7 @@ import Common.NamePrim( nameLazyIsWhnf, nameLazyPtrIsWhnf )
 import Kind.Newtypes
 import Type.Type( lazyName, conInfoName )
 import Backend.Typed.Syntax
-import Backend.Typed.Lazies( Lazies(..) )
-import Backend.Typed.Env( Env(..), reuseSize, lazySides )
+import Backend.Typed.Env( Env(..), Lazies(..), reuseSize, lazySides )
 import Backend.Typed.Traversal( descendAll, fvE )
 import Backend.Typed.Elab.TypeInfo( conFieldTypes )
 import Backend.Typed.Elab.Monad( E, fresh )

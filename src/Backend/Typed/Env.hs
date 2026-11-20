@@ -9,8 +9,8 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 -- The global environment of a typed IR program, queries on it and on types that need no
--- typing context, and the monad for typed IR consumers.
-module Backend.Typed.Env( Env(..), Q, envOf, funSig, dataBody, lazySides, openFields, boxContents, reuseSize, noHeapCredit
+-- typing context, the lazy metadata, and the monad for typed IR consumers.
+module Backend.Typed.Env( Env(..), Q, Lazies(..), envOf, funSig, dataBody, lazySides, openFields, boxContents, reuseSize, noHeapCredit
                         , M, runM, evalM, liftE
                         , module Control.Monad.Reader, module Control.Monad.State
                         ) where
@@ -18,6 +18,7 @@ module Backend.Typed.Env( Env(..), Q, envOf, funSig, dataBody, lazySides, openFi
 import Control.Monad.Reader
 import Control.Monad.State
 import qualified Data.Map as M
+import qualified Data.Set as S
 import Control.Monad( when )
 import Common.Name
 import Backend.Typed.Syntax
@@ -47,6 +48,13 @@ type Q a = Either String a
 
 envOf :: Program -> Env
 envOf prog = Env (progTypes prog) (progSigs prog) (progExterns prog)
+
+-- The metadata of lazy types that elaboration (`Elab.Lazy`) passes to `Passes.Lazy`:
+-- the `lazy-C` functions with the tag of their constructor, the size of its cell and its
+-- fields (with the padding, see `Elab.TypeInfo.conFieldTypes`), the
+-- `lazy-eval-locked` functions, and the tag of the indirection ι of each lazy type.
+data Lazies = Lazies{ lzCons :: M.Map Name (Int,Int,[VType]), lzLocked :: S.Set Name
+                    , lzIndirect :: M.Map Name Int }
 
 funSig :: Env -> Name -> [AType] -> Q ([VType],VType)
 funSig env f tys
