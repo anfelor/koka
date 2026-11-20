@@ -31,7 +31,7 @@ data Mode = Test | New | Update
   deriving (Eq, Ord, Show)
 
 
--- the C backend, or the typed backend (`--typedc`, executing the typed executable)
+-- the C backend, or the typed backend (`--typedc`)
 data Backend = BackendC | BackendTyped
   deriving (Eq, Ord, Show)
 
@@ -119,10 +119,9 @@ initialCfg options backend
   = makeCfg (commonFlags ++ backendFlags ++ if (not (null (target options))) then ["--target=" ++ target options] else [])
             options []
   where
-    -- the typed backend needs its own build directory as it generates extra C for every module
     backendFlags = case backend of
                      BackendC     -> []
-                     BackendTyped -> ["--typedc", "--buildtag=test-typed"]
+                     BackendTyped -> ["--typedc"]
 
 
 readFlagsFile :: FilePath -> IO [String]

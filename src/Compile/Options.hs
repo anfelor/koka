@@ -251,7 +251,6 @@ instance Hashable Flags where
     where
       relevantFlags = [
           show $ targetPlatform flags,
-          show $ typedC flags,
           -- show $ stackSize flags,
           -- show $ heapSize flags,
           show $ simplify flags,
@@ -490,7 +489,7 @@ options = (\(xss,yss) -> (concat xss, concat yss)) $ unzip
  , flag   []    ["showcore"]       (\b f -> f{showCore=b})          "show core"
  , flag   []    ["showicore"]      (\b f -> f{showInitialCore=b})   "show initial core (right after type checking)"
  , flag   []    ["showfcore"]      (\b f -> f{showFinalCore=b})     "show final core (with backend optimizations)"
- , flag   []    ["typedc"]         (\b f -> f{typedC=b})            "build only with the typed backend (as <exe>_typed)"
+ , flag   []    ["typedc"]         (\b f -> f{typedC=b})            "build only with the typed backend"
  , flag   []    ["showcoretypes"]  (\b f -> f{showCoreTypes=b})     "show full types in core"
  , flag   []    ["showtypeids"]    (\b f -> f{showTypeIds=b})       "show numeric type variable ids"
  , flag   []    ["showcs"]         (\b f -> f{showAsmCS=b})         "show generated c#"
@@ -1166,7 +1165,7 @@ buildLibVariant :: Flags -> String   -- for example: clang-debug, js-release
 buildLibVariant flags
   = let pre  = case target flags of
                  C ctarget
-                   -> ccName (ccomp flags) ++
+                   -> ccName (ccomp flags) ++ (if typedC flags then "-typed" else "") ++
                       (case ctarget of
                         Wasm   -> "-wasm" ++ show (8*sizePtr (platform flags))
                         WasmJs -> "-wasmjs"
