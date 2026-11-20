@@ -56,8 +56,8 @@ typedFromCore enableReuse nt imports uniq core
           [ Require "check" checkProgram
           , purePass "paths" pathsProgram
           , Pass "lazy" (lazyProgram lazies)
-          , purePass "anf" anfProgram
           , Pass "contify" contifyProgram
+          , Pass "anf" anfProgram
           , purePass "simplify" simplifyProgram
           , purePass "yields" yieldsProgram
           , Require "linear" checkLinear
