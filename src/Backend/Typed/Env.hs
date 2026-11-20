@@ -61,7 +61,7 @@ dataBody :: Env -> AType -> Q AType
 dataBody env t
   = case t of
       ACon n args -> case M.lookup n (envTypes env) of
-                       Just TypeDef{ tdefParams = tvs, tdefBody = Just body } | length tvs == length args
+                       Just TypeDef{ tdefParams = tvs, tdefBody = BodyRef body } | length tvs == length args
                          -> return (inst tvs args body)
                        Just _  -> Left ("cannot unroll abstract type " ++ show n)
                        Nothing -> Left ("unknown type " ++ show n)

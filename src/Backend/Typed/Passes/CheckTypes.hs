@@ -57,13 +57,18 @@ checkLayoutProgram p = concatMap check (programTypes p)
 -- All the types that a program mentions.
 programTypes :: Program -> [VType]
 programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (progDefs prog)
-                    ++ concatMap (\d -> vars (tdefParams d) ++ maybe [] at (tdefBody d)) (M.elems (progTypes prog))
+                    ++ concatMap (\d -> vars (tdefParams d) ++ body (tdefBody d)) (M.elems (progTypes prog))
   where
     vars = map (VPtr . AVar)
     sig s = case s of
       SigFun vs ps _ r -> vars vs ++ (r : map snd ps)
       SigVal vs t -> vars vs ++ [t]
       SigCon vs ts _ -> vars vs ++ ts
+    body b = case b of
+      BodyRef a -> at a
+      BodyValue t -> [t]
+      BodyOpen -> []
+      BodyAbstract -> []
     def d = case d of
       DefFun _ vs ps _ r e -> vars vs ++ (r : map (\(_,_,t) -> t) ps ++ et e)
       DefVal _ vs t e -> vars vs ++ (t : et e)
