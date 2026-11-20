@@ -250,6 +250,16 @@ jumps j expr
 jumpArgs :: Name -> VExpr -> [[VVal]]
 jumpArgs j = map snd . jumps j
 
+-- the join points that an expression jumps to (those `k` with `jumps k expr` non-empty), in one
+-- traversal; same shadowing as `jumps`
+jumpTargets :: VExpr -> S.Set Name
+jumpTargets expr
+  = case expr of
+      Jump k _ _ -> S.singleton k
+      Join NonRec k _ _ e1 e2 -> S.union (jumpTargets e1) (S.delete k (jumpTargets e2))
+      Join Rec{} k _ _ e1 e2 -> S.delete k (S.union (jumpTargets e1) (jumpTargets e2))
+      _ -> getConst (descendE (const (Const S.empty)) (const (Const S.empty)) (\_ e -> Const (jumpTargets e)) expr)
+
 -- a top-level value, possibly instantiated (`[dup-glob]`)
 isGlob :: VVal -> Bool
 isGlob v

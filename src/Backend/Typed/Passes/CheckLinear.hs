@@ -91,7 +91,7 @@ import Control.Monad( unless, when, forM_, foldM )
 import Data.Functor.Const( Const(..) )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Traversal( child, descendV, destructAOf, destructVOf, dsAlts, dsScrut, fieldsAt, fvA, fvE, jumpArgs, sibling, within )
+import Backend.Typed.Traversal( child, descendV, destructAOf, destructVOf, dsAlts, dsScrut, fieldsAt, fvA, fvE, jumpTargets, sibling, within )
 import Backend.Typed.Types( checkDupType, prodV, unYield )
 import Backend.Typed.Passes.Common( isRead, paramModes, prefixes, resultMode, trivialTy )
 import Backend.Typed.Env( Env(..), envOf, M, ask, evalM, get, gets, liftE, local, modify )
@@ -476,7 +476,7 @@ checkE env g js q expr
       -- of the join points that the body jumps to
       Join NonRec j _ ps e1 e2
                         -> do let fvs = S.toList (S.union (fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps])
-                                                           (S.fromList [x | (k,(_,cs)) <- M.toList js, not (null (jumpArgs k e1)), (x,_) <- cs]))
+                                                           (S.fromList [x | (_,cs) <- M.elems (M.restrictKeys js (jumpTargets e1)), (x,_) <- cs]))
                               let xs = [x | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
                               u <- local (const (M.fromList (params env ps ++ [(x,Unique) | x <- xs])))
                                          (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) js q e1)

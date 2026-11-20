@@ -20,7 +20,7 @@ import Control.Monad( zipWithM_, unless, when, forM_ )
 import Common.Name
 import Lib.PPrint( Pretty )
 import Backend.Typed.Syntax
-import Backend.Typed.Traversal( bindersE, boxTag, child, destructAOf, destructVOf, dsAlts, dsScrut, fvA, fvE, fvV, holes, isGlob, jumpArgs, within )
+import Backend.Typed.Traversal( bindersE, boxTag, child, destructAOf, destructVOf, dsAlts, dsScrut, fvA, fvE, fvV, holes, isGlob, jumpTargets, within )
 import Backend.Typed.Types
 import Backend.Typed.Pretty( ppr )
 import Backend.Typed.Env( Env(..), Q, funSig, dataBody, lazySides, openFields, boxContents, reuseSize, noHeapCredit )
@@ -157,7 +157,7 @@ inferExpr env g js expr
                                 joinDescriptions j ps
                                 t <- inferE env (bindAll [(x,V p) | (x,_,p) <- ps] g) js e1
                                 unbound tvs (ftv t ++ ftvCtx g e1)
-                                let caps = S.unions (S.difference (fvE e1) (S.fromList xs) : [cs | (k,(cs,_,_,_)) <- M.toList (jsPoints js), not (null (jumpArgs k e1))])
+                                let caps = S.unions (S.difference (fvE e1) (S.fromList xs) : [cs | (cs,_,_,_) <- M.elems (M.restrictKeys (jsPoints js) (jumpTargets e1))])
                                 t <$ checkE env g js{ jsPoints = M.insert j (caps,tvs,[p | (_,_,p) <- ps],t) (jsPoints js) } e2 t
       -- only itself is in scope in its body (its captures are borrowed, see `CheckLinear`)
       Join (Rec t) j tvs ps e1 e2
