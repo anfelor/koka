@@ -56,7 +56,7 @@ inlineDefs penv inlineMax inlines
     do --traceDoc $ \penv -> text "Core.Inline.inlineDefs:" <+> ppInlines penv inlines
        --inlDefGroups defs
        defs1 <- fmap uniquefyDefGroups $ inlDefGroups defs
-       defs2 <- liftUnique (uniqueSimplify penv False True 3 0 defs1)
+       defs2 <- liftUnique (uniqueSimplify penv False True False {-caseOfCase-} 3 0 defs1)
        fmap uniquefyDefGroups $ inlDefGroups defs2
 
 

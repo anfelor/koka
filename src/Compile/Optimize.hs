@@ -67,7 +67,7 @@ coreOptimize flags newtypes gamma inlines coreProgram
 
         -- define simplify
         let ndebug           = optimize flags > 0
-            simplifyX dupMax = simplifyDefs penv False {-unsafe-} ndebug (simplify flags) dupMax
+            simplifyX dupMax = simplifyDefs penv False {-unsafe-} ndebug False {-caseOfCase-} (simplify flags) dupMax
             simplifyDupN     = when (simplify flags >= 0) $ simplifyX (simplifyMaxDup flags)
             simplifyNoDup    = simplifyX 0
 
@@ -171,11 +171,11 @@ coreLowerUnsafe flags uniq core
             ndebug = optimize flags > 0
 
         -- remove remaining open calls and identity externals; this may change effect types
-        simplifyDefs penv True {-unsafe-} ndebug (simplify flags) 0
+        simplifyDefs penv True {-unsafe-} ndebug True {-caseOfCase-} (simplify flags) 0
 
         -- final simplification
         when (simplify flags >= 0) $
-          simplifyDefs penv False {-unsafe-} ndebug (simplify flags) (simplifyMaxDup flags)
+          simplifyDefs penv False {-unsafe-} ndebug True {-caseOfCase-} (simplify flags) (simplifyMaxDup flags)
 
         defs <- Core.getCoreDefs
         return (uniquefy core{ Core.coreProgDefs = defs })

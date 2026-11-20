@@ -121,7 +121,7 @@ typeCheck flags defs coreImports program0
 
         -- initial simplify
         let ndebug  = optimize flags > 0
-            simplifyX dupMax = simplifyDefs penv False {-unsafe-} ndebug (simplify flags) dupMax
+            simplifyX dupMax = simplifyDefs penv False {-unsafe-} ndebug False {-caseOfCase-} (simplify flags) dupMax
             simplifyDupN     = when (simplify flags >= 0) $
                                 simplifyX (simplifyMaxDup flags)
             simplifyNoDup    = simplifyX 0

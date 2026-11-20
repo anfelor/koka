@@ -41,10 +41,13 @@ import qualified Data.Set as S
 -- data Env = Env{ inlineMap :: M.NameMap Expr }
 -- data Info = Info{ occurrences :: M.NameMap Int }
 
-simplifyDefs :: HasCallStack => Pretty.Env -> Bool -> Bool -> Int -> Int -> CorePhase b ()
-simplifyDefs penv unsafe ndebug nRuns duplicationMax
+-- `caseOfCase` enables the case-of-case transformation. It is off in the optimizations
+-- on the shared Core (`Compile.Optimize.coreOptimize`) and only enabled when lowering
+-- for the C, JavaScript and C# backends (`Compile.Optimize.coreLowerUnsafe`, `Backend.C.Box`).
+simplifyDefs :: HasCallStack => Pretty.Env -> Bool -> Bool -> Bool -> Int -> Int -> CorePhase b ()
+simplifyDefs penv unsafe ndebug caseOfCase nRuns duplicationMax
   = liftCorePhaseUniq $ \uniq defs ->
-    runSimplify unsafe ndebug duplicationMax uniq penv (simplifyN nRuns (uniquefyDefBodies defs))
+    runSimplify unsafe ndebug caseOfCase duplicationMax uniq penv (simplifyN nRuns (uniquefyDefBodies defs))
 
 -- simplifyN :: Simplify a => Int -> a -> Simp a
 simplifyN nRuns defs
@@ -52,10 +55,10 @@ simplifyN nRuns defs
     else do defs' <- simplify defs
             simplifyN (nRuns-1) defs'
 
-uniqueSimplify :: HasCallStack => (HasUnique m, Simplify a) => Pretty.Env -> Bool -> Bool -> Int -> Int -> a -> m a
-uniqueSimplify penv unsafe ndebug nRuns duplicationMax expr
+uniqueSimplify :: HasCallStack => (HasUnique m, Simplify a) => Pretty.Env -> Bool -> Bool -> Bool -> Int -> Int -> a -> m a
+uniqueSimplify penv unsafe ndebug caseOfCase nRuns duplicationMax expr
   = do u <- unique
-       let (x,u') = runSimplify unsafe ndebug duplicationMax u penv
+       let (x,u') = runSimplify unsafe ndebug caseOfCase duplicationMax u penv
                      (simplifyN nRuns expr) -- (simplify expr) -- (simplifyN (if nRuns <= 0 then 1 else nRuns) expr)
        setUnique u'
        return x
@@ -227,8 +230,11 @@ topDown (Case [Let dgs expr] branches)
     return (Let dgs (Case [expr] branches))
 
 -- case-of-case: currently makes reuse worse in some cases (like bench/koka/rbtree)
-topDown (Case [Case scruts0 branches0] branches1) | doesNotDuplicate
-  = return (Case scruts0 (map (pushCase branches1) branches0))
+topDown expr@(Case [Case scruts0 branches0] branches1) | doesNotDuplicate
+  = do caseOfCase <- getCaseOfCase
+       if caseOfCase
+         then return (Case scruts0 (map (pushCase branches1) branches0))
+         else return expr
   where
     pushCase branches (Branch pats guards)
       = Branch pats (map (pushCaseG branches) guards)
@@ -920,14 +926,14 @@ uniqueTName (TName name tp)
 
 newtype Simp a = Simplify (Int -> SEnv -> Result a)
 
-runSimplify :: Bool -> Bool -> Int -> Int -> Pretty.Env -> Simp a -> (a,Int)
-runSimplify unsafe ndebug dupMax uniq penv (Simplify c)
-  = case (c uniq (SEnv unsafe ndebug dupMax penv [] )) of
+runSimplify :: Bool -> Bool -> Bool -> Int -> Int -> Pretty.Env -> Simp a -> (a,Int)
+runSimplify unsafe ndebug caseOfCase dupMax uniq penv (Simplify c)
+  = case (c uniq (SEnv unsafe ndebug caseOfCase dupMax penv [] )) of
       Ok x u' -> (x,u')
 
 
 
-data SEnv = SEnv{ unsafe :: Bool, ndebug :: Bool, dupMax :: Int, penv :: Pretty.Env, currentDef :: [Name] }
+data SEnv = SEnv{ unsafe :: Bool, ndebug :: Bool, caseOfCase :: Bool, dupMax :: Int, penv :: Pretty.Env, currentDef :: [Name] }
 
 data Result a = Ok a Int
 
@@ -964,6 +970,11 @@ getUnsafe :: Simp Bool
 getUnsafe
   = do env <- getEnv
        return (unsafe env)
+
+getCaseOfCase :: Simp Bool
+getCaseOfCase
+  = do env <- getEnv
+       return (caseOfCase env)
 
 getDuplicationMax :: Simp Int
 getDuplicationMax

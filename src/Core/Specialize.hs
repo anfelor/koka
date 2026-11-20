@@ -337,7 +337,7 @@ replaceCall name expr0 sort bools args mybeTypeArgs
                         _ -> failure "Specialize.replaceCall: Unexpected output from specialize pass"
 
       -- simplify so the new specialized arguments are potentially inlined unlocking potential further specialization
-      sspecBody <- uniqueSimplify defaultEnv False False 1 10 specBody
+      sspecBody <- uniqueSimplify defaultEnv False False False {-caseOfCase-} 1 10 specBody
       -- trace ("\n// ----start--------\n// specializing " <> show name <> " to parameters " <> show speccedParams <> " with args " <> comment (show speccedArgs) <> "\n// specTName: " <> show (getName specTName) <> ", specBody0: \n" <> show specBody <> "\n\n, sspecBody: \n" <> show sspecBody <> "\n// ---- start recurse---") $ return ()
 
       -- the specialized parameters are gone, so their parameter infos must go too:
