@@ -7,23 +7,20 @@
 -----------------------------------------------------------------------------
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
--- The typed C driver: runs the `Typed` pipeline on a module and generates its C (`CGen`).
--- The typed C of a module includes its regular C (`Backend.C.FromCore`) and
--- is compiled in its place.
+-- The typed C driver: runs the `Typed` pipeline on a module and generates its C (`CGen`),
+-- which is compiled in place of its regular C (`Backend.C.FromCore`).
 module Backend.Typed.CFromCore( typedCFromCore, cgenMain, ktFileName ) where
 
 import Data.List( intercalate )
 import qualified Data.Set as S
 import Lib.PPrint( Doc, (<.>), linebreak )
-import Common.Name
 import Common.Syntax( DefInline(..), BuildType )
-import qualified Common.NameMap as NM
-import Kind.Newtypes( Newtypes, newtypesTypeDefs )
+import Kind.Newtypes( Newtypes )
 import qualified Core.Core as C
 import Backend.Typed.Typed( typedFromCore )
 import Backend.Typed.Elab.Foreign( foreignOf )
 import Backend.Typed.Pretty( prettyProgram )
-import Backend.Typed.CGen.CGen( CEnv(..), cgenModule, cgenMain, ktInitName, ktFileName )
+import Backend.Typed.CGen.CGen( CEnv(..), cgenModule, cgenMain, ktFileName )
 
 -- Returns the final IR (for debugging), the diagnostics, and either an error or the header
 -- and source. `coreC` is the Core that the C backend compiles; its
@@ -44,12 +41,7 @@ typedCFromCore buildType sourceDir enableReuse newtypes imports coreC core
       | otherwise         = Right (hdr,csrc)
     (hdr,csrc,errs) = cgenModule cenv tprog
 
-    cores   = core : imports
-    importNames = map C.coreProgName imports
-    cenv    = CEnv modName
-                   ([moduleNameToPath modName ++ ".h"] ++ [ktFileName m ++ ".h" | m <- importNames])
-                   (map ktInitName importNames)
-                   newtypes (map snd (NM.toList (newtypesTypeDefs newtypes)) ++ [info | c <- cores, C.TypeDefGroup tds <- C.coreProgTypeDefs c, C.Data info <- tds])
+    cenv    = CEnv modName (map C.coreProgName imports)
                    -- as the C backend (`Backend.C.FromCore.genTopGroup`)
                    (S.fromList [C.defName d | C.DefNonRec d <- C.coreProgDefs coreC,
                                               C.defInline d == InlineAlways || C.isInlineable 5 d])

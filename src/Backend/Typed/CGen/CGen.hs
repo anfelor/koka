@@ -21,16 +21,13 @@ module Backend.Typed.CGen.CGen( CEnv(..), cgenModule, cgenMain, cName, ktInitNam
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Char( isAlphaNum, ord )
-import Data.List( sortOn, zip4 )
+import Data.List( sortOn )
 import Data.Maybe( fromMaybe, isJust )
 import qualified Numeric
 import Control.Monad( forM, when )
 import Lib.PPrint( Doc, text, string, int, integer, empty, isEmptyDoc, line, nest, align, vcat, hcat, hsep, punctuate, (<.>), (<+>), (<->) )
 import Common.Name
 import Common.NamePrim
-import Type.Type
-import Kind.Kind( kindStar )
-import Kind.Newtypes
 import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( child, TestSide(..), boxTag, canonical, failingTo, fvA, fvE, fvV, holes, testSides, within )
@@ -39,15 +36,12 @@ import Backend.Typed.Env( Env(..), envOf, dataBody, openFields, boxContents, reu
 import Backend.Typed.Query( Gamma, inferE, inferV, inferVar, noJoins, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 import Backend.Typed.Layout
 import Backend.Typed.CGen.Layout hiding( dupExpr, dropStmt )
-import Backend.Typed.CGen.Koka hiding( conInfoOf, conFieldNames )
-import qualified Backend.Typed.CGen.Koka as Koka
+import Backend.Typed.CGen.Koka
+import Backend.Typed.CGen.Decls( typeDecls, openPayload, openTagName )
 import Backend.Typed.CGen.ReuseSlots( keptLeaves )
 
 data CEnv = CEnv{ ceModName   :: Name
-                , ceIncludes  :: [String]     -- headers to include
-                , ceImportInits :: [String]   -- init functions of imported modules
-                , ceNewtypes  :: Newtypes
-                , ceDataInfos :: [DataInfo]
+                , ceImports   :: [Name]       -- all imported modules (their headers, initialization and termination)
                 , ceInline    :: S.Set Name   -- small functions defined `static inline` in the header
                 }
 
@@ -111,6 +105,9 @@ ktFileName modName = "kt_" ++ encode (show modName)
 
 ktInitName :: Name -> String
 ktInitName modName = cName modName ++ "__init"
+
+ktDoneName :: Name -> String
+ktDoneName modName = cName modName ++ "__done"
 
 -- C syntax
 
@@ -396,26 +393,30 @@ prodLeafVals v = [v]
 -- construct an unboxed product from values for its components
 genProd :: Ctx -> VType -> [VVal] -> G Doc
 genProd cx t vs
+  = do parts <- forM vs $ \v -> do e <- genV cx v
+                                   tv <- tyOf cx v
+                                   return (e,tv)
+       prodFrom t parts
+
+-- an unboxed product from the C expressions of its components and their types
+prodFrom :: VType -> [(Doc,VType)] -> G Doc
+prodFrom t parts
   = do ct <- ctype t
        case ct of
-         CProd fs
+         CProd _
            -> do -- each value covers some leaves
-                 parts <- forM vs $ \v -> do tv <- tyOf cx v
-                                             e <- genV cx v
-                                             return (e, length (leaves tv), tv)
                  x <- fresh "p"
-                 assigns <- assignLeaves x (zip [0..] fs) parts 0
+                 assigns <- assignLeaves x [(e, length (leaves s), s) | (e,s) <- parts] 0
                  return (stmtExpr ((cty ct <+> x <.> ";") : assigns) x)
          -- at most one value has a leaf
-         _ -> do ts <- mapM (tyOf cx) vs
-                 case [v | (v,s) <- zip vs ts, not (null (leaves s))] of
-                   [v] -> genV cx v
-                   _ -> return "kk_Unit"
+         _ -> case [e | (e,s) <- parts, not (null (leaves s))] of
+                [e] -> return e
+                _ -> return "kk_Unit"
   where
-    assignLeaves x fs [] _ = return []
-    assignLeaves x fs ((e,n,s):rest) i
+    assignLeaves _ [] _ = return []
+    assignLeaves x ((e,n,s):rest) i
       = do as <- leafAssign x i n s e
-           rs <- assignLeaves x fs rest (i+n)
+           rs <- assignLeaves x rest (i+n)
            return (as ++ rs)
     leafAssign x i n s e
       | n == 0 = return ["(void)(" <.> e <.> ");"]
@@ -465,14 +466,8 @@ genBox cx tag at v
                           Nothing -> "kk_block_alloc_as(" <.> bt <.> "," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
                           Just _ -> allocAt "kk_reuse_null"
            setPath = maybe empty (\i -> x <.> "->_block.header._field_idx =" <+> i <.> ";") cpath
-           -- store a product field by field: a whole struct copy can also copy its
-           -- padding, from a temporary on the stack
-           storeFrom y = case ct of
-                           CUnit -> []
-                           CProd fs -> [x <.> "->p.f" <.> int i <+> "=" <+> y <.> ".f" <.> int i <.> ";" | (i,_) <- fs]
-                           _ -> [x <.> "->p =" <+> y <.> ";"]
            store = do y <- fresh "p"
-                      return ((cty ct <+> y <+> "=" <+> e <.> ";") : storeFrom y)
+                      return ((cty ct <+> y <+> "=" <+> e <.> ";") : storeFrom ct x y)
        case at of
          Fresh -> do s <- store
                      return (stmtExpr ((bt <.> "*" <+> x <+> "=" <+> allocFresh <.> ";") : s) box)
@@ -496,7 +491,7 @@ genBox cx tag at v
                                    update = case keptLeaves rt t v of
                                               Just (k,oldScan,matches) -> [setTag k, setScan oldScan, setPath] ++ writes matches
                                               Nothing -> ("kk_block_init(&" <.> x <.> "->_block,sizeof(" <.> bt <.> ")," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ");")
-                                                         : storeFrom y
+                                                         : storeFrom ct x y
                                return (stmtExpr ([check, cty ct <+> y <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> localName r <.> ";"]
                                                  ++ update) box)
                        -- a credit that may be empty, which `ExpandReuse` did not test
@@ -506,7 +501,16 @@ genBox cx tag at v
                      ye <- genV cx y
                      let clear = "kt_block_clear(kt_box_as_ptr(" <.> ye <.> ",_ctx)," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
                      return (stmtExpr ([cty ct <+> v <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> clear <.> ";",
-                                        setPath] ++ storeFrom v) box)
+                                        setPath] ++ storeFrom ct x v) box)
+
+-- Store a payload `y` in the block `x`: a product field by field, as a whole struct copy can
+-- also copy its padding, from a temporary on the stack.
+storeFrom :: CT -> Doc -> Doc -> [Doc]
+storeFrom ct x y
+  = case ct of
+      CUnit -> []
+      CProd fs -> [x <.> "->p.f" <.> int i <+> "=" <+> y <.> ".f" <.> int i <.> ";" | (i,_) <- fs]
+      _ -> [x <.> "->p =" <+> y <.> ";"]
 
 -- A projection copies the field into a local.
 genProjection :: Ctx -> Dest -> VVal -> Int -> Path -> VExpr -> G [Doc]
@@ -723,32 +727,30 @@ genLam cx ps r e
 lamFree :: [(Path,Mode,VType)] -> VExpr -> S.Set Path
 lamFree ps e = fvA (Lam ps VUnit e)
 
--- open datatypes use the constructors of Koka's headers
+-- An open constructor is a block of its tag string and its fields (`openPayload`), as Koka's.
 genOpenCon :: Ctx -> Name -> [AType] -> [VVal] -> G Doc
 genOpenCon cx c tys vs
-  = do (fields,kfields) <- openConFields cx c tys
-       args <- forM (zip3 vs fields kfields) $ \(v,f,kt) ->
-                 do e <- genV cx v
-                    fct <- ctype f
-                    return (toKoka fct (kokaCType kt) e)
-       let new = text (kokaName (makeHiddenName "new" c))
-       return ("kt_box_datatype(" <.> new <.> "(" <.> (if null args then empty else "kk_reuse_null,0,") <.> hcat [a <.> "," | a <- args] <.> "_ctx))")
+  = do fields <- openConFields cx c tys
+       let t = openPayload fields
+       ct <- ctype t
+       bt <- blockType ct
+       args <- mapM (genV cx) vs
+       payload <- prodFrom t (zip ("kk_box_dup(" <.> text (cName (openTagName c)) <.> ",_ctx)" : args) (map snd (prodFieldsOf t)))
+       x <- fresh "b"
+       y <- fresh "p"
+       return (stmtExpr ([bt <.> "*" <+> x <+> "= kk_block_alloc_as(" <.> bt <.> "," <.> int (scanOf ct) <.> ",KK_TAG_OPEN,_ctx);",
+                          cty ct <+> y <+> "=" <+> payload <.> ";"] ++ storeFrom ct x y)
+                        ("kt_box_from_block(&" <.> x <.> "->_block,_ctx)"))
+  where
+    prodFieldsOf (VProd fs) = fs
+    prodFieldsOf _ = []
 
--- the fields of an open constructor at type arguments, with their Koka types
-openConFields :: Ctx -> Name -> [AType] -> G ([VType],[Type])
+-- the fields of an open constructor at type arguments
+openConFields :: Ctx -> Name -> [AType] -> G [VType]
 openConFields cx c tys
   = case M.lookup c (envSigs (cxEnv cx)) of
-      Just (SigCon _ _ n) ->
-        do ci <- conInfoOf cx c
-           fields <- liftC (openFields (cxEnv cx) c (ACon n tys))
-           return (fields, map snd (conInfoParams ci))
+      Just (SigCon _ _ n) -> liftC (openFields (cxEnv cx) c (ACon n tys))
       _ -> failG ("unknown open constructor " ++ show c)
-
-conInfoOf :: Ctx -> Name -> G ConInfo
-conInfoOf cx c = liftC (Koka.conInfoOf (ceDataInfos (cxCEnv cx)) c)
-
-conFieldNames :: Ctx -> Name -> G [String]
-conFieldNames cx c = liftC (Koka.conFieldNames (ceDataInfos (cxCEnv cx)) c)
 
 -- expressions
 
@@ -983,15 +985,16 @@ genE cx dest expr
         -> do let ve = localName v
               brs <- forM alts $ \(c,xs,e) ->
                        do tys <- openTypeArgs cx v
-                          (fields,kfields) <- openConFields cx c tys
-                          names <- conFieldNames cx c
-                          let acc n = text (kokaName (makeHiddenName "as" c)) <.> "(kt_unbox_datatype(" <.> ve <.> "),_ctx)->" <.> text n
-                          decls <- forM (zip4 xs fields kfields names) $ \(x,f,kt,n) ->
+                          fields <- openConFields cx c tys
+                          let t = openPayload fields
+                          payload <- unboxBlock t ve
+                          decls <- forM (zip3 xs fields (scanl (+) 1 (map (length . leaves) fields))) $ \(x,f,start) ->
                                      do fct <- ctype f
-                                        return (declare (cty fct) x (fromKoka (kokaCType kt) fct (acc n)))
+                                        e' <- projLeaves t payload start f
+                                        return (declare (cty fct) x e')
                           s <- genE (foldl (\cx' (x,f) -> bindVar cx' x (V f)) cx (zip xs fields)) dest e
-                          let tag = text (kokaName (makeHiddenName "tag" c))
-                          return ("kt_open_is(" <.> ve <.> "," <.> tag <.> ",_ctx)", decls ++ s)
+                          let tag = text (cName (openTagName c))
+                          return ("kt_open_is(" <.> ve <.> ",kt_pun(kk_string_t," <.> tag <.> "),_ctx)", decls ++ s)
               sd <- genE cx dest def
               return [ifChain brs sd]
 
@@ -1252,35 +1255,44 @@ cgenModule cenv prog
                   modName = ceModName cenv
                   guardN = text ("KT_" ++ encode (show modName) ++ "_H")
                   initf  = "void" <+> text (ktInitName modName) <.> "(kk_context_t* _ctx)"
+                  donef  = "void" <+> text (ktDoneName modName) <.> "(kk_context_t* _ctx)"
                   include h = "#include \"" <.> text h <.> "\""
                   -- `CLayout` writes its definitions as lines that end in a newline
                   layoutDef s = string (init s)
-                  hdr   = vcat (["#ifndef" <+> guardN, "#define" <+> guardN]
-                                ++ map include (take 1 (ceIncludes cenv))
-                                ++ [runtimeHeader]
-                                ++ map include (drop 1 (ceIncludes cenv))
+                  ffi = progForeign prog
+                  -- the hooks that the foreign C of a module may define (as for Koka's C)
+                  hook h = ["#if defined(" <.> h <.> ")", "  " <.> h <.> "(_ctx);", "#endif"]
+                  once flag = ["static bool" <+> flag <+> "= false;", "if (" <.> flag <.> ") return;", flag <+> "= true;"]
+                  hdr   = vcat (["#ifndef" <+> guardN, "#define" <+> guardN, "#include <kklib.h>", runtimeHeader]
+                                ++ [include (ktFileName m ++ ".h") | m <- ceImports cenv]
+                                ++ map string (forHeader ffi)
+                                ++ map string (typeDecls cName modName prog)
                                 ++ [layoutDef (stStructs st M.! n) | n <- stOrder st]
                                 ++ [p | (p,_,_,_) <- ok]
                                 ++ [h | (_,h,_,_) <- ok]
-                                ++ [initf <.> ";", "#endif"])
-                  csrc  = vcat ([include (take (length h - 2) h ++ ".c") | h <- take 1 (ceIncludes cenv)]
-                                ++ [include (ktFileName modName ++ ".h")]
+                                ++ map string (forHeaderEnd ffi)
+                                ++ [initf <.> ";", donef <.> ";", "#endif"])
+                  csrc  = vcat ([include (ktFileName modName ++ ".h")]
+                                ++ map string (forSource ffi)
                                 ++ map fst wdefs
                                 ++ stDecls st
                                 ++ [d | (_,_,d,_) <- ok]
                                 ++ map snd wdefs
-                                ++ [initf <+> block (["static bool _initialized = false;", "if (_initialized) return;", "_initialized = true;"]
-                                                     ++ [text i <.> "(_ctx);" | i <- ceImportInits cenv]
-                                                     ++ [i | (_,_,_,i) <- ok])])
+                                ++ [initf <+> block (once "_initialized"
+                                                     ++ [text (ktInitName m) <.> "(_ctx);" | m <- ceImports cenv]
+                                                     ++ hook "KK_CUSTOM_INIT"
+                                                     ++ [i | (_,_,_,i) <- ok])
+                                   ,donef <+> block (once "_done"
+                                                     ++ hook "KK_CUSTOM_DONE"
+                                                     ++ [text (ktDoneName m) <.> "(_ctx);" | m <- reverse (ceImports cenv)])])
               in (show hdr ++ "\n", show csrc ++ "\n", errs)
 
 
 -- The C source of the main module of a typed program: its typed C followed by the entry point
--- `mainName`, which initializes the modules `imports` (in build order) and runs `entryName`.
-cgenMain :: String -> Int -> Name -> Name -> [Name] -> String
-cgenMain mainName stackSize progName entryName imports
+-- `mainName`, which initializes the modules (each initializes its imports) and runs `entryName`.
+cgenMain :: String -> Int -> Name -> Name -> String
+cgenMain mainName stackSize progName entryName
   = unlines (["#include \"" ++ ktFileName progName ++ ".c\""]
-             ++ ["#include \"" ++ moduleNameToPath m ++ ".h\"" | m <- imports]
              ++ ["#include <execinfo.h>"
                 ,"#include <stdlib.h>"
                 ,"#include <unistd.h>"
@@ -1291,10 +1303,9 @@ cgenMain mainName stackSize progName entryName imports
                 ]
              ++ ["  kk_os_set_stack_size(KK_IZ(" ++ show stackSize ++ "));" | stackSize /= 0]
              ++ ["  kk_context_t* _ctx = kk_main_start(argc, argv);"]
-             ++ ["  kk_" ++ asciiEncode True (show m) ++ "__init(_ctx);" | m <- imports]
              ++ ["  " ++ ktInitName progName ++ "(_ctx);"
                 ,"  " ++ cName entryName ++ "(_ctx);"
-                ,"  kk_" ++ asciiEncode True (show progName) ++ "__done(_ctx);"  -- e.g. stops the task threads
+                ,"  " ++ ktDoneName progName ++ "(_ctx);"  -- e.g. stops the task threads
                 ,"  kk_main_end(_ctx);"
                 ,"  return 0;"
                 ,"}"])

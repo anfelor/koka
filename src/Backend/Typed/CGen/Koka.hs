@@ -8,19 +8,17 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- Koka's C conventions for extern calls and open datatype constructors.
+-- Koka's C conventions: names, and the C types of extern calls.
 module Backend.Typed.CGen.Koka( kokaName, kokaTypeName, kokaLocal, cReserved
-                              , kokaCType, kokaPrimTypes
+                              , kokaKType, kokaPrimTypes
                               , toKoka, fromKoka, cIdents, isComment, substFormat
-                              , unboxedInternals, externCType, conInfoOf, conFieldNames
+                              , unboxedInternals, externCType
                               ) where
 
 import Data.Char( isAlphaNum, isDigit )
 import Lib.PPrint( Doc, text, empty, (<.>) )
 import Common.Name
 import Common.NamePrim
-import Type.Type
-import Kind.Newtypes
 import Backend.Typed.Syntax
 import Backend.Typed.Layout( CT(..) )
 import Backend.Typed.CGen.Layout( ctName )
@@ -36,11 +34,6 @@ kokaName name
 kokaTypeName :: Name -> String
 kokaTypeName name = kokaName (prependRaw "@" name)
 
-conFieldNames :: [DataInfo] -> Name -> Either String [String]
-conFieldNames infos c
-  = do ci <- conInfoOf infos c
-       return [kokaLocal (unqualify n) | (n,_) <- conInfoParams ci]
-
 kokaLocal :: Name -> String
 kokaLocal n
   = let s = asciiEncode False (show n)
@@ -49,24 +42,7 @@ kokaLocal n
 cReserved :: [String]
 cReserved = ["bool","toString","arguments","eval","char","int","intptr_t","long","short","signed","size_t","ssize_t","intptr_t","uintptr_t","unsigned","uint8_t","double","auto","extern","float","goto","inline","restrict","sizeof","static","volatile","async","await","break","case","catch","class","continue","const","debugger","default","delete","do","else","finally","for","function","if","in","instanceof","new","return","register","switch","struct","this","throw","try","typeof","typedef","union","var","void","while","with","yield","class","enum","export","extends","import","super","errno","exception_info","or","timezone"]
 
-conInfoOf :: [DataInfo] -> Name -> Either String ConInfo
-conInfoOf infos c
-  = case [ci | di <- infos, ci <- dataInfoConstrs di, conInfoName ci == c] of
-      (ci:_) -> return ci
-      [] -> Left ("unknown constructor " ++ show c)
-
 -- conversions between our C types and Koka's C types
-
-kokaCType :: Type -> String
-kokaCType tp
-  = case tp of
-      TForall _ t -> kokaCType t
-      TFun _ _ _ -> "kk_function_t"
-      TApp t _ -> kokaCType t
-      TVar _ -> "kk_box_t"
-      TSyn _ _ t -> kokaCType t
-      TCon c -> let n = typeConName c
-                in maybe (kokaTypeName n) id (lookup n kokaPrimTypes)
 
 kokaPrimTypes :: [(Name,String)]
 kokaPrimTypes
