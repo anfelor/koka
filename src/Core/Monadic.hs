@@ -44,6 +44,7 @@ import Core.Core
 import qualified Core.Core as Core
 import Core.Pretty
 import Core.CoreVar
+import Core.Simplify( caseOfCase )
 
 trace s x =
    -- Lib.Trace.trace s
@@ -155,6 +156,11 @@ monExpr' topLevel expr
                           ))
       Let defgs body
         -> monLetGroups defgs body
+
+      -- an inner match with monadic branches would be bound to a continuation that runs the
+      -- outer match: push the outer match into its branches instead (case-of-case)
+      Case [Case _ innerBranches] _ | any isMonBranch innerBranches, Just expr' <- caseOfCase expr
+        -> monExpr' topLevel expr'
 
       Case exprs bs
         -> do exprs' <- monTrans monExpr exprs

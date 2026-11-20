@@ -9,7 +9,7 @@
 -}
 -----------------------------------------------------------------------------
 
-module Core.Simplify (simplify, uniqueSimplify, simplifyDefs, isIdentityFun) where
+module Core.Simplify (simplify, uniqueSimplify, simplifyDefs, isIdentityFun, caseOfCase) where
 
 import Data.List
 import Control.Monad
@@ -230,42 +230,9 @@ topDown (Case [Let dgs expr] branches)
     return (Let dgs (Case [expr] branches))
 
 -- case-of-case: currently makes reuse worse in some cases (like bench/koka/rbtree)
-topDown expr@(Case [Case scruts0 branches0] branches1) | doesNotDuplicate
-  = do caseOfCase <- getCaseOfCase
-       if caseOfCase
-         then return (Case scruts0 (map (pushCase branches1) branches0))
-         else return expr
-  where
-    pushCase branches (Branch pats guards)
-      = Branch pats (map (pushCaseG branches) guards)
-    pushCaseG branches (Guard guard expr)
-      = Guard guard (Case [expr] branches)
-
-    doesNotDuplicate
-      = hasSingleBranch branches0 ||
-        length (filter (simplifiesOn branches1) branches0) + 1 >= length branches0
-
-    hasSingleBranch :: [Branch] -> Bool
-    hasSingleBranch branches
-      = case branches of
-          [Branch pats [guard]] -> True
-          _                     -> False
-
-    simplifiesOn :: [Branch] -> Branch -> Bool
-    simplifiesOn branches (Branch pats guards)
-      = all (simplifiesOnG branches) guards
-
-    simplifiesOnG :: [Branch] -> Guard -> Bool
-    simplifiesOnG branches (Guard guard expr)
-      = simplifiesOnE branches expr
-
-    simplifiesOnE :: [Branch] -> Expr -> Bool
-    simplifiesOnE branches expr
-      = case expr of
-          Let dgs body -> simplifiesOnE branches body
-          _ -> case kmatchBranches [expr] branches of
-                 Just _ -> True
-                 _      -> False
+topDown expr@(Case [Case _ _] _) | Just expr' <- caseOfCase expr
+  = do enabled <- getCaseOfCase
+       return (if enabled then expr' else expr)
 
 -- App of case to case of app's
 topDown expr@(App (Case scruts branches) args)
@@ -309,6 +276,50 @@ isIdentityFun f
       TypeApp (Var g _) _ -> getName g == nameEffectOpen
       App g [h] -> isIdentityFun g && isIdentityFun h
       _ -> False
+
+
+-- Case-of-case: `match (match e { p_i -> e_i }) { bs }` becomes `match e { p_i -> match e_i { bs } }`
+-- when this does not duplicate `bs`: the inner match has a single branch, or all but one of its
+-- branches end in a constructor that `bs` matches (as for `a && b`). Those branches are matched
+-- right away. Used by `topDown` if enabled, and by `Core.Monadic` instead of binding an inner
+-- match to a continuation.
+caseOfCase :: Expr -> Maybe Expr
+caseOfCase (Case [Case scruts0 branches0] branches1) | doesNotDuplicate
+  = Just (Case scruts0 (map pushCase branches0))
+  where
+    pushCase (Branch pats guards)
+      = Branch pats [Guard guard (pushInto expr) | Guard guard expr <- guards]
+
+    pushInto (Let dgs body)  | bv dgs `tnamesDisjoint` fv branches1
+      = Let dgs (pushInto body)
+    pushInto expr
+      = case kmatchBranches [expr] branches1 of
+          Just matched -> matched
+          Nothing      -> Case [expr] branches1
+
+    doesNotDuplicate
+      = hasSingleBranch branches0 ||
+        length (filter simplifiesOn branches0) + 1 >= length branches0
+
+    hasSingleBranch :: [Branch] -> Bool
+    hasSingleBranch branches
+      = case branches of
+          [Branch pats [guard]] -> True
+          _                     -> False
+
+    simplifiesOn :: Branch -> Bool
+    simplifiesOn (Branch pats guards)
+      = all (\(Guard guard expr) -> simplifiesOnE expr) guards
+
+    simplifiesOnE :: Expr -> Bool
+    simplifiesOnE expr
+      = case expr of
+          Let dgs body | bv dgs `tnamesDisjoint` fv branches1 -> simplifiesOnE body
+          _ -> case kmatchBranches [expr] branches1 of
+                 Just _ -> True
+                 _      -> False
+caseOfCase _
+  = Nothing
 
 
 -- normalize evaluation by binding sub expressions
@@ -933,7 +944,7 @@ runSimplify unsafe ndebug caseOfCase dupMax uniq penv (Simplify c)
 
 
 
-data SEnv = SEnv{ unsafe :: Bool, ndebug :: Bool, caseOfCase :: Bool, dupMax :: Int, penv :: Pretty.Env, currentDef :: [Name] }
+data SEnv = SEnv{ unsafe :: Bool, ndebug :: Bool, enableCaseOfCase :: Bool, dupMax :: Int, penv :: Pretty.Env, currentDef :: [Name] }
 
 data Result a = Ok a Int
 
@@ -974,7 +985,7 @@ getUnsafe
 getCaseOfCase :: Simp Bool
 getCaseOfCase
   = do env <- getEnv
-       return (caseOfCase env)
+       return (enableCaseOfCase env)
 
 getDuplicationMax :: Simp Int
 getDuplicationMax
