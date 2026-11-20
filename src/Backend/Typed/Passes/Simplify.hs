@@ -16,7 +16,12 @@
 
   Before that, join points with at most one jump are inlined: the jump becomes a binding
   of the parameters to the arguments (aliases that copy propagation then removes), and
-  instantiates the type parameters.
+  instantiates the type parameters. First, a jump whose arguments select an alternative of
+  a destructuring at the start of the join body (under dereferences and unrolls) is replaced
+  by a copy of that alternative, if it does not use its binder, with the same bindings. With
+  the commuting conversions of `Anf`, this is case-of-case: in
+  `join j(x) = case x of {...} in ... jump j(inj₁ ()) ...` the jump becomes the first
+  alternative.
 
   Afterwards, a fresh context that is only appended is inlined: elaboration binds the
   argument of `c ++ ctx K` (Koka's `cctx/(++)`) and copies it as if it may be shared
@@ -33,32 +38,50 @@ module Backend.Typed.Passes.Simplify( simplifyProgram ) where
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
+import Control.Monad.State( State, evalState, state )
 import Backend.Typed.Syntax
-import Backend.Typed.Traversal( descendA, descendV, fvE, fvV, jumpArgs, stepsFrom, within )
-import Backend.Typed.Passes.Common( mapAll, SubstExpr, defScope, project, substJump, substName, substStep, substTypesE, valueAt )
+import Backend.Typed.Traversal( descendA, descendAll, descendV, fvE, fvV, jumpArgs, stepsFrom, within )
+import Backend.Typed.Passes.Common( mapAll, NameSupply, SubstExpr, cloneE, defScope, freshFor, freshNameFrom, project, substJump, substJumpM, substName, substStep, substTypesE, valueAt )
 import Backend.Typed.Types( Types(..) )
 
 simplifyProgram :: Program -> Program
 simplifyProgram prog = prog{ progDefs = map simplifyDef (progDefs prog) }
 
 simplifyDef :: Def -> Def
-simplifyDef def = def{ defBody = knownE M.empty (freshE (copyE (defScope def) (const Nothing) (inlineE (defBody def)))) }
+simplifyDef def = def{ defBody = knownE M.empty (freshE (copyE (defScope def) (const Nothing) inlined)) }
+  where
+    inlined = evalState (inlineE (defBody def)) (freshFor def)
 
 -- join points
 
-inlineE :: VExpr -> VExpr
+inlineE :: VExpr -> State NameSupply VExpr
 inlineE expr
   = case expr of
       Join NonRec j tvs ps e1 e2
-        -> let e1' = inlineE e1
-               e2' = inlineE e2
-               bindArgs ts vs = let sub = M.fromList (zip tvs ts)
-                                in foldr (\((x,_,t),v) e -> Let x (subst sub t) (Ret v) e) (substTypesE sub e1') (zip ps vs)
-           in case length (jumpArgs j e2') of
-                0 -> e2'
-                1 -> substJump j bindArgs e2'
-                _ -> Join NonRec j tvs ps e1' e2'
-      _ -> mapAll (const inlineE) expr
+        -> do e1' <- inlineE e1
+              let bindArgs body ts vs = let sub = M.fromList (zip tvs ts)
+                                        in foldr (\((x,_,t),v) e -> Let x (subst sub t) (Ret v) e) (substTypesE sub body) (zip ps vs)
+                  known :: [AType] -> [VVal] -> State NameSupply VExpr
+                  known ts vs = case selected (M.fromList (zip [x | (x,_,_) <- ps] vs)) e1' of
+                                   Just alt -> cloneE (root <$> state (freshNameFrom "known")) (bindArgs alt ts vs)
+                                   Nothing -> return (Jump j ts vs)
+              e2' <- substJumpM j known =<< inlineE e2
+              return (case length (jumpArgs j e2') of
+                        0 -> e2'
+                        1 -> substJump j (bindArgs e1') e2'
+                        _ -> Join NonRec j tvs ps e1' e2')
+      _ -> descendAll (const inlineE) expr
+
+-- The alternative of a destructuring (under dereferences and unrolls) that the known values
+-- select, if it does not use its binder.
+selected :: M.Map Path VVal -> VExpr -> Maybe VExpr
+selected known expr
+  = case expr of
+      Deref v x e -> ifUsed x (Deref v x) <$> selected (shadow [x] known) e
+      Unroll v x e -> ifUsed x (Unroll v x) <$> selected (shadow [x] known) e
+      _ -> case decided known expr of
+             Just (x,e) | not (used x e) -> Just e
+             _ -> Nothing
 
 copyE :: SubstExpr
 copyE scope sub expr
@@ -133,20 +156,7 @@ knownE known expr
            in if isRet e1' && not (used x e2') then e2' else Let x t e1' e2'
       Deref v x e -> ifUsed x (Deref v x) (knownE (shadow [x] known) e)
       Unroll v x e -> ifUsed x (Unroll v x) (knownE (shadow [x] known) e)
-      CaseV v alts
-        | Just (Inj i _ _) <- case v of { Var x -> valueAt known x; _ -> Just v }
-        , ((x,e):_) <- [(x,e) | (j,x,e) <- alts, j == i]
-        -> taken x e
-      CaseA v alts def
-        | Just (InjA i _ _) <- knownAt known v
-        , ((x,e):_) <- [(x,e) | (j,x,e) <- alts, j == i] ++ maybe [] pure def
-        -> taken x e
-      SplitA v k (x,e1) (y,e2)
-        | Just (InjA i _ _) <- knownAt known v
-        -> if i < k then taken x e1 else taken y e2
-      IfWhnf v (x,e1) (y,e2)
-        | Just (InjLazy d _ _) <- knownAt known v
-        -> if d == Whnf then taken x e1 else taken y e2
+      _ | Just (x,e) <- decided known expr -> taken x e
       _ -> descend
   where
     descend = mapAll (\xs -> knownE (shadow xs known)) expr
@@ -155,6 +165,28 @@ knownE known expr
                 in if used x e' then descend else e'
     isRet (Ret _) = True
     isRet _ = False
+
+-- the alternative of a destructuring of a known value, with its binder
+decided :: M.Map Path VVal -> VExpr -> Maybe (Path,VExpr)
+decided known expr
+  = case expr of
+      CaseV v alts
+        | Just (Inj i _ _) <- case v of { Var x -> valueAt known x; _ -> Just v }
+        -> alt i alts Nothing
+      CaseA v alts def
+        | Just (InjA i _ _) <- knownAt known v
+        -> alt i alts def
+      SplitA v k (x,e1) (y,e2)
+        | Just (InjA i _ _) <- knownAt known v
+        -> Just (if i < k then (x,e1) else (y,e2))
+      IfWhnf v (x,e1) (y,e2)
+        | Just (InjLazy d _ _) <- knownAt known v
+        -> Just (if d == Whnf then (x,e1) else (y,e2))
+      _ -> Nothing
+  where
+    alt i alts def = case [(x,e) | (j,x,e) <- alts, j == i] ++ maybe [] pure def of
+                       (a:_) -> Just a
+                       [] -> Nothing
 
 -- keep a destructuring with the binder `x` around `e` if `e` uses it
 ifUsed :: Path -> (VExpr -> VExpr) -> VExpr -> VExpr
