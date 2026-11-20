@@ -47,10 +47,10 @@ import Backend.Typed.Passes.CheckLinear( checkLinear )
 import Backend.Typed.Passes.CheckFip( checkFip )
 
 -- returns the lowered program, its errors and its warnings, labeled by the phase that produced them
-typedFromCore :: Bool -> Newtypes -> [C.Core] -> Int -> C.Core -> (Program,[(String,String)],[(String,String)])
-typedFromCore enableReuse nt imports uniq core
+typedFromCore :: Bool -> Newtypes -> Foreign -> [C.Core] -> Int -> C.Core -> (Program,[(String,String)],[(String,String)])
+typedFromCore enableReuse nt ffi imports uniq core
   = let (acore,_)              = runUnique uniq (matchCore nt core)
-        (eprog,elabErrs,notes) = elabProgram nt imports acore
+        (eprog,elabErrs,notes) = elabProgram nt ffi imports acore
         lazies                 = lazyFuns nt (progTypes eprog)
         pipeline               =
           [ Require "check" checkProgram

@@ -41,12 +41,12 @@ evalM m r s = fst <$> runM m r s
 liftE :: Either String a -> M r s a
 liftE = either fail return
 
-data Env = Env{ envTypes :: TypeDefs, envSigs :: Sigs }
+data Env = Env{ envTypes :: TypeDefs, envSigs :: Sigs, envExterns :: Externs }
 
 type Q a = Either String a
 
 envOf :: Program -> Env
-envOf prog = Env (progTypes prog) (progSigs prog)
+envOf prog = Env (progTypes prog) (progSigs prog) (progExterns prog)
 
 funSig :: Env -> Name -> [AType] -> Q ([VType],VType)
 funSig env f tys

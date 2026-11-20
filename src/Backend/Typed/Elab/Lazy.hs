@@ -36,7 +36,7 @@ lazyFuns nt tdefs
            (S.fromList [funName info "eval-locked" | (info,_,_) <- infos])
            (M.fromList [(dataInfoName info, tag) | (info,_,_) <- infos, (tag,con) <- cons info, isLazyIndirectConName (conInfoName con)])
   where
-    env = Env tdefs M.empty
+    env = Env tdefs M.empty M.empty
     cons info = zip [1..] (dataInfoConstrs info)   -- tags start at 1
     infos = [(info,tvs,thunks) | (_,info) <- NM.toList (newtypesTypeDefs nt)
                                , Just TypeDef{ tdefParams = tvs } <- [M.lookup (dataInfoName info) tdefs]

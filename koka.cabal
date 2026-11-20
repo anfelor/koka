@@ -39,6 +39,7 @@ library
       Backend.Typed.CFromCore
       Backend.Typed.Elab.Coerce
       Backend.Typed.Elab.Common
+      Backend.Typed.Elab.Foreign
       Backend.Typed.Elab.FromCore
       Backend.Typed.Elab.Lazy
       Backend.Typed.Elab.Match

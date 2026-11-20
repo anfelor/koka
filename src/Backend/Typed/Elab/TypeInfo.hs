@@ -13,7 +13,7 @@ module Backend.Typed.Elab.TypeInfo( Tr
                                   , isValueInfo, elabArgs
                                   , conIndex, conFieldTypes, conFieldNames, schemeFieldTypes, conCount, conShape, conExists
                                   , isLazyInfo, refShape, refInj
-                                  , dataInfoOf, valueBody, valueDecl
+                                  , dataInfoOf, valueBody, valueDecl, kType
                                   , tvarStar
                                   ) where
 
@@ -132,6 +132,17 @@ valueBody nt info vargs
       []    -> VRaw <$> rawType (dataInfoName info)
       [con] -> conValueFields nt vargs con
       cons  -> VSum <$> mapM (\con -> (,) (Con (conInfoName con)) <$> conValueFields nt vargs con) cons
+
+-- Koka's C type of a Koka type (as `Backend.C.FromCore` declares externals)
+kType :: Type -> KType
+kType tp
+  = case tp of
+      TForall _ t    -> kType t
+      TFun _ _ _    -> KFun
+      TApp t _      -> kType t
+      TVar _        -> KBox
+      TSyn _ _ t    -> kType t
+      TCon tc       -> KCon (typeConName tc)
 
 -- the value datatype that a Koka type names, if any (`lblDecls`)
 valueDecl :: Newtypes -> Type -> Maybe Name
