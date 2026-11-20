@@ -314,7 +314,7 @@ codeGenC sourceFile newtypes borrowed0 imported unique0 term flags sequential en
                             Just (name,tp) -> Just (name,isAsyncFunction tp)
                             _              -> Nothing
       -- generate C
-      let (cdoc,hdoc,_,bcore) = cFromCore (typedC flags)  -- the typed C defines its own entry point
+      let (cdoc,hdoc,_,bcore) = cFromCore False
                                           (buildType flags) sourceDir (prettyEnvFromFlags flags) (platformFromFlags flags)
                                           newtypes borrowed0 unique0 (parcReuse flags) (parcSpecialize flags) (parcReuseSpec flags)
                                           (parcBorrowInference flags) (optEagerPatBind flags) (stackSize flags) mbEntry
@@ -323,14 +323,14 @@ codeGenC sourceFile newtypes borrowed0 imported unique0 term flags sequential en
           bcoreDoc  = Core.Pretty.prettyCore (prettyEnvFromFlags flags){ coreIface = False, coreShowDef = True } (targetPlatformFromFlags flags) [] bcore
 
       -- writeDocW 120 (outBase ++ ".c.kkc") bcoreDoc
-      when (showFinalCore flags) $
+      when (showFinalCore flags) $  -- (under `typedC`, the only use of `cFromCore`)
         do termInfo term bcoreDoc
 
       -- termTrace term ( "generate c: " ++ outBase )
-      writeDocW 120 outC (cdoc <.> linebreak)
-      writeDocW 120 outH (hdoc <.> linebreak)
+      unless (typedC flags) $ writeDocW 120 outC (cdoc <.> linebreak)  -- the typed backend generated its own C (`codeGenTyped`)
+      unless (typedC flags) $ writeDocW 120 outH (hdoc <.> linebreak)
       termTrace term ( "generated c: " ++ outBase )
-      when (showAsmC flags) (termInfo term (hdoc <//> cdoc))
+      when (showAsmC flags && not (typedC flags)) (termInfo term (hdoc <//> cdoc))
 
       -- copy libraries
       -- Multiple modules can declare the same `extern import { c { library="..." } }`
@@ -338,7 +338,7 @@ codeGenC sourceFile newtypes borrowed0 imported unique0 term flags sequential en
       -- given library is copied/linked only once instead of once per declaring
       -- module, which also silences "ignoring duplicate libraries" linker warnings.
       let importcores = map (fromJust . modCore) imported
-          cores = bcore:importcores
+          cores = (if typedC flags then core0 else bcore):importcores  -- (boxing keeps the externals)
           cc       = ccomp flags
           eimports = nub $ concatMap (externalImportsFromCore) cores
           clibs    = nub $ concatMap (clibsFromCore flags) cores

@@ -375,8 +375,8 @@ precompile options backend
            -- precompile the syn-nested chain so syn-nested1 emits only its own core
          , runKoka stdcfg "" "test/parc/syn-nested1c.kk"
          ]
-       when (backend == BackendC) $
-         void $ runKoka stdcfg{flags = "--target=js":(flags stdcfg)} "" "util/link-test.kk" -- precompiled js libraries as well
+       -- precompiled js libraries as well (the js tests run with each backend's flags)
+       void $ runKoka stdcfg{flags = "--target=js":(flags stdcfg)} "" "util/link-test.kk"
        return (unlines outs)
 
 
