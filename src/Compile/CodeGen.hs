@@ -5,7 +5,7 @@
 -- terms of the Apache License, Version 2.0. A copy of the License can be
 -- found in the LICENSE file at the root of this distribution.
 -----------------------------------------------------------------------------
-module Compile.CodeGen ( codeGen, codeGenTyped, cModuleBases, Link, LinkResult(..), noLink ) where
+module Compile.CodeGen ( codeGen, codeGenTyped, Link, LinkResult(..), noLink ) where
 
 import Debug.Trace
 import Data.Char
@@ -42,13 +42,7 @@ import Core.Borrowed( Borrowed )
 import Backend.CSharp.FromCore    ( csharpFromCore )
 import Backend.JavaScript.FromCore( javascriptFromCore )
 import Backend.C.FromCore         ( cFromCore )
-import Backend.Typed.Typed        ( typedFromCore )
-import qualified Backend.Typed.CGen.CGen as TC
-import qualified Data.Map as M
-import qualified Data.Set as S
-import qualified Common.NameMap as NM
-import Kind.Newtypes( newtypesTypeDefs )
-import Backend.Typed.Pretty( prettyProgram )
+import Backend.Typed.CFromCore    ( typedCFromCore, cgenMain, ktFileName )
 
 import Compile.Options
 import Compile.Module( Definitions(..), Module(..), modCoreImports, defsFromModules )
@@ -276,63 +270,35 @@ codeGenJS term flags sequential entry outBase core
 
 
 {---------------------------------------------------------------
-  Typed C code generation
+  Typed C backend: `codeGenC` compiles its output in place of the regular C
 ---------------------------------------------------------------}
 
+-- `imports` are all (transitive) imports of the module
 codeGenTyped :: Terminal -> Flags -> [Module] -> Module -> IO ()
 codeGenTyped term flags imports mod
   = do let newtypes = defsNewtypes (defsFromModules (mod:imports))
-           (tprog,errors,warnings) = typedFromCore (parcReuse flags) newtypes (mapMaybe modCore imports) 1000000 (fromJust (modCore mod))
-           outDir                  = dirname (modIfacePath mod)
+           (ir,diagnostics,result) = typedCFromCore (parcReuse flags) newtypes (mapMaybe modCore imports) (fromJust (modCore mod)) (fromJust (modCore mod))
+           outBase = joinPath (dirname (modIfacePath mod)) (ktFileName (modName mod))
        -- the final IR, for debugging; written before validation so that it is kept on failure
-       createDirectoryIfMissing True outDir
-       writeDocW 120 (joinPath outDir (TC.ktFileName (modName mod) ++ ".ir")) (prettyProgram tprog <.> linebreak)
-       mapM_ (\(phase,msg) -> termInfo term (text ("typed " ++ phase ++ ": " ++ msg))) (errors ++ warnings)
-       -- Warnings (such as FIP diagnostics) are advisory, like the frontend's FIP warnings.
-       -- Errors invalidate the lowering boundary.
-       unless (null errors) $
-         raiseIO "typed backend validation failed; C generation stopped"
-       let cores   = mapMaybe modCore (mod:imports)
-           externs = M.fromList [(Core.externalName x, TC.External (Core.externalFormat x) (Core.externalType x)) | c <- cores, x@(Core.External{}) <- Core.coreProgExternals c]
-           ktHeader m = TC.ktFileName m ++ ".h"
-           cenv    = TC.CEnv (modName mod)
-                             ([moduleNameToPath (modName mod) ++ ".h"] ++ map (ktHeader . modName) imports)
-                             (map (TC.ktInitName . modName) imports)
-                             externs newtypes (map snd (NM.toList (newtypesTypeDefs newtypes)) ++ [info | c <- cores, Core.TypeDefGroup tds <- Core.coreProgTypeDefs c, Core.Data info <- tds])
-                             -- as the C backend (`Backend.C.FromCore.genTopGroup`)
-                             (S.fromList [Core.defName d | Core.DefNonRec d <- Core.coreProgDefs (fromJust (modCore mod)),
-                                                           Core.defInline d == InlineAlways || Core.isInlineable 5 d])
-           (hdr,csrc,errs) = TC.cgenModule cenv tprog
-       unless (null errs) $ raiseIO ("typed C generation failed: " ++ intercalate "\n" errs)
-       writeFile (joinPath outDir (ktHeader (modName mod))) hdr
-       writeFile (joinPath outDir (TC.ktFileName (modName mod) ++ ".c")) csrc
+       createDirectoryIfMissing True (dirname outBase)
+       writeDocW 120 (outBase ++ ".ir") ir
+       mapM_ (termInfo term . text) diagnostics
+       case result of
+         Left err          -> raiseIO err
+         Right (hdr,csrc)  -> do writeFile (outBase ++ ".h") hdr
+                                 writeFile (outBase ++ ".c") csrc
 
--- The typed backend uses a separate entry point, but its modules are compiled
--- by the same per-module action and linked by the same linker as regular C.
-codeGenTypedMain :: Flags -> ModuleName -> Name -> [Module] -> Doc
-codeGenTypedMain flags progName entryName imported
-  = let    mods     = map modName imported ++ [progName]
-           mainName = if null (outputEntryName flags) then "main" else outputEntryName flags
-           mainSrc  = unlines (["#include \"" ++ TC.ktFileName progName ++ ".h\""]
-                               ++ ["#include \"" ++ moduleNameToPath m ++ ".h\"" | m <- mods]
-                               ++ ["#include <execinfo.h>"
-                                  ,"#include <stdlib.h>"
-                                  ,"#include <unistd.h>"
-                                  ,"#include <signal.h>"
-                                  ,"static void kt_segv(int sig) { fflush(stdout); void* b[64]; int n = backtrace(b,64); backtrace_symbols_fd(b,n,2); _exit(139); }"
-                                  ,"int " ++ mainName ++ "(int argc, char** argv) {"
-                                  ,"  if (getenv(\"KT_BACKTRACE\") != NULL) { signal(SIGSEGV,&kt_segv); signal(SIGBUS,&kt_segv); }"
-                                  ]
-                               ++ ["  kk_os_set_stack_size(KK_IZ(" ++ show (stackSize flags) ++ "));" | stackSize flags /= 0]
-                               ++ ["  kk_context_t* _ctx = kk_main_start(argc, argv);"]
-                               ++ ["  kk_" ++ asciiEncode True (show m) ++ "__init(_ctx);" | m <- mods, m /= progName]
-                               ++ ["  " ++ TC.ktInitName progName ++ "(_ctx);"
-                                  ,"  " ++ TC.cName entryName ++ "(_ctx);"
-                                  ,"  kk_" ++ asciiEncode True (show progName) ++ "__done(_ctx);"  -- e.g. stops the task threads
-                                  ,"  kk_main_end(_ctx);"
-                                  ,"  return 0;"
-                                  ,"}"])
-      in text mainSrc
+-- the typed C source to compile for a module; for the main module, it is extended with the entry point
+typedCSource :: Flags -> Maybe (Name,Type) -> [Module] -> ModuleName -> FilePath -> IO FilePath
+typedCSource flags entry imported progName outBase
+  = do let ktBase = joinPath (dirname outBase) (ktFileName progName)
+       case entry of
+         Nothing -> return (ktBase ++ ".c")
+         Just (entryName,_)
+           -> do let mainName = if null (outputEntryName flags) then "main" else outputEntryName flags
+                 writeFile (ktBase ++ "_main.c") (cgenMain mainName (stackSize flags) progName entryName (map modName imported))
+                 return (ktBase ++ "_main.c")
+
 
 {---------------------------------------------------------------
   C backend
@@ -350,7 +316,7 @@ codeGenC sourceFile newtypes borrowed0 imported unique0 term flags sequential en
                             Just (name,tp) -> Just (name,isAsyncFunction tp)
                             _              -> Nothing
       -- generate C
-      let (cdoc,hdoc,mainDoc,bcore) = cFromCore True
+      let (cdoc,hdoc,_,bcore) = cFromCore (typedC flags)  -- the typed C defines its own entry point
                                           (buildType flags) sourceDir (prettyEnvFromFlags flags) (platformFromFlags flags)
                                           newtypes borrowed0 unique0 (parcReuse flags) (parcSpecialize flags) (parcReuseSpec flags)
                                           (parcBorrowInference flags) (optEagerPatBind flags) (stackSize flags) mbEntry
@@ -382,45 +348,33 @@ codeGenC sourceFile newtypes borrowed0 imported unique0 term flags sequential en
 
       -- return the C compilation and final link as a separate IO action to increase concurrency
       return $ \fullImports ->
-               do -- Compile the selected representation with the module configuration.
-                  mapM_ (\base -> ccompile term flags cc base extraIncDirs [base ++ ".c"])
-                        (cModuleBases flags progName outBase)
-                  case (entry,mainDoc) of
-                    (Just (entryName,_),Just regularMain)
-                            -> do let (moduleFile,suffix,doc)
-                                        = if typedC flags
-                                            then (TC.ktFileName,"_typed",codeGenTypedMain flags progName entryName fullImports)
-                                            else (moduleNameToPath,"",regularMain)
-                                      mainBase = joinPath (dirname outBase) (moduleFile progName ++ "_main")
-                                  writeDocW 120 (mainBase ++ ".c") doc
-                                  ccompile term flags cc mainBase extraIncDirs [mainBase ++ ".c"]
-                                  codeGenLinkC term flags sequential cc progName fullImports outBase moduleFile suffix [ccObjFile cc mainBase] clibs
-                    _ -> return LinkDone
+               do -- compile the generated C
+                  csource <- if typedC flags then typedCSource flags entry fullImports progName outBase else return outC
+                  ccompile term flags cc outBase extraIncDirs [csource]
+                  case entry of
+                    Nothing -> return LinkDone
+                    Just _  -> codeGenLinkC term flags sequential cc progName fullImports {-link all objs, not just direct imports -}
+                                            outBase clibs
 
-
--- The same module artifacts are compiled, copied and validated for both backends.
-cModuleBases :: Flags -> ModuleName -> FilePath -> [FilePath]
-cModuleBases flags modName outBase
-  = [outBase | not (typedC flags)] ++
-    [joinPath (dirname outBase) (TC.ktFileName modName) | typedC flags]
 
 -- link obj's and create an executable
 codeGenLinkC :: Terminal -> Flags -> (IO () -> IO ()) -> CC -> ModuleName -> [Module]
-                  -> FilePath -> (ModuleName -> FilePath) -> String -> [FilePath] -> [FilePath] -> IO LinkResult
-codeGenLinkC term flags sequential cc progName imported outBase moduleFile exeSuffix extraObjs clibs
+                  -> FilePath -> [FilePath] -> IO LinkResult
+codeGenLinkC term flags sequential cc progName imported outBase clibs
   = do  -- names
         let outName fname = joinPath (dirname outBase) fname
             mainModName = moduleNameToPath progName
             mainName    = if null (outBaseName flags) then mainModName else outBaseName flags
-            mainExe     = outName (mainName ++ exeSuffix)
+            mainExe     = outName mainName
 
         -- build kklib for the specified build variant
         kklibObj <- kklibBuild term flags sequential cc (dirname outBase) "kklib" (ccObjFile cc "kklib")
 
         -- set up linker command line
         let objs   = [kklibObj] ++
-                      [outName (ccObjFile cc (moduleFile mname))
-                          | mname <- map modName imported ++ [progName]] ++ extraObjs
+                      [outName (ccObjFile cc (moduleNameToPath mname))
+                          | mname <- map modName imported ++ [progName]]
+                      -- ++ [mainObj]
             syslibs= nub $ concat [csyslibsFromCore flags mcore | mcore <- map (fromJust . modCore) imported]
                       ++ ccompLinkSysLibs flags
                       ++ (if onWindows && not (isTargetWasm (targetFromFlags flags))
@@ -428,7 +382,9 @@ codeGenLinkC term flags sequential cc progName imported outBase moduleFile exeSu
                             else ["m","pthread"])
             libs   = -- ["kklib"] -- [normalizeWith '/' (outName (ccLibFile cc "kklib"))] ++ ccompLinkLibs flags
                       -- ++
-                      nub (clibs ++ concat [clibsFromCore flags mcore | mcore <- map (fromJust . modCore) imported])
+                      nub $ clibs
+                      ++
+                      concat [clibsFromCore flags mcore | mcore <- map (fromJust . modCore) imported]
 
             libpaths = map (\lib -> outName (ccLibFile cc lib)) libs
 

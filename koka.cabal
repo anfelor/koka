@@ -36,6 +36,7 @@ library
       Backend.Typed.CGen.Layout
       Backend.Typed.CGen.ReuseSlots
       Backend.Typed.Build
+      Backend.Typed.CFromCore
       Backend.Typed.Elab.Coerce
       Backend.Typed.Elab.Common
       Backend.Typed.Elab.FromCore

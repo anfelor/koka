@@ -16,7 +16,7 @@
 
   The C code is a `Doc`: string literals are documents, and a list of documents is a list of statements.
 -}
-module Backend.Typed.CGen.CGen( CEnv(..), External(..), cgenModule, cName, ktInitName, ktFileName ) where
+module Backend.Typed.CGen.CGen( CEnv(..), External(..), cgenModule, cgenMain, cName, ktInitName, ktFileName ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -1275,6 +1275,31 @@ cgenModule cenv prog
                                                      ++ [text i <.> "(_ctx);" | i <- ceImportInits cenv]
                                                      ++ [i | (_,_,_,i) <- ok])])
               in (show hdr ++ "\n", show csrc ++ "\n", errs)
+
+
+-- The C source of the main module of a typed program: its typed C followed by the entry point
+-- `mainName`, which initializes the modules `imports` (in build order) and runs `entryName`.
+cgenMain :: String -> Int -> Name -> Name -> [Name] -> String
+cgenMain mainName stackSize progName entryName imports
+  = unlines (["#include \"" ++ ktFileName progName ++ ".c\""]
+             ++ ["#include \"" ++ moduleNameToPath m ++ ".h\"" | m <- imports]
+             ++ ["#include <execinfo.h>"
+                ,"#include <stdlib.h>"
+                ,"#include <unistd.h>"
+                ,"#include <signal.h>"
+                ,"static void kt_segv(int sig) { fflush(stdout); void* b[64]; int n = backtrace(b,64); backtrace_symbols_fd(b,n,2); _exit(139); }"
+                ,"int " ++ mainName ++ "(int argc, char** argv) {"
+                ,"  if (getenv(\"KT_BACKTRACE\") != NULL) { signal(SIGSEGV,&kt_segv); signal(SIGBUS,&kt_segv); }"
+                ]
+             ++ ["  kk_os_set_stack_size(KK_IZ(" ++ show stackSize ++ "));" | stackSize /= 0]
+             ++ ["  kk_context_t* _ctx = kk_main_start(argc, argv);"]
+             ++ ["  kk_" ++ asciiEncode True (show m) ++ "__init(_ctx);" | m <- imports]
+             ++ ["  " ++ ktInitName progName ++ "(_ctx);"
+                ,"  " ++ cName entryName ++ "(_ctx);"
+                ,"  kk_" ++ asciiEncode True (show progName) ++ "__done(_ctx);"  -- e.g. stops the task threads
+                ,"  kk_main_end(_ctx);"
+                ,"  return 0;"
+                ,"}"])
 
 
 -- warning pragmas for generated typed C
