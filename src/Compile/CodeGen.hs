@@ -289,14 +289,14 @@ codeGenTyped term flags imports mod
                                  writeFile (outBase ++ ".c") csrc
 
 -- the typed C source to compile for a module; for the main module, it is extended with the entry point
-typedCSource :: Flags -> Maybe (Name,Type) -> [Module] -> ModuleName -> FilePath -> IO FilePath
-typedCSource flags entry imported progName outBase
+typedCSource :: Flags -> Maybe (Name,Type) -> ModuleName -> FilePath -> IO FilePath
+typedCSource flags entry progName outBase
   = do let ktBase = joinPath (dirname outBase) (ktFileName progName)
        case entry of
          Nothing -> return (ktBase ++ ".c")
          Just (entryName,_)
            -> do let mainName = if null (outputEntryName flags) then "main" else outputEntryName flags
-                 writeFile (ktBase ++ "_main.c") (cgenMain mainName (stackSize flags) progName entryName (map modName imported))
+                 writeFile (ktBase ++ "_main.c") (cgenMain mainName (stackSize flags) progName entryName)
                  return (ktBase ++ "_main.c")
 
 
@@ -349,7 +349,7 @@ codeGenC sourceFile newtypes borrowed0 imported unique0 term flags sequential en
       -- return the C compilation and final link as a separate IO action to increase concurrency
       return $ \fullImports ->
                do -- compile the generated C
-                  csource <- if typedC flags then typedCSource flags entry fullImports progName outBase else return outC
+                  csource <- if typedC flags then typedCSource flags entry progName outBase else return outC
                   ccompile term flags cc outBase extraIncDirs [csource]
                   case entry of
                     Nothing -> return LinkDone
