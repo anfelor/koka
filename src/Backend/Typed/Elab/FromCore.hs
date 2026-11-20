@@ -42,8 +42,8 @@ import Backend.Typed.Pretty( ppr )
 
 -- programs
 
-elabProgram :: Newtypes -> [C.Core] -> C.Core -> (Program,[String],[String])
-elabProgram nt imports core
+elabProgram :: Newtypes -> Foreign -> [C.Core] -> C.Core -> (Program,[String],[String])
+elabProgram nt ffi imports core
   = let defs    = map closeDef (filter (not . isLeftOut) (C.flattenDefGroups (C.coreProgDefs core)))
         isigs   = M.fromList [(n,withModes modes sig) | (n,(tp,isFun,modes)) <- M.toList (importSigs (core:imports)), Right sig <- [typeSig nt tp isFun]]
         env0    = Env nt S.empty S.empty isigs M.empty S.empty M.empty VUnit
@@ -54,7 +54,19 @@ elabProgram nt imports core
                  Right ((d,sig),st) -> (M.insert (C.defName def) sig (stSigs st), ds ++ [d], errs, notes ++ map label (stNotes st))
                  Left err -> (sigs, ds, errs ++ [label err], notes)
         (sigs,ds,errs,notes) = foldl run (M.empty,[],tdefErrs,[]) defs
-    in (Program (C.coreProgName core) tdefs sigs ds, errs, notes)
+    in (Program (C.coreProgName core) tdefs sigs (externsOf (core:imports)) ffi ds, errs, notes)
+
+-- the externals of a module and its imports
+externsOf :: [C.Core] -> Externs
+externsOf cores
+  = M.fromList [(C.externalName x, Extern (C.externalFormat x) [(n,kType t) | (n,t) <- ps] (kType r))
+               | c <- cores, x@(C.External{}) <- C.coreProgExternals c, let (ps,r) = kokaFunType (C.externalType x)]
+  where
+    kokaFunType tp = case tp of
+                       TForall _ t -> kokaFunType t
+                       TSyn _ _ t -> kokaFunType t
+                       TFun ps _ r -> (ps,r)
+                       _ -> ([],tp)
 
 -- Koka leaves the type variables that nothing constrains free: they become `any`
 closeDef :: C.Def -> C.Def

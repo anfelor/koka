@@ -902,4 +902,24 @@ data Sig = SigFun [TVar] [(Mode,VType)] Mode VType  -- f : ∀ā. (q̄ V̄) -> q
 
 type Sigs = M.Map Name Sig
 
-data Program = Program{ progName :: Name, progTypes :: TypeDefs, progSigs :: Sigs, progDefs :: [Def] }
+-- An external function or value, called through its C format. Its typed signature is in
+-- `progSigs`; this is metadata for C generation, as the bodies of `TypeDef`s: Koka's C types of
+-- its parameters (with their names, which a format may use) and of its result.
+data Extern = Extern{ extFormat :: String, extParams :: [(Name,KType)], extResult :: KType }
+            deriving (Show)
+
+-- Koka's C type of an external's parameter or result
+data KType = KCon Name   -- the datatype or primitive type of that name
+           | KBox        -- a type variable: boxed
+           | KFun        -- a function
+           deriving (Show,Eq)
+
+type Externs = M.Map Name Extern
+
+-- The C code of a module's `extern include` and `extern import` declarations: before and at the
+-- end of its header, and before its source.
+data Foreign = Foreign{ forHeader :: [String], forHeaderEnd :: [String], forSource :: [String] }
+             deriving (Show)
+
+data Program = Program{ progName :: Name, progTypes :: TypeDefs, progSigs :: Sigs, progExterns :: Externs
+                      , progForeign :: Foreign, progDefs :: [Def] }

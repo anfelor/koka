@@ -277,7 +277,7 @@ codeGenJS term flags sequential entry outBase core
 codeGenTyped :: Terminal -> Flags -> [Module] -> Module -> IO ()
 codeGenTyped term flags imports mod
   = do let newtypes = defsNewtypes (defsFromModules (mod:imports))
-           (ir,diagnostics,result) = typedCFromCore (parcReuse flags) newtypes (mapMaybe modCore imports) (fromJust (modCore mod)) (fromJust (modCore mod))
+           (ir,diagnostics,result) = typedCFromCore (buildType flags) (dirname (modSourcePath mod)) (parcReuse flags) newtypes (mapMaybe modCore imports) (fromJust (modCore mod)) (fromJust (modCore mod))
            outBase = joinPath (dirname (modIfacePath mod)) (ktFileName (modName mod))
        -- the final IR, for debugging; written before validation so that it is kept on failure
        createDirectoryIfMissing True (dirname outBase)

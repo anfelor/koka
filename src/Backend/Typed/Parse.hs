@@ -651,18 +651,21 @@ memoizeP = do c <- atomValP
 -- Programs
 --------------------------------------------------------------------------
 
-data Item = IType TypeDef | ISig Name Sig | IDef Def
+data Item = IType TypeDef | ISig Name Sig | IExtern Name Extern | IForeign String String | IDef Def
 
--- Parses a program, given the imported datatypes and signatures. Its datatypes and signatures
--- include them.
-parseProgram :: TypeDefs -> Sigs -> String -> Either String Program
-parseProgram types sigs src
+-- Parses a program, given the imported datatypes, signatures and externals. Its datatypes,
+-- signatures and externals include them.
+parseProgram :: TypeDefs -> Sigs -> Externs -> String -> Either String Program
+parseProgram types sigs externs src
   = do toks <- lexTokens src
        (m,items) <- either (Left . show) Right (runParser programP st0 "" toks)
        let defs = [d | IDef d <- items]
+           code k = [c | IForeign k' c <- items, k' == k]
        return Program{ progName = m
                      , progTypes = M.union (M.fromList [(tdefName d, d) | IType d <- items]) types
                      , progSigs = M.unions [M.fromList [(n,s) | ISig n s <- items], M.fromList [(defName d, sigOf d) | d <- defs], sigs]
+                     , progExterns = M.union (M.fromList [(n,x) | IExtern n x <- items]) externs
+                     , progForeign = Foreign (code "header") (code "end") (code "source")
                      , progDefs = defs }
   where
     st0 = PState (M.unionsWith (++) (map (consOf False) (M.elems types))) M.empty
@@ -682,7 +685,7 @@ programP = do kw "module"
 
 itemP :: P Item
 itemP = do modifyState (\st -> st{ psBinders = M.empty })
-           choice [dataP, funP, valDefP, conP]
+           choice [dataP, funP, valDefP, conP, externP, foreignP]
 
 funP :: P Item
 funP = do kw "fun"
@@ -706,6 +709,28 @@ valDefP = do kw "val"
              sym ":"
              t <- vP
              (do sym "="; IDef . DefVal n tvs t <$> exprP) <|> return (ISig n (SigVal tvs t))
+
+externP :: P Item
+externP = do kw "extern"
+             n <- globalName <$> nameP
+             ps <- parensP (commaSep (do x <- globalName <$> nameP; sym ":"; t <- ktypeP; return (x,t)))
+             sym ":"
+             r <- ktypeP
+             sym "="
+             fmt <- stringP
+             return (IExtern n (Extern fmt ps r))
+  where
+    ktypeP = choice [KBox <$ kw "box", KFun <$ kw "fun", KCon . globalName <$> nameP]
+
+foreignP :: P Item
+foreignP = do kw "foreign"
+              k <- choice [k <$ kw k | k <- ["header","end","source"]]
+              IForeign k <$> stringP
+
+stringP :: P String
+stringP = tokenP (\t -> case t of
+                          TString s -> Just s
+                          _ -> Nothing) <?> "string"
 
 conP :: P Item
 conP = do kw "con"

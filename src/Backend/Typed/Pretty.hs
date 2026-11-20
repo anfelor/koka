@@ -69,7 +69,7 @@ reserved s = null s || "(" `isPrefixOf` s || s `elem` keywords || "box@" `isPref
     keywords = words ("ret let in of case split at if-whnf whnf delay ptr roll box scalar pack dup drop free"
                       ++ " if-unique if-full then else join rec jump fn gen forall exists yielded unreachable"
                       ++ " yielding cast-ev memoize ctx ctx-copy hole pure up down lock @ @copy _"
-                      ++ " module data con fun val Box Scalar I Y NaN Infinity"
+                      ++ " module data con fun val extern foreign Box Scalar I Y NaN Infinity"
                       ++ " char ssize_t intptr_t float64 float32 int64 int32 int16 int8 uint8")
 
 -- a path with all its steps
@@ -409,13 +409,30 @@ prettySig n sig
       SigCon vs ts t   -> text "con" <+> nm n <.> tyParams vs <.> parens (commaSep (map (prettyV fullPath) ts))
                           <+> colon <+> nm t <.> tyParams vs
 
+-- Koka's C types of an external, and its format
+prettyExtern :: Name -> Extern -> Doc
+prettyExtern n (Extern fmt ps r)
+  = text "extern" <+> nm n <.> parens (commaSep [nm x <.> colon <+> ktype t | (x,t) <- ps]) <+> colon <+> ktype r
+    <+> text "=" <+> text (show fmt)
+  where
+    ktype t = case t of
+                KCon c -> nm c
+                KBox -> text "box"
+                KFun -> text "fun"
+
+prettyForeign :: Foreign -> [Doc]
+prettyForeign (Foreign hs es ss)
+  = [text "foreign" <+> text k <+> text (show c) | (k,cs) <- [("header",hs),("end",es),("source",ss)], c <- cs]
+
 prettyProgram :: Program -> Doc
 prettyProgram prog
   = vcat (punctuate linebreak (map vcat (filter (not . null) sections)))
   where
     sections = [ [text "module" <+> nm (progName prog)]
+               , prettyForeign (progForeign prog)
                , [prettyTypeDef d | d <- M.elems (progTypes prog), local (tdefName d)]
                , [prettySig n s | (n,s) <- M.toList (progSigs prog), local n, not (S.member n defined)]
+               , [prettyExtern n x | (n,x) <- M.toList (progExterns prog), local n]
                , [prettyDef (defPaths fields d) d | d <- progDefs prog] ]
     local n = qualifier n == progName prog
     defined = S.fromList (map defName (progDefs prog))

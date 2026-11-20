@@ -9,8 +9,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- Koka's C conventions for extern calls and open datatype constructors.
-module Backend.Typed.CGen.Koka( External(..), kokaName, kokaTypeName, kokaLocal, cReserved
-                              , kokaCType, kokaPrimTypes, kokaFunType, kokaParamNames
+module Backend.Typed.CGen.Koka( kokaName, kokaTypeName, kokaLocal, cReserved
+                              , kokaCType, kokaPrimTypes
                               , toKoka, fromKoka, cIdents, isComment, substFormat
                               , unboxedInternals, externCType, conInfoOf, conFieldNames
                               ) where
@@ -24,8 +24,6 @@ import Kind.Newtypes
 import Backend.Typed.Syntax
 import Backend.Typed.Layout( CT(..) )
 import Backend.Typed.CGen.Layout( ctName )
-
-data External = External{ extFormat :: String, extType :: Type }
 
 -- Koka's C names (see Backend.C.FromCore)
 kokaName :: Name -> String
@@ -98,24 +96,23 @@ fromKoka kt ct e
       _ -> "kt_pun(" <.> text (ctName ct) <.> "," <.> e <.> ")"
 
 -- Koka passes type variables of its lazy internals at their instance (see `Backend.C.Box`)
-externCType :: Name -> Type -> VType -> String
+externCType :: Name -> KType -> VType -> String
 externCType f kt t
   = case (kt,t) of
-      (TVar _, VPtr (ACon n _)) | f `elem` unboxedInternals -> maybe (kokaTypeName n) id (lookup n kokaPrimTypes)
-      _ -> kokaCType kt
+      (KBox, VPtr (ACon n _)) | f `elem` unboxedInternals -> kokaKType (KCon n)
+      _ -> kokaKType kt
+
+kokaKType :: KType -> String
+kokaKType kt
+  = case kt of
+      KCon n -> maybe (kokaTypeName n) id (lookup n kokaPrimTypes)
+      KBox   -> "kk_box_t"
+      KFun   -> "kk_function_t"
 
 unboxedInternals :: [Name]
 unboxedInternals
   = [nameLazyEnter, nameLazyLeave, nameLazyIsWhnf, nameLazyPtrIsWhnf
     ,nameDataTypePtrIsThreadShared, nameDataTypePtrIsUnique, nameLazyIndirectCompress]
-
-kokaFunType :: Type -> ([Type],Type)
-kokaFunType tp
-  = case tp of
-      TForall _ t -> kokaFunType t
-      TSyn _ _ t -> kokaFunType t
-      TFun ps _ r -> (map snd ps, r)
-      _ -> ([],tp)
 
 -- the identifiers in a piece of C code
 cIdents :: String -> [String]
@@ -123,14 +120,6 @@ cIdents s = case dropWhile (not . isIdent) s of
               "" -> []
               s' -> let (w,rest) = span isIdent s' in w : cIdents rest
   where isIdent c = isAlphaNum c || c == '_'
-
-kokaParamNames :: Type -> [String]
-kokaParamNames tp
-  = case tp of
-      TForall _ t -> kokaParamNames t
-      TSyn _ _ t  -> kokaParamNames t
-      TFun ps _ _ -> [show n | (n,_) <- ps]
-      _           -> []
 
 isComment :: String -> Bool
 isComment fmt = case dropWhile (== ' ') fmt of

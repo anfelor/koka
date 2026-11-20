@@ -16,7 +16,7 @@
 
   The C code is a `Doc`: string literals are documents, and a list of documents is a list of statements.
 -}
-module Backend.Typed.CGen.CGen( CEnv(..), External(..), cgenModule, cgenMain, cName, ktInitName, ktFileName ) where
+module Backend.Typed.CGen.CGen( CEnv(..), cgenModule, cgenMain, cName, ktInitName, ktFileName ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -46,7 +46,6 @@ import Backend.Typed.CGen.ReuseSlots( keptLeaves )
 data CEnv = CEnv{ ceModName   :: Name
                 , ceIncludes  :: [String]     -- headers to include
                 , ceImportInits :: [String]   -- init functions of imported modules
-                , ceExterns   :: M.Map Name External
                 , ceNewtypes  :: Newtypes
                 , ceDataInfos :: [DataInfo]
                 , ceInline    :: S.Set Name   -- small functions defined `static inline` in the header
@@ -1134,7 +1133,7 @@ genCall cx dest f tys vs
   = do (_,r) <- callSig cx f tys
        rct <- ctype r
        return (assignTo dest rct (fromKoka kt rct lit))
-  | Just ext <- M.lookup f (ceExterns (cxCEnv cx)) = genExtern cx dest f tys vs ext
+  | Just ext <- M.lookup f (envExterns (cxEnv cx)) = genExtern cx dest f tys vs ext
   | otherwise
   = do (_,r) <- callSig cx f tys
        rct <- ctype r
@@ -1169,17 +1168,16 @@ callSig cx f tys
       Just (SigFun tvs ps _ r) -> return (map (inst tvs tys . snd) ps, inst tvs tys r)
       _ -> failG ("unknown function " ++ show f)
 
-genExtern :: Ctx -> Dest -> Name -> [AType] -> [VVal] -> External -> G [Doc]
+genExtern :: Ctx -> Dest -> Name -> [AType] -> [VVal] -> Extern -> G [Doc]
 genExtern cx dest f tys vs ext
   = do (ps,r) <- callSig cx f tys
-       let (kpars,kres) = kokaFunType (extType ext)
        rct <- ctype r
-       args <- forM (zip3 vs ps (kpars ++ repeat (TVar (TypeVar 0 kindStar Bound)))) $ \(v,p,kp) ->
+       args <- forM (zip3 vs ps (map snd (extParams ext) ++ repeat KBox)) $ \(v,p,kp) ->
                  do e <- genV cx v
                     ct <- ctype p
                     return (toKoka ct (externCType f kp p) e, externCType f kp p)
        let fmt   = extFormat ext
-           named = [(n,a) | (n,a) <- zip (kokaParamNames (extType ext)) args, n `elem` cIdents fmt]
+           named = [(n,a) | (n,a) <- zip (map (show . fst) (extParams ext)) args, n `elem` cIdents fmt]
            call | isComment fmt = empty
                 | null named    = substFormat fmt (map fst args)
                 | otherwise     = stmtExpr [text kt <+> text n <+> "=" <+> a <.> ";" | (n,(a,kt)) <- named]  -- parameters used by name
@@ -1187,7 +1185,7 @@ genExtern cx dest f tys vs ext
        case r of
          VUnit | isEmptyDoc call -> return (assignTo dest CUnit "kk_Unit")
          VUnit -> return (("(void)(" <.> call <.> ");") : assignTo dest CUnit "kk_Unit")
-         _ -> return (assignTo dest rct (fromKoka (externCType f kres r) rct call))
+         _ -> return (assignTo dest rct (fromKoka (externCType f (extResult ext) r) rct call))
 
 -- definitions
 
