@@ -330,6 +330,12 @@ isMonExpr expr
   = case expr of
       App (TypeApp (Var open _) [_, effTo]) [f] | getName open == nameEffectOpen
         -> isMonEffect effTo || isMonExpr f
+      -- an application of an opened function that needs no translation itself,
+      -- as in the optimized open binding of `monExpr'`
+      App (App (TypeApp (Var open _) [_,_,_,_]) [f]) args | getName open == nameEffectOpen && not (isMonExpr f)
+        -> any isMonExpr args
+      App (TypeApp (App (TypeApp (Var open _) [_,_,_,_]) [f]) targs) args | getName open == nameEffectOpen && not (isMonExpr f)
+        -> any isMonExpr args
       App f args
         -> any isMonExpr (f:args)
       Lam pars eff body
