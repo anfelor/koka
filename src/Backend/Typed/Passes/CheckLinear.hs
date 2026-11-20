@@ -181,10 +181,11 @@ childrenToward tr p@(Path _ ss) (Path _ ts) = go p (drop (length ss) ts)
     go v (s:rest) = [key tr q | q <- siblingsOf tr (child v s)] ++ go (child v s) rest
 
 -- Count the references to a variable with one of the `keys` (or another variable of the
--- counts) below it as references to its children.
+-- counts) below it as references to its children. The variables above `q` are its prefixes,
+-- so they are looked up instead of comparing every pair.
 refine :: Children -> [Path] -> Counts -> Counts
 refine tr keys m
-  = case [(p,q) | p <- M.keys m, q <- keys ++ M.keys m, q /= p, q `within` p] of
+  = case [(p,q) | q <- keys ++ M.keys m, p <- prefixes q, M.member p m] of
       ((p,q):_) -> refine tr keys (M.filter (/= 0) (M.unionWith (+) (M.delete p m) (M.fromList [(r,m M.! p) | r <- childrenToward tr p q])))
       [] -> m
 
