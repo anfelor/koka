@@ -9,10 +9,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- Koka's C conventions: names, and the C types of extern calls.
-module Backend.Typed.CGen.Koka( kokaName, kokaTypeName, kokaLocal, cReserved
+module Backend.Typed.CGen.Koka( kokaName, kokaTypeName, kokaLocal
                               , kokaKType, kokaPrimTypes
                               , toKoka, fromKoka, cIdents, isComment, substFormat
-                              , unboxedInternals, externCType
+                              , externCType
                               ) where
 
 import Data.Char( isAlphaNum, isDigit )

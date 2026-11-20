@@ -42,7 +42,7 @@ import Core.Borrowed( Borrowed )
 import Backend.CSharp.FromCore    ( csharpFromCore )
 import Backend.JavaScript.FromCore( javascriptFromCore )
 import Backend.C.FromCore         ( cFromCore )
-import Backend.Typed.CFromCore    ( typedCFromCore, cgenMain, ktFileName )
+import Backend.Typed.CFromCore    ( typedCFromCore, cgenMain )
 
 import Compile.Options
 import Compile.Module( Definitions(..), Module(..), modCoreImports, defsFromModules )
@@ -278,7 +278,7 @@ codeGenTyped :: Terminal -> Flags -> [Module] -> Module -> IO ()
 codeGenTyped term flags imports mod
   = do let newtypes = defsNewtypes (defsFromModules (mod:imports))
            (ir,diagnostics,result) = typedCFromCore (buildType flags) (dirname (modSourcePath mod)) (parcReuse flags) newtypes (mapMaybe modCore imports) (fromJust (modCore mod)) (fromJust (modCore mod))
-           outBase = joinPath (dirname (modIfacePath mod)) (ktFileName (modName mod))
+           outBase = noexts (modIfacePath mod)
        -- the final IR, for debugging; written before validation so that it is kept on failure
        createDirectoryIfMissing True (dirname outBase)
        writeDocW 120 (outBase ++ ".ir") ir
@@ -291,13 +291,12 @@ codeGenTyped term flags imports mod
 -- the typed C source to compile for a module; for the main module, it is extended with the entry point
 typedCSource :: Flags -> Maybe (Name,Type) -> ModuleName -> FilePath -> IO FilePath
 typedCSource flags entry progName outBase
-  = do let ktBase = joinPath (dirname outBase) (ktFileName progName)
-       case entry of
-         Nothing -> return (ktBase ++ ".c")
-         Just (entryName,_)
-           -> do let mainName = if null (outputEntryName flags) then "main" else outputEntryName flags
-                 writeFile (ktBase ++ "_main.c") (cgenMain mainName (stackSize flags) progName entryName)
-                 return (ktBase ++ "_main.c")
+  = case entry of
+      Nothing -> return (outBase ++ ".c")
+      Just (entryName,_)
+        -> do let mainName = if null (outputEntryName flags) then "main" else outputEntryName flags
+              writeFile (outBase ++ "-main.c") (cgenMain mainName (stackSize flags) progName entryName)
+              return (outBase ++ "-main.c")
 
 
 {---------------------------------------------------------------

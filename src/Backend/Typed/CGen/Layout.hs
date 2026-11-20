@@ -9,18 +9,34 @@
 -- C names, declarations and runtime operations for the shared memory layouts.
 -- Struct names are hashes of their canonical layouts so modules agree on them.
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.CGen.Layout( ctName, structDefs, blockName, blockDef, leafSlots
+module Backend.Typed.CGen.Layout( cName, encode, ctName, structDefs, blockName, blockDef, leafSlots
                             , needsRC, dupExpr, dropStmt, dupFun, dropFun
                             , primBox, scalarHeapSize, shapeIsSmall, fnv
                             ) where
 
-import Data.Char( ord )
+import Data.Char( isAlphaNum, ord )
 import Data.Bits( xor )
 import Data.Word( Word64 )
 import Data.List( intercalate, foldl', sortOn )
 import qualified Numeric
+import Common.Name( Name )
 import Backend.Typed.Syntax
 import Backend.Typed.Layout
+
+-- the C name of a top-level value (Koka's own names are `kk_` names, see `CGen.Koka`)
+cName :: Name -> String
+cName name = "kt_" ++ encode (show name)
+
+encode :: String -> String
+encode = concatMap enc
+  where
+    enc c | isAlphaNum c && ord c < 128 = [c]
+          | c == '_'  = "__"
+          | c == '/'  = "_s_"
+          | c == '-'  = "_d_"
+          | c == '@'  = "_a_"
+          | c == '.'  = "_o_"
+          | otherwise = "_x" ++ Numeric.showHex (ord c) "_"
 
 ctName :: CT -> String
 ctName ct
