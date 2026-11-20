@@ -13,7 +13,7 @@ module Backend.Typed.Elab.TypeInfo( Tr
                                   , isValueInfo, elabArgs
                                   , conIndex, conFieldTypes, conFieldNames, schemeFieldTypes, conCount, conShape, conExists
                                   , isLazyInfo, refShape, refInj
-                                  , dataInfoOf, valueBody
+                                  , dataInfoOf, valueBody, valueDecl
                                   , tvarStar
                                   ) where
 
@@ -132,6 +132,15 @@ valueBody nt info vargs
       []    -> VRaw <$> rawType (dataInfoName info)
       [con] -> conValueFields nt vargs con
       cons  -> VSum <$> mapM (\con -> (,) (Con (conInfoName con)) <$> conValueFields nt vargs con) cons
+
+-- the value datatype that a Koka type names, if any (`lblDecls`)
+valueDecl :: Newtypes -> Type -> Maybe Name
+valueDecl nt tp
+  = case tp of
+      TSyn _ _ t -> valueDecl nt t
+      TApp t _   -> valueDecl nt t
+      TCon tc | Just info <- newtypesLookupAny (typeconName tc) nt, isValueInfo info -> Just (typeconName tc)
+      _          -> Nothing
 
 -- the primitive value types, which have no constructors; a `marker` is an `int32` (as in Koka)
 rawType :: Name -> Tr Raw

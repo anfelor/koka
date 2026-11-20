@@ -76,11 +76,12 @@ reserved s = null s || "(" `isPrefixOf` s || s `elem` keywords || "box@" `isPref
 fullPath :: PP
 fullPath (Path x ss) = text (intercalate "." (escape (show x) : map show ss))
 
--- the fields of each constructor
+-- the fields of each constructor of a reference datatype (paths into values name no
+-- constructors of value datatypes, whose names may clash with those of reference datatypes)
 type Fields = M.Map Name [Field]
 
 fieldsOf :: TypeDefs -> Fields
-fieldsOf tdefs = M.fromList [(lblCon l, lblFields l) | d <- M.elems tdefs, l <- tdefLabels d]
+fieldsOf tdefs = M.fromList [(lblCon l, lblFields l) | d@TypeDef{ tdefBody = BodyRef _ } <- M.elems tdefs, l <- tdefLabels d]
 
 -- The steps of a path, shortened by labels: a constructor stands for the steps to its
 -- alternative (`deref`, `roll`, and the tests of the tag on the way: `whnf`, `delay`, `lo`, `hi`
@@ -360,11 +361,21 @@ prettyDef pp def
 -- The declaration of a datatype, whose alternatives are labelled by their constructors instead
 -- of their tags: the tags are those of the labels, in order (and in a lazy sum `L ~> S`, those of
 -- S come first), with their local qualifiers. The only field of a constructor is labelled in its
--- box, as it is no product.
+-- box, as it is no product. The body of a value datatype (`value :=`) labels the fields of each
+-- constructor as a product, even a single one. The declared types of the fields of a constructor
+-- follow (`decl C(T, _)`), if any.
 prettyTypeDef :: TypeDef -> Doc
 prettyTypeDef (TypeDef n vs body labels)
-  = text "data" <+> nm n <.> tyParams vs <.> maybe empty (\b -> text " :=" <+> labelledBody b) body
+  = text "data" <+> nm n <.> tyParams vs <.> bodyDoc
+    <.> hcat [text " decl" <+> nm (unqualify c) <.> parens (commaSep (map (maybe (text "_") nm) ds))
+             | ConLabel c _ ds <- labels, any (/= Nothing) ds]
   where
+    bodyDoc
+      = case body of
+          BodyRef b    -> text " :=" <+> labelledBody b
+          BodyValue v  -> text " value :=" <+> labelledValue v
+          BodyOpen     -> text " open"
+          BodyAbstract -> empty
     labelledBody b
       = case b of
           ASum ts   -> parens (hsep (punctuate (text " +") [alt i t | (i,t) <- ts]))
@@ -372,10 +383,20 @@ prettyTypeDef (TypeDef n vs body labels)
           _         -> alt 1 b
     alt i t
       = case drop (i-1) labels of
-          ConLabel c fs : _ -> nm (unqualify c) <.> colon <+> shape fs t
+          ConLabel c fs _ : _ -> nm (unqualify c) <.> colon <+> shape fs t
           [] -> int i <.> colon <+> atomA fullPath t
     shape [f] (ABox v) = text "Box" <.> parens (text (escape (show f)) <.> colon <+> prettyV fullPath v)
     shape _ t = atomA fullPath t
+    labelledValue v
+      = case (labels,v) of
+          ([],_)     -> prettyV fullPath v
+          ([l],_)    -> valt l v
+          (_,VSum ts) -> parens (hsep (punctuate (text " +") [valt l t | (l,(_,t)) <- zip labels ts]))
+          _          -> prettyV fullPath v
+    valt (ConLabel c fs _) t = nm (unqualify c) <.> colon <+> prettyV fullPath (fields fs t)
+    fields [f] (VExists ws t) = VExists ws (fields [f] t)
+    fields [f] t = VProd [(f,t)]
+    fields _ t = t
 
 -- a signature without a definition: an external function or value, or a constructor of an open
 -- datatype

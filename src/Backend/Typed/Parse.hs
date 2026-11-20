@@ -151,8 +151,11 @@ data PState = PState{ psCons :: M.Map String [Cons], psBinders :: M.Map RawPath 
 -- a constructor, whether it is of a datatype of the module, and how its fields print
 data Cons = Cons{ consName :: Name, consLocal :: Bool, consFields :: [String] }
 
+-- (of a reference datatype, as `Pretty.fieldsOf`)
 consOf :: Bool -> TypeDef -> M.Map String [Cons]
-consOf isLocal d = M.fromListWith (flip (++)) [(show (Con c), [Cons c isLocal (map show fs)]) | ConLabel c fs <- tdefLabels d]
+consOf isLocal d = case tdefBody d of
+                     BodyRef _ -> M.fromListWith (flip (++)) [(show (Con c), [Cons c isLocal (map show fs)]) | ConLabel c fs _ <- tdefLabels d]
+                     _ -> M.empty
 
 type P a = Parsec [Token] PState a
 
@@ -724,12 +727,40 @@ dataP :: P Item
 dataP = do kw "data"
            n <- globalName <$> nameP
            tvs <- tyParamsP
-           body <- optionMaybe (sym ":" >> sym "=" >> bodyP)
-           let d = case body of
-                     Just b -> let (t,labels) = numberBody n b in TypeDef n tvs (Just t) labels
-                     Nothing -> TypeDef n tvs Nothing []
+           (body,labels) <- choice
+             [ do sym ":"; sym "="; (t,labels) <- numberBody n <$> bodyP; return (BodyRef t, labels)
+             , do kw "value"; sym ":"; sym "="; (t,labels) <- valueBodyP n; return (BodyValue t, labels)
+             , (BodyOpen,[]) <$ kw "open"
+             , return (BodyAbstract,[]) ]
+           decls <- many (do kw "decl"; c <- labelP; ds <- parensP (commaSep declP); return (conOf n c, ds))
+           let label (ConLabel c fs _) = ConLabel c fs (maybe (map (const Nothing) fs) id (lookup c decls))
+               d = TypeDef n tvs body (map label labels)
            modifyState (\st -> st{ psCons = M.unionWith (++) (consOf True d) (psCons st) })
            return (IType d)
+  where
+    declP = (Nothing <$ kw "_") <|> (Just . globalName <$> nameP)
+
+-- The body of a value datatype: a raw type, or its constructors, whose fields are labelled as
+-- a product (even a single one, which the type does not wrap)
+valueBodyP :: Name -> P (VType,[ConLabel])
+valueBodyP tname
+  = (do r <- rawP; return (VRaw r, []))
+    <|> (do alts <- (sym "(" *> sepBy1 altP (sym "+") <* sym ")") <|> ((:[]) <$> altP)
+            let labels = [ConLabel (conOf tname c) (fields v) [] | (c,v) <- alts]
+                ts = [unlabel v | (_,v) <- alts]
+            return (case ts of
+                      [t] -> t
+                      _   -> VSum (zip (map (Con . lblCon) labels) ts), labels))
+  where
+    altP = do c <- labelP; sym ":"; v <- vP; return (c,v)
+    fields v = case v of
+                 VProd fs -> map fst fs
+                 VExists _ b -> fields b
+                 _ -> []
+    unlabel v = case v of
+                  VProd [(_,t)] -> t
+                  VExists vs b -> VExists vs (unlabel b)
+                  _ -> v
 
 bodyP :: P Body
 bodyP = (sym "(" >> (lazy <|> sumP)) <|> (BOne <$> altP')
@@ -751,11 +782,15 @@ bodyP = (sym "(" >> (lazy <|> sumP)) <|> (BOne <$> altP')
                  VExists _ b -> fields b
                  _ -> []
 
+-- a constructor of a datatype: it is in the module of the datatype, and may have a local qualifier
+conOf :: Name -> String -> Name
+conOf tname s = let c = localName s in newLocallyQualified (nameModule tname) (nameLocalQual c) (nameStem c)
+
 -- The tags of the alternatives of a datatype follow the order of its constructors, where the
 -- strict alternatives S of a lazy sum `L ~> S` come first. Alternatives without a constructor
 -- print their tags.
 numberBody :: Name -> Body -> (AType,[ConLabel])
-numberBody tname body = (shape, [ConLabel (conOf (localName c)) fs | (_,Right c,_,fs) <- tagged])
+numberBody tname body = (shape, [ConLabel (conOf tname c) fs [] | (_,Right c,_,fs) <- tagged])
   where
     altsOf b = case b of
                  BSum as -> as
@@ -763,8 +798,6 @@ numberBody tname body = (shape, [ConLabel (conOf (localName c)) fs | (_,Right c,
                  BLazy l s -> altsOf s ++ altsOf l
     tagged = [(either id (const k) lbl, lbl, t, fs) | (k,(lbl,t,fs)) <- zip [1..] (altsOf body)]
     sumOf ts = ASum [(i,t) | (i,_,t,_) <- ts]
-    -- constructors are in the module of their datatype, and may have a local qualifier
-    conOf c = newLocallyQualified (nameModule tname) (nameLocalQual c) (nameStem c)
     shape = case body of
               BOne (_,t,_) -> t
               BSum _ -> sumOf tagged

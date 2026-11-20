@@ -21,10 +21,14 @@ import Backend.Typed.Syntax
 import Backend.Typed.Env( reuseSize )
 import Backend.Typed.Elab.TypeInfo
 
-refBody :: Newtypes -> DataInfo -> Tr (Maybe AType)
-refBody nt info
-  | dataDefIsOpen (dataInfoDef info) || null (dataInfoConstrs info) = Right Nothing
-  | otherwise = Just . refShape info <$> mapM (conShape nt (paramArgs info)) (dataInfoConstrs info)
+-- The body of a datatype. Only that of a reference datatype is part of the typing rules; the
+-- others are metadata for C generation (see `TypeDef`).
+typeBody :: Newtypes -> DataInfo -> Tr TypeBody
+typeBody nt info
+  | isValueInfo info = BodyValue <$> valueBody nt info (paramArgs info)
+  | dataDefIsOpen (dataInfoDef info) = Right BodyOpen
+  | null (dataInfoConstrs info) = Right BodyAbstract
+  | otherwise = BodyRef . refShape info <$> mapM (conShape nt (paramArgs info)) (dataInfoConstrs info)
 
 paramArgs :: DataInfo -> [AType]
 paramArgs info = map (AVar . typevarId) (filter tvarStar (dataInfoParams info))
@@ -35,21 +39,24 @@ typeDefs nt
   = (M.fromList [(tdefName d, d) | (_,Right d) <- defs],
      [show (dataInfoName info) ++ ": " ++ err | (info,Left err) <- defs, dataInfoIsLazy info])
   where
-    defs = [(info, typeDef nt info) | (_,info) <- NM.toList (newtypesTypeDefs nt), not (isValueInfo info)]
+    defs = [(info, typeDef nt info) | (_,info) <- NM.toList (newtypesTypeDefs nt)]
 
 typeDef :: Newtypes -> DataInfo -> Tr TypeDef
 typeDef nt info
-  = do body <- refBody nt info
+  = do body <- typeBody nt info
        when (isLazyInfo info) (lazyDef nt info)
        let params = map typevarId (filter tvarStar (dataInfoParams info))
-       -- only datatypes with a body have values to destructure
-       labels <- maybe (return []) (const (mapM (conLabel nt (paramArgs info)) (dataInfoConstrs info))) body
+       -- the constructors of an open datatype are signatures
+       labels <- case body of
+                   BodyOpen -> return []
+                   _ -> mapM (conLabel nt (paramArgs info)) (dataInfoConstrs info)
        return (TypeDef (dataInfoName info) params body labels)
 
 conLabel :: Newtypes -> [AType] -> ConInfo -> Tr ConLabel
 conLabel nt vargs con
   = do fields <- if null (conInfoParams con) then return [] else conFieldTypes nt vargs con
-       return (ConLabel (conInfoName con) (take (length fields) (conFieldNames con)))
+       let decls = map (valueDecl nt . snd) (conInfoParams con) ++ repeat Nothing   -- no padding is declared
+       return (ConLabel (conInfoName con) (take (length fields) (conFieldNames con)) (take (length fields) decls))
 
 -- A lazy type `L ~> S` has strict constructors, which come before its lazy ones (the thunks,
 -- among them the indirection), and every thunk is a box with a block, which evaluation locks.

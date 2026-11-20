@@ -217,14 +217,27 @@ data Ty = A AType | V VType
 -- a datatype declaration `data T⟨ā⟩ := A` (see `AType`). A lazy datatype has a lazy sum as its
 -- body. Without a body (`int`, `string`, open types, ...) the named type is abstract. The labels
 -- of its constructors name the paths into its values (see `Path`); an abstract type has none.
-data TypeDef = TypeDef{ tdefName :: Name, tdefParams :: [TVar], tdefBody :: Maybe AType, tdefLabels :: [ConLabel] }
+--
+-- Only the body of a reference datatype is part of the typing rules. The other kinds of
+-- bodies, and the declared types of fields (`lblDecls`), are metadata for C generation, which
+-- names Koka's types as Koka's C backend does. They are not part of any type, and type
+-- equivalence ignores them: a value datatype is inlined at its uses (`V`), and an open or
+-- abstract one is never unrolled.
+data TypeDef = TypeDef{ tdefName :: Name, tdefParams :: [TVar], tdefBody :: TypeBody, tdefLabels :: [ConLabel] }
              deriving (Show)
+
+data TypeBody = BodyRef AType   -- a reference datatype, `T⟨ā⟩ := A`
+              | BodyValue VType -- a value datatype: the type its uses inline (`VRaw` for `int32`, `marker`, ...)
+              | BodyOpen        -- an extensible datatype, whose constructors are `SigCon`s
+              | BodyAbstract    -- a reference datatype without constructors (`int`, `string`, `evv`, ...)
+              deriving (Show)
 
 -- The label of a constructor: its name and the names of its fields (as in `conFieldNames`). A
 -- datatype has the labels of its constructors in the order of their tags, which start at 1.
 -- Printed paths name an alternative of a value of the datatype by its constructor, and a field
--- of the alternative by the name of the field.
-data ConLabel = ConLabel{ lblCon :: Name, lblFields :: [Field] }
+-- of the alternative by the name of the field. The declared type of each field is the value
+-- datatype that the source names for it, if any (metadata, see `TypeDef`).
+data ConLabel = ConLabel{ lblCon :: Name, lblFields :: [Field], lblDecls :: [Maybe Name] }
               deriving (Show)
 
 type TypeDefs = M.Map Name TypeDef
