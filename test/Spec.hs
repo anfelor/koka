@@ -386,8 +386,8 @@ precompileBackend options backend
            -- precompile the syn-nested chain so syn-nested1 emits only its own core
          , precompile stdcfg{flags = flags stdcfg ++ ["-l"]} "test/parc/syn-nested1c.kk"
          ]
-       when (backend == BackendC) $
-         void $ precompile stdcfg{flags = "--target=js":(flags stdcfg)} "util/link-test.kk" -- precompiled js libraries as well
+       -- precompiled js libraries as well (the js tests run with each backend's flags)
+       void $ precompile stdcfg{flags = "--target=js":(flags stdcfg)} "util/link-test.kk"
        return (unlines outs)
 
 

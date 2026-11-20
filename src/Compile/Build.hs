@@ -780,15 +780,14 @@ copyLibIfaceToOutput :: Flags -> FilePath -> FilePath -> Core.Core -> IO ()
 copyLibIfaceToOutput flags libIfacePath ifacePath core  {- core is needed to know imported clibs etc. -}
   = do let withext fname ext = notext fname ++ ext
            force = rebuild flags
+           -- the typed backend's C files are `kt_<mod>.{c,h}`
+           withextC fname ext = if typedC flags then joinPath (dirname fname) (ktFileName (Core.coreProgName core) ++ ext) else withext fname ext
        copyTextIfNewer force libIfacePath ifacePath
        case targetFromFlags flags of
         CS    -> do copyBinaryIfNewer force (withext libIfacePath dllExtension) (withext ifacePath dllExtension)
         JS _  -> do copyTextIfNewer force (withext libIfacePath ".mjs") (withext ifacePath ".mjs")
-        C _   -> do copyTextIfNewer force (withext libIfacePath ".c") (withext ifacePath ".c")
-                    copyTextIfNewer force (withext libIfacePath ".h") (withext ifacePath ".h")
-                    when (typedC flags) $  -- included by typed importers
-                      let ktHeader path = joinPath (dirname path) (ktFileName (Core.coreProgName core) ++ ".h")
-                      in copyTextIfNewer force (ktHeader libIfacePath) (ktHeader ifacePath)
+        C _   -> do copyTextIfNewer force (withextC libIfacePath ".c") (withextC ifacePath ".c")
+                    copyTextIfNewer force (withextC libIfacePath ".h") (withextC ifacePath ".h")
                     let cc = ccomp flags
                     copyBinaryIfNewer force (ccObjFile cc (notext libIfacePath)) (ccObjFile cc (notext ifacePath))
                     mapM_ (\clib -> do let libFile = ccLibFile cc clib
