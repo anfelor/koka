@@ -29,7 +29,7 @@ import Common.Name
 import Common.NamePrim( nameTpString )
 import Backend.Typed.Syntax
 import Backend.Typed.Layout
-import Backend.Typed.CGen.Layout( ctName, structDefs, blockName, blockDef, dupFun, dropFun, primBox )
+import Backend.Typed.CGen.Layout( cName, ctName, structDefs, blockName, blockDef, dupFun, dropFun, primBox )
 import Backend.Typed.CGen.Koka( kokaName, kokaTypeName, kokaLocal, kokaKType, kokaPrimTypes, fromKoka )
 
 -- The payload of the block of an open constructor: the tag string of the constructor (the `_tag`
@@ -41,12 +41,11 @@ openPayload fs = VProd ((posField 0, VPtr (ACon nameTpString [])) : [(posField i
 openTagName :: Name -> Name
 openTagName c = makeHiddenName "tag" c
 
--- The declarations of the datatypes and open constructors of a module, given the C names of
--- top-level values. Value types are declared in dependency order, after the reference types.
-typeDecls :: (Name -> String) -> Name -> Program -> [String]
-typeDecls globalName modName prog
+-- The declarations of the datatypes and open constructors of a module. Value types are declared in dependency order, after the reference types.
+typeDecls :: Name -> Program -> [String]
+typeDecls modName prog
   = concatMap baseDecls refs ++ concatMap valueDecls (dependencyOrder values)
-    ++ concatMap refConDecls refs ++ concatMap (openConDecls globalName) opens
+    ++ concatMap refConDecls refs ++ concatMap openConDecls opens
   where
     owned n = isQualified n && qualifier n == modName
     own     = [d | d <- M.elems (progTypes prog), owned (tdefName d), isNothing (lookup (tdefName d) kokaPrimTypes)]
@@ -202,8 +201,8 @@ member c = kokaLocal (unqualify c)
 -- open constructors
 
 -- `new_C` of an open constructor (its fields have positional names)
-openConDecls :: (Name -> String) -> (Name,[VType],Name) -> [String]
-openConDecls globalName (c,fs,n)
+openConDecls :: (Name,[VType],Name) -> [String]
+openConDecls (c,fs,n)
   | any ((> 1) . length . leaves) fs = []
   | otherwise
   = blockDefs ct ++
@@ -217,7 +216,7 @@ openConDecls globalName (c,fs,n)
   where
     ct  = layout (openPayload fs)
     bt  = "struct " ++ blockName ct
-    tag = globalName (openTagName c)
+    tag = cName (openTagName c)
     xs  = [("x" ++ show i, t) | (i,t) <- zip [0 :: Int ..] fs]
     (reuseParams,at,cpath) | null fs   = ([], "kk_reuse_null", "0")
                            | otherwise = (["kk_reuse_t _at", "int32_t _cpath"], "_at", "_cpath")

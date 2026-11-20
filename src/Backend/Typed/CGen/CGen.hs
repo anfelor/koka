@@ -16,23 +16,22 @@
 
   The C code is a `Doc`: string literals are documents, and a list of documents is a list of statements.
 -}
-module Backend.Typed.CGen.CGen( CEnv(..), cgenModule, cgenMain, cName, ktInitName, ktFileName ) where
+module Backend.Typed.CGen.CGen( CEnv(..), cgenModule, cgenMain ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Data.Char( isAlphaNum, ord )
 import Data.List( sortOn )
 import Data.Maybe( fromMaybe, isJust )
 import qualified Numeric
-import Control.Monad( forM, when )
+import Control.Monad( forM )
 import Lib.PPrint( Doc, text, string, int, integer, empty, isEmptyDoc, line, nest, align, vcat, hcat, hsep, punctuate, (<.>), (<+>), (<->) )
 import Common.Name
 import Common.NamePrim
 import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( child, TestSide(..), boxTag, canonical, failingTo, fvA, fvE, fvV, holes, testSides, within )
-import Backend.Typed.Types( Types(..), inst, isShape )
-import Backend.Typed.Env( Env(..), envOf, dataBody, openFields, boxContents, reuseSize, M, get, gets, liftE, modify, put, runM, state )
+import Backend.Typed.Types( inst, isShape )
+import Backend.Typed.Env( Env(..), envOf, dataBody, openFields, boxContents, M, get, gets, liftE, modify, put, runM, state )
 import Backend.Typed.Query( Gamma, inferE, inferV, inferVar, noJoins, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 import Backend.Typed.Layout
 import Backend.Typed.CGen.Layout hiding( dupExpr, dropStmt )
@@ -76,9 +75,6 @@ emitDecl d = modify (\st -> st{ stDecls = stDecls st ++ [d], stLocal = True })
 
 -- names
 
-cName :: Name -> String
-cName name = "kt_" ++ encode (show name)
-
 localName :: Path -> Doc
 localName (Path x ss) = text ("x_" ++ encode (show x) ++ concat ["_p_" ++ encode (stepName s) | s <- ss])
   where
@@ -88,20 +84,6 @@ localName (Path x ss) = text ("x_" ++ encode (show x) ++ concat ["_p_" ++ encode
                    SInjV i _ -> "inj" ++ show i
                    SField i _ -> "field" ++ show i
                    _ -> show s
-
-encode :: String -> String
-encode = concatMap enc
-  where
-    enc c | isAlphaNum c && ord c < 128 = [c]
-          | c == '_'  = "__"
-          | c == '/'  = "_s_"
-          | c == '-'  = "_d_"
-          | c == '@'  = "_a_"
-          | c == '.'  = "_o_"
-          | otherwise = "_x" ++ Numeric.showHex (ord c) "_"
-
-ktFileName :: Name -> String
-ktFileName modName = "kt_" ++ encode (show modName)
 
 ktInitName :: Name -> String
 ktInitName modName = cName modName ++ "__init"
@@ -1264,15 +1246,15 @@ cgenModule cenv prog
                   hook h = ["#if defined(" <.> h <.> ")", "  " <.> h <.> "(_ctx);", "#endif"]
                   once flag = ["static bool" <+> flag <+> "= false;", "if (" <.> flag <.> ") return;", flag <+> "= true;"]
                   hdr   = vcat (["#ifndef" <+> guardN, "#define" <+> guardN, "#include <kklib.h>", runtimeHeader]
-                                ++ [include (ktFileName m ++ ".h") | m <- ceImports cenv]
+                                ++ [include (moduleNameToPath m ++ ".h") | m <- ceImports cenv]
                                 ++ map string (forHeader ffi)
-                                ++ map string (typeDecls cName modName prog)
+                                ++ map string (typeDecls modName prog)
                                 ++ [layoutDef (stStructs st M.! n) | n <- stOrder st]
                                 ++ [p | (p,_,_,_) <- ok]
                                 ++ [h | (_,h,_,_) <- ok]
                                 ++ map string (forHeaderEnd ffi)
                                 ++ [initf <.> ";", donef <.> ";", "#endif"])
-                  csrc  = vcat ([include (ktFileName modName ++ ".h")]
+                  csrc  = vcat ([include (moduleNameToPath modName ++ ".h")]
                                 ++ map string (forSource ffi)
                                 ++ map fst wdefs
                                 ++ stDecls st
@@ -1292,7 +1274,7 @@ cgenModule cenv prog
 -- `mainName`, which initializes the modules (each initializes its imports) and runs `entryName`.
 cgenMain :: String -> Int -> Name -> Name -> String
 cgenMain mainName stackSize progName entryName
-  = unlines (["#include \"" ++ ktFileName progName ++ ".c\""]
+  = unlines (["#include \"" ++ moduleNameToPath progName ++ ".c\""]
              ++ ["#include <execinfo.h>"
                 ,"#include <stdlib.h>"
                 ,"#include <unistd.h>"

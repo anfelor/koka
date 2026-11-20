@@ -9,7 +9,7 @@
 
 -- The typed C driver: runs the `Typed` pipeline on a module and generates its C (`CGen`),
 -- which is compiled in place of its regular C (`Backend.C.FromCore`).
-module Backend.Typed.CFromCore( typedCFromCore, cgenMain, ktFileName ) where
+module Backend.Typed.CFromCore( typedCFromCore, cgenMain ) where
 
 import Data.List( intercalate )
 import qualified Data.Set as S
@@ -20,7 +20,7 @@ import qualified Core.Core as C
 import Backend.Typed.Typed( typedFromCore )
 import Backend.Typed.Elab.Foreign( foreignOf )
 import Backend.Typed.Pretty( prettyProgram )
-import Backend.Typed.CGen.CGen( CEnv(..), cgenModule, cgenMain, ktFileName )
+import Backend.Typed.CGen.CGen( CEnv(..), cgenModule, cgenMain )
 
 -- Returns the final IR (for debugging), the diagnostics, and either an error or the header
 -- and source. `coreC` is the Core that the C backend compiles; its
