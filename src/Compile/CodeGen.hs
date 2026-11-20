@@ -95,7 +95,7 @@ codeGen term flags sequential newtypes borrowed kgamma gamma entry imported mod
             let outCore  = outBase ++ ".kkc"
             writeDocW 10000 outCore coreDoc  -- just for debugging
 
-       when (showCore flags || (showFinalCore flags && not (isTargetC (targetFromFlags flags)))) $
+       when (showCore flags || (showFinalCore flags && (not (isTargetC (targetFromFlags flags)) || typedC flags))) $  -- (the typed backend starts from this core)
          do termInfo term coreDoc
 
        -- write documentation
@@ -312,24 +312,26 @@ codeGenC sourceFile newtypes borrowed0 imported unique0 term flags sequential en
           mbEntry       = case entry of
                             Just (name,tp) -> Just (name,isAsyncFunction tp)
                             _              -> Nothing
-      -- generate C
-      let (cdoc,hdoc,_,bcore) = cFromCore False
-                                          (buildType flags) sourceDir (prettyEnvFromFlags flags) (platformFromFlags flags)
-                                          newtypes borrowed0 unique0 (parcReuse flags) (parcSpecialize flags) (parcReuseSpec flags)
-                                          (parcBorrowInference flags) (optEagerPatBind flags) (stackSize flags) mbEntry
-                                          (if null (outputEntryName flags) then "main" else outputEntryName flags)
-                                          core0
-          bcoreDoc  = Core.Pretty.prettyCore (prettyEnvFromFlags flags){ coreIface = False, coreShowDef = True } (targetPlatformFromFlags flags) [] bcore
+      -- generate C (the typed backend generated its own C in `codeGenTyped`)
+      bcore <- if typedC flags then return core0 else
+               do let (cdoc,hdoc,_,bcore) = cFromCore False
+                                                      (buildType flags) sourceDir (prettyEnvFromFlags flags) (platformFromFlags flags)
+                                                      newtypes borrowed0 unique0 (parcReuse flags) (parcSpecialize flags) (parcReuseSpec flags)
+                                                      (parcBorrowInference flags) (optEagerPatBind flags) (stackSize flags) mbEntry
+                                                      (if null (outputEntryName flags) then "main" else outputEntryName flags)
+                                                      core0
+                      bcoreDoc  = Core.Pretty.prettyCore (prettyEnvFromFlags flags){ coreIface = False, coreShowDef = True } (targetPlatformFromFlags flags) [] bcore
 
-      -- writeDocW 120 (outBase ++ ".c.kkc") bcoreDoc
-      when (showFinalCore flags) $  -- (under `typedC`, the only use of `cFromCore`)
-        do termInfo term bcoreDoc
+                  -- writeDocW 120 (outBase ++ ".c.kkc") bcoreDoc
+                  when (showFinalCore flags) $
+                    do termInfo term bcoreDoc
 
-      -- termTrace term ( "generate c: " ++ outBase )
-      unless (typedC flags) $ writeDocW 120 outC (cdoc <.> linebreak)  -- the typed backend generated its own C (`codeGenTyped`)
-      unless (typedC flags) $ writeDocW 120 outH (hdoc <.> linebreak)
-      termTrace term ( "generated c: " ++ outBase )
-      when (showAsmC flags && not (typedC flags)) (termInfo term (hdoc <//> cdoc))
+                  -- termTrace term ( "generate c: " ++ outBase )
+                  writeDocW 120 outC (cdoc <.> linebreak)
+                  writeDocW 120 outH (hdoc <.> linebreak)
+                  termTrace term ( "generated c: " ++ outBase )
+                  when (showAsmC flags) (termInfo term (hdoc <//> cdoc))
+                  return bcore
 
       -- copy libraries
       -- Multiple modules can declare the same `extern import { c { library="..." } }`
@@ -337,7 +339,7 @@ codeGenC sourceFile newtypes borrowed0 imported unique0 term flags sequential en
       -- given library is copied/linked only once instead of once per declaring
       -- module, which also silences "ignoring duplicate libraries" linker warnings.
       let importcores = map (fromJust . modCore) imported
-          cores = (if typedC flags then core0 else bcore):importcores  -- (boxing keeps the externals)
+          cores = bcore:importcores
           cc       = ccomp flags
           eimports = nub $ concatMap (externalImportsFromCore) cores
           clibs    = nub $ concatMap (clibsFromCore flags) cores
