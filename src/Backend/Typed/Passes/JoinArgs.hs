@@ -36,6 +36,10 @@
   and not be bound in the body or scope, and its type must not mention the type parameters
   of the join point. It is then borrowed or trivial there, as the jumps in the scope are
   tail calls that lend it.
+
+  In a lambda, a variable is not captured if fields of it are bound outside the lambda:
+  substitution names the fields of a captured variable by those paths, and the closure would
+  then capture both the variable and its fields.
 -}
 module Backend.Typed.Passes.JoinArgs( joinArgsProgram ) where
 
@@ -43,13 +47,14 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.List( transpose )
 import Data.Functor.Const( Const(..) )
+import Data.Functor.Identity( Identity(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Types( Types(..) )
-import Backend.Typed.Traversal( bindersE, descendAll, fvV, jumpArgs )
+import Backend.Typed.Traversal( bindersE, descendAll, descendE, fvV, jumpArgs, lamsV, within )
 import Backend.Typed.Passes.Common( mapAll, Scope, bindScope, defScope, scopeOf, substEIn, substJump, valueAt )
 
 joinArgsProgram :: Program -> Program
-joinArgsProgram prog = prog{ progDefs = [d{ defBody = jaE (declared (defBody d)) (defScope d) (defBody d) } | d <- progDefs prog] }
+joinArgsProgram prog = prog{ progDefs = [d{ defBody = jaE (declared (defBody d)) S.empty (defScope d) (defBody d) } | d <- progDefs prog] }
 
 -- the declared descriptions of the credits that join parameters and `let`s bind in a
 -- definition (its binders are fresh)
@@ -63,27 +68,28 @@ declared expr = M.union here (getConst (descendAll (\_ e -> Const (declared e)) 
              Let x (VReuse _ _ p) _ _ -> M.singleton x p
              _ -> M.empty
 
-jaE :: Declared -> Scope -> VExpr -> VExpr
-jaE decl scope expr
+-- `outer` are the paths bound outside the innermost lambda
+jaE :: Declared -> S.Set Path -> Scope -> VExpr -> VExpr
+jaE decl outer scope expr
   = case expr of
       -- a borrowed parameter that the entry jumps pass the same variable to, and the jumps in
       -- the body the parameter itself
       Join rc@Rec{} j tvs ps e1 e2
-        -> let e1' = jaE decl (scopeOf [x | (x,_,_) <- ps]) e1
-               e2' = jaE decl scope e2
+        -> let e1' = jaE decl outer (scopeOf [x | (x,_,_) <- ps]) e1
+               e2' = jaE decl outer scope e2
                bound = S.fromList (bindersE e1' ++ bindersE e2')
                entry = transpose (jumpArgs j e2') ++ repeat []
                back = transpose (jumpArgs j e1') ++ repeat []
                invariant (x,Borrowed,t) vs@(Var y : _) ws
-                 | all (== Var y) vs, all (== Var x) ws, M.member y scope, S.notMember y bound
+                 | all (== Var y) vs, all (== Var x) ws, M.member y scope, S.notMember y bound, not (fieldsOutside y)
                  , all (`notElem` tvs) (ftv t) = Just y
                invariant _ _ _ = Nothing
                ys = zipWith3 invariant ps entry back
                (ps',body) = capture scope ps ys e1'
            in Join rc j tvs ps' (substJump j (\ts -> Jump j ts . kept ys) body) (substJump j (\ts -> Jump j ts . kept ys) e2')
       Join NonRec j tvs ps e1 e0
-        -> let e1' = jaE decl (M.union (scopeOf [x | (x,_,_) <- ps]) scope) e1
-               e0' = jaE decl scope e0
+        -> let e1' = jaE decl outer (M.union (scopeOf [x | (x,_,_) <- ps]) scope) e1
+               e0' = jaE decl outer scope e0
                args0 = transpose (jumpArgs j e0') ++ repeat []
                -- the reads of fields that every jump passes to an owned parameter
                hoisted = [(y,p,i) | ((_,Owned,_),Var y : vs) <- zip ps args0, all (== Var y) vs, M.notMember y scope
@@ -94,7 +100,7 @@ jaE decl scope expr
                bound = S.fromList (bindersE e1' ++ bindersE e2')
                args = transpose (jumpArgs j e2') ++ repeat []
                -- for each parameter, the variable that every jump passes to it
-               invariant (_,Owned,_) vs@(Var y : _) | all (== Var y) vs, M.member y scope', S.notMember y bound = Just y
+               invariant (_,Owned,_) vs@(Var y : _) | all (== Var y) vs, M.member y scope', S.notMember y bound, not (fieldsOutside y) = Just y
                invariant _ _ = Nothing
                ys = zipWith invariant ps args
                -- the description of every credit that the jumps pass to a credit without one
@@ -112,7 +118,11 @@ jaE decl scope expr
                (ps',body) = capture scope' (zipWith describe ps args) ys e1'
                join = Join NonRec j tvs ps' body (substJump j (\ts -> Jump j ts . kept ys) e2')
            in foldr (\(y,p,i) -> Proj (Var p) i y) join hoisted
-      _ -> mapAll (\xs -> jaE decl (bindScope expr xs scope)) expr
+      _ -> runIdentity (descendE pure (lamsV (\ps _ e -> Identity (jaE decl (M.keysSet scope) (bindScope expr [x | (x,_,_) <- ps] scope) e)))
+                                 (\xs e -> Identity (jaE decl outer (bindScope expr xs scope) e)) expr)
+  where
+    -- the descendants of a path follow it in the order of paths
+    fieldsOutside y = maybe False (`within` y) (S.lookupGT y outer)
 
 -- the join body captures the variable `y` instead of each parameter with `Just y`, which
 -- the parameters no longer contain
