@@ -111,6 +111,8 @@ inlineApply expr
                   -> Let x t body' e
                 LetYield x t call e2 e3 | S.notMember f (S.union (fvE e2) (fvE e3)), Just body' <- apply call
                   -> LetYield x t body' e2 e3
+                Let x t (CastEv u s call) e | S.notMember f (fvE e), Just body' <- apply call
+                  -> Let x t (CastEv u s body') e
                 _ | Just body' <- apply rest -> body'
                 _ -> expr
       _ -> expr

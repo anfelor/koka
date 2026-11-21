@@ -497,7 +497,7 @@ exprP
       , Yielded unknownV <$ kw "yielded"
       , Unreachable unknownV <$ kw "unreachable"
       , kw "ctx-copy" >> (CtxCopy <$> atomValP)
-      , kw "cast-ev" >> (CastEv <$> bracketsP vP <*> atomValP)
+      , kw "cast-ev" >> (do (u,t) <- bracketsP ((,) <$> vP <* sym "," <*> vP); CastEv u t <$> exprP)
       , kw "memoize" >> memoizeP
       , kw "gen" >> (do vs <- many1 tvarP; sym "."; Gen vs <$> exprP)
       , headP ]

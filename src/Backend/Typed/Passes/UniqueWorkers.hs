@@ -95,4 +95,5 @@ mapRets f expr
       Let x t e1 e2 -> Let x t e1 <$> mapRets f e2
       LetYield x t e1 e2 e3 -> LetYield x t e1 <$> mapRets f e2 <*> mapRets f e3
       Gen{} -> return expr
+      CastEv{} -> return expr
       _ -> descendE pure pure (\_ e -> mapRets f e) expr

@@ -103,7 +103,8 @@ inferExpr env g js expr
 inferExpr env g js expr
   = case expr of
       Ret v -> inferV env g v
-      Let x t e1 e2 -> do checkE env g noJoins e1 t
+      Let x t e1 e2 -> do noYieldVars [t]
+                          checkE env g noJoins e1 t
                           inferE env (M.insert x (V t) g) js e2
       LetYield x t e1 e2 e3 -> do checkE env g noJoins e1 (VYield t)
                                   branches env [inferE env (M.insert x (V t) g) js e2, inferE env g js e3]
@@ -150,7 +151,7 @@ inferExpr env g js expr
       Lock z e -> do g' <- lockGamma g z
                      inferE env g' js e
       Join NonRec j tvs ps e1 e2
-                          -> do noYieldParams [p | (_,_,p) <- ps]
+                          -> do noYieldVars [p | (_,_,p) <- ps]
                                 let xs = [x | (x,_,_) <- ps]
                                 unless (S.disjoint (fvE e1 `S.difference` S.fromList xs) (S.fromList (bindersE e2)))
                                   (Left ("join point " ++ show j ++ " captures a variable that is bound again in its scope"))
@@ -161,7 +162,7 @@ inferExpr env g js expr
                                 t <$ checkE env g js{ jsPoints = M.insert j (caps,tvs,[p | (_,_,p) <- ps],t) (jsPoints js) } e2 t
       -- only itself is in scope in its body (its captures are borrowed, see `CheckLinear`)
       Join (Rec t) j tvs ps e1 e2
-                          -> do noYieldParams [p | (_,_,p) <- ps]
+                          -> do noYieldVars [p | (_,_,p) <- ps]
                                 let xs = [x | (x,_,_) <- ps]
                                     caps = S.filter (\y -> not (any (y `within`) xs)) (fvE e1)
                                 unless (S.disjoint caps (S.fromList (bindersE e2)))
@@ -188,10 +189,11 @@ inferExpr env g js expr
                        case (tc,td) of
                          (VCtx f a b, VCtx f' b' c') | alphaEq b b' -> return (VCtx (if f == Full then f else f') a c')
                          _ -> Left ("appending " ++ ppr td ++ " to " ++ ppr tc)
-      CastEv t v -> do checkTy (V t)
-                       s <- inferV env g v
-                       if alphaEq (eraseY s) (eraseY t) then return t
-                         else Left ("cast-ev of a value of type " ++ ppr s ++ " to " ++ ppr t)
+      CastEv u t e -> do checkTy (V u)
+                         checkTy (V t)
+                         checkE env g noJoins e u
+                         if alphaEq (eraseY u) (eraseY t) then return t
+                           else Left ("cast-ev of an expression of type " ++ ppr u ++ " to " ++ ppr t)
       CtxCopy c -> do t <- inferV env g c
                       case t of
                         VCtx _ _ _ -> return t
@@ -227,11 +229,11 @@ joinDescriptions j ps
 signature :: [VType] -> VType -> Q ()
 signature ps r
   = do unless (null (concatMap descriptions (r : ps))) (Left "a description in the signature of a function or closure")
-       noYieldParams ps
+       noYieldVars ps
 
--- the parameters of a function, closure or join point are never `Y V`
-noYieldParams :: [VType] -> Q ()
-noYieldParams ps = forM_ ps $ \p -> when (snd (unYield p)) (Left ("a parameter that may be the dummy of a yield: " ++ ppr p))
+-- the types of variables (binders and parameters) are not `Y U`
+noYieldVars :: [VType] -> Q ()
+noYieldVars ts = forM_ ts $ \t -> when (snd (unYield t)) (Left ("a variable that may be the dummy of a yield: " ++ ppr t))
 
 -- The two scrutinee categories share branch checking and existential escape checks.
 inferDestruct :: Env -> Gamma -> Joins -> VExpr -> Ty -> [([Path],VExpr)] -> Q VType

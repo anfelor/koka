@@ -87,7 +87,7 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
                      Let _ t _ _ -> [t]
                      LetYield _ t _ _ _ -> [t]
                      Yielded t -> [t]
-                     CastEv t _ -> [t]
+                     CastEv u t _ -> [u,t]
                      Unreachable t -> [t]
                      Join r _ _ ps _ _ -> recResult r ++ map (\(_,_,t) -> t) ps
                      Jump _ ts _ -> concatMap at ts
@@ -206,7 +206,7 @@ tvarsE bound expr
       Let _ t _ _        -> ftv t
       LetYield _ t _ _ _ -> ftv t
       Yielded t          -> ftv t
-      CastEv t _         -> ftv t
+      CastEv u t _       -> ftv u ++ ftv t
       Unreachable t      -> ftv t
       Call _ ts _        -> concatMap ftv ts
       Jump _ ts _        -> concatMap ftv ts

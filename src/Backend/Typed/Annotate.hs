@@ -13,7 +13,7 @@
   `yielded` and `unreachable`, as they follow from where they occur. This pass fills them in
   from the signatures and datatypes of the program: an expression is checked against its type,
   a value against the type that its position expects, and the type of a value is synthesized
-  where nothing is expected (the scrutinee of a destructuring, the operand of `cast-ev`).
+  where nothing is expected (the scrutinee of a destructuring).
 
   The pass does not check the program (`CheckTypes` does). An annotation that does not follow
   is left as it is, with a message: for example, without the definition of an imported datatype
@@ -101,8 +101,9 @@ annE c expr w
                      VYield t -> return (Yielded t)
                      _ -> unknown ("yielded at " ++ ppr w) expr
       Unreachable _ -> return (Unreachable w)
-      CastEv t v -> do t' <- annTy c t
-                       CastEv t' <$> maybe (checkV c v t') snd (synthV c v)
+      CastEv u t e -> do u' <- annTy c u
+                         t' <- annTy c t
+                         CastEv u' t' <$> annE c e u'
       Call f ts vs -> case funSig env f ts of
                         Right (ps,_) | length ps == length vs -> Call f ts <$> zipWithM (checkV c) vs ps
                         _ -> unknown ("unknown function " ++ show f) () >> (Call f ts <$> mapM (synthOrKeep c) vs)

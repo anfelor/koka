@@ -251,6 +251,7 @@ fipE expr
               (c',full) <- branches [fipE e | e <- map snd alts ++ [def], alive e]
               return (c <> c',full)
       Gen _ e -> fipE e
+      CastEv _ _ e -> fipE e
       Drop x e
         -> do t <- typeOfVar x
               u <- untracked t
@@ -311,7 +312,6 @@ fipE expr
       Append c d -> operands [c,d]
       Plug c v -> operands [c,v]
       CtxCopy c -> operands [c]
-      CastEv _ v -> operands [v]
       Memoize _ _ _ w -> operands [w]
       _ -> fail ("unexpected expression: " ++ ppr expr)
   where

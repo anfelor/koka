@@ -112,7 +112,6 @@ dropNames pe xs e = foldM step e (reverse xs)
     step body x = do t <- tyOfVar pe x
                      case t of
                        V (VCell _ _) -> fail ("a cell that is not filled: " ++ show x)
-                       V (VYield _) -> fail ("an unused value that may be the dummy of a yield: " ++ show x)
                        _ -> return ()
                      let discard = dropValue (trivialTy (peEnv pe)) (fresh "d") (scopeOf (M.keys (peGamma pe))) x t body
                      case (t,childrenOf pe x) of
@@ -203,7 +202,6 @@ consumedWith expr z x
       Append{}   -> True
       Plug{}     -> True
       CtxCopy{}  -> True
-      CastEv{}   -> True
       Memoize{}  -> True
       App f _    -> x /= f
       Jump{}     -> True
@@ -328,6 +326,7 @@ percE' pe owned expr
               (k,vs') <- useVals pe (if move then S.delete f owned else owned) [(Owned,v) | v <- vs]
               return ((if move then id else Dup f) (k (App f vs')))
       Gen tvs e -> Gen tvs <$> percE' pe owned e
+      CastEv u t e -> CastEv u t <$> percE pe owned e
       Drop x e -> Drop x <$> percE' pe owned e
       Free r e -> Free r <$> percE' pe owned e
       IsUnique x e1 e2 -> IsUnique x <$> percE pe{ peGamma = uniqueGamma (peGamma pe) x } owned e1 <*> percE pe owned e2
@@ -346,7 +345,6 @@ percE' pe owned expr
       Append c d -> operation [(Unique,c),(Unique,d)] (\[c',d'] -> Append c' d')
       Plug c v -> operation [(Unique,c),(Owned,v)] (\[c',v'] -> Plug c' v')
       CtxCopy c -> operation [(Owned,c)] (\[c'] -> CtxCopy c')
-      CastEv t v -> operation [(Owned,v)] (\[v'] -> CastEv t v')
       Memoize c d i v -> operation [(Owned,c),(Owned,v)] (\[c',v'] -> Memoize c' d i v')
       _ -> fail "unexpected destructuring form"
   where
@@ -374,7 +372,6 @@ dupsOf pe xs = concat <$> mapM one xs
                case t of
                  _ | trivialTy (peEnv pe) t -> return []
                  V (VCell _ _) -> fail ("duplication of a cell: " ++ show x)
-                 V (VYield _) -> fail ("duplication of a value that may be the dummy of a yield: " ++ show x)
                  _ -> return [x]
 
 -- the dups at the start of the bound expression of a `let` come before the `let`, so that
@@ -510,7 +507,9 @@ valName :: VVal -> Maybe Path
 valName (Var x) = Just x
 valName _ = Nothing
 
--- after a call: drop owned variables that were only passed as borrowed arguments
+-- After a call: drop owned variables that were only passed as borrowed arguments. A result that
+-- may be the dummy of a yield is not bound to a variable: it is tested, and the drops come in
+-- both branches.
 postCall :: PEnv -> VarSet -> [(Mode,VVal)] -> K -> VExpr -> P VType -> P VExpr
 postCall pe owned mvs k call resTp
   = do let borrowedVars = S.fromList (concat [occurrences v | (Borrowed,v) <- mvs])
@@ -518,8 +517,12 @@ postCall pe owned mvs k call resTp
        if null drops then return (k call)
          else do r <- fresh "r"
                  t <- resTp
-                 body <- dropNames pe drops (Ret (Var r))
-                 return (k (Let r t call body))
+                 case t of
+                   VYield w -> do body <- dropNames pe drops (Ret (Pure (Var r)))
+                                  yielding <- dropNames pe drops (Yielded w)
+                                  return (k (LetYield r w call body yielding))
+                   _ -> do body <- dropNames pe drops (Ret (Var r))
+                           return (k (Let r t call body))
 
 isAtom :: VVal -> Bool
 isAtom (Var _) = True

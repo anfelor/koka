@@ -87,11 +87,11 @@
     eliminates `Y W`, by testing the flag, so the dummy is never inspected (apart from the
     unchecked `[cast-ev]`). There is no subtyping: elaboration converts between W and `Y W`
     with `[cast-ev]` or by eta-expansion.
-    `Y` only occurs at the top of the type of an expression, a binder or a function result
-    (`Types.wellYield`), so a type variable never stands for `Y W` and a parameter never has a
-    type `Y W`. W itself contains no `Y`, credits or cells. A variable of type `Y W` is
-    linear like a cell: it is never duplicated or dropped, and never live across an expression
-    that may yield. A unique `Y W` is unique unless it is the dummy.
+    `Y` only occurs at the top of the type of an expression or a function result
+    (`Types.wellYield`), so a type variable never stands for `Y W`, and no variable (a binder
+    or a parameter) has a type `Y W`: the flag is tested, or the result is cast, where the
+    expression returns. W itself contains no `Y`, credits or cells. A unique `Y W` is unique
+    unless it is the dummy.
 -}
 module Backend.Typed.Syntax where
 
@@ -177,7 +177,7 @@ data Side = Whnf | Delay
 --   jump with a cell parameter. They never occur inside another type or a closure, and are
 --   never live across `[let-yield]`. A `cell_n` can be used where `cell_m` is expected if m ≤ n.
 -- - `Y V` is a `V` or the dummy value of an effect yield (see "Effect yields" above), with the
---   layout of `V`. It is linear like a cell.
+--   layout of `V`. It is the type of an expression or a function result, never of a variable.
 data VType = VPtr AType                 -- A*
            | VUnit                      -- 𝟙
            | VSum [(Con,VType)]         -- ⊕ᵢ Vᵢ, n-ary (a Koka value type with several constructors)
@@ -557,7 +557,8 @@ data VExpr
   --   Γ₁, Γ₂ | J ⊢ let x : V = e₁ in e₂ : W
   --
   -- The binder is unique if every tail position of e₁ has a unique result: a unique value, a
-  -- call of a function with a unique result, `[ctx-append]` or `[ctx-copy]`.
+  -- call of a function with a unique result, `[ctx-append]` or `[ctx-copy]`. V is not `Y U`:
+  -- a result that may be the dummy is tested (`[let-yield]`) or cast (`[cast-ev]`).
   | Let Path VType VExpr VExpr
 
   --   Γ₁, ^Γ₂ | ∅ ⊢ e₁ : Y V    Γ₂, x : V | J ⊢ e₂ : W    Γ₂ | J ⊢ e₃ : W
@@ -571,7 +572,7 @@ data VExpr
   -- Koka's monadic bind (`if yielding() then e₃ else e₂`), the only elimination of `Y V`. If e₁
   -- yields, it returns the dummy and e₃ runs, where x is not in scope. e₁ consumes Γ₁ in either
   -- case. Without a value to bind, the test is `let x : 𝟙 = ret (pure ()) yielding e₃ in e₂`.
-  -- No variable of a type `Y U` or a cell is live in e₂ or e₃.
+  -- No cell is live in e₂ or e₃.
   | LetYield Path VType VExpr VExpr VExpr
 
   --   W contains no credits or cells
@@ -590,19 +591,22 @@ data VExpr
   -- including credits and cells. Code generation aborts.
   | Unreachable VType
 
-  --   Γ ⊢ v : U    |U| = |V|
-  --  ──────────────────────────── [cast-ev]
-  --   Γ | J ⊢ cast-ev[V] v : V
+  --   Γ | ∅ ⊢ e : U    |U| = |V|
+  --  ────────────────────────────────── [cast-ev]
+  --   Γ | J ⊢ cast-ev[U, V] e : V
   --
-  -- Adds or removes `Y`s anywhere in the type of v (`|·|` erases them, `Types.eraseY`). A no-op
+  -- Adds or removes `Y`s anywhere in the type of e (`|·|` erases them, `Types.eraseY`). A no-op
   -- at run time, and unchecked, as the IR has no effects: elaboration emits it where Koka knows
-  -- that the value is not a dummy. Examples are an effect variable instantiated at a total
+  -- that the result is not a dummy. It is an expression, like `[gen]`, so that a result `Y U`
+  -- is cast where it is returned, without a variable of type `Y U`; a value is cast as
+  -- `cast-ev[U, V] ret v`. The annotation U is the type of e, which does not follow from e (as
+  -- the type of a `let` binder). The result is owned. Examples are an effect variable instantiated at a total
   -- effect, and the result of a call that Koka does not test (a total call, a call in
   -- `std/core/hnd`, which tests the flag itself, or a call under `unsafe-total`). It also lets a
   -- function that never yields be used as one that may. In `std/core/hnd`, a dummy may pass at
   -- a type variable, where it is only passed on, duplicated or dropped. `[pure]`, not
   -- `cast-ev`, injects a value into `Y` at the top of a type.
-  | CastEv VType VVal
+  | CastEv VType VType VExpr
 
   --   f : ∀ā. (q̄ V̄) -> q W ∈ Σ    Γᵢ ⊢ vᵢ :qᵢ Vᵢ[B̄/ā]
   --  ───────────────────────────────────────────────── [call]

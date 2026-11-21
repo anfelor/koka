@@ -134,7 +134,7 @@ descendB fn fv fb expr
       Append c d            -> Append <$> fv c <*> fv d
       Plug c v              -> Plug <$> fv c <*> fv v
       CtxCopy c             -> CtxCopy <$> fv c
-      CastEv t v            -> CastEv t <$> fv v
+      CastEv u t e          -> CastEv u t <$> plain e
       Memoize c d k v       -> Memoize <$> fv c <*> pure d <*> pure k <*> fv v
   where
     plain e = snd <$> fb [] e

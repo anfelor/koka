@@ -337,7 +337,7 @@ prettyExpr pp expr
       Plug c v -> atomVal pp c <.> brackets (prettyVal pp v)
       Append c d -> atomVal pp c <+> text "++" <+> atomVal pp d
       CtxCopy c -> text "ctx-copy" <+> atomVal pp c
-      CastEv t v -> text "cast-ev" <.> brackets (prettyV pp t) <+> atomVal pp v
+      CastEv u t e -> text "cast-ev" <.> brackets (prettyV pp u <.> comma <+> prettyV pp t) <+> align (prettyExpr pp e)
       Memoize c d k v -> text "memoize" <+> atomVal pp c <+> parens (side d <+> parens (text "inj" <.> int k <+> atomVal pp v))
       Gen vs e -> text "gen" <+> hsep (map tv vs) <.> text "." <+> align (prettyExpr pp e)
       CaseOpen v alts def -> caseOf (text "case") (pp v) ([(nm c <.> parens (commaSep (map pp xs)), e) | (c,xs,e) <- alts] ++ [(text "_", def)])

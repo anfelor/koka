@@ -65,5 +65,6 @@ selfJumps f j tvs bs = go
           Let x t e1 e2 -> Let x t e1 (go e2)
           LetYield x t e1 e2 e3 -> LetYield x t e1 (go e2) (go e3)
           Gen _ _ -> expr
+          CastEv{} -> expr
           Join rc@Rec{} k ks ps e1 e2 -> Join rc k ks ps e1 (go e2)
           _ -> runIdentity (descendE pure pure (\_ e -> Identity (go e)) expr)

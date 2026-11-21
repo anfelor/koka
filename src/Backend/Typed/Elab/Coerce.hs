@@ -46,7 +46,7 @@ coerce from to v
        return (k, Pure v')
   | VYield _ <- from
   = failE ("cannot coerce " ++ ppr from ++ " to " ++ ppr to ++ " without a test for a yield")
-  | addsY from to = castV to v
+  | addsY from to = castV from to v
   | not (isPtr from) && alphaEq to (boxrep from) = boxV from v
   | not (isPtr to) && alphaEq from (boxrep to) = unboxV to v
   | otherwise
@@ -196,10 +196,10 @@ addsY from to
     addsA _ _ = False
 
 -- `v` at the type `to` (`[cast-ev]`)
-castV :: VType -> VVal -> E (K,VVal)
-castV to v
+castV :: VType -> VType -> VVal -> E (K,VVal)
+castV from to v
   = do x <- fresh "c"
-       return (Let x to (CastEv to v), Var x)
+       return (Let x to (CastEv from to (Ret v)), Var x)
 
 -- The value `v` of a generic type instantiated at `from`, at its Koka instance `to`. The IR
 -- has no effects, so the `Y`s of `from` follow the effect variables of the generic type, while
@@ -208,7 +208,7 @@ castV to v
 -- at `list<(int) -> int>`), the value is cast (`[cast-ev]`): Koka does not test its results.
 coerceInst :: VType -> VType -> VVal -> E (K,VVal)
 coerceInst from to v
-  | not (alphaEq from to) && castable from to = castV to v
+  | not (alphaEq from to) && castable from to = castV from to v
   | otherwise = coerce from to v
 
 isYield :: VType -> Bool
@@ -228,15 +228,13 @@ coerceExpr :: VType -> VType -> VExpr -> E VExpr
 coerceExpr from to e
   | alphaEq from to = return e
   | castable from to && (isYield from || not (isYield to))
-  = do r <- fresh "r"
-       return (Let r from e (CastEv to (Var r)))
+  = return (CastEv from to e)
   | VYield u <- from
   = do r <- fresh "r"
        (k,v) <- coerce u to (Var r)
-       d <- fresh "d"
        let yielding = case to of
                         VYield w -> Yielded w
-                        _ -> Let d (VYield to) (Yielded to) (CastEv to (Var d))
+                        _ -> CastEv (VYield to) to (Yielded to)
        return (LetYield r u e (k (Ret v)) yielding)
   | otherwise
   = do r <- fresh "r"

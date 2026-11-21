@@ -242,8 +242,7 @@ genCtx cx b k
          _ -> do (ss,res,hole) <- genHolePath (bindVar cx nameHole (V (VPtr b))) k
                  return (stmtExpr ss (fromCctx ct ("kk_cctx_create(" <.> res <.> "," <.> hole <.> ",_ctx)")))
 
--- An operation on contexts or cells is a C expression (`genOperation`), and so are `cast-ev`
--- (a no-op, as the representation of `Y V` is that of `V`) and `ctx-copy`
+-- An operation on contexts or cells is a C expression (`genOperation`), and so is `ctx-copy`
 -- followed by plugging the copy (`copyPlug`).
 isOperation :: VExpr -> Bool
 isOperation expr
@@ -251,7 +250,6 @@ isOperation expr
       Append{} -> True
       Plug{} -> True
       CtxCopy{} -> True
-      CastEv{} -> True
       Memoize{} -> True
       _ -> isJust (copyPlug expr)
 
@@ -266,7 +264,6 @@ genOperation cx expr
                       x <- fresh "c"
                       return (stmtExpr [cty ct <+> x <+> "=" <+> ce <.> ";", "kt_ctx_copy(&" <.> x <.> ".f0,&" <.> x <.> ".f1,_ctx);"] x)
       Memoize c _ k v -> genBox cx k (In c) v
-      CastEv _ v -> genV cx v
       _ -> failG ("not an operation: " ++ show expr)
 
 -- `let c' = ctx-copy c in c'[v]`: plugging a copy of `c`
@@ -842,6 +839,8 @@ genE cx dest expr
       CopyRu z r e -> genCopyRu cx dest z r e
       Lock z e -> genLock cx dest z e
       Gen _ e -> genE cx dest e
+      -- a no-op, as the representation of `Y V` is that of `V`
+      CastEv _ _ e -> genE cx dest e
       -- the body of a recursive join point is a loop, which only sees the join point itself
       Join rc j _ ps e1 e2
         -> do lbl <- fresh "join"
@@ -961,7 +960,6 @@ genE cx dest expr
       Append{} -> failG "an operation"
       Plug{} -> failG "an operation"
       CtxCopy{} -> failG "an operation"
-      CastEv{} -> failG "an operation"
       Memoize{} -> failG "an operation"
       CaseOpen v alts def
         -> do let ve = localName v

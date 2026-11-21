@@ -292,7 +292,6 @@ checkDupType t
   = case t of
       V (VReuse _ _ _) -> Left "dup of a reuse credit"
       V (VCell _ _) -> Left "dup of a cell"
-      V (VYield _) -> Left "dup of a value that may be the dummy of a yield"
       _ -> Right ()
 
 -- Boxed sum alternatives must have a tag determined by their construction: sums are flat and

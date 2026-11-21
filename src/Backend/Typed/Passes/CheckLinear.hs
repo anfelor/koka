@@ -43,10 +43,8 @@
   is checked like `UnboxRu`, but needs an owned box, and its block is a cell. A cell is
   linear: it is owned and not trivial, so it must be consumed (as `Check` rejects a dup or a
   drop of it, by `memoize`, a uniqueness test or a call or jump), and it must not be live
-  across a `[let-yield]`, whose yielding branch could not consume it. A value that may be the
-  dummy of a yield (`Y V`) is linear in the same way, and it must not be live across a
-  `[let-yield]` or a `let` whose bound expression returns `Y U`, as the test reads a flag that
-  they may change. An owned variable is unique in the
+  across a `[let-yield]`, whose yielding branch could not consume it. (No variable has a type
+  `Y V`, see `CheckTypes`.) An owned variable is unique in the
   first branch of `IsUnique`; unique parameters and a `let` or `[let-yield]` whose bound
   expression has a unique result are unique too, and so are the binders that are the pointer
   of a unique variable (`key`). An expression has a unique result (its result mode `q`, which
@@ -92,7 +90,7 @@ import Data.Functor.Const( Const(..) )
 import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( child, descendV, destructAOf, destructVOf, dsAlts, dsScrut, fieldsAt, fvA, fvE, jumpTargets, sibling, within )
-import Backend.Typed.Types( checkDupType, prodV, unYield )
+import Backend.Typed.Types( checkDupType, prodV )
 import Backend.Typed.Passes.Common( isRead, paramModes, prefixes, resultMode, trivialTy )
 import Backend.Typed.Env( Env(..), envOf, M, ask, evalM, get, gets, liftE, local, modify )
 import Backend.Typed.Query( Gamma, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
@@ -448,8 +446,7 @@ checkE env g js q expr
       Ret v | q == Unique -> uniqueV env g v
             | otherwise -> ownedV env g v
       -- the binder is unique if it is used as unique (and the expression's result is unique)
-      Let x t e1 e2 -> do when (snd (unYield t)) (notLiveAcrossYield g [e2])
-                          u2 <- withOwners [(x,Owned)] (checkE env (M.insert x (V t) g) js q e2)
+      Let x t e1 e2 -> do u2 <- withOwners [(x,Owned)] (checkE env (M.insert x (V t) g) js q e2)
                           let m = if S.member x (uUnique u2) then Unique else Owned
                           u1 <- checkE env g M.empty m e1
                           andThen u1 =<< leave [(x,m) | not (trivialTy env (V t))] u2
@@ -531,7 +528,7 @@ checkE env g js q expr
       -- appending and copying give a unique context, plugging and memoizing an owned value
       Append c d -> uses [uniqueV env g c, uniqueV env g d]
       CtxCopy c -> ownedV env g c
-      CastEv _ v -> ownedResult expr >> ownedV env g v
+      CastEv _ _ e -> ownedResult expr >> checkE env g M.empty Owned e
       Plug c v -> ownedResult expr >> uses [uniqueV env g c, ownedV env g v]
       Memoize c _ _ v -> ownedResult expr >> uses [ownedV env g v, ownedV env g c]
       CaseLit v alts def -> before (borrowedV env g v) (branches =<< mapM (checkE env g js q) (def : map snd alts))
@@ -560,18 +557,12 @@ checkE env g js q expr
                    else if null consumed then [(x,Borrowed)]
                    else concat [replicate n (p,Owned) | (p,n) <- consumed])
 
--- No cell or value that may be the dummy of a yield is live after a test of the yield flag in
--- any of the expressions `es`.
+-- No cell is live after a test of the yield flag in any of the expressions `es`.
 notLiveAcrossYield :: Gamma -> [VExpr] -> L ()
 notLiveAcrossYield g es
-  = case [y | y <- S.toList (S.unions (map fvE es)), Just (V t) <- [M.lookup y g], linear t] of
-      (y:_) -> fail ("cell or value that may be the dummy of a yield live across a yield: " ++ show y)
+  = case [y | y <- S.toList (S.unions (map fvE es)), Just (V VCell{}) <- [M.lookup y g]] of
+      (y:_) -> fail ("cell live across a yield: " ++ show y)
       [] -> return ()
-  where
-    linear t = case t of
-                 VCell _ _ -> True
-                 VYield _ -> True
-                 _ -> False
 
 -- The binders of a destructuring of a variable are its children, which the scrutinee only reads.
 -- The binders of a destructuring of another value are new borrowed roots.

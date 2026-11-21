@@ -37,8 +37,8 @@
     unboxing, as in the inlined `local-var`, whose `prompt-local-var` tests the flag itself),
     the test goes away, and the result is passed on with a cast, as by Koka's C backend:
 
-      let x : V = (let r : U = e yielding (let d = yielded in cast-ev[V] d) in unbox r) in B[box x]
-        ~>   let r : Y U = e in let x : U = cast-ev[U] r in B[x]
+      let x : V = (let r : U = e yielding cast-ev[Y V, V] yielded in unbox r) in B[box x]
+        ~>   let x : U = cast-ev[Y U, U] e in B[x]
 -}
 module Backend.Typed.Passes.Yields( yieldsProgram ) where
 
@@ -62,9 +62,10 @@ yE w expr
   = case expr of
       Let r u e (Let x _ c body) | Just boxedAs <- reboxed r u x c body -> yE w (Let r u e (boxedAs r))
       Let x _ (LetYield r u e c d) body | dummy d, Just boxedAs <- reboxed r u x c body
-        -> Let r (VYield u) (yE (VYield u) e) (Let x u (CastEv u (Var r)) (yE w (boxedAs x)))
+        -> Let x u (CastEv (VYield u) u (yE (VYield u) e)) (yE w (boxedAs x))
       Let x t e1 e2 -> Let x t (yE t e1) (yE w e2)
       LetYield x t e1 e2 e3 -> letYield w x t (yE (VYield t) e1) (yE w e2) (yE w e3)
+      CastEv u t e -> CastEv u t (yE u e)
       Gen tvs e -> case w of
                      VPtr (AForall bs a) -> Gen tvs (yE (VPtr (inst bs (map AVar tvs) a)) e)
                      _ -> expr
@@ -89,15 +90,15 @@ unpure expr
   | mayYield expr = Nothing
   | otherwise = unwrap expr
 
--- Whether an expression calls something that may yield: a test, or a result of a type `Y U`
--- that is bound (to be cast without a test, such as a call that Koka tests only after an
--- enclosing type abstraction). The flag may then be set although the results are `pure`.
--- Lambdas do not run here.
+-- Whether an expression calls something that may yield: a test, or a cast that removes the `Y`
+-- of a result without a test (such as of a call that Koka tests only after an enclosing type
+-- abstraction). The flag may then be set although the results are `pure`. Lambdas do not run
+-- here.
 mayYield :: VExpr -> Bool
 mayYield expr
   = case expr of
       LetYield{} -> True
-      Let _ VYield{} _ _ -> True
+      CastEv VYield{} _ _ -> True
       _ -> any mayYield (subexprs expr)
 
 unwrap :: VExpr -> Maybe VExpr
@@ -152,7 +153,7 @@ reboxed r u x c body
 dummy :: VExpr -> Bool
 dummy expr
   = case expr of
-      Let d _ (Yielded _) (CastEv _ (Var d')) -> d' == d
+      CastEv _ _ Yielded{} -> True
       _ -> False
 
 -- a call to `yield-extend` or `yield-cont`, which return while the effect still yields
