@@ -31,6 +31,7 @@ import Data.Char( isDigit )
 import Data.List( intercalate, isPrefixOf )
 import Lib.PPrint
 import Common.Name
+import Common.Syntax( DefInline(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( bindersE, child )
 
@@ -69,7 +70,7 @@ reserved s = null s || "(" `isPrefixOf` s || s `elem` keywords || "box@" `isPref
     keywords = words ("ret let in of case split at if-whnf whnf delay ptr roll box scalar pack dup drop free"
                       ++ " if-unique if-full then else join rec and jump fn gen forall exists unreachable"
                       ++ " cast-ev total memoize ctx ctx-copy hole some null is-null if-yielding yield up down lock @ @copy _"
-                      ++ " module data con fun val extern foreign Box Scalar I KCtx NaN Infinity"
+                      ++ " module data con inline noinline fun val extern foreign Box Scalar I KCtx NaN Infinity"
                       ++ " char ssize_t intptr_t float64 float32 int64 int32 int16 int8 uint8")
 
 -- a path with all its steps
@@ -355,11 +356,15 @@ prettyExpr pp expr
 -- Programs
 --------------------------------------------------------------------------
 
+inline :: DefInline -> Doc
+inline InlineAuto = empty
+inline inl        = text (show inl) <.> space   -- `inline` or `noinline`
+
 prettyDef :: PP -> Def -> Doc
 prettyDef pp def
   = case def of
-      DefFun f vs ps q r e -> text "fun" <+> nm f <.> tyParams vs <.> params pp ps <+> colon <+> mode q <.> prettyV pp r <+> text "=" <-> indent 2 (prettyExpr pp e)
-      DefVal x vs t e      -> text "val" <+> nm x <.> tyParams vs <+> colon <+> prettyV pp t <+> text "=" <-> indent 2 (prettyExpr pp e)
+      DefFun f vs ps q r e inl -> inline inl <.> text "fun" <+> nm f <.> tyParams vs <.> params pp ps <+> colon <+> mode q <.> prettyV pp r <+> text "=" <-> indent 2 (prettyExpr pp e)
+      DefVal x vs t e          -> text "val" <+> nm x <.> tyParams vs <+> colon <+> prettyV pp t <+> text "=" <-> indent 2 (prettyExpr pp e)
 
 -- The declaration of a datatype, whose alternatives are labelled by their constructors instead
 -- of their tags: the tags are those of the labels, in order (and in a lazy sum `L ~> S`, those of

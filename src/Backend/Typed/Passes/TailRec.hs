@@ -28,14 +28,15 @@
     fun w⟨ā,b̄₁,...,b̄ₙ⟩(s :q ⊕ᵢ ⊗V̄ᵢ) : W
       = join rec : W { j₁⟨c̄₁⟩(x̄₁ :q V̄₁) = e₁'; ...; jₙ⟨c̄ₙ⟩(x̄ₙ :q V̄ₙ) = eₙ' }
         in case s of { injᵢ y -> jump jᵢ[c̄ᵢ](y.field₀, ...) }
-    fun fᵢ⟨āᵢ,b̄ᵢ⟩(x̄ᵢ :q V̄ᵢ) : Wᵢ = w[āᵢ,any,...,b̄ᵢ,...,any](injᵢ (x̄ᵢ))
+    inline fun fᵢ⟨āᵢ,b̄ᵢ⟩(x̄ᵢ :q V̄ᵢ) : Wᵢ = w[āᵢ,any,...,b̄ᵢ,...,any](injᵢ (x̄ᵢ))
 
   where eᵢ' replaces the tail calls to the functions of the group by jumps, as above. The
   results Wᵢ are W up to a renaming of their type parameters āᵢ to ā, and the other type
   parameters b̄ᵢ of the functions are distinct; the other functions' are `any` in a wrapper.
   All parameters have the same mode q, and the results the same mode and `fip` annotation.
   The bodies are renamed apart, as the names of a definition are unique. The other calls
-  to fᵢ stay calls of its wrapper.
+  to fᵢ stay calls of its wrapper, which is `inline` (even if fᵢ is `noinline`): C generation
+  defines it in the header, where the C compiler can inline it into its callers.
 -}
 module Backend.Typed.Passes.TailRec( tailRecProgram, loopWorkerName ) where
 
@@ -49,7 +50,7 @@ import Control.Monad( zipWithM )
 import Control.Monad.State( evalState, state )
 import Data.Maybe( fromMaybe, maybeToList )
 import Common.Name( Name, makeHiddenName )
-import Common.Syntax( Fip )
+import Common.Syntax( Fip, DefInline(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Types( Types(..), atAny, holdsToken, inst, prodV )
 import Backend.Typed.Build( prodVal )
@@ -132,7 +133,7 @@ renaming t u
 -- the worker of a group of functions, and their wrappers
 mutual :: [Def] -> (Def,[Def])
 mutual ds
-  = (DefFun w tvs [(s,q,sumT)] (defResMode d1) res (JoinRec res points (CaseV (Var s) (zipWith3 enter [0..] js points)))
+  = (DefFun w tvs [(s,q,sumT)] (defResMode d1) res (JoinRec res points (CaseV (Var s) (zipWith3 enter [0..] js points))) InlineAuto
     , zipWith wrapper [0..] ds)
   where
     d1 = head ds
@@ -178,7 +179,7 @@ mutual ds
       = let inverse = M.fromList [(b,a) | (a,b) <- M.toList (sigmas !! i)]
             tys = [AVar (M.findWithDefault b b inverse) | b <- wtvs]
                   ++ concat [map (if k == i then AVar else const atAny) (others e) | (k,e) <- zip [0 :: Int ..] ds]
-        in d{ defBody = Call w tys [Inj i (inst tvs tys sumT) (prodVal [Var x | (x,_,_) <- defArgs d])] }
+        in d{ defBody = Call w tys [Inj i (inst tvs tys sumT) (prodVal [Var x | (x,_,_) <- defArgs d])], defInline = InlineAlways }
 
 -- replace the tail calls to the functions of `points` by jumps to their join points, with the
 -- type parameters of the functions in the join and those that the join may quantify over:

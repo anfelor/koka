@@ -27,6 +27,7 @@ import Control.Monad( forM )
 import Lib.PPrint( Doc, text, string, int, integer, empty, isEmptyDoc, line, nest, align, vcat, hcat, hsep, punctuate, (<.>), (<+>), (<->) )
 import Common.Name
 import Common.NamePrim
+import Common.Syntax( DefInline(..) )
 import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( child, TestSide(..), boxTag, canonical, failingTo, fvA, fvE, fvV, holes, testSides, within )
@@ -41,7 +42,6 @@ import Backend.Typed.CGen.ReuseSlots( keptLeaves )
 
 data CEnv = CEnv{ ceModName   :: Name
                 , ceImports   :: [Name]       -- all imported modules (their headers, initialization and termination)
-                , ceInline    :: S.Set Name   -- small functions defined `static inline` in the header
                 }
 
 -- generation monad
@@ -1236,7 +1236,7 @@ genExtern cx dest f tys vs ext
 genDef :: Env -> CEnv -> Def -> G (Doc,Doc,Doc)
 genDef env cenv def
   = case def of
-      DefFun f _ args _ res body
+      DefFun f _ args _ res body _
         -> do let (cps,tokens) = erased [(x,t) | (x,_,t) <- args]
               pcts <- mapM (ctype . snd) cps
               rct  <- ctype res
@@ -1282,10 +1282,10 @@ cgenModule cenv prog
                          Left err -> return (Left (show (defName d) ++ ": " ++ err))
                          Right ((p,c,i),st') -> do put st'
                                                    return (Right (if inHeader d st' then ("static inline" <+> p,"static inline" <+> c,empty,i) else (p,empty,c,i)))
-        -- a small function is defined in the header unless it uses declarations of the C file
-        inHeader d st = S.member (defName d) (ceInline cenv) && isFun d && not (stLocal st)
-        isFun DefFun{} = True
-        isFun DefVal{} = False
+        -- an inline function is defined in the header unless it uses declarations of the C file
+        inHeader d st = isInline d && not (stLocal st)
+        isInline d@DefFun{} = defInline d == InlineAlways
+        isInline DefVal{} = False
         genAll = do rs <- mapM genDefE (progDefs prog)
                     ws <- gets (S.toList . stWrappers)
                     wdefs <- mapM (genWrapper env cenv) ws

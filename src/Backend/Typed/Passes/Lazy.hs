@@ -67,7 +67,7 @@ fresh s = state (\(ns,js) -> let (x,ns') = freshPathFrom ("lz" ++ s) ns in (x,(n
 lazyProgram :: Lazies -> Program -> (Program,[String])
 lazyProgram lazies prog
   = let (prog',errs) = perDef (\d -> evalM (lazyDef d) (LEnv (envOf prog) lazies Nothing) (freshFor d, M.empty)) prog
-        cells = M.fromList [(f,c) | DefFun f _ ((_,_,c@VCell{}):_) _ _ _ <- progDefs prog']
+        cells = M.fromList [(f,c) | DefFun f _ ((_,_,c@VCell{}):_) _ _ _ _ <- progDefs prog']
     in (prog'{ progSigs = M.mapWithKey (withCell cells) (progSigs prog) }, errs)
   where
     withCell cells f sig

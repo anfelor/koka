@@ -18,7 +18,7 @@ import Control.Monad.Reader( local )
 import Common.Name
 import Common.NamePrim( nameCoreHnd, nameFieldAddrOf, nameCCtxHoleCreate, nameCCtxCreate, nameCCtxExtend, nameCCtxApply, nameCCtxEmpty, nameCCtxCompose, nameCCtxComposeExtend
                       , nameYielding, nameTrue, nameFalse, nameEffectOpen )
-import Common.Syntax( isDefFun, ParamInfo(..) )
+import Common.Syntax( isDefFun, ParamInfo(..), DefInline(..) )
 import qualified Common.Syntax as Syntax
 import Kind.Newtypes
 import Type.Type
@@ -53,10 +53,15 @@ elabProgram nt ffi imports core
         (tdefs,tdefErrs) = typeDefs nt
         run (sigs,ds,errs,notes) def
           = let label msg = show (C.defName def) ++ ": " ++ msg
-            in case runE (elabDef def) env0{ envTrusted = C.defName def `elem` trustedNulls } (St 0 sigs [] Nothing) of
+            in case runE (elabDef (inlineOf def) def) env0{ envTrusted = C.defName def `elem` trustedNulls } (St 0 sigs [] Nothing) of
                  Right ((d,sig),st) -> (M.insert (C.defName def) sig (stSigs st), ds ++ [d], errs, notes ++ map label (stNotes st))
                  Left err -> (sigs, ds, errs ++ [label err], notes)
         (sigs,ds,errs,notes) = foldl run (M.empty,[],tdefErrs,[]) defs
+        -- Koka's annotation, with the small functions `inline`: as the C backend, which defines
+        -- them in the header (`Backend.C.FromCore.genTopGroup`)
+        small = S.fromList [C.defName d | C.DefNonRec d <- C.coreProgDefs core, C.isInlineable 5 d]
+        inlineOf d | C.defInline d == InlineAuto && S.member (C.defName d) small = InlineAlways
+                   | otherwise = C.defInline d
     in (Program (C.coreProgName core) tdefs sigs externs ffi ds, errs, notes)
 
 -- The definitions that use a dummy as a value: `protect-prompt` puts its result `res`, which
@@ -91,23 +96,24 @@ closeDef def = TV.subNew [(tv,typeAny) | tv <- TV.tvsList (TV.ftv def), tvarStar
 isLeftOut :: C.Def -> Bool
 isLeftOut def = C.defName def `elem` (nameEffectOpen : [newLocallyQualified "std/core/types" "cctx" f | f <- ["res","holeptr"]])
 
-elabDef :: C.Def -> E (Def,Sig)
-elabDef def
+-- `inl`: whether a function is inlined
+elabDef :: DefInline -> C.Def -> E (Def,Sig)
+elabDef inl def
   = do (d,sig) <- case splitLam (C.defExpr def) of
-                    Just (_,pars,body) | isDefFun (C.defSort def) -> elabFunDef def pars body
+                    Just (_,pars,body) | isDefFun (C.defSort def) -> elabFunDef inl def pars body
                     Nothing | isDefFun (C.defSort def) -> failE "function definition is not a lambda"
                     _ -> elabValDef def
        body <- whnfTests (defBody d)
        return (d{ defBody = body },sig)
 
-elabFunDef :: C.Def -> [TName] -> C.Expr -> E (Def,Sig)
-elabFunDef def pars body
+elabFunDef :: DefInline -> C.Def -> [TName] -> C.Expr -> E (Def,Sig)
+elabFunDef inl def pars body
   = do (tvs,args,res) <- funSig (C.defName def) (typeOf (C.defExpr def))
        (k,token) <- tokenBinder args
        body' <- withTVars tvs (withTypedLocals [(getName p,t) | (p,(_,t)) <- zip pars args] (tokenIn token (elabExprAt res body)))
        let params = withParamModes (defModes def) args
            args' = [(root (getName p),m,t) | (p,(m,t)) <- zip pars params] ++ k
-       return (DefFun (C.defName def) tvs args' Owned res body', SigFun tvs params Owned res)
+       return (DefFun (C.defName def) tvs args' Owned res body' inl, SigFun tvs params Owned res)
 
 -- the token parameter of a function with the parameters `ps`, if it has one, and the token in
 -- its body

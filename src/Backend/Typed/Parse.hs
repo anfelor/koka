@@ -27,11 +27,13 @@
 module Backend.Typed.Parse( parseProgram, unknownA, unknownV ) where
 
 import qualified Data.Map as M
+import Control.Monad( when )
 import Data.Char( isAlpha, isAlphaNum, isDigit, isSpace )
 import Data.List( intercalate, isSuffixOf, stripPrefix )
 import Text.Parsec hiding ( label, labels )
 import Text.Parsec.Pos( newPos )
 import Common.Name
+import Common.Syntax( DefInline(..) )
 import Backend.Typed.Syntax
 import Backend.Typed.Pretty( ppr, reserved )
 import Backend.Typed.Traversal( child )
@@ -698,7 +700,7 @@ parseProgram types sigs externs src
 sigOf :: Def -> Sig
 sigOf def
   = case def of
-      DefFun _ tvs ps q r _ -> SigFun tvs [(m,t) | (_,m,t) <- ps] q r
+      DefFun _ tvs ps q r _ _ -> SigFun tvs [(m,t) | (_,m,t) <- ps] q r
       DefVal _ tvs t _ -> SigVal tvs t
 
 programP :: P (Name,[Item])
@@ -713,15 +715,17 @@ itemP = do modifyState (\st -> st{ psBinders = M.empty })
            choice [dataP, funP, valDefP, conP, externP, foreignP]
 
 funP :: P Item
-funP = do kw "fun"
+funP = do inl <- option InlineAuto ((InlineAlways <$ kw "inline") <|> (InlineNever <$ kw "noinline"))
+          kw "fun"
           n <- globalName <$> nameP
           tvs <- tyParamsP
           ps <- parensP (commaSep param)
           sym ":"
           q <- modeP
           r <- vP
-          (do sym "="; args <- mapM named ps; IDef . DefFun n tvs args q r <$> exprP)
-            <|> (do ts <- mapM unnamed ps; return (ISig n (SigFun tvs ts q r)))
+          (do sym "="; args <- mapM named ps; e <- exprP; return (IDef (DefFun n tvs args q r e inl)))
+            <|> (do when (inl /= InlineAuto) (fail ("a " ++ show inl ++ " function without a body"))
+                    ts <- mapM unnamed ps; return (ISig n (SigFun tvs ts q r)))
   where
     param = do m <- modeP; mx <- optionMaybe (try (pathP <* sym ":")); t <- vP; x <- traverse rootBinder mx; return (m,x,t)
     named (m,mx,t) = maybe (fail "a parameter without a name") (\x -> return (x,m,t)) mx

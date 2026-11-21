@@ -51,8 +51,9 @@ annotateProgram prog
 annDef :: Env -> Def -> An Def
 annDef env def
   = case def of
-      DefFun f tvs ps q r e -> do ps' <- annParams c0 ps
-                                  DefFun f tvs ps' q r <$> annE (bindVars [(x,V t) | (x,_,t) <- ps'] c0) e r
+      DefFun f tvs ps q r e inl -> do ps' <- annParams c0 ps
+                                      e' <- annE (bindVars [(x,V t) | (x,_,t) <- ps'] c0) e r
+                                      return (DefFun f tvs ps' q r e' inl)
       DefVal x tvs t e -> DefVal x tvs t <$> annE c0 e t
   where
     c0 = Ctx env M.empty M.empty

@@ -12,9 +12,8 @@
 module Backend.Typed.CFromCore( typedCFromCore, cgenMain ) where
 
 import Data.List( intercalate )
-import qualified Data.Set as S
 import Lib.PPrint( Doc, (<.>), linebreak )
-import Common.Syntax( DefInline(..), BuildType )
+import Common.Syntax( BuildType )
 import Kind.Newtypes( Newtypes )
 import qualified Core.Core as C
 import Backend.Typed.Typed( typedFromCore )
@@ -23,10 +22,9 @@ import Backend.Typed.Pretty( prettyProgram )
 import Backend.Typed.CGen.CGen( CEnv(..), cgenModule, cgenMain )
 
 -- Returns the final IR (for debugging), the diagnostics, and either an error or the header
--- and source. `coreC` is the Core that the C backend compiles; its
--- definitions decide which functions are inlined from the header, as for the C backend.
-typedCFromCore :: BuildType -> FilePath -> Bool -> Newtypes -> [C.Core] -> C.Core -> C.Core -> (Doc,[String],Either String (String,String))
-typedCFromCore buildType sourceDir enableReuse newtypes imports coreC core
+-- and source.
+typedCFromCore :: BuildType -> FilePath -> Bool -> Newtypes -> [C.Core] -> C.Core -> (Doc,[String],Either String (String,String))
+typedCFromCore buildType sourceDir enableReuse newtypes imports core
   = (prettyProgram tprog <.> linebreak, map diagnostic (errors ++ warnings), result)
   where
     modName                 = C.coreProgName core
@@ -42,6 +40,3 @@ typedCFromCore buildType sourceDir enableReuse newtypes imports coreC core
     (hdr,csrc,errs) = cgenModule cenv tprog
 
     cenv    = CEnv modName (map C.coreProgName imports)
-                   -- as the C backend (`Backend.C.FromCore.genTopGroup`)
-                   (S.fromList [C.defName d | C.DefNonRec d <- C.coreProgDefs coreC,
-                                              C.defInline d == InlineAlways || C.isInlineable 5 d])

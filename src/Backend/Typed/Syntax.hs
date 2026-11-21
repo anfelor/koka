@@ -119,6 +119,7 @@ module Backend.Typed.Syntax where
 
 import qualified Data.Map as M
 import Common.Name
+import Common.Syntax( DefInline(..) )
 
 -- Types. Type variables range over boxed types: a value at type `a` has the unboxed type `a*`.
 -- Elaboration instantiates a Koka type argument V with `rep(V)`: `A` if `V = A*`, and otherwise
@@ -941,8 +942,10 @@ data Def
   --   ⊢ fun f⟨ā⟩(x̄ :q̄ V̄) :q W = e
   --
   -- The result is owned or unique. Elaboration, imported functions and closures only have
-  -- owned results.
-  = DefFun{ defName :: Name, defParams :: [TVar], defArgs :: [(Path,Mode,VType)], defResMode :: Mode, defRes :: VType, defBody :: VExpr }
+  -- owned results. Whether a function is inlined (`defInline`) does not change its typing:
+  -- C generation defines an `inline` function (`InlineAlways`) in the header, where other
+  -- modules can inline it, and no other (`noinline` or unannotated `InlineAuto`).
+  = DefFun{ defName :: Name, defParams :: [TVar], defArgs :: [(Path,Mode,VType)], defResMode :: Mode, defRes :: VType, defBody :: VExpr, defInline :: DefInline }
 
   --   ∅ | ∅ ⊢ e : V
   --  ───────────────────────── [defval]

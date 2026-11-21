@@ -127,7 +127,7 @@ checkLinear prog
 checkDef :: Env -> Def -> Either String ()
 checkDef env def
   = case def of
-      DefFun _ _ args q _ body
+      DefFun _ _ args q _ body _
         -> run (M.fromList [(x,V t) | (x,_,t) <- args]) (params env args) q body
       DefVal _ _ _ body -> run M.empty [] Owned body
   where
