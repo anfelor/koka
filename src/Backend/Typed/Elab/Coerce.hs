@@ -236,17 +236,26 @@ castV from to v
 -- The value `v` of a generic type instantiated at `from`, at its Koka instance `to`. The IR
 -- has no effects, so the `?`s and tokens of `from` follow the effect variables of the generic type, while
 -- `to` follows their instances. Where these differ only in `?`s and tokens (an effect variable
--- instantiated at a total effect, also under a type constructor, as in
--- `list<(int, KCtx) -> int? ⊗ KCtx>` at `list<(int) -> int>`), the value is cast (`[cast-ev]`):
--- Koka does not test its results. A `V?` at a `V` is tested for null (`extractNull`).
+-- instantiated at a total effect), a function value is wrapped (`wrapped`), whose results are
+-- tested for null, and a value that holds functions under a type constructor, as in
+-- `list<(int, KCtx) -> int? ⊗ KCtx>` at `list<(int) -> int>`, is cast (`[cast-ev]`): this
+-- trusts Koka's typing. A `V?` at a `V` is tested for null (`extractNull`).
 coerceInst :: VType -> VType -> VVal -> E (K,VVal)
 coerceInst from to v
   | VOrNull f <- from, not (isNull to)
   = do (k1,w) <- extractNull f v
        (k2,u) <- coerceInst f to w
        return (k1 . k2, u)
-  | not (alphaEq from to) && castable from to = castV from to v
+  | not (alphaEq from to) && castable from to && not (wrapped from to) = castV from to v
   | otherwise = coerce from to v
+
+-- A function value whose type differs only in `?`s and tokens, but not as `addsNull`, is
+-- wrapped (`wrapFun`), so that its results are tested for null rather than cast
+wrapped :: VType -> VType -> Bool
+wrapped from to
+  = case (from,to) of
+      (VPtr a, VPtr b) -> isJust (funPair a b) && not (addsNull from to)
+      _ -> False
 
 isNull :: VType -> Bool
 isNull t = case t of
@@ -262,8 +271,8 @@ isNull t = case t of
 -- (`std/core/hnd`, and its `local-var` and `finally` where they are inlined: there the result
 -- may be a dummy, which elaboration passes on at `V?` to `prompt-local-var` or
 -- `finally-prompt`). A result that differs from `to` only in `?`s and tokens is then cast
--- (`[cast-ev]`), except that its `?` at the top is removed by a test for null (`checked`), and
--- added by `[some]`. A coercion (such as an unboxing) would inspect a dummy, so it is tested,
+-- (`[cast-ev]`), except that its `?` at the top is removed by a test for null (`checked`),
+-- added by `[some]`, and a function value is wrapped (`wrapped`). A coercion (such as an unboxing) would inspect a dummy, so it is tested,
 -- and the yielding branch passes on a dummy of the type `to` (cast from `to?`), as Koka does.
 --
 -- The token of a token-threaded `to` is that of `from`, or the current token (`takeToken`)
@@ -278,7 +287,7 @@ coerceExpr from to e
        kt <$> coerceTo from to0 e (\v -> Ret (Tuple [v,k]))
   | castable from to && yields from && not (yields to)
   = checked from to e
-  | castable from to && (yields from || not (yields to))
+  | castable from to && (yields from || not (yields to)) && not (wrapped from to)
   = return (CastEv from to e)
   | Just from0 <- unToken from, Just to0 <- unToken to
   = tested from0 to0 to e
@@ -367,7 +376,7 @@ wrapFun tvs itvs ps r qs s v
        let (qs0,qk) = tokenParam qs
            (ps0,pk) = tokenParam ps
            token = if qk then Just (last ys) else Nothing
-       (ks,args) <- unzip <$> mapM (\((_,q),(_,p),y) -> coerce q p (Var y)) (zip3 qs0 ps0 ys)
+       (ks,args) <- unzip <$> mapM (\((_,q),(_,p),y) -> coerceInst q p (Var y)) (zip3 qs0 ps0 ys)
        body <- tokenIn token $ withResult s $ (if pk then region else id) $
                do (kt,targs) <- takeTokenIf pk
                   call <- applyFun (AFun ps r) (tapp v (map AVar itvs)) (args ++ targs)
