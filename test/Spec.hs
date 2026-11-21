@@ -118,11 +118,15 @@ extendCfg (Cfg flags1 opts1 exclude1 fexclude1) (Cfg flags2 opts2 exclude2 fexcl
 initialCfg :: Options -> Backend -> Cfg
 initialCfg options backend
   = makeCfg (commonFlags ++ backendFlags ++ if (not (null (target options))) then ["--target=" ++ target options] else [])
-            options []
+            options backendExclude
   where
     backendFlags = case backend of
                      BackendC     -> []
                      BackendTyped -> ["--typedc"]
+    -- the `parc` tests check the Core after Koka's Perceus (`--showfcore`), which `--typedc` does not run
+    backendExclude = case backend of
+                       BackendC     -> []
+                       BackendTyped -> ["parc"]
 
 
 readFlagsFile :: FilePath -> IO [String]
