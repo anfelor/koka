@@ -193,9 +193,11 @@ dropValue trivial fresh scope x t e
                 return (Let u VUnit (reuseChildren scope (IsNull (Var x) (Ret UnitV) (y,body))) e)
         VReuse _ _ _ -> return (Free x e)
         VCtx _ _ _ -> return (Drop x e)
-        -- a cell or a token is linear and never dropped, which `Check` rejects
+        -- a cell is linear and never dropped, which `Check` rejects
         VCell _ _ -> return (Drop x e)
-        VToken -> return (Drop x e)
+        -- a token is left unused only on a path that diverges (`let x = unreachable in …`, after
+        -- a test for null); it has no representation, and `CheckLinear` rejects it elsewhere
+        VToken -> return e
         VUnit -> return e
         VRaw _ -> return e
 

@@ -18,7 +18,7 @@
 #define kt_unbox_string(b) kt_pun(kk_string_t,b)
 #define kt_box_datatype(d) kk_datatype_box(d)
 #define kt_unbox_datatype(b) kk_datatype_unbox(b)
-#define kt_unreachable() kk_fatal_error(EFAULT,"typed backend: unreachable")
+#define kt_unreachable() do { kk_fatal_error(EFAULT,"typed backend: unreachable in %s (line %d)",__func__,__LINE__); abort(); } while(0)
 static inline kk_block_t* kt_box_as_ptr(kk_box_t b, kk_context_t* ctx) {
   return kk_datatype_as_ptr(kk_datatype_unbox(b),ctx);
 }

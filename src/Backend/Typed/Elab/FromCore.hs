@@ -14,8 +14,9 @@ import qualified Data.Set as S
 import Data.List( find, sortOn, partition )
 import Data.Maybe( isJust, isNothing, listToMaybe )
 import Control.Monad( foldM, unless )
+import Control.Monad.Reader( local )
 import Common.Name
-import Common.NamePrim( nameFieldAddrOf, nameCCtxHoleCreate, nameCCtxCreate, nameCCtxExtend, nameCCtxApply, nameCCtxEmpty, nameCCtxCompose, nameCCtxComposeExtend
+import Common.NamePrim( nameCoreHnd, nameFieldAddrOf, nameCCtxHoleCreate, nameCCtxCreate, nameCCtxExtend, nameCCtxApply, nameCCtxEmpty, nameCCtxCompose, nameCCtxComposeExtend
                       , nameYielding, nameTrue, nameFalse, nameEffectOpen )
 import Common.Syntax( isDefFun, ParamInfo(..) )
 import qualified Common.Syntax as Syntax
@@ -45,16 +46,27 @@ import Backend.Typed.Pretty( ppr )
 elabProgram :: Newtypes -> Foreign -> [C.Core] -> C.Core -> (Program,[String],[String])
 elabProgram nt ffi imports core
   = let defs    = map closeDef (filter (not . isLeftOut) (C.flattenDefGroups (C.coreProgDefs core)))
-        isigs   = M.fromList [(n,withModes modes sig) | (n,(tp,isFun,modes)) <- M.toList (importSigs (core:imports)), Right sig <- [typeSig nt n tp isFun]]
-        env0    = Env nt S.empty S.empty isigs M.empty S.empty M.empty VUnit M.empty
+        externs = externsOf (core:imports)
+        exts    = M.keysSet externs
+        isigs   = M.fromList [(n,withModes modes sig) | (n,(tp,isFun,modes)) <- M.toList (importSigs (core:imports)), Right sig <- [typeSig nt (S.member n exts) n tp isFun]]
+        env0    = Env nt S.empty S.empty isigs M.empty S.empty M.empty VUnit M.empty exts False
         (tdefs,tdefErrs) = typeDefs nt
         run (sigs,ds,errs,notes) def
           = let label msg = show (C.defName def) ++ ": " ++ msg
-            in case runE (elabDef def) env0 (St 0 sigs [] Nothing) of
+            in case runE (elabDef def) env0{ envTrusted = C.defName def `elem` trustedNulls } (St 0 sigs [] Nothing) of
                  Right ((d,sig),st) -> (M.insert (C.defName def) sig (stSigs st), ds ++ [d], errs, notes ++ map label (stNotes st))
                  Left err -> (sigs, ds, errs ++ [label err], notes)
         (sigs,ds,errs,notes) = foldl run (M.empty,[],tdefErrs,[]) defs
-    in (Program (C.coreProgName core) tdefs sigs (externsOf (core:imports)) ffi ds, errs, notes)
+    in (Program (C.coreProgName core) tdefs sigs externs ffi ds, errs, notes)
+
+-- The definitions that use a dummy as a value: `protect-prompt` puts its result `res`, which
+-- is a dummy after `yield-capture` cleared the flag of a final yield, into `Finalize(res)` to
+-- run the finalizers (see "What stays trusted" in `Plan/ORNULL-KCTX-PLAN.md`).
+trustedNulls :: [Name]
+trustedNulls = [hndName "protect-prompt"]
+
+hndName :: String -> Name
+hndName s = qualify nameCoreHnd (newName s)
 
 -- the externals of a module and its imports
 externsOf :: [C.Core] -> Externs
@@ -92,13 +104,10 @@ elabFunDef :: C.Def -> [TName] -> C.Expr -> E (Def,Sig)
 elabFunDef def pars body
   = do (tvs,args,res) <- funSig (C.defName def) (typeOf (C.defExpr def))
        (k,token) <- tokenBinder args
-       body' <- withTVars tvs (withTypedLocals (map typed pars) (tokenIn token (elabExprAt res body)))
+       body' <- withTVars tvs (withTypedLocals [(getName p,t) | (p,(_,t)) <- zip pars args] (tokenIn token (elabExprAt res body)))
        let params = withParamModes (defModes def) args
            args' = [(root (getName p),m,t) | (p,(m,t)) <- zip pars params] ++ k
        return (DefFun (C.defName def) tvs args' Owned res body', SigFun tvs params Owned res)
-
-typed :: TName -> (Name,Type)
-typed (TName x tp) = (x,tp)
 
 -- the token parameter of a function with the parameters `ps`, if it has one, and the token in
 -- its body
@@ -147,27 +156,51 @@ withModes modes sig
 withParamModes :: [Mode] -> [(Mode,VType)] -> [(Mode,VType)]
 withParamModes modes ps = [(m,t) | ((_,t),m) <- zip ps (modes ++ repeat Owned)]
 
-typeSig :: Newtypes -> Name -> Type -> Bool -> Tr Sig
-typeSig nt n tp isFun
-  | isFun     = (\(tvs,args,res) -> SigFun tvs args Owned res) <$> funSigOf nt n tp
+typeSig :: Newtypes -> Bool -> Name -> Type -> Bool -> Tr Sig
+typeSig nt isExt n tp isFun
+  | isFun     = (\(tvs,args,res) -> SigFun tvs args Owned res) <$> funSigOf nt isExt n tp
   | otherwise = uncurry SigVal <$> elabScheme nt tp
 
--- The IR type of the function `n` of the Koka type `tp`. The tests of the yield flag,
--- `yielding()` and `yielding-non-final()`, take the token like an effectful external (Koka
--- types them total), so that they are ordered after the calls whose yields they test.
-funTypeOf :: Newtypes -> Name -> Type -> Tr AType
-funTypeOf nt n tp
-  = do a <- elabFunType nt tp
-       return (case a of
-                 AFun ps r | isFlagTest n, not (snd (tokenParam ps)) -> AFun (ps ++ [(Owned,VToken)]) (withToken r)
-                 _ -> a)
+-- The IR type of the function `n` (an external if `isExt`) of the Koka type `tp`:
+--
+-- * The tests of the yield flag, `yielding()` and `yielding-non-final()`, take the token like
+--   an effectful external (Koka types them total), so that they are ordered after the calls
+--   whose yields they test.
+-- * Only the yield primitives among the externals return the dummy of a yield: the result of
+--   any other external is not `V?`, so its uses need no test for null.
+-- * The prompt functions of `std/core/hnd` take the result of an action, which may be the
+--   dummy of a yield that they test for, at `V?` (`nullParams`).
+funTypeOf :: Newtypes -> Bool -> Name -> Type -> Tr AType
+funTypeOf nt isExt n tp = adjust <$> elabFunType nt tp
+  where
+    adjust a = case a of
+                 AForall tvs b -> AForall tvs (adjust b)
+                 AFun ps r -> let (ps',r') = if isFlagTest n && not (snd (tokenParam ps)) then (ps ++ [(Owned,VToken)], withToken r) else (ps,r)
+                              in AFun [(m, if i `elem` nullParams n then orNull t else t) | (i,(m,t)) <- zip [0 :: Int ..] ps']
+                                      (if isExt && n `notElem` yieldPrims then noNull r' else r')
+                 _ -> a
+    noNull r = maybe (unNull r) (withToken . unNull) (unToken r)
 
 isFlagTest :: Name -> Bool
 isFlagTest n = n `elem` [nameYielding, nameYieldingNonFinal]
 
-funSigOf :: Newtypes -> Name -> Type -> Tr ([TVar],[(Mode,VType)],VType)
-funSigOf nt n tp
-  = do a <- funTypeOf nt n tp
+-- the externals that may return the dummy of a yield
+yieldPrims :: [Name]
+yieldPrims = map hndName ["yield-extend", "yield-cont", "keep-yielding-final", "yield-to-prim", "yield-to-final", "unsafe-reyield-prim"]
+
+-- the positions of the parameters of a prompt function that take the result of an action
+nullParams :: Name -> [Int]
+nullParams n = M.findWithDefault [] n (M.fromList [ (hndName "prompt", [5])                -- result
+                                                  , (hndName "prompt-local-var", [1])      -- res
+                                                  , (hndName "finally-prompt", [1])        -- res
+                                                  , (hndName "initially-prompt", [1])      -- res
+                                                  , (hndName "protect-prompt", [1])        -- res
+                                                  , (hndName "yield-bind", [0])            -- x
+                                                  , (hndName "yield-bind2", [0]) ])        -- x
+
+funSigOf :: Newtypes -> Bool -> Name -> Type -> Tr ([TVar],[(Mode,VType)],VType)
+funSigOf nt isExt n tp
+  = do a <- funTypeOf nt isExt n tp
        case a of
          AForall tvs (AFun args res) -> Right (tvs,args,res)
          AFun args res               -> Right ([],args,res)
@@ -187,7 +220,7 @@ stripTypeLam e               = e
 funSig :: Name -> Type -> E ([TVar],[(Mode,VType)],VType)
 funSig n tp
   = do e <- env
-       tr (funSigOf (envNT e) n tp)
+       tr (funSigOf (envNT e) False n tp)
 
 -- expressions
 
@@ -208,7 +241,7 @@ elabTail expr
               (k,token) <- joinToken
               (ps,e1') <- withTVars tvs' $
                           do ps <- mapM (\p -> (\t -> (root (getName p),paramMode Own (S.member (getName p) linear),t)) <$> vt (tnameType p)) pars
-                             (,) (ps ++ k) <$> withTypedLocals (map typed pars) (tokenIn token (elabTail e1))
+                             (,) (ps ++ k) <$> withTypedLocals [(getName p,t) | (p,(_,_,t)) <- zip pars ps] (tokenIn token (elabTail e1))
               Join NonRec j tvs' ps e1' <$> elabTail (C.Let dgs body)
       C.App f args | (Just (TName j tp,_),tys) <- splitTypeApp f, isJoinName j, Just (pars,_,_) <- splitFunType (typeOf f)
         -> do tys' <- instArgs tp tys
@@ -233,8 +266,7 @@ elabTail expr
       -- an identity external changes only effects: the tails of its argument are coerced to `result`
       _ | Just g <- identityCast expr, not (isValue g) -> elabTail g
       C.App f args | not (isConApp f), isNothing (identityCast expr) -> elabApp f args (typeOf expr)
-      _ -> do (k,v) <- elabVal expr
-              t <- vt (typeOf expr)
+      _ -> do (k,v,t) <- elabValT expr
               k <$> retAt t v
 
 -- In a token-threaded expression, every join point takes the token, as the last parameter
@@ -273,7 +305,9 @@ yieldTest expr
 
 -- The parts of a context under construction are not bound: their uses become parts of the
 -- `ctx` value (see `elabCtx`). Koka's test for a yield after `val x = e₁` (whose yielding
--- branch does not use `x`) is an `[if-yielding]` (`letYield`).
+-- branch does not use `x`) is an `[if-yielding]` that extracts `x` (`letYield`), if `e₁` may be
+-- the dummy; otherwise it tests a yield of an earlier call (as in `val y = f(); evv-set(w);
+-- if yielding() …`), and is elaborated where it occurs (`yieldTest`).
 elabLet :: C.Def -> C.Expr -> E VExpr
 elabLet def body
   = do en <- env
@@ -290,11 +324,12 @@ elabLet def body
                  (k,v) <- elabValAt t (C.defExpr def)
                  k <$> withFields [(x,(id,v))] (elabTail body)
          else do t <- vt (C.defType def)
+                 dummy <- mayBeDummy (C.defExpr def)
                  case yieldTest body of
-                   Just (e2,e3) | not (S.member x (S.map getName (CV.fv e3)))
+                   Just (e2,e3) | dummy, not (S.member x (S.map getName (CV.fv e3)))
                      -> letYield def t e2 e3
-                   _ -> do k <- bindExpr (root x) t (C.defExpr def)
-                           k <$> withTypedLocals [(x,C.defType def)] (elabTail body)
+                   _ -> do (k,t') <- bindExpr (root x) t (C.defExpr def)
+                           k <$> withTypedLocals [(x,t')] (elabTail body)
   where
     fieldAlias en (C.Var (TName y _) _) = M.member y (envFields en)
     fieldAlias _ _ = False
@@ -314,7 +349,7 @@ letYield def t e2 e3
        k <- fresh "k"
        w <- result
        test <- testYield token (Var k) (elabTail e3)
-                 (IsNull (Var r0) (Unreachable w) . (,) (root x) <$> withTypedLocals [(x,C.defType def)] (elabTail e2))
+                 (IsNull (Var r0) (Unreachable w) . (,) (root x) <$> withTypedLocals [(x,t)] (elabTail e2))
        return (Let r u e1' (Proj (Var r) 0 r0 (Proj (Var r) 1 k test)))
 
 -- `[if-yielding]` on the token `k`, with the yielding branch `m3` and the other branch `m2`.
@@ -330,36 +365,78 @@ testYield token k m3 m2
                                dropToken d (Var k') <$> tokenIn Nothing m
                   return (k',e)
 
--- `let x : t = e in □`. In a token-threaded expression, an `e` that calls something that takes
--- a token (`usesToken`) is elaborated at `t ⊗ KCtx`, whose token is the next one; any other
--- `e` does not see the token.
-bindExpr :: Path -> VType -> C.Expr -> E K
-bindExpr x t expr
+-- `let x : t = e in □`, and the type of x. In a token-threaded expression, an `e` that calls
+-- something that takes a token (`usesToken`) is elaborated at `t ⊗ KCtx`, whose token is the
+-- next one; any other `e` does not see the token. An `e` that may be the dummy of a yield,
+-- which Koka does not test (`mayBeDummy`), is elaborated at `t?`: its uses test it for null,
+-- unless they pass it on (to a prompt function of `std/core/hnd`).
+bindExpr :: Path -> VType -> C.Expr -> E (K,VType)
+bindExpr x t0 expr
   = do token <- currentToken
-       if isJust token && usesToken expr
+       dummy <- mayBeDummy expr
+       let t = if dummy then orNull t0 else t0
+       en <- env
+       if isJust token && usesToken en expr
          then do let tt = withToken t
                  e <- elabExprAt tt expr
                  p <- fresh "p"
                  k <- fresh "k"
                  setToken (Just k)
-                 return (Let p tt e . Proj (Var p) 0 x . Proj (Var p) 1 k)
+                 return (Let p tt e . Proj (Var p) 0 x . Proj (Var p) 1 k, t)
          else do e <- tokenIn Nothing (elabExprAt t expr)
-                 return (Let x t e)
+                 return (Let x t e, t)
+
+-- Whether an expression may be the dummy of a yield, as one of its tails calls a function
+-- whose result may be (`V?`), overapproximated as the type of the function is generic.
+mayBeDummy :: C.Expr -> E Bool
+mayBeDummy expr
+  = case expr of
+      C.App f args
+        | Just g <- identityCast expr, not (isValue g) -> mayBeDummy g
+        | Just g <- identityCast f -> mayBeDummy (C.App g args)
+        | isConApp f -> return False
+        | (Just (TName j _,_),_) <- splitTypeApp f, isJoinName j -> return False
+        | any (`isPrim` f) [nameCCtxEmpty, nameCCtxCreate, nameCCtxExtend, nameCCtxApply, nameCCtxCompose] -> return False
+        | otherwise -> do e <- env
+                          case splitTypeApp f of
+                            (Just (TName g _,_),_)
+                              | S.member g (envLocals e), Just t <- M.lookup g (envBinders e) -> return (resultYields t)
+                              | not (S.member g (envLocals e)), Just sig <- M.lookup g (envSigs e)
+                              -> return (case sig of
+                                           SigFun _ _ _ r -> yields r
+                                           SigVal _ t -> resultYields t
+                                           _ -> False)
+                            _ -> resultYields <$> vt (typeOf f)   -- also a local bound in the expression
+      C.Let dgs body -> or <$> mapM mayBeDummy (body : [e | d <- C.flattenDefGroups dgs, isJoinName (C.defName d), Just (_,_,e) <- [splitLam (C.defExpr d)]])
+      C.Case _ brs -> or <$> mapM mayBeDummy [C.guardExpr g | br <- brs, g <- C.branchGuards br]
+      C.TypeLam _ e -> mayBeDummy e
+      _ -> return False
+  where
+    resultYields t = case t of
+                       VPtr a -> resultA a
+                       _ -> False
+    resultA a = case a of
+                  AForall _ b -> resultA b
+                  AFun _ r -> yields r
+                  _ -> False
 
 -- Whether an expression (outside of its lambdas, but including the bodies of its join points,
 -- which `matchCore` types as total) calls a function that takes a token, overapproximated: a
 -- function is also taken at its generic type (an effect-polymorphic function at a total
 -- instance takes a token), and one under an identity cast (`.open`, `unsafe-total`) at both
 -- of its types, as elaboration calls it at its own (`elabApp`). The tests of the yield flag
--- take a token too (`sigOf`).
-usesToken :: C.Expr -> Bool
-usesToken expr
+-- take a token too (`funTypeOf`), as does a function whose elaborated type takes one although
+-- its Koka type is total here: a global value (a handler at `∀e. … -> e r`, used at a total
+-- effect) or a local bound at such a type.
+usesToken :: Env -> C.Expr -> Bool
+usesToken en expr
   = case expr of
-      C.App f args -> any calls (typeOf f : generic f ++ maybe [] (\g -> typeOf g : generic g) (identityCast f)) || any (`isPrim` f) [nameYielding, nameYieldingNonFinal] || any usesToken (f : args)
-      C.TypeApp e _ -> usesToken e
-      C.TypeLam _ e -> usesToken e
-      C.Let dgs e -> usesToken e || any bound (C.flattenDefGroups dgs)
-      C.Case scs brs -> any usesToken scs || or [usesToken (C.guardTest g) || usesToken (C.guardExpr g) | br <- brs, g <- C.branchGuards br]
+      C.App f args -> any calls (typeOf f : generic f ++ maybe [] (\g -> typeOf g : generic g) (identityCast f)) || any (`isPrim` f) [nameYielding, nameYieldingNonFinal]
+                      || any elaborated (f : maybe [] (: []) (identityCast f)) || any (usesToken en) (f : args)
+      C.TypeApp e _ -> usesToken en e
+      C.TypeLam _ e -> usesToken en e
+      C.Let dgs e -> usesToken en e || any bound (C.flattenDefGroups dgs)
+      C.Case scs brs -> any (usesToken en) scs || or [usesToken en (C.guardTest g) || usesToken en (C.guardExpr g) | br <- brs, g <- C.branchGuards br]
       _ -> False
   where
     calls tp = case expandSyn tp of
@@ -370,16 +447,33 @@ usesToken expr
                   (Just (TName _ gtp,_),_) -> [gtp]
                   _ -> []
     bound d = case splitLam (C.defExpr d) of
-                Just (_,_,body) | isJoinName (C.defName d) -> usesToken body
-                _ -> usesToken (C.defExpr d)
+                Just (_,_,body) | isJoinName (C.defName d) -> usesToken en body
+                _ -> usesToken en (C.defExpr d)
+    elaborated f = case splitTypeApp f of
+                     (Just (TName g _,_),_)
+                       | S.member g (envLocals en) -> maybe False takes (M.lookup g (envBinders en))
+                       | otherwise -> case M.lookup g (envSigs en) of
+                                        Just (SigFun _ ps _ _) -> snd (tokenParam ps)
+                                        Just (SigVal _ t) -> takes t
+                                        _ -> False
+                     _ -> False
+    takes t = case t of
+                VPtr a -> takesA a
+                _ -> False
+    takesA a = case a of
+                 AForall _ b -> takesA b
+                 AFun ps _ -> snd (tokenParam ps)
+                 _ -> False
 
+-- A type abstraction over an expression that is not a value. Its result may be the dummy of a
+-- yield (`tlam-yield1`), which has no type `(∀ā. A)*?`: it is passed on by a cast (`envTrusted`).
 elabGen :: [TVar] -> C.Expr -> Type -> E VExpr
 elabGen tvs e tp
   = do target <- vt tp
        case target of
          VPtr (AForall tvs' a)
            -> do let a' = inst tvs (map AVar tvs') a
-                 body <- withTVars tvs' (tokenIn Nothing (elabExprAt (VPtr a') e))
+                 body <- withTVars tvs' (tokenIn Nothing (local (\en -> en{ envTrusted = True }) (elabExprAt (VPtr a') e)))
                  return (Gen tvs' body)
          _ -> failE ("type abstraction at the monomorphic type " ++ ppr target)
 
@@ -412,14 +506,14 @@ elabApp f args resTp
                   VCtx _ a b -> return (a,b)
                   _ -> failE ("plugging a non-context: " ++ ppr t)
        let shared = not (isLinearContextPrim f)
-       callWith (\[c,v] -> do (k,c') <- ctxCopy shared t c
-                              return (k (Plug c' v))) [t, VPtr b] (VPtr a) args
+       callWith False (\[c,v] -> do (k,c') <- ctxCopy shared t c
+                                    return (k (Plug c' v))) [t, VPtr b] (VPtr a) args
   | isPrim nameCCtxCompose f
   = do t <- vt resTp
        ts@[tc,td] <- mapM (vt . typeOf) args
-       callWith (\[c,d] -> do (kc,c') <- ctxCopy True tc c
-                              (kd,d') <- ctxCopy True td d
-                              return (kc (kd (Append c' d')))) ts t args
+       callWith False (\[c,d] -> do (kc,c') <- ctxCopy True tc c
+                                    (kd,d') <- ctxCopy True td d
+                                    return (kc (kd (Append c' d')))) ts t args
   | any (`isPrim` f) [nameCCtxHoleCreate, nameFieldAddrOf]
   = failE "a hole outside of a context"
   -- extends with the hole of a context that may be shared, without copying its path
@@ -432,11 +526,12 @@ elabApp f args resTp
            -> do (tysD,params,res) <- instFun g sig gtp tys
                  e <- env
                  let copies = [m == Unique && captured e arg | ((m,_),arg) <- zip ps args] ++ repeat False
-                 callWith (\vs -> do (ks,vs') <- unzip <$> sequence (zipWith3 ctxCopy copies params vs)
+                 callWith (g == hndName "yield-to-final")
+                          (\vs -> do (ks,vs') <- unzip <$> sequence (zipWith3 ctxCopy copies params vs)
                                      return (compose ks (Call g tysD vs'))) params res args
          _ -> do (k1,fv) <- elabVal f
                  (params,res) <- funType f
-                 body <- callWith (applyFun (AFun params res) fv) (map snd params) res args
+                 body <- callWith False (applyFun (AFun params res) fv) (map snd params) res args
                  return (k1 body)
 
 globalOf :: C.Expr -> E (Maybe (Name,Sig,Type,[Type]))
@@ -456,7 +551,7 @@ globalSig g gtp info
        sig <- case M.lookup g (envSigs e) of
                 Just sig -> return sig
                 Nothing  -> do note ("signature from use site: " ++ show g)
-                               tr (typeSig (envNT e) g gtp (isFunInfo info))
+                               tr (typeSig (envNT e) (S.member g (envExterns e)) g gtp (isFunInfo info))
        recordSig g sig
        return sig
 
@@ -469,7 +564,7 @@ instFun :: Name -> Sig -> Type -> [Type] -> E ([AType],[VType],VType)
 instFun g (SigFun tvs params _ res) gtp tys
   = do e <- env
        tys' <- instArgs gtp tys
-       useA <- tr (funTypeOf (envNT e) g gtp)
+       useA <- tr (funTypeOf (envNT e) (S.member g (envExterns e)) g gtp)
        let pat = AFun params res
            (utvs,ubody) = splitForallA useA
            used = inst utvs tys' ubody
@@ -505,15 +600,16 @@ funType f = do t <- vt (typeOf f)
 
 -- A call of the arguments `args` at the types `params`, whose result of type `res` is
 -- coerced to the type `result` (`coerceExpr`, which tests a result that may be the dummy of a
--- yield where Koka does not).
-callWith :: ([VVal] -> E VExpr) -> [VType] -> VType -> [C.Expr] -> E VExpr
-callWith call params res args
+-- yield where Koka does not). The result of a final yield (`trusted`) is always the dummy: where
+-- Koka types it at a total type (`prompt` resumes with `{ yield-to-final(m, …) }`), it is cast.
+callWith :: Bool -> ([VVal] -> E VExpr) -> [VType] -> VType -> [C.Expr] -> E VExpr
+callWith trusted call params res args
   = do let (params0,token) = tokenParam [((),p) | p <- params]
        (ks,vs) <- unzip <$> mapM (\(p,arg) -> elabValAt p arg) (zip (map snd params0) args)
        (kt,tv) <- takeTokenIf token
        expect <- result
        app <- call (vs ++ tv)
-       compose ks . kt <$> coerceExpr res expect app
+       compose ks . kt <$> local (\e -> e{ envTrusted = envTrusted e || trusted }) (coerceExpr res expect app)
 
 splitTypeApp :: C.Expr -> (Maybe (TName,C.VarInfo),[Type])
 splitTypeApp expr
@@ -541,54 +637,75 @@ elabValAt expect@(VPtr a@(AFun qs _)) (C.Lam pars _ body) | length (fst (tokenPa
   = do (k,lam) <- captureFields body (elabLam expect pars body)
        return (k, Ptr a lam)
 elabValAt expect expr
-  = do (k1,v) <- elabVal expr
-       t <- vt (typeOf expr)
+  = do (k1,v,t) <- elabValT expr
        (k2,v') <- coerce t expect v
        return (k1 . k2, v')
 
+-- a value of the Koka type `t` of an expression, at `t`
 elabVal :: C.Expr -> E (K,VVal)
 elabVal expr
+  = do (k1,v,u) <- elabValT expr
+       t <- vt (typeOf expr)
+       (k2,v') <- coerce u t v
+       return (k1 . k2, v')
+
+-- a value of an expression and its type: the Koka type `t`, or `t?` for a result that may be
+-- the dummy of a yield (`bindExpr`), or a local bound to one
+elabValT :: C.Expr -> E (K,VVal,VType)
+elabValT expr
+  = do t <- vt (typeOf expr)
+       e <- env
+       case elabValOf expr of
+         _ | C.Var (TName x _) _ <- expr, Just bt <- M.lookup x (envBinders e), yields bt
+           -> do (k,v) <- coerceInst bt (orNull t) (Var (root x))
+                 return (k,v,orNull t)
+         Just m -> do (k,v) <- m
+                      return (k,v,t)
+         Nothing -> do x <- fresh "a"
+                       (k,t') <- bindExpr x t expr
+                       return (k, Var x, t')
+
+-- the elaboration of an expression as a value of its Koka type, unless it is bound (`Nothing`)
+elabValOf :: C.Expr -> Maybe (E (K,VVal))
+elabValOf expr
   = case expr of
-      C.Var (TName x tp) _ | x == nameUnreachable -> unreachable tp
-      C.App f [] | isPrim nameCCtxHoleCreate f -> return (id, Hole)
-      C.Var (TName x tp) info -> elabVar x tp info []
-      C.TypeApp (C.Var (TName x tp) info) tys -> elabVar x tp info tys
-      C.Lit lit -> return (id, Lit (elabLit lit))
-      _ | isConApp expr -> case expandSyn (typeOf expr) of
-                              TFun pars eff _ -> etaCon expr pars eff
-                              TForall tvs _ -> generalize [typevarId tv | tv <- tvs, tvarStar tv] (elabCon expr []) (typeOf expr)
-                              _ -> elabCon expr []
-      C.App f args | isConApp f -> elabCon f args
+      C.Var (TName x tp) _ | x == nameUnreachable -> Just (unreachable tp)
+      C.App f [] | isPrim nameCCtxHoleCreate f -> Just (return (id, Hole))
+      C.Var (TName x tp) info -> Just (elabVar x tp info [])
+      C.TypeApp (C.Var (TName x tp) info) tys -> Just (elabVar x tp info tys)
+      C.Lit lit -> Just (return (id, Lit (elabLit lit)))
+      _ | isConApp expr -> Just $ case expandSyn (typeOf expr) of
+                                    TFun pars eff _ -> etaCon expr pars eff
+                                    TForall tvs _ -> generalize [typevarId tv | tv <- tvs, tvarStar tv] (elabCon expr []) (typeOf expr)
+                                    _ -> elabCon expr []
+      C.App f args | isConApp f -> Just (elabCon f args)
       C.TypeApp e tys
-        -> do (k1,v) <- elabVal e
-              tys' <- instArgs (typeOf e) tys
-              if null tys' then return (k1,v)
-                else do a <- ptrType (typeOf e)
-                        expect <- vt (typeOf expr)
-                        (k2,v') <- coerceInst (VPtr (instA a tys')) expect (tapp v tys')
-                        return (k1 . k2,v')
-      C.TypeLam tvs e | not (any tvarStar tvs) -> elabVal e
-      C.Lam pars _ body -> do t <- vt (typeOf expr)
-                              (k,lam) <- captureFields body (elabLam t pars body)
-                              (kg,v) <- genVal t lam
-                              return (k . kg,v)
+        -> Just $ do (k1,v) <- elabVal e
+                     tys' <- instArgs (typeOf e) tys
+                     if null tys' then return (k1,v)
+                       else do a <- ptrType (typeOf e)
+                               expect <- vt (typeOf expr)
+                               (k2,v') <- coerceInst (VPtr (instA a tys')) expect (tapp v tys')
+                               return (k1 . k2,v')
+      C.TypeLam tvs e | not (any tvarStar tvs) -> Just (elabVal e)
+      C.Lam pars _ body -> Just $ do t <- vt (typeOf expr)
+                                     (k,lam) <- captureFields body (elabLam t pars body)
+                                     (kg,v) <- genVal t lam
+                                     return (k . kg,v)
       C.TypeLam tvs (C.Lam pars _ body)
-        -> do t <- vt (typeOf expr)
-              (k,lam) <- captureFields body (withTVars (map typevarId tvs) (elabLam (stripForallV t) pars body))
-              (kg,v) <- genVal t lam
-              return (k . kg,v)
-      C.TypeLam tvs e | isValue e -> elabTypeLam [typevarId tv | tv <- tvs, tvarStar tv] e (typeOf expr)
+        -> Just $ do t <- vt (typeOf expr)
+                     (k,lam) <- captureFields body (withTVars (map typevarId tvs) (elabLam (stripForallV t) pars body))
+                     (kg,v) <- genVal t lam
+                     return (k . kg,v)
+      C.TypeLam tvs e | isValue e -> Just (elabTypeLam [typevarId tv | tv <- tvs, tvarStar tv] e (typeOf expr))
       -- an identity external changes only effects: its argument, cast where it differs in `?`s and tokens
       _ | Just g <- identityCast expr, isValue g
-        -> do (k1,v) <- elabVal g
-              from <- vt (typeOf g)
-              to <- vt (typeOf expr)
-              (k2,v') <- coerceInst from to v
-              return (k1 . k2,v')
-      _ -> do t <- vt (typeOf expr)
-              x <- fresh "a"
-              k <- bindExpr x t expr
-              return (k, Var x)
+        -> Just $ do (k1,v) <- elabVal g
+                     from <- vt (typeOf g)
+                     to <- vt (typeOf expr)
+                     (k2,v') <- coerceInst from to v
+                     return (k1 . k2,v')
+      _ -> Nothing
 
 elabTypeLam :: [TVar] -> C.Expr -> Type -> E (K,VVal)
 elabTypeLam tvs e tp = generalize tvs (elabVal e) tp
@@ -627,8 +744,9 @@ captureFields body action = do
 elabLam :: VType -> [TName] -> C.Expr -> E AVal
 elabLam (VPtr (AFun qs res)) pars body
   = do (ps,ks) <- unzip <$> mapM lamParam (zip pars qs)
+       ts <- mapM (vt . tnameType) pars
        (k,token) <- tokenBinder qs
-       body' <- inClosure (withTypedLocals (map typed pars) (tokenIn token (elabExprAt res body)))
+       body' <- inClosure (withTypedLocals (zip (map getName pars) ts) (tokenIn token (elabExprAt res body)))
        return (Lam (ps ++ k) res (compose ks body'))
 elabLam t _ _ = failE ("expecting a function type for a lambda: " ++ ppr t)
 
@@ -668,8 +786,7 @@ elabNamed e x tp info tys
                  let (k,v) = M.findWithDefault (id,Var (root x)) x (envFields e)
                  (ki,w) <- case (tys', M.lookup x (envBinders e)) of
                              -- a use at other effects than its binder (`() -> int` as `() -> console int`)
-                             ([],Just btp) -> do bt <- vt btp
-                                                 coerceInst bt expect v
+                             ([],Just bt) -> coerceInst bt expect v
                              _ -> instLocal v tp tys' expect
                  return (k . ki,w)
          else do sig <- globalSig x tp info

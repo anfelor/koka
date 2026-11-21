@@ -20,7 +20,7 @@ import Control.Monad.State
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Common.Name
-import Type.Type
+import Type.Type( Type )
 import Kind.Newtypes
 import Backend.Typed.Build( K, makeToken )
 import Backend.Typed.Syntax
@@ -31,10 +31,14 @@ import Backend.Typed.Elab.TypeInfo
 -- in the IR; their uses become parts of a `ctx` value.
 -- `envCaptured`: the locals that the innermost closure captures.
 -- `envResult`: the type at which an expression in tail position is elaborated (`withResult`).
--- `envBinders`: the Koka types of the binders of locals, whose uses may have other effects.
+-- `envBinders`: the types of the binders of locals, whose uses may have other effects, and
+-- which may be `V?` where the Koka type is `V` (a result that may be the dummy of a yield).
+-- `envExterns`: the externals in scope. `envTrusted`: whether a `V?` is used as a `V` without a
+-- test for null (`Coerce.extractNull`).
 data Env = Env{ envNT :: Newtypes, envLocals :: S.Set Name, envTVars :: S.Set TVar, envSigs :: Sigs
               , envHoles :: M.Map Name (Maybe VVal), envCaptured :: S.Set Name
-              , envFields :: M.Map Name (K,VVal), envResult :: VType, envBinders :: M.Map Name Type }
+              , envFields :: M.Map Name (K,VVal), envResult :: VType, envBinders :: M.Map Name VType
+              , envExterns :: S.Set Name, envTrusted :: Bool }
 
 -- `stToken`: the current effect token, if the expression is token-threaded (see "The effect
 -- token" in `Syntax`). Elaboration follows the order of evaluation: a call takes the token,
@@ -64,8 +68,8 @@ withLocals :: [Name] -> E a -> E a
 withLocals xs = local (\e -> e{ envLocals = foldr S.insert (envLocals e) xs, envCaptured = foldr S.delete (envCaptured e) xs
                                            , envFields = foldr M.delete (envFields e) xs, envBinders = foldr M.delete (envBinders e) xs })
 
--- locals with the Koka types of their binders
-withTypedLocals :: [(Name,Type)] -> E a -> E a
+-- locals with the types of their binders
+withTypedLocals :: [(Name,VType)] -> E a -> E a
 withTypedLocals xs m = withLocals (map fst xs) (local (\e -> e{ envBinders = M.union (M.fromList xs) (envBinders e) }) m)
 
 -- Pattern-field getters are emitted at each use, rather than eagerly at the

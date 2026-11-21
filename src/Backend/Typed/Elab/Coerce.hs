@@ -19,6 +19,7 @@ import Backend.Typed.Layout( leaves )
 import Backend.Typed.Elab.TypeMatch( match )
 import Backend.Typed.Elab.Representation
 import Backend.Typed.Elab.Monad
+import Control.Monad.Reader( asks )
 import Backend.Typed.Pretty( ppr )
 
 -- a pointer to a value `w : A`, generalized at `(∀ā. A)*`
@@ -34,18 +35,22 @@ genPtr t@(VPtr (AForall tvs _)) v
        return (Let x t (Gen tvs (Ret v)), Var x)
 genPtr _ v = return (id, v)
 
--- A value is injected into `W?` by `[some]`. A value that may be null is not coerced:
--- `coerceExpr` tests the result of a call, or casts it where Koka does not test it. A function
--- used where its results may yield (`addsNull`) is cast (`[cast-ev]`), not eta-expanded: it
--- does not yield, so the tests of its callers take the non-yielding branch.
+-- A value is injected into `W?` by `[some]`. A value `V?` (a result that Koka does not test)
+-- is used as a `V` after a test for null (`extractNull`), and as a `W?` by a test that maps
+-- its V. A function used where its results may yield (`addsNull`) is cast (`[cast-ev]`), not
+-- eta-expanded: it does not yield, so the tests of its callers take the non-yielding branch.
 coerce :: VType -> VType -> VVal -> E (K,VVal)
 coerce from to v
   | alphaEq from to = return (id,v)
   | VOrNull w <- to, not (isNull from)
   = do (k,v') <- coerce from w v
        return (k, Some v')
-  | VOrNull _ <- from
-  = failE ("cannot coerce " ++ ppr from ++ " to " ++ ppr to ++ " without a test for null")
+  | VOrNull f <- from, not (isNull to)
+  = do (k1,w) <- extractNull f v
+       (k2,u) <- coerce f to w
+       return (k1 . k2, u)
+  | VOrNull f <- from, VOrNull t <- to, not (addsNull from to)
+  = mapNull f t v
   | addsNull from to = castV from to v
   | not (isPtr from) && alphaEq to (boxrep from) = boxV from v
   | not (isPtr to) && alphaEq from (boxrep to) = unboxV to v
@@ -201,6 +206,25 @@ addsNull from to
       = length as == length bs && addsA a (inst bs (map AVar as) b)
     addsA _ _ = False
 
+-- The V of `v : V?`, which is not null as Koka does not test it: `let x : V = is-null v of
+-- { null -> unreachable; y -> ret y }`. In the definitions that pass on a dummy where Koka
+-- expects a value (`envTrusted`), it is cast instead.
+extractNull :: VType -> VVal -> E (K,VVal)
+extractNull f v
+  = do trusted <- asks envTrusted
+       if trusted then castV (orNull f) f v
+         else do x <- fresh "x"
+                 y <- fresh "y"
+                 return (Let x f (IsNull v (Unreachable f) (y, Ret (Var y))), Var x)
+
+-- `v : V?` at `W?`: the null is the null of W, and the V is coerced to W
+mapNull :: VType -> VType -> VVal -> E (K,VVal)
+mapNull f t v
+  = do x <- fresh "x"
+       y <- fresh "y"
+       (k,w) <- coerce f t (Var y)
+       return (Let x (orNull t) (IsNull v (Ret (Null t)) (y, k (Ret (Some w)))), Var x)
+
 -- `v` at the type `to` (`[cast-ev]`)
 castV :: VType -> VType -> VVal -> E (K,VVal)
 castV from to v
@@ -212,9 +236,13 @@ castV from to v
 -- `to` follows their instances. Where these differ only in `?`s and tokens (an effect variable
 -- instantiated at a total effect, also under a type constructor, as in
 -- `list<(int, KCtx) -> int? ⊗ KCtx>` at `list<(int) -> int>`), the value is cast (`[cast-ev]`):
--- Koka does not test its results.
+-- Koka does not test its results. A `V?` at a `V` is tested for null (`extractNull`).
 coerceInst :: VType -> VType -> VVal -> E (K,VVal)
 coerceInst from to v
+  | VOrNull f <- from, not (isNull to)
+  = do (k1,w) <- extractNull f v
+       (k2,u) <- coerceInst f to w
+       return (k1 . k2, u)
   | not (alphaEq from to) && castable from to = castV from to v
   | otherwise = coerce from to v
 
@@ -230,11 +258,11 @@ isNull t = case t of
 -- result of an effect-polymorphic function at a total effect, of a `deref`, or of a call
 -- through `unsafe-total-cast`, which makes it look total), or the code tests the flag itself
 -- (`std/core/hnd`, and its `local-var` and `finally` where they are inlined: there the result
--- may be a dummy, which `prompt-local-var` or `finally-prompt` receives). A result that
--- differs from `to` only in `?`s and tokens is then cast (`[cast-ev]`, unless that would add
--- a `?` at the top, which is `[some]`). A coercion (such as an unboxing) would inspect a
--- dummy, so it is tested, and the yielding branch passes on a dummy of the type `to` (cast
--- from `to?`), as Koka does.
+-- may be a dummy, which elaboration passes on at `V?` to `prompt-local-var` or
+-- `finally-prompt`). A result that differs from `to` only in `?`s and tokens is then cast
+-- (`[cast-ev]`), except that its `?` at the top is removed by a test for null (`checked`), and
+-- added by `[some]`. A coercion (such as an unboxing) would inspect a dummy, so it is tested,
+-- and the yielding branch passes on a dummy of the type `to` (cast from `to?`), as Koka does.
 --
 -- The token of a token-threaded `to` is that of `from`, or the current token (`takeToken`)
 -- if `from` has none. A token of `from` that `to` does not have is dropped by a cast (site 1
@@ -245,6 +273,8 @@ coerceExpr from to e
   | Just to0 <- unToken to, Nothing <- unToken from
   = do (kt,k) <- takeToken
        kt <$> coerceTo from to0 e (\v -> Ret (Tuple [v,k]))
+  | castable from to && yields from && not (yields to)
+  = checked from to e
   | castable from to && (yields from || not (yields to))
   = return (CastEv from to e)
   | Just from0 <- unToken from, Just to0 <- unToken to
@@ -255,6 +285,25 @@ coerceExpr from to e
   = coerceExpr from0 to (CastEv from from0 e)
   | otherwise
   = coerceTo from to e Ret
+
+-- `e : U?` or `U? ⊗ KCtx`, which Koka does not test, at `to`: its U is extracted by a test for
+-- null, which fails only if Koka's typing is wrong (cast instead where `envTrusted`)
+checked :: VType -> VType -> VExpr -> E VExpr
+checked from to e
+  = do trusted <- asks envTrusted
+       if trusted then return (CastEv from to e) else checkedNull from to e
+
+checkedNull :: VType -> VType -> VExpr -> E VExpr
+checkedNull from to e
+  = do r <- fresh "r"
+       y <- fresh "y"
+       let from' = maybe (unNull from) (withToken . unNull) (unToken from)
+       body <- case unToken from of
+                 Just _ -> do r0 <- fresh "r"
+                              k <- fresh "k"
+                              return (Proj (Var r) 0 r0 (Proj (Var r) 1 k (IsNull (Var r0) (Unreachable from') (y, Ret (Tuple [Var y, Var k])))))
+                 Nothing -> return (IsNull (Var r) (Unreachable from') (y, Ret (Var y)))
+       coerceExpr from' to (Let r from e body)
 
 -- `e : from`, which is not the dummy, at `to`, given the tail `ret` of a value
 coerceTo :: VType -> VType -> VExpr -> (VVal -> VExpr) -> E VExpr
