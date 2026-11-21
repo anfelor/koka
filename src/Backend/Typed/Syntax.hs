@@ -102,7 +102,21 @@
     the null has a pattern that no valid V has, and `[is-null]` tests it. Otherwise V is
     *full*: every bit pattern is a valid V, and `[is-null]` takes the value branch. `?` is an
     unboxed type former only: a type variable never stands for a `V?`, a heap block never
-    contains one (`Types.wellNull`), and `V??` is `V?`. V contains no credits or cells.
+    contains one (`Types.wellNull`), and `V??` is `V?`. V contains no credits, cells or tokens.
+
+  The effect token
+
+    A function whose effect is more than `div` takes the token `KCtx` as its last parameter
+    and returns it as the last field of its result: `(V̄, KCtx) -> Y (W? ⊗ KCtx)`, or
+    `(V̄, KCtx) -> W ⊗ KCtx` for an effect that does not yield. The token stands for the state
+    of the world, including the yield flag. It is linear (never duplicated or dropped, never in
+    a heap block, under `?` or in a closure capture), so passes can neither drop nor reorder
+    effectful calls or the tests of the flag (`[let-yield]` passes the token on in both
+    branches). It has no runtime representation: its layout is that of 𝟙, and code
+    generation leaves out token parameters and arguments. Total and `div` code has no token;
+    where it calls a function that needs one (an effect-polymorphic function at a total
+    instance), it makes the token with `cast-ev[𝟙, KCtx] ret ()` and drops the token of the
+    result with a `cast-ev`, as `|·|` erases tokens.
 -}
 module Backend.Typed.Syntax where
 
@@ -191,6 +205,8 @@ data Side = Whnf | Delay
 --   layout of `V`. It is the type of an expression or a function result, never of a variable.
 -- - `V?` is a `V` or its null, the dummy value of an effect yield (see "Nullable values"
 --   above), with the layout of `V`.
+-- - `KCtx` is the effect token (see "The effect token" above), with the layout of `𝟙`. Like a
+--   cell, it is linear, but it may be a field of a product.
 data VType = VPtr AType                 -- A*
            | VUnit                      -- 𝟙
            | VSum [(Con,VType)]         -- ⊕ᵢ Vᵢ, n-ary (a Koka value type with several constructors)
@@ -202,6 +218,7 @@ data VType = VPtr AType                 -- A*
            | VCell Int AType            -- cell_n⟨τ⟩: the n-byte block of a lazy value under evaluation
            | VYield VType               -- Y V: a V, and whether an effect yields
            | VOrNull VType              -- V?: a V, or the dummy value of an effect yield (`Types.orNull`)
+           | VToken                     -- KCtx: the effect token
            deriving (Eq,Show)
 
 -- raw types: the primitive value types of Koka (`TypeInfo.rawType`), named by their C type
@@ -593,21 +610,22 @@ data VExpr
   -- a result that may be the dummy is tested (`[let-yield]`) or cast (`[cast-ev]`).
   | Let Path VType VExpr VExpr
 
-  --   Γ₁, ^Γ₂ | ∅ ⊢ e₁ : Y V    Γ₂, x : V | J ⊢ e₂ : W    Γ₂ | J ⊢ e₃ : W
-  --  ──────────────────────────────────────────────────────────────────────── [let-yield]
+  --   Γ₁, ^Γ₂ | ∅ ⊢ e₁ : Y V    Γ₂, x : V | J ⊢ e₂ : W    Γ₂, x : V | J ⊢ e₃ : W
+  --  ──────────────────────────────────────────────────────────────────────────────── [let-yield]
   --   Γ₁, Γ₂ | J ⊢ let x : V = e₁ yielding e₃ in e₂ : W
   --
-  --   Γ₁, ^Γ₂ | ∅ ⊢ e₁ :! Y V    Γ₂, x :! V | J ⊢ e₂ : W    Γ₂ | J ⊢ e₃ : W
-  --  ──────────────────────────────────────────────────────────────────────── [let-yield-unique]
+  --   Γ₁, ^Γ₂ | ∅ ⊢ e₁ :! Y V    Γ₂, x :! V | J ⊢ e₂ : W    Γ₂, x :! V | J ⊢ e₃ : W
+  --  ──────────────────────────────────────────────────────────────────────────────── [let-yield-unique]
   --   Γ₁, Γ₂ | J ⊢ let x : V = e₁ yielding e₃ in e₂ : W
   --
   -- Koka's monadic bind (`if yielding() then e₃ else e₂`), the only elimination of `Y V`. If e₁
-  -- yields, it returns the dummy and e₃ runs, where x is not in scope. e₁ consumes Γ₁ in either
-  -- case. Without a value to bind, the test is `let x : 𝟙 = ret (pure ()) yielding e₃ in e₂`.
-  -- No cell is live in e₂ or e₃. Elaboration binds x : W? and extracts the W with
-  -- `is-null x of { null -> unreachable; y -> e₂ }`: the flag is clear in e₂, so x is not
-  -- null unless Koka's invariant "the flag is set iff the result is null" is broken. The
-  -- yielding branch passes on the dummy as `ret (pure null)`.
+  -- yields, it returns the dummy and e₃ runs. e₁ consumes Γ₁ in either case. As a `Y V` is
+  -- always a valid V, x is in scope in both branches: the result of a token-threaded call is
+  -- `W? ⊗ KCtx`, and each branch passes on its token `x.1`. No cell is live in e₂ or e₃.
+  -- Elaboration extracts the W of `x.0 : W?` with `is-null x.0 of { null -> unreachable; y -> e₂ }`:
+  -- the flag is clear in e₂, so x.0 is not null unless Koka's invariant "the flag is set iff
+  -- the result is null" is broken. The yielding branch passes on the dummy as
+  -- `ret (pure (null, x.1))`.
   | LetYield Path VType VExpr VExpr VExpr
 
   --  ───────────────────────── [unreachable]
@@ -621,10 +639,12 @@ data VExpr
   --  ────────────────────────────────── [cast-ev]
   --   Γ | J ⊢ cast-ev[U, V] e : V
   --
-  -- Adds or removes `Y`s and `?`s anywhere in the type of e (`|·|` erases them, `Types.eraseY`).
-  -- A no-op at run time, and unchecked, as the IR has no effects: elaboration emits it where
-  -- Koka knows that the result is not a dummy. Only removing a `?` is trusted with memory
-  -- safety; removing a `Y` only skips a flag test. It is an expression, like `[gen]`, so that a result `Y U`
+  -- Adds or removes `Y`s, `?`s and tokens anywhere in the type of e (`|·|` erases them,
+  -- `Types.eraseY`). A no-op at run time, and unchecked, as the IR has no effects: elaboration
+  -- emits it where Koka knows that the result is not a dummy. Only removing a `?` is trusted
+  -- with memory safety; removing a `Y` only skips a flag test, and adding or removing a token
+  -- (`cast-ev[𝟙, KCtx] ret ()`, a token-threaded function used at a total instance) only
+  -- forgets the order of effects. It is an expression, like `[gen]`, so that a result `Y U`
   -- is cast where it is returned, without a variable of type `Y U`; a value is cast as
   -- `cast-ev[U, V] ret v`. The annotation U is the type of e, which does not follow from e (as
   -- the type of a `let` binder). The result is owned. Examples are an effect variable instantiated at a total

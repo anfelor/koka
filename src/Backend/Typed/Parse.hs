@@ -363,6 +363,7 @@ baseTyP
       , kw "Scalar" >> (A . AScalar <$> parensP rawP)
       , A AUnit <$ tokenP (\t -> if t == TInt 1 then Just () else Nothing)
       , V VUnit <$ kw "I"
+      , V VToken <$ kw "KCtx"
       , V . VRaw <$> rawP
       , do (f,n) <- (do kw "reuse"; sym "!"; n <- intP; return (Full,n)) <|> ((,) MaybeEmpty <$> numbered "reuse")
            V . VReuse f n <$> optionMaybe contentsP

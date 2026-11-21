@@ -130,7 +130,7 @@ ruE expr
               Let x t' e1' <$> bind [(x,V t')] (ruE e2)
       LetYield x t e1 e2 e3
         -> do e1' <- ruE e1
-              es <- branches [([(x,V t)],e2),([],e3)]
+              es <- branches [([(x,V t)],e2),([(x,V t)],e3)]
               return (LetYield x t e1' (es !! 0) (es !! 1))
       Join NonRec j tvs ps e1 e2
         -> do (e1',as) <- scope (Just []) (bind [(x,V t) | (x,_,t) <- ps] (ruE e1))

@@ -99,6 +99,7 @@ unpure expr
   where
     pureVal v = case v of
                   Pure (Null _) -> Nothing
+                  Pure (Tuple [Null _, _]) -> Nothing   -- with the token
                   Pure w -> Just w
                   _ -> Nothing
 

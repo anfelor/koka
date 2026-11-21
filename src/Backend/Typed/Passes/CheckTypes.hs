@@ -158,6 +158,7 @@ scopeA bound val
 
 -- each binder: its root name, or an error if it is not named by its path
 pathsE :: VExpr -> [Either String Name]
+pathsE (LetYield x _ e1 e2 e3) = rootBinder x ++ concatMap pathsE [e1,e2,e3]   -- one binder for both branches
 pathsE expr = getConst (descendB (const (Const [])) (Const . pathsV) (\bs e -> Const (concatMap binder bs ++ pathsE e)) expr)
   where
     binder (x,s) = case pathOf (scrutVar expr) s of

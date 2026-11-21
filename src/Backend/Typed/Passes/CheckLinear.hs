@@ -459,16 +459,17 @@ checkE env g js q expr
                           let m = if S.member x (uUnique u2) then Unique else Owned
                           u1 <- checkE env g M.empty m e1
                           andThen u1 =<< leave [(x,m) | not (trivialTy env (V t))] u2
-      -- the binder is not in scope where an effect yields; as for `Let`, it is unique if it is
-      -- used as unique (the dummy is unique enough, as it never reaches the binder)
+      -- the binder is in scope in both branches; as for `Let`, it is unique if it is used as
+      -- unique
       LetYield x t e1 e2 e3
         -> do notLiveAcrossYield g [e2,e3]
-              u2 <- withOwners [(x,Owned)] (checkE env (M.insert x (V t) g) js q e2)
-              let m = if S.member x (uUnique u2) then Unique else Owned
-              u2' <- leave [(x,m) | not (trivialTy env (V t))] u2
-              u3 <- checkE env g js q e3
+              let branchE e = withOwners [(x,Owned)] (checkE env (M.insert x (V t) g) js q e)
+              u2 <- branchE e2
+              u3 <- branchE e3
+              let m = if S.member x (S.union (uUnique u2) (uUnique u3)) then Unique else Owned
+              us <- mapM (leave [(x,m) | not (trivialTy env (V t))]) [u2,u3]
               u1 <- checkE env g M.empty m e1
-              andThen u1 =<< branches [u2', u3]
+              andThen u1 =<< branches us
       -- control never gets here, so every reference counts as consumed
       Unreachable _ -> return noUse{ uDiverges = True }
       Call f _ vs -> do when (q == Unique && resultMode env f /= Unique)

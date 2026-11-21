@@ -12,7 +12,7 @@ module Backend.Typed.Elab.Coerce( coerce, coerceInst, coerceExpr, genVal, genPtr
 import qualified Data.Map as M
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Build( K, compose, yielded )
+import Backend.Typed.Build( K, compose, yielded, yieldedWith, withTokenVal )
 import Backend.Typed.Traversal( child )
 import Backend.Typed.Types
 import Backend.Typed.Layout( leaves )
@@ -137,6 +137,7 @@ boxLeaf t v
       VCell _ _   -> Box v
       VYield _    -> Box v
       VOrNull _   -> Box v
+      VToken      -> Box v
 
 isMultiSum :: VType -> Bool
 isMultiSum (VSum ts) = length ts > 1
@@ -170,6 +171,7 @@ unboxAV t a
       VCell _ _   -> unbox Unbox
       VYield _    -> unbox Unbox
       VOrNull _   -> unbox Unbox
+      VToken      -> unbox Unbox
   where
     unbox form = do x <- fresh "x"
                     return (form a x, Var x)
@@ -194,13 +196,17 @@ addsY from to
   | alphaEq from to = True
   | VYield t <- to, not (isYield from) = addsY from t
   | VYield f <- from, VYield t <- to = addsY f t
+  | Just t <- unToken to, Nothing <- unToken from = addsY from t
+  | Just f <- unToken from, Just t <- unToken to = addsY f t
   | VOrNull t <- to, not (isNull from) = addsY from t
   | VOrNull f <- from, VOrNull t <- to = addsY f t
   | VPtr a <- from, VPtr b <- to = addsA a b
   | otherwise = False
   where
     addsA (AFun ps r) (AFun qs s)
-      = length ps == length qs && and [m == n && addsY q p | ((m,p),(n,q)) <- zip ps qs] && addsY r s
+      = let (ps0,pk) = tokenParam ps
+            (qs0,qk) = tokenParam qs
+        in (qk || not pk) && length ps0 == length qs0 && and [m == n && addsY q p | ((m,p),(n,q)) <- zip ps0 qs0] && addsY r s
     addsA (AForall as a) (AForall bs b)
       = length as == length bs && addsA a (inst bs (map AVar as) b)
     addsA _ _ = False
@@ -240,23 +246,57 @@ isNull t = case t of
 -- (`[cast-ev]`, unless that would add a `Y`, which is `[pure]`). A coercion (such as an
 -- unboxing) would inspect a dummy, so it is tested, and the yielding branch passes on a dummy
 -- of the type `to` (cast from `Y (to?)`), as Koka does.
+--
+-- The token of a token-threaded `to` is that of `from`, or the current token (`takeToken`)
+-- if `from` has none. A token of `from` that `to` does not have is dropped by a cast (site 1
+-- of "The effect token" in `Syntax`).
 coerceExpr :: VType -> VType -> VExpr -> E VExpr
 coerceExpr from to e
   | alphaEq from to = return e
+  | Just to0 <- unToken to, Nothing <- unToken from
+  = do (kt,k) <- takeToken
+       kt <$> coerceTo from to0 to e (\v -> Ret (withTokenVal v k)) (yieldedWith to k)
+  | Just from0 <- unToken from, Nothing <- unToken to
+  = coerceExpr from0 to (CastEv from from0 e)
   | castable from to && (isYield from || not (isYield to))
   = return (CastEv from to e)
+  | Just from0 <- unToken from, Just to0 <- unToken to
+  = do let (u,yields) = unYield from
+           u0 = fst (unYield from0)
+       r <- fresh "r"
+       r0 <- fresh "r"
+       k <- fresh "k"
+       (k1,w) <- extract u0 r0 to
+       (k2,v) <- coerce (unNull u0) to0 w
+       let e2 = Proj (Var r) 0 r0 (Proj (Var r) 1 k (k1 (k2 (Ret (withTokenVal v (Var k))))))
+       if yields then do k3 <- fresh "k"
+                         return (LetYield r u e e2 (Proj (Var r) 1 k3 (yieldedWith to (Var k3))))
+                 else return (Let r u e e2)
+  | otherwise
+  = coerceTo from to to e Ret (yielded to)
+
+-- `e : from` at `to`, given the tail `ret` of a value and the yielding branch: `full` is the
+-- type of the whole expression
+coerceTo :: VType -> VType -> VType -> VExpr -> (VVal -> VExpr) -> VExpr -> E VExpr
+coerceTo from to full e ret dummy
   | VYield u <- from
   = do r <- fresh "r"
-       (k1,w) <- case u of
-                   VOrNull _ -> do y <- fresh "y"
-                                   return (\body -> IsNull (Var r) (Unreachable to) (y,body), Var y)
-                   _ -> return (id, Var r)
+       (k1,w) <- extract u r full
        (k2,v) <- coerce (unNull u) to w
-       return (LetYield r u e (k1 (k2 (Ret v))) (yielded to))
+       return (LetYield r u e (k1 (k2 (ret v))) dummy)
   | otherwise
   = do r <- fresh "r"
        (k,v) <- coerce from to (Var r)
-       return (Let r from e (k (Ret v)))
+       return (Let r from e (k (ret v)))
+
+-- the value of `r : u` after a test for a yield, extracted if `u` is `V?` (in an expression of
+-- type `full`)
+extract :: VType -> Path -> VType -> E (K,VVal)
+extract u r full
+  = case u of
+      VOrNull _ -> do y <- fresh "y"
+                      return (\body -> IsNull (Var r) (Unreachable full) (y,body), Var y)
+      _ -> return (id, Var r)
 
 ptrA :: VType -> AType
 ptrA (VPtr a) = a
@@ -266,23 +306,34 @@ instPoly :: [TVar] -> AType -> Sub -> VVal -> VType -> E (K,VVal)
 instPoly tvs a sub v to
   = coerce (VPtr (subst sub a)) to (TyApp v [M.findWithDefault atAny tv sub | tv <- tvs])
 
+-- functions with the same number of parameters, apart from their tokens
 funPair :: AType -> AType -> Maybe ([TVar],[TVar],[(Mode,VType)],VType,[(Mode,VType)],VType)
 funPair a b
   = case (a,b) of
-      (AFun ps r, AFun qs s) | length ps == length qs -> Just ([],[],ps,r,qs,s)
-      (AFun ps r, AForall bs (AFun qs s)) | length ps == length qs -> Just (bs,[],ps,r,qs,s)
+      (AFun ps r, AFun qs s) | arity ps == arity qs -> Just ([],[],ps,r,qs,s)
+      (AFun ps r, AForall bs (AFun qs s)) | arity ps == arity qs -> Just (bs,[],ps,r,qs,s)
       (AForall as (AFun ps r), AForall bs b') | length as == length bs
         -> case inst bs (map AVar as) b' of
-             AFun qs s | length ps == length qs -> Just (as,as,ps,r,qs,s)
+             AFun qs s | arity ps == arity qs -> Just (as,as,ps,r,qs,s)
              _ -> Nothing
       _ -> Nothing
+  where
+    arity = length . fst . tokenParam
 
+-- A function `v` with the parameters `ps` as one with the parameters `qs`. The token of the
+-- wrapper is that of `v`; without one, the result of `v` gets the token of the wrapper, or
+-- `v` gets a fresh token, which its result drops (`coerceExpr`).
 wrapFun :: [TVar] -> [TVar] -> [(Mode,VType)] -> VType -> [(Mode,VType)] -> VType -> VVal -> E (K,VVal)
 wrapFun tvs itvs ps r qs s v
   = do ys <- mapM (const (fresh "w")) qs
-       (ks,args) <- unzip <$> mapM (\((_,q),(_,p),y) -> coerce q p (Var y)) (zip3 qs ps ys)
-       call <- applyFun (AFun ps r) (tapp v (map AVar itvs)) args
-       body <- compose ks <$> coerceExpr r s call
+       let (qs0,qk) = tokenParam qs
+           (ps0,pk) = tokenParam ps
+           token = if qk then Just (last ys) else Nothing
+       (ks,args) <- unzip <$> mapM (\((_,q),(_,p),y) -> coerce q p (Var y)) (zip3 qs0 ps0 ys)
+       body <- tokenIn token $
+               do (kt,targs) <- takeTokenIf pk
+                  call <- applyFun (AFun ps r) (tapp v (map AVar itvs)) (args ++ targs)
+                  compose ks . kt <$> coerceExpr r s call
        let lam  = Lam [(y,m,q) | (y,(m,q)) <- zip ys qs] s body
        genVal (VPtr (forallA tvs (AFun qs s))) lam
 

@@ -102,7 +102,7 @@ descendB fn fv fb expr
   = case expr of
       Ret v                 -> Ret <$> fv v
       Let x t e1 e2         -> (\e1' (x',e2') -> Let x' t e1' e2') <$> plain e1 <*> one x [] e2
-      LetYield x t e1 e2 e3 -> (\e1' (x',e2') e3' -> LetYield x' t e1' e2' e3') <$> plain e1 <*> one x [] e2 <*> plain e3
+      LetYield x t e1 e2 e3 -> (\e1' (x',e2') (_,e3') -> LetYield x' t e1' e2' e3') <$> plain e1 <*> one x [] e2 <*> one x [] e3
       Unreachable _         -> pure expr
       Call f ts vs          -> Call f ts <$> traverse fv vs
       App f vs              -> App <$> fn f <*> traverse fv vs

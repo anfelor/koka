@@ -9,7 +9,7 @@
 
 -- Koka-to-IR type translation and constructor metadata.
 module Backend.Typed.Elab.TypeInfo( Tr
-                                  , elabType, elabFunType, elabScheme
+                                  , elabType, elabFunType, elabScheme, needsToken
                                   , isValueInfo, elabArgs
                                   , conIndex, conFieldTypes, conFieldNames, schemeFieldTypes, conCount, conShape, conExists
                                   , isLazyInfo, refShape, refInj
@@ -25,6 +25,7 @@ import Common.Syntax( dataDefIsValue )
 import Kind.Kind( Kind, kindStar, hasKindStarResult, isKindStar, extractKindFun )
 import Kind.Newtypes
 import Type.Type
+import Common.NamePrim( nameTpDiv )
 import Core.Core( isMonEffect )
 import Backend.Typed.Syntax
 import Backend.Typed.Types
@@ -70,18 +71,31 @@ elabHigher nt tp
       _              -> Left ("unsupported type constructor: " ++ show tp)
 
 -- The result of a function whose calls may yield, as Koka's monadic translation decides
--- (`Core.isMonType`), comes with the yield flag and may be the dummy of a yield (`Y (W?)`).
+-- (`Core.isMonType`), comes with the yield flag and may be the dummy of a yield (`Y (W?)`). A
+-- function whose effect is more than `div` (`needsToken`) takes the effect token as its last
+-- parameter and returns it as the last field of its result (`Types.withToken`).
 elabFunType :: Newtypes -> Type -> Tr AType
 elabFunType nt tp
   = case tp of
       TSyn _ _ t      -> elabFunType nt t
       TForall tvs rho -> forallA (map tvarId (filter tvarStar tvs)) <$> elabFunType nt rho
-      TFun pars eff res -> AFun <$> mapM (\(_,t) -> (,) Owned <$> elabType nt t) pars
-                                <*> ((if isMonEffect eff then VYield . orNull else id) <$> elabType nt res)
+      TFun pars eff res -> AFun <$> ((++ [(Owned,VToken) | needsToken eff]) <$> mapM (\(_,t) -> (,) Owned <$> elabType nt t) pars)
+                                <*> ((if needsToken eff then withToken else id) . (if isMonEffect eff then VYield . orNull else id) <$> elabType nt res)
       _ -> do t <- elabType nt tp
               case t of
                 VPtr a -> Right a
                 _      -> Left ("quantification over a non-pointer type: " ++ show t)
+
+-- Whether a function with the effect `eff` takes the effect token: its effect is open, or has
+-- a label other than `div`.
+needsToken :: Effect -> Bool
+needsToken eff
+  = let (ls,tl) = extractEffectExtend eff
+    in not (isEffectEmpty tl) || not (all isDiv ls)
+  where
+    isDiv l = case expandSyn l of
+                TCon tc -> typeConName tc == nameTpDiv
+                _ -> False
 
 elabScheme :: Newtypes -> Type -> Tr ([TVar],VType)
 elabScheme nt tp

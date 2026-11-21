@@ -11,7 +11,7 @@
 module Backend.Typed.Build where
 
 import Backend.Typed.Syntax
-import Backend.Typed.Types( alphaEq, orNull, unNull, unYield )
+import Backend.Typed.Types( alphaEq, orNull, unNull, unYield, unToken, withToken )
 
 -- A continuation that wraps an expression.
 type K = VExpr -> VExpr
@@ -29,13 +29,42 @@ yielded w
     v = fst (unYield w)
     dummy = Ret (Pure (Null (unNull v)))
 
--- the dummy of a yield, as `yielded` builds it
+-- The dummy of a yield with the token `k` at the type `W`, the result of a token-threaded
+-- function: `ret (pure (null, k)) : Y (V? ⊗ KCtx)`, where `W` is `Y (V ⊗ KCtx)` or
+-- `V ⊗ KCtx`, cast to `W` if that is not `Y (V? ⊗ KCtx)`.
+yieldedWith :: VType -> VVal -> VExpr
+yieldedWith w k
+  | alphaEq w u = dummy
+  | otherwise = CastEv u w dummy
+  where
+    v = unNull (fst (unYield (maybe w id (unToken w))))
+    u = VYield (withToken (orNull v))
+    dummy = Ret (Pure (Tuple [Null v, k]))
+
+-- the dummy of a yield, as `yielded` or `yieldedWith` builds it
 isYielded :: VExpr -> Bool
 isYielded e
   = case e of
-      Ret (Pure (Null _)) -> True
-      CastEv _ _ (Ret (Pure (Null _))) -> True
+      Ret v -> dummy v
+      CastEv _ _ (Ret v) -> dummy v
       _ -> False
+  where
+    dummy v = case v of
+                Pure (Null _) -> True
+                Pure (Tuple [Null _, _]) -> True
+                _ -> False
+
+-- the result `v` of a token-threaded function with the token `k`, inside `[pure]`
+withTokenVal :: VVal -> VVal -> VVal
+withTokenVal v k
+  = case v of
+      Pure w -> Pure (withTokenVal w k)
+      _ -> Tuple [v,k]
+
+-- `let k : KCtx = cast-ev[𝟙, KCtx] ret ()`: a token where there is none (see "The effect
+-- token" in `Syntax`)
+makeToken :: Path -> K
+makeToken k = Let k VToken (CastEv VUnit VToken (Ret UnitV))
 
 -- the product of values (`Types.prodV`)
 prodVal :: [VVal] -> VVal

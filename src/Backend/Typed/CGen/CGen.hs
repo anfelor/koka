@@ -30,7 +30,7 @@ import Common.NamePrim
 import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( child, TestSide(..), boxTag, canonical, failingTo, fvA, fvE, fvV, holes, testSides, within )
-import Backend.Typed.Types( inst, isShape )
+import Backend.Typed.Types( inst, isShape, isToken, unToken )
 import Backend.Typed.Env( Env(..), envOf, dataBody, openFields, boxContents, M, get, gets, liftE, modify, put, runM, state )
 import Backend.Typed.Query( Gamma, inferE, inferV, inferVar, noJoins, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 import Backend.Typed.Layout
@@ -711,7 +711,8 @@ genLam cx ps r e
        n <- freshName "lam"
        let sname = "struct kt_clo" <.> text n
            fname = "kt_fun" <.> text n
-       pcts <- mapM (\(_,_,t) -> ctype t) ps
+       let (cps,tokens) = erased [(x,t) | (x,_,t) <- ps]
+       pcts <- mapM (ctype . snd) cps
        rct  <- ctype r
        let structDef = sname <+> block ("struct kk_function_s _base;" : [cty ct <+> "c" <.> int i <.> ";" | (i,ct) <- fields]) <.> ";"
            g'  = M.union (M.fromList ([(x,V t) | (x,_,t) <- ps])) (cxGamma cx)
@@ -720,10 +721,10 @@ genLam cx ps r e
        -- Transfer captures from unique closures; shared closures retain their own references.
        let loads = [cty ct <+> localName (caps !! i) <+> "= _self->c" <.> int i <.> ";" | (i,ct) <- fields]
            dups = [x <+> "=" <+> dupExpr ct x <.> ";" | (i,ct) <- fields, needsRC ct, let x = localName (caps !! i)]
-           sig = "static" <+> cty rct <+> fname <.> "(kk_function_t _fself" <.> hcat [", " <.> cty ct <+> localName x | ((x,_,_),ct) <- zip ps pcts] <.> ", kk_context_t* _ctx)"
-           prologue | null caps = ["kk_function_static_drop(_fself,_ctx);"]
+           sig = "static" <+> cty rct <+> fname <.> "(kk_function_t _fself" <.> hcat [", " <.> cty ct <+> localName x | ((x,_),ct) <- zip cps pcts] <.> ", kk_context_t* _ctx)"
+           prologue | null caps = "kk_function_static_drop(_fself,_ctx);" : tokens
                     | otherwise = (sname <.> "* _self = kk_function_as(" <.> sname <.> "*,_fself,_ctx);") : loads
-                                  ++ ["kk_drop_match(_self,{" <+> hsep dups <+> "},{},_ctx);"]
+                                  ++ ["kk_drop_match(_self,{" <+> hsep dups <+> "},{},_ctx);"] ++ tokens
        emitDecl (vcat ([structDef | not (null caps)] ++ [sig <+> block (prologue ++ body)]))
        x <- fresh "c"
        let capVals = map localName caps
@@ -738,6 +739,15 @@ genLam cx ps r e
 
 lamFree :: [(Path,Mode,VType)] -> VExpr -> S.Set Path
 lamFree ps e = fvA (Lam ps VUnit e)
+
+-- The parameters of a function or closure in C: the effect token has no representation (see
+-- "The effect token" in `Syntax`), so it is left out, and the body declares it as a local.
+erased :: [(Path,VType)] -> ([(Path,VType)],[Doc])
+erased ps = ([p | p@(_,t) <- ps, not (isToken t)], ["kk_unit_t" <+> localName x <+> "= kk_Unit;" | (x,t) <- ps, isToken t])
+
+-- the arguments for the parameters of the types `ts` that C passes (`erased`)
+passed :: [VType] -> [a] -> [a]
+passed ts as = [a | (t,a) <- zip (ts ++ repeat VUnit) as, not (isToken t)]
 
 -- An open constructor is a block of its tag string and its fields (`openPayload`), as Koka's.
 genOpenCon :: Ctx -> Name -> [AType] -> [VVal] -> G Doc
@@ -807,7 +817,7 @@ genE cx dest expr
       LetYield x t e1 e2 e3
         -> do s1 <- genBound cx x t e1
               s2 <- genE (bindVar cx x (V t)) dest e2
-              s3 <- genE cx dest e3
+              s3 <- genE (bindVar cx x (V t)) dest e3
               ct <- ctype t
               let check = case niche ct of
                             Just n -> ["kt_yield_check(" <.> nullTest n (localName x) <.> ");"]
@@ -902,9 +912,9 @@ genE cx dest expr
               (ps,r) <- case ft of
                           A (AFun ps r) -> return (map snd ps, r)
                           _ -> failG ("application of " ++ show ft)
-              pcts <- mapM ctype ps
+              pcts <- mapM ctype (passed ps ps)
               rct  <- ctype r
-              args <- mapM (genV cx) vs
+              args <- mapM (genV cx) (passed ps vs)
               fx <- fresh "fn"
               let call = "kk_function_call(" <.> cty rct <.> ",(kk_function_t" <.> hcat [", " <.> cty ct | ct <- pcts] <.> ", kk_context_t*),"
                          <.> fx <.> ",(" <.> fx <.> hcat [", " <.> a | a <- args] <.> ", _ctx),_ctx)"
@@ -1162,9 +1172,9 @@ genCall cx dest f tys vs
        return (assignTo dest rct (fromKoka kt rct lit))
   | Just ext <- M.lookup f (envExterns (cxEnv cx)) = genExtern cx dest f tys vs ext
   | otherwise
-  = do (_,r) <- callSig cx f tys
+  = do (ps,r) <- callSig cx f tys
        rct <- ctype r
-       args <- mapM (genV cx) vs
+       args <- mapM (genV cx) (passed ps vs)
        return (assignTo dest rct (text (cName f) <.> "(" <.> hcat [a <.> ", " | a <- args] <.> "_ctx)"))
 
 -- assign the arguments to the parameters through temporaries, as they may read the parameters
@@ -1197,9 +1207,12 @@ callSig cx f tys
 
 genExtern :: Ctx -> Dest -> Name -> [AType] -> [VVal] -> Extern -> G [Doc]
 genExtern cx dest f tys vs ext
-  = do (ps,r) <- callSig cx f tys
+  = do (ps0,r0) <- callSig cx f tys
+       -- the token has no representation, so a result `W ⊗ KCtx` is a `W` in C
+       let ps = passed ps0 ps0
+           r = fromMaybe r0 (unToken r0)
        rct <- ctype r
-       args <- forM (zip3 vs ps (map snd (extParams ext) ++ repeat KBox)) $ \(v,p,kp) ->
+       args <- forM (zip3 (passed ps0 vs) ps (map snd (extParams ext) ++ repeat KBox)) $ \(v,p,kp) ->
                  do e <- genV cx v
                     ct <- ctype p
                     return (toKoka ct (externCType f kp p) e, externCType f kp p)
@@ -1220,13 +1233,14 @@ genDef :: Env -> CEnv -> Def -> G (Doc,Doc,Doc)
 genDef env cenv def
   = case def of
       DefFun f _ args _ res body
-        -> do pcts <- mapM (\(_,_,t) -> ctype t) args
+        -> do let (cps,tokens) = erased [(x,t) | (x,_,t) <- args]
+              pcts <- mapM (ctype . snd) cps
               rct  <- ctype res
               let g  = M.fromList [(x,V t) | (x,_,t) <- args]
                   cx = Ctx env cenv g M.empty S.empty
               ss <- genE cx DReturn body
-              let sig = cty rct <+> text (cName f) <.> "(" <.> hcat [cty ct <+> localName x <.> ", " | ((x,_,_),ct) <- zip args pcts] <.> "kk_context_t* _ctx)"
-              return (sig <.> ";", sig <+> block ss, empty)
+              let sig = cty rct <+> text (cName f) <.> "(" <.> hcat [cty ct <+> localName x <.> ", " | ((x,_),ct) <- zip cps pcts] <.> "kk_context_t* _ctx)"
+              return (sig <.> ";", sig <+> block (tokens ++ ss), empty)
       DefVal x _ t body
         -> do ct <- ctype t
               let cx = Ctx env cenv M.empty M.empty S.empty
@@ -1242,13 +1256,14 @@ genWrapper :: Env -> CEnv -> Name -> G (Doc,Doc)
 genWrapper env cenv f
   = case M.lookup f (envSigs env) of
       Just (SigFun tvs ps _ r)
-        -> do pcts <- mapM (ctype . snd) ps
+        -> do let xs  = [root (newHiddenName ("p" ++ show i)) | i <- [0..length ps - 1]]
+                  (cps,tokens) = erased [(x,t) | (x,(_,t)) <- zip xs ps]
+              pcts <- mapM (ctype . snd) cps
               rct  <- ctype r
-              let xs  = [root (newHiddenName ("p" ++ show i)) | i <- [0..length ps - 1]]
-                  cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) M.empty S.empty
+              let cx  = Ctx env cenv (M.fromList [(x,V t) | (x,(_,t)) <- zip xs ps]) M.empty S.empty
               body <- genCall cx DReturn f (map AVar tvs) (map Var xs)
-              let sig = "static" <+> cty rct <+> text (cName f) <.> "_fun(kk_function_t _fself" <.> hcat [", " <.> cty ct <+> localName x | (x,ct) <- zip xs pcts] <.> ", kk_context_t* _ctx)"
-              return (sig <.> ";", sig <+> block ("kk_function_static_drop(_fself,_ctx);" : body))
+              let sig = "static" <+> cty rct <+> text (cName f) <.> "_fun(kk_function_t _fself" <.> hcat [", " <.> cty ct <+> localName x | ((x,_),ct) <- zip cps pcts] <.> ", kk_context_t* _ctx)"
+              return (sig <.> ";", sig <+> block (("kk_function_static_drop(_fself,_ctx);" : tokens) ++ body))
       _ -> failG ("wrapper for unknown function " ++ show f)
 
 -- modules

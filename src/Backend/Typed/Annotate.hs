@@ -96,7 +96,7 @@ annE c expr w
       LetYield x t e1 e2 e3 -> do t' <- annTy c t
                                   e1' <- annE c e1 (VYield t')
                                   e2' <- annE (bindVars [(x,V t')] c) e2 w
-                                  LetYield x t' e1' e2' <$> annE c e3 w
+                                  LetYield x t' e1' e2' <$> annE (bindVars [(x,V t')] c) e3 w
       Unreachable _ -> return (Unreachable w)
       CastEv u t e -> do u' <- annTy c u
                          t' <- annTy c t

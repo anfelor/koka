@@ -12,7 +12,7 @@ module Backend.Typed.Elab.FromCore( elabProgram ) where
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.List( find, sortOn, partition )
-import Data.Maybe( isNothing, listToMaybe )
+import Data.Maybe( isJust, isNothing, listToMaybe )
 import Control.Monad( foldM, unless )
 import Common.Name
 import Common.NamePrim( nameFieldAddrOf, nameCCtxHoleCreate, nameCCtxCreate, nameCCtxExtend, nameCCtxApply, nameCCtxEmpty, nameCCtxCompose, nameCCtxComposeExtend
@@ -27,7 +27,7 @@ import qualified Core.CoreVar as CV
 import Core.Pretty()
 import qualified Type.TypeVar as TV
 import Backend.Typed.Syntax
-import Backend.Typed.Build( K, compose, prodVal, padFields )
+import Backend.Typed.Build( K, compose, prodVal, padFields, withTokenVal )
 import Backend.Typed.Traversal( child )
 import Backend.Typed.Elab.Types( typeDefs )
 import Backend.Typed.Elab.TypeInfo
@@ -46,11 +46,11 @@ elabProgram :: Newtypes -> Foreign -> [C.Core] -> C.Core -> (Program,[String],[S
 elabProgram nt ffi imports core
   = let defs    = map closeDef (filter (not . isLeftOut) (C.flattenDefGroups (C.coreProgDefs core)))
         isigs   = M.fromList [(n,withModes modes sig) | (n,(tp,isFun,modes)) <- M.toList (importSigs (core:imports)), Right sig <- [typeSig nt tp isFun]]
-        env0    = Env nt S.empty S.empty isigs M.empty S.empty M.empty VUnit
+        env0    = Env nt S.empty S.empty isigs M.empty S.empty M.empty VUnit M.empty
         (tdefs,tdefErrs) = typeDefs nt
         run (sigs,ds,errs,notes) def
           = let label msg = show (C.defName def) ++ ": " ++ msg
-            in case runE (elabDef def) env0 (St 0 sigs []) of
+            in case runE (elabDef def) env0 (St 0 sigs [] Nothing) of
                  Right ((d,sig),st) -> (M.insert (C.defName def) sig (stSigs st), ds ++ [d], errs, notes ++ map label (stNotes st))
                  Left err -> (sigs, ds, errs ++ [label err], notes)
         (sigs,ds,errs,notes) = foldl run (M.empty,[],tdefErrs,[]) defs
@@ -91,16 +91,28 @@ elabDef def
 elabFunDef :: C.Def -> [TName] -> C.Expr -> E (Def,Sig)
 elabFunDef def pars body
   = do (tvs,args,res) <- funSig (typeOf (C.defExpr def))
-       body' <- withTVars tvs (withLocals (map getName pars) (elabExprAt res body))
+       (k,token) <- tokenBinder args
+       body' <- withTVars tvs (withTypedLocals (map typed pars) (tokenIn token (elabExprAt res body)))
        let params = withParamModes (defModes def) args
-           args' = [(root (getName p),m,t) | (p,(m,t)) <- zip pars params]
+           args' = [(root (getName p),m,t) | (p,(m,t)) <- zip pars params] ++ k
        return (DefFun (C.defName def) tvs args' Owned res body', SigFun tvs params Owned res)
+
+typed :: TName -> (Name,Type)
+typed (TName x tp) = (x,tp)
+
+-- the token parameter of a function with the parameters `ps`, if it has one, and the token in
+-- its body
+tokenBinder :: [(Mode,VType)] -> E ([(Path,Mode,VType)],Maybe Path)
+tokenBinder ps
+  | snd (tokenParam ps) = do k <- fresh "k"
+                             return ([(k,Owned,VToken)], Just k)
+  | otherwise = return ([], Nothing)
 
 elabValDef :: C.Def -> E (Def,Sig)
 elabValDef def
   = do e <- env
        (tvs,t) <- tr (elabScheme (envNT e) (typeOf (C.defExpr def)))
-       body <- withTVars tvs (elabExprAt t (stripTypeLam (C.defExpr def)))
+       body <- withTVars tvs (tokenIn Nothing (elabExprAt t (stripTypeLam (C.defExpr def))))
        return (DefVal (C.defName def) tvs t body, SigVal tvs t)
 
 importSigs :: [C.Core] -> M.Map Name (Type,Bool,[Mode])
@@ -166,11 +178,6 @@ funSig tp
 
 -- expressions
 
--- an expression at its own type
-elabExpr :: C.Expr -> E VExpr
-elabExpr e = do t <- vt (typeOf e)
-                elabExprAt t e
-
 -- An expression at the type `t`, which its expressions in tail position take (`result`): the
 -- result of each is coerced there, so that a result that may be the dummy of a yield (`Y W`)
 -- is tested where it is coerced.
@@ -185,15 +192,18 @@ elabTail expr
       C.Let (C.DefNonRec (C.Def{ C.defName = j, C.defExpr = lam }) : dgs) body | isJoinName j, Just (tvs,pars,e1) <- splitLam lam
         -> do let linear = linearContexts e1
                   tvs'   = [typevarId tv | tv <- tvs, tvarStar tv]
+              (k,token) <- joinToken
               (ps,e1') <- withTVars tvs' $
                           do ps <- mapM (\p -> (\t -> (root (getName p),paramMode Own (S.member (getName p) linear),t)) <$> vt (tnameType p)) pars
-                             (,) ps <$> withLocals (map getName pars) (elabTail e1)
+                             (,) (ps ++ k) <$> withTypedLocals (map typed pars) (tokenIn token (elabTail e1))
               Join NonRec j tvs' ps e1' <$> elabTail (C.Let dgs body)
       C.App f args | (Just (TName j tp,_),tys) <- splitTypeApp f, isJoinName j, Just (pars,_,_) <- splitFunType (typeOf f)
         -> do tys' <- instArgs tp tys
               (ks,vs) <- unzip <$> mapM (\((_,ptp),arg) -> do t <- vt ptp
                                                               elabValAt t arg) (zip pars args)
-              return (compose ks (Jump j tys' vs))
+              (_,token) <- joinToken
+              (kt,tv) <- takeTokenIf (isJust token)
+              return (compose ks (kt (Jump j tys' (vs ++ tv))))
       C.Let (C.DefNonRec def : dgs) body
         -> elabLet def (C.Let dgs body)
       C.Let (C.DefRec defs : _) _
@@ -210,11 +220,21 @@ elabTail expr
               t <- vt (typeOf expr)
               k <$> retAt t v
 
--- a value of type `t` at the type `result`
+-- In a token-threaded expression, every join point takes the token, as the last parameter
+-- (and its jumps pass it). The binder and the token in the body of a join point.
+joinToken :: E ([(Path,Mode,VType)],Maybe Path)
+joinToken = do r <- result
+               if isJust (unToken r) then tokenBinder [(Owned,VToken)] else return ([],Nothing)
+
+-- a value of type `t` at the type `result`, with the current token if that is token-threaded
 retAt :: VType -> VVal -> E VExpr
 retAt t v = do r <- result
-               (k,w) <- coerce t r v
-               return (k (Ret w))
+               case unToken r of
+                 Just r0 -> do (k,w) <- coerce t r0 v
+                               (kt,tok) <- takeToken
+                               return (k (kt (Ret (withTokenVal w tok))))
+                 Nothing -> do (k,w) <- coerce t r v
+                               return (k (Ret w))
 
 -- an expression of the Koka type `tp` at the type `result`
 atResult :: Type -> VExpr -> E VExpr
@@ -253,18 +273,79 @@ elabLet def body
                  (k,v) <- elabValAt t (C.defExpr def)
                  k <$> withFields [(x,(id,v))] (elabTail body)
          else do t <- vt (C.defType def)
+                 token <- currentToken
                  case yieldTest body of
                    Just (e2,e3) | not (S.member x (S.map getName (CV.fv e3)))
-                     -> do e1 <- elabExprAt (VYield (orNull t)) (C.defExpr def)
-                           body <- withLocals [x] (elabTail e2)
+                     -> if isJust token then letYieldToken def t e2 e3 else
+                        do e1 <- elabExprAt (VYield (orNull t)) (C.defExpr def)
+                           body <- withTypedLocals [(x,C.defType def)] (elabTail e2)
                            r <- fresh "r"
                            w <- result
                            LetYield r (orNull t) e1 (IsNull (Var r) (Unreachable w) (root x,body)) <$> elabTail e3
-                   _ -> do e1 <- elabExprAt t (C.defExpr def)
-                           Let (root x) t e1 <$> withLocals [x] (elabTail body)
+                   _ -> do k <- bindExpr (root x) t (C.defExpr def)
+                           k <$> withTypedLocals [(x,C.defType def)] (elabTail body)
   where
     fieldAlias en (C.Var (TName y _) _) = M.member y (envFields en)
     fieldAlias _ _ = False
+
+-- `[let-yield]` on the token: the result `r : t? ⊗ KCtx` of `e₁`, whose token `r.1` each
+-- branch takes
+letYieldToken :: C.Def -> VType -> C.Expr -> C.Expr -> E VExpr
+letYieldToken def t e2 e3
+  = do let u = withToken (orNull t)
+           x = C.defName def
+       e1' <- elabExprAt (VYield u) (C.defExpr def)
+       r <- fresh "r"
+       r0 <- fresh "r"
+       k2 <- fresh "k"
+       k3 <- fresh "k"
+       w <- result
+       body <- tokenIn (Just k2) (withTypedLocals [(x,C.defType def)] (elabTail e2))
+       yielding <- tokenIn (Just k3) (elabTail e3)
+       return (LetYield r u e1' (Proj (Var r) 0 r0 (Proj (Var r) 1 k2 (IsNull (Var r0) (Unreachable w) (root x,body))))
+                                (Proj (Var r) 1 k3 yielding))
+
+-- `let x : t = e in □`. In a token-threaded expression, an `e` that calls something that takes
+-- a token (`usesToken`) is elaborated at `t ⊗ KCtx`, whose token is the next one; any other
+-- `e` does not see the token.
+bindExpr :: Path -> VType -> C.Expr -> E K
+bindExpr x t expr
+  = do token <- currentToken
+       if isJust token && usesToken expr
+         then do let tt = withToken t
+                 e <- elabExprAt tt expr
+                 p <- fresh "p"
+                 k <- fresh "k"
+                 setToken (Just k)
+                 return (Let p tt e . Proj (Var p) 0 x . Proj (Var p) 1 k)
+         else do e <- tokenIn Nothing (elabExprAt t expr)
+                 return (Let x t e)
+
+-- Whether an expression (outside of its lambdas, but including the bodies of its join points,
+-- which `matchCore` types as total) calls a function that takes a token, overapproximated: a
+-- function is also taken at its generic type (an effect-polymorphic function at a total
+-- instance takes a token), and one under an identity cast (`.open`, `unsafe-total`) at both
+-- of its types, as elaboration calls it at its own (`elabApp`).
+usesToken :: C.Expr -> Bool
+usesToken expr
+  = case expr of
+      C.App f args -> any calls (typeOf f : generic f ++ maybe [] (\g -> typeOf g : generic g) (identityCast f)) || any usesToken (f : args)
+      C.TypeApp e _ -> usesToken e
+      C.TypeLam _ e -> usesToken e
+      C.Let dgs e -> usesToken e || any bound (C.flattenDefGroups dgs)
+      C.Case scs brs -> any usesToken scs || or [usesToken (C.guardTest g) || usesToken (C.guardExpr g) | br <- brs, g <- C.branchGuards br]
+      _ -> False
+  where
+    calls tp = case expandSyn tp of
+                 TForall _ t -> calls t
+                 TFun _ eff _ -> needsToken eff
+                 _ -> False
+    generic f = case splitTypeApp f of
+                  (Just (TName _ gtp,_),_) -> [gtp]
+                  _ -> []
+    bound d = case splitLam (C.defExpr d) of
+                Just (_,_,body) | isJoinName (C.defName d) -> usesToken body
+                _ -> usesToken (C.defExpr d)
 
 elabGen :: [TVar] -> C.Expr -> Type -> E VExpr
 elabGen tvs e tp
@@ -272,7 +353,7 @@ elabGen tvs e tp
        case target of
          VPtr (AForall tvs' a)
            -> do let a' = inst tvs (map AVar tvs') a
-                 body <- withTVars tvs' (elabExprAt (VPtr a') e)
+                 body <- withTVars tvs' (tokenIn Nothing (elabExprAt (VPtr a') e))
                  return (Gen tvs' body)
          _ -> failE ("type abstraction at the monomorphic type " ++ ppr target)
 
@@ -401,10 +482,12 @@ funType f = do t <- vt (typeOf f)
 -- yield where Koka does not).
 callWith :: ([VVal] -> E VExpr) -> [VType] -> VType -> [C.Expr] -> E VExpr
 callWith call params res args
-  = do (ks,vs) <- unzip <$> mapM (\(p,arg) -> elabValAt p arg) (zip params args)
+  = do let (params0,token) = tokenParam [((),p) | p <- params]
+       (ks,vs) <- unzip <$> mapM (\(p,arg) -> elabValAt p arg) (zip (map snd params0) args)
+       (kt,tv) <- takeTokenIf token
        expect <- result
-       app <- call vs
-       compose ks <$> coerceExpr res expect app
+       app <- call (vs ++ tv)
+       compose ks . kt <$> coerceExpr res expect app
 
 splitTypeApp :: C.Expr -> (Maybe (TName,C.VarInfo),[Type])
 splitTypeApp expr
@@ -428,7 +511,7 @@ splitForall tp
 -- values
 
 elabValAt :: VType -> C.Expr -> E (K,VVal)
-elabValAt expect@(VPtr a@(AFun qs _)) (C.Lam pars _ body) | length qs == length pars
+elabValAt expect@(VPtr a@(AFun qs _)) (C.Lam pars _ body) | length (fst (tokenParam qs)) == length pars
   = do (k,lam) <- captureFields body (elabLam expect pars body)
        return (k, Ptr a lam)
 elabValAt expect expr
@@ -478,8 +561,8 @@ elabVal expr
               return (k1 . k2,v')
       _ -> do t <- vt (typeOf expr)
               x <- fresh "a"
-              e <- elabExpr expr
-              return (Let x t e, Var x)
+              k <- bindExpr x t expr
+              return (k, Var x)
 
 elabTypeLam :: [TVar] -> C.Expr -> Type -> E (K,VVal)
 elabTypeLam tvs e tp = generalize tvs (elabVal e) tp
@@ -518,8 +601,9 @@ captureFields body action = do
 elabLam :: VType -> [TName] -> C.Expr -> E AVal
 elabLam (VPtr (AFun qs res)) pars body
   = do (ps,ks) <- unzip <$> mapM lamParam (zip pars qs)
-       body' <- inClosure (withLocals (map getName pars) (elabExprAt res body))
-       return (Lam ps res (compose ks body'))
+       (k,token) <- tokenBinder qs
+       body' <- inClosure (withTypedLocals (map typed pars) (tokenIn token (elabExprAt res body)))
+       return (Lam (ps ++ k) res (compose ks body'))
 elabLam t _ _ = failE ("expecting a function type for a lambda: " ++ ppr t)
 
 lamParam :: (TName,(Mode,VType)) -> E ((Path,Mode,VType),K)
@@ -556,7 +640,11 @@ elabNamed e x tp info tys
        if S.member x (envLocals e)
          then do tys' <- instArgs tp tys
                  let (k,v) = M.findWithDefault (id,Var (root x)) x (envFields e)
-                 (ki,w) <- instLocal v tp tys' expect
+                 (ki,w) <- case (tys', M.lookup x (envBinders e)) of
+                             -- a use at other effects than its binder (`() -> int` as `() -> console int`)
+                             ([],Just btp) -> do bt <- vt btp
+                                                 coerceInst bt expect v
+                             _ -> instLocal v tp tys' expect
                  return (k . ki,w)
          else do sig <- globalSig x tp info
                  case sig of
@@ -718,11 +806,12 @@ elabCtx mbAcc res addr resTp
        unless (isFieldAddr en addr) (failE "a context whose hole is not the field of a constructor")
        t <- vt resTp
        b <- holeType t
-       (k1,v) <- elabVal res
        case mbAcc of
-         Nothing -> return (k1 (Ret (Context b v)))
+         Nothing -> do (k1,v) <- elabVal res
+                       return (k1 (Ret (Context b v)))
          Just (linear,acc)
            -> do (k0,c) <- elabVal acc
+                 (k1,v) <- elabVal res
                  tacc <- vt (typeOf acc)
                  (kc,c') <- ctxCopy (not linear) tacc c
                  return (k0 (k1 (kc (Append c' (Context b v)))))
@@ -786,7 +875,7 @@ isWild _         = False
 
 -- the body of a branch, in tail position
 branchBody :: C.Branch -> E VExpr
-branchBody (C.Branch _ [C.Guard _ e]) = elabTail e
+branchBody (C.Branch _ [C.Guard _ e]) = branch (elabTail e)
 branchBody _ = failE "unexpected guards after matching"
 
 elabLitCase :: VVal -> [C.Branch] -> E VExpr

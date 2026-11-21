@@ -34,6 +34,7 @@ leaves t
       VCell _ _ -> [t]
       VYield b -> leaves b
       VOrNull b -> leaves b
+      VToken -> []
 
 isEnum :: VType -> Bool
 isEnum t
@@ -98,6 +99,7 @@ layout t
       VCell _ _   -> CBox
       VYield b    -> layout b
       VOrNull b   -> layout b
+      VToken      -> CUnit
   where
     altLayout s = case layout s of
                     CUnit -> Nothing

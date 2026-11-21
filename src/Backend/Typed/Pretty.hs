@@ -69,7 +69,7 @@ reserved s = null s || "(" `isPrefixOf` s || s `elem` keywords || "box@" `isPref
     keywords = words ("ret let in of case split at if-whnf whnf delay ptr roll box scalar pack dup drop free"
                       ++ " if-unique if-full then else join rec jump fn gen forall exists unreachable"
                       ++ " yielding cast-ev memoize ctx ctx-copy hole pure some null is-null up down lock @ @copy _"
-                      ++ " module data con fun val extern foreign Box Scalar I Y NaN Infinity"
+                      ++ " module data con fun val extern foreign Box Scalar I Y KCtx NaN Infinity"
                       ++ " char ssize_t intptr_t float64 float32 int64 int32 int16 int8 uint8")
 
 -- a path with all its steps
@@ -172,6 +172,7 @@ prettyV pp t
       VCell n a -> text ("cell" ++ show n) <.> angles (prettyA pp a)
       VYield b  -> text "Y" <+> prettyV pp b
       VOrNull b -> prettyV pp b <.> text "?"
+      VToken    -> text "KCtx"
 
 -- a component of a sum or product with its label, unless that is the default one for its
 -- position (`tagCon`, `posField`)

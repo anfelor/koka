@@ -12,7 +12,7 @@ module Backend.Typed.Elab.Representation( rep, boxrep, boxA, shapeLeaves, leafCo
                                         , scalarField, varV, atAny, sumOf
                                         , tapp, injA, caseSum ) where
 
-import Backend.Typed.Types( atAny, underNull )
+import Backend.Typed.Types( atAny, underNull, withToken, unToken, isToken )
 import Backend.Typed.Syntax
 import Backend.Typed.Layout( leaves, isEnum )
 import Backend.Typed.Traversal( child )
@@ -44,11 +44,12 @@ rep t
 boxrep :: VType -> VType
 boxrep t = VPtr (rep t)
 
--- a result that may yield stays one (`Y (boxrep(W)?)`)
+-- A result that may yield stays one (`Y (boxrep(W)?)`), and the token stays a token
+-- (`(boxrep(V), KCtx) -> Y (boxrep(W)? ⊗ KCtx)`).
 boxFunA :: AType -> AType
 boxFunA a
   = case a of
-      AFun ps r     -> AFun [(m,boxrep p) | (m,p) <- ps] (case r of { VYield w -> VYield (underNull boxrep w); _ -> boxrep r })
+      AFun ps r     -> AFun [(m,if isToken p then p else boxrep p) | (m,p) <- ps] (boxRes r)
       AForall tvs b -> AForall tvs (boxFunA b)
       ABox _        -> a
       AScalar _     -> a
@@ -59,6 +60,10 @@ boxFunA a
       ACon _ _      -> a
       ALam _ _      -> a
       ALazy _ _     -> a
+  where
+    boxRes r = case r of
+                 VYield w -> VYield (boxRes w)
+                 _ -> maybe (underNull boxrep r) (withToken . underNull boxrep) (unToken r)
 
 -- Koka's `box`: a raw value is boxed by itself, any other value as a shape, and a product of a
 -- single raw value or enumeration (`scalarField`) like that field
@@ -106,6 +111,7 @@ shapeLeaves t
       VCell _ _   -> [ABox t]
       VYield _    -> [ABox t]
       VOrNull _   -> [ABox t]
+      VToken      -> [ABox t]
 
 tapp :: VVal -> [AType] -> VVal
 tapp v []  = v

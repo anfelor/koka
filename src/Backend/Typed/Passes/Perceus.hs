@@ -62,7 +62,7 @@ import Data.Functor.Const( Const(..) )
 import Data.Maybe( isNothing, listToMaybe )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Build( K, compose, yielded )
+import Backend.Typed.Build( K, compose )
 import Backend.Typed.Traversal( Destruct(..), child, descendA, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fieldsAt, fvA, fvE, fvV, scrutVar, stepsFrom, takesContents, within )
 import Backend.Typed.Passes.Common( isRead, paramModes, prefixes, trivialTy, NameSupply, dropValue, freshFor, perDef, freshPathFrom, nameChildren, projectAll, scopeOf )
 import Backend.Typed.Env( Env(..), envOf, M, evalM, get, gets, lift, liftE, put, state, StateT, runStateT )
@@ -293,14 +293,14 @@ percE' pe owned expr
               e1' <- percE pe{ peBorrowed = peBorrowed pe `S.union` own2 } own1 e1
               e2' <- percE (bind pe [(x,V t)]) (own2 `S.union` ownedOf pe [(x,V t)]) e2
               return (hoistdupAll (\e1'' -> Let x t e1'' e2') e1')
-      -- like a `let`, whose continuation is one of two branches; `x` is only bound in `e2`
+      -- like a `let`, whose continuation is one of two branches, both with `x`
       LetYield x t e1 e2 e3
         -> do let live = needs (fvE e2 `S.union` fvE e3)
                   own2 = owned `S.intersection` live
                   own1 = owned `S.difference` live
               e1' <- percE pe{ peBorrowed = peBorrowed pe `S.union` own2 } own1 e1
               e2' <- percE (bind pe [(x,V t)]) (own2 `S.union` ownedOf pe [(x,V t)]) e2
-              e3' <- percE pe own2 e3
+              e3' <- percE (bind pe [(x,V t)]) (own2 `S.union` ownedOf pe [(x,V t)]) e3
               return (hoistdupAll (\e1'' -> LetYield x t e1'' e2' e3') e1')
       Unreachable _ -> return expr
       Call f tys vs
@@ -507,8 +507,7 @@ valName (Var x) = Just x
 valName _ = Nothing
 
 -- After a call: drop owned variables that were only passed as borrowed arguments. A result that
--- may be the dummy of a yield is not bound to a variable: it is tested, and the drops come in
--- both branches.
+-- may come with a yield is tested, and the drops come in both branches, which pass the result on.
 postCall :: PEnv -> VarSet -> [(Mode,VVal)] -> K -> VExpr -> P VType -> P VExpr
 postCall pe owned mvs k call resTp
   = do let borrowedVars = S.fromList (concat [occurrences v | (Borrowed,v) <- mvs])
@@ -518,7 +517,7 @@ postCall pe owned mvs k call resTp
                  t <- resTp
                  case t of
                    VYield w -> do body <- dropNames pe drops (Ret (Pure (Var r)))
-                                  yielding <- dropNames pe drops (yielded t)
+                                  yielding <- dropNames pe drops (Ret (Pure (Var r)))
                                   return (k (LetYield r w call body yielding))
                    _ -> do body <- dropNames pe drops (Ret (Var r))
                            return (k (Let r t call body))

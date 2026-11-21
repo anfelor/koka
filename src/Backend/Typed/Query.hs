@@ -108,7 +108,7 @@ inferExpr env g js expr
                           checkE env g noJoins e1 t
                           inferE env (M.insert x (V t) g) js e2
       LetYield x t e1 e2 e3 -> do checkE env g noJoins e1 (VYield t)
-                                  branches env [inferE env (M.insert x (V t) g) js e2, inferE env g js e3]
+                                  branches env [inferE env (M.insert x (V t) g) js e2, inferE env (M.insert x (V t) g) js e3]
       Unreachable t -> return t
       Call f tys vs -> do (ps,r) <- funSig env f tys
                           checkArgs env g ps vs
@@ -430,6 +430,7 @@ checkReuseTy ty = case ty of
                     checkReuseTy (A a)
     VYield b -> checkReuseTy (V b)
     VOrNull b -> inner b
+    VToken -> return ()
     VUnit -> return ()
     VRaw _ -> return ()
   A a -> case a of
@@ -525,7 +526,7 @@ inferA env g val
                      return (ACon n tys)
              _ -> Left ("unknown open constructor " ++ show c)
       Lam ps r e -> do when (any containsLinear [t | x <- S.toList (fvA val), Just t <- [M.lookup x g]])
-                         (Left "cannot capture reuse credits or cells in a closure")
+                         (Left "cannot capture reuse credits, cells or tokens in a closure")
                        signature [t | (_,_,t) <- ps] r
                        checkE env (lamGamma ps g) noJoins e r
                        return (AFun [(m,t) | (_,m,t) <- ps] r)

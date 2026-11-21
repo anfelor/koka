@@ -65,6 +65,7 @@ isTrivialWith unroll t
                    VCell _ _    -> False
                    VYield _     -> False
                    VOrNull b    -> trivialV b
+                   VToken       -> False
     trivialA a = case a of
                    AUnit     -> True
                    ASum ts   -> all (trivialA . snd) ts
@@ -194,9 +195,10 @@ dropValue trivial fresh scope x t e
                 return (Let u VUnit (reuseChildren scope (IsNull (Var x) (Ret UnitV) (y,body))) e)
         VReuse _ _ _ -> return (Free x e)
         VCtx _ _ _ -> return (Drop x e)
-        -- a cell is linear and never dropped, which `Check` rejects, and no variable has a type
-        -- `Y V`
+        -- a cell or a token is linear and never dropped, which `Check` rejects, and no variable
+        -- has a type `Y V`
         VCell _ _ -> return (Drop x e)
+        VToken -> return (Drop x e)
         VYield _ -> return (Drop x e)
         VUnit -> return e
         VRaw _ -> return e
@@ -528,7 +530,7 @@ subGammas env g expr
   | otherwise
   = case expr of
       Let x t _ _ -> return [g, M.insert x (V t) g]
-      LetYield x t _ _ _ -> return [g, M.insert x (V t) g, g]
+      LetYield x t _ _ _ -> return [g, M.insert x (V t) g, M.insert x (V t) g]
       Join _ _ _ ps _ _ -> return [bindAll [(x,V t) | (x,_,t) <- ps] g, g]
       Dup _ _ -> return [g]
       IsUnique x _ _ -> return [uniqueGamma g x, g]
