@@ -61,7 +61,7 @@ import Common.NamePrim( nameYieldExtend, nameCoreHnd )
 import Backend.Typed.Syntax
 import Backend.Typed.Build( isYielded )
 import Backend.Typed.Traversal( descendE, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fvE, lamsV, mapA, mapV, subexprs, within )
-import Backend.Typed.Types( Types(..), alphaEq, inst, unNull, unToken, yields )
+import Backend.Typed.Types( Types(..), alphaEq, inst, unNull, unToken, withToken, yields )
 import Backend.Typed.Passes.Common( renamePath )
 
 yieldsProgram :: Program -> Program
@@ -95,12 +95,11 @@ yE :: VType -> VExpr -> VExpr
 yE w expr
   = case expr of
       Let r u e (Let x _ c body) | Just boxedAs <- reboxed r u x c body -> yE w (Let r u e (boxedAs r))
-      Let x _ inner body | Just t <- testOf inner, Just u <- unToken (tType t), Just boxedAs <- reboxedTest t x body
-        -> Let x (unNull u) (CastEv (tType t) (unNull u) (yE (tType t) (tExpr t))) (yE w (boxedAs x))
       _ | Just t <- testOf expr
         -> test w t{ tExpr = yE (tType t) (tExpr t), tYielding = fmap (yE w) (tYielding t), tCont = fmap (yE w) (tCont t) }
       Let x t e1 e2 -> nonNull (Let x t (yE t e1) (yE w e2))
       CastEv u t e -> CastEv u t (yE u e)
+      Total k e -> Total k (yE (withToken w) e)
       Gen tvs e -> case w of
                      VPtr (AForall bs a) -> Gen tvs (yE (VPtr (inst bs (map AVar tvs) a)) e)
                      _ -> expr
@@ -240,21 +239,6 @@ reboxed r u x c body
         replaceA a = case a of
                        Lam ps t b -> Lam ps t (replaceE b)
                        _ -> mapA id replaceA replaceV a
-
--- `reboxed` for a test that elaboration made only to unbox the result, at a type without a
--- token: its branches drop their tokens, the yielding one passes on a dummy, and the other
--- extracts the result and unboxes it
-reboxedTest :: Test -> Path -> VExpr -> Maybe (Path -> VExpr)
-reboxedTest t x body
-  | Just (CastEv _ _ d) <- dropped (tYielding t), isYielded d
-  , Just (IsNull (Var r0) Unreachable{} (y,c)) <- dropped (tCont t), r0 == tVal t
-  , Just u <- unToken (tType t)
-  = reboxed y (unNull u) x c body
-  | otherwise = Nothing
-  where
-    dropped (k,e) = case e of
-                      Let _ VUnit (CastEv VToken VUnit (Ret (Var k'))) b | k' == k -> Just b
-                      _ -> Nothing
 
 -- a call to `yield-extend` or `yield-cont`, which return while the effect still yields
 stillYields :: VExpr -> Bool

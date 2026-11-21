@@ -320,6 +320,7 @@ percE' pe owned expr
               return ((if move then id else Dup f) (k (App f vs')))
       Gen tvs e -> Gen tvs <$> percE' pe owned e
       CastEv u t e -> CastEv u t <$> percE pe owned e
+      Total k e -> Total k <$> percE (bind pe [(k,V VToken)]) (S.insert k owned) e
       Drop x e -> Drop x <$> percE' pe owned e
       Free r e -> Free r <$> percE' pe owned e
       IsUnique x e1 e2 -> IsUnique x <$> percE pe{ peGamma = uniqueGamma (peGamma pe) x } owned e1 <*> percE pe owned e2

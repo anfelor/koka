@@ -10,10 +10,11 @@
 module Backend.Typed.Elab.Coerce( coerce, coerceInst, coerceExpr, genVal, genPtr, applyFun ) where
 
 import qualified Data.Map as M
+import Data.Maybe( isJust )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Build( K, compose, yielded, yieldedWith, dropToken )
-import Backend.Typed.Traversal( child )
+import Backend.Typed.Build( K, compose, yieldedWith )
+import Backend.Typed.Traversal( child, hasRegion )
 import Backend.Typed.Types
 import Backend.Typed.Layout( leaves )
 import Backend.Typed.Elab.TypeMatch( match )
@@ -182,9 +183,10 @@ unboxLeaf t j y
        return (k, Inj i t w)
   | otherwise = unboxAV t y
 
--- whether two types differ only in their `?`s and tokens, so that `[cast-ev]` relates them
+-- whether two types differ only in their `?`s and tokens, but not in a token at the top, so
+-- that `[cast-ev]` relates them
 castable :: VType -> VType -> Bool
-castable from to = alphaEq (eraseEv from) (eraseEv to)
+castable from to = alphaEq (eraseEv from) (eraseEv to) && holdsToken from == holdsToken to
 
 -- `to` is `from` with `?`s and tokens added to the results of functions (`V` to `V? ⊗ KCtx`),
 -- where function parameters are contravariant and all other types are compared as they are
@@ -265,8 +267,9 @@ isNull t = case t of
 -- and the yielding branch passes on a dummy of the type `to` (cast from `to?`), as Koka does.
 --
 -- The token of a token-threaded `to` is that of `from`, or the current token (`takeToken`)
--- if `from` has none. A token of `from` that `to` does not have is dropped by a cast (site 1
--- of "The effect token" in `Syntax`), or after its test.
+-- if `from` has none. A `from` with a token is coerced only to a `to` with one: code without
+-- a token calls a function that takes one in a `[total]` region (`region`), whose result
+-- has a token.
 coerceExpr :: VType -> VType -> VExpr -> E VExpr
 coerceExpr from to e
   | alphaEq from to = return e
@@ -278,11 +281,7 @@ coerceExpr from to e
   | castable from to && (yields from || not (yields to))
   = return (CastEv from to e)
   | Just from0 <- unToken from, Just to0 <- unToken to
-  = tested True from0 to0 to e
-  | Just from0 <- unToken from, yields from0
-  = tested False from0 to to e
-  | Just from0 <- unToken from
-  = coerceExpr from0 to (CastEv from from0 e)
+  = tested from0 to0 to e
   | otherwise
   = coerceTo from to e Ret
 
@@ -312,24 +311,20 @@ coerceTo from to e ret
        (k,v) <- coerce from to (Var r)
        return (Let r from e (k (ret v)))
 
--- `e : from₀ ⊗ KCtx` at `to₀`, the type `to` without its token, tested for a yield if `from₀`
--- may be the dummy: the result passes on the token if `keep`, and otherwise drops it in both
--- branches
-tested :: Bool -> VType -> VType -> VType -> VExpr -> E VExpr
-tested keep from0 to0 to e
+-- `e : from₀ ⊗ KCtx` at `to₀ ⊗ KCtx` (`to`), tested for a yield if `from₀` may be the dummy
+tested :: VType -> VType -> VType -> VExpr -> E VExpr
+tested from0 to0 to e
   = do r <- fresh "r"
        r0 <- fresh "r"
        k <- fresh "k"
        (k1,w) <- extract from0 r0 to
        (k2,v) <- coerce (unNull from0) to0 w
-       let value t = k1 (k2 (Ret (if keep then Tuple [v,Var t] else v)))
-           dummy t = if keep then yieldedWith to (Var t) else yielded to
-           branch body t = if keep then return (t, body t)
-                           else do u <- fresh "u"
-                                   return (t, dropToken u (Var t) (body t))
+       let value t = k1 (k2 (Ret (Tuple [v,Var t])))
        test <- if yields from0
-                 then IfYielding (Var k) <$> (branch dummy =<< fresh "k") <*> (branch value =<< fresh "k")
-                 else snd <$> branch value k
+                 then do k3 <- fresh "k"
+                         k2' <- fresh "k"
+                         return (IfYielding (Var k) (k3, yieldedWith to (Var k3)) (k2', value k2'))
+                 else return (value k)
        return (Let r (withToken from0) e (Proj (Var r) 0 r0 (Proj (Var r) 1 k test)))
 
 -- the value of `r : u` after a test for a yield, extracted if `u` is `V?` (in an expression of
@@ -365,7 +360,7 @@ funPair a b
 
 -- A function `v` with the parameters `ps` as one with the parameters `qs`. The token of the
 -- wrapper is that of `v`; without one, the result of `v` gets the token of the wrapper, or
--- `v` gets a fresh token, which its result drops (`coerceExpr`).
+-- the call of `v` is a `[total]` region (`region`).
 wrapFun :: [TVar] -> [TVar] -> [(Mode,VType)] -> VType -> [(Mode,VType)] -> VType -> VVal -> E (K,VVal)
 wrapFun tvs itvs ps r qs s v
   = do ys <- mapM (const (fresh "w")) qs
@@ -373,29 +368,40 @@ wrapFun tvs itvs ps r qs s v
            (ps0,pk) = tokenParam ps
            token = if qk then Just (last ys) else Nothing
        (ks,args) <- unzip <$> mapM (\((_,q),(_,p),y) -> coerce q p (Var y)) (zip3 qs0 ps0 ys)
-       body <- tokenIn token $
+       body <- tokenIn token $ withResult s $ (if pk then region else id) $
                do (kt,targs) <- takeTokenIf pk
                   call <- applyFun (AFun ps r) (tapp v (map AVar itvs)) (args ++ targs)
-                  compose ks . kt <$> coerceExpr r s call
+                  expect <- result
+                  compose ks . kt <$> coerceExpr r expect call
        let lam  = Lam [(y,m,q) | (y,(m,q)) <- zip ys qs] s body
        genVal (VPtr (forallA tvs (AFun qs s))) lam
 
--- Immediately applied coercion adapters need no closure. Bind arguments outside
+-- Immediately applied coercion adapters need no closure, unless the adapter is a `[total]`
+-- region in token-threaded code. Bind arguments outside
 -- the lambda's scope first, so its parameters cannot capture names in later arguments.
 -- A top-level function is called directly rather than through its static closure. Any
 -- other function value of type `a` is bound first, so that the closure that `[app]`
 -- consumes is a child of a variable, which can be duplicated (`[dup]` is on pointers).
 applyFun :: AType -> VVal -> [VVal] -> E VExpr
-applyFun _ (Ptr _ (Lam ps _ body)) args
+applyFun a f@(Ptr _ (Lam ps _ body)) args
+  = do token <- currentToken
+       if isJust token && hasRegion body then applyClosure a f args else inlineFun ps body args
+applyFun a fv args
+  | Just (f,tys) <- knownFun fv []
+  = return (Call f tys args)
+  | otherwise
+  = applyClosure a fv args
+
+inlineFun :: [(Path,Mode,VType)] -> VExpr -> [VVal] -> E VExpr
+inlineFun ps body args
   = do xs <- mapM (const (fresh "arg")) args
        let bind (x,t,v) = Let x t (Ret v)
            actuals = [(x,t,v) | (x,(_,_,t),v) <- zip3 xs ps args]
            formals = [(p,t,Var x) | ((p,_,t),x) <- zip ps xs]
        return (compose (map bind actuals ++ map bind formals) body)
-applyFun a fv args
-  | Just (f,tys) <- knownFun fv []
-  = return (Call f tys args)
-  | otherwise
+
+applyClosure :: AType -> VVal -> [VVal] -> E VExpr
+applyClosure a fv args
   = do s <- fresh "f"
        let g = child s SDeref
        return (Let s (VPtr a) (Ret fv) (Deref (Var s) g (App g args)))

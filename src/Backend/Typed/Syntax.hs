@@ -112,8 +112,8 @@
     branches). It has no runtime representation: its layout is that of 𝟙, and code
     generation leaves out token parameters and arguments. Total and `div` code has no token;
     where it calls a function that needs one (an effect-polymorphic function at a total
-    instance), it makes the token with `cast-ev[𝟙, KCtx] ret ()` and drops the token of the
-    result with a `cast-ev`, as `|·|` erases tokens.
+    instance, a handler, a local variable), the code is a `[total]` region, which makes a
+    token and drops the token of its result.
 -}
 module Backend.Typed.Syntax where
 
@@ -607,12 +607,13 @@ data VExpr
   --  ────────────────────────────────── [cast-ev]
   --   Γ | J ⊢ cast-ev[U, V] e : V
   --
-  -- Adds or removes `?`s and tokens anywhere in the type of e (`|·|` erases them,
-  -- `Types.eraseEv`). A no-op at run time, and unchecked, as the IR has no effects: elaboration
-  -- emits it where Koka knows that the result is not a dummy. Only removing a `?` is trusted
-  -- with memory safety (and skips a flag test where it removes the `?` of a result); adding or
-  -- removing a token (`cast-ev[𝟙, KCtx] ret ()`, a token-threaded function used at a total
-  -- instance) only forgets the order of effects. It is an expression, like `[gen]`, so that a
+  -- Adds or removes `?`s and tokens in the type of e (`|·|` erases them, `Types.eraseEv`),
+  -- but no token at the top of it (`[total]` makes and drops tokens). A no-op at run time, and
+  -- unchecked, as the IR has no effects: elaboration emits it where Koka knows that the result
+  -- is not a dummy. Only removing a `?` is trusted with memory safety (and skips a flag test
+  -- where it removes the `?` of a result); removing a token under a function arrow (a
+  -- token-threaded function used at a total instance) only forgets the order of effects. It
+  -- is an expression, like `[gen]`, so that a
   -- result is cast where it is returned; a value is cast as `cast-ev[U, V] ret v`. The
   -- annotation U is the type of e, which does not follow from e (as the type of a `let`
   -- binder). The result is owned. Examples are an effect variable instantiated at a total
@@ -622,6 +623,18 @@ data VExpr
   -- a type variable, where it is only passed on, duplicated or dropped. `[some]`, not
   -- `cast-ev`, injects a value into `?` at the top of a type.
   | CastEv VType VType VExpr
+
+  --   Γ contains no KCtx    Γ, k : KCtx | ∅ ⊢ e : W ⊗ KCtx
+  --  ───────────────────────────────────────────────────── [total]
+  --   Γ | J ⊢ total k. e : W
+  --
+  -- A region of code without a token whose body needs one: it makes the token k, and drops
+  -- the token of the result of e. Koka's typing contains the effects inside the region (a
+  -- handled effect, a local variable, a total instance of an effect-polymorphic function, or
+  -- `unsafe-total`), which are ordered by k, but the region is not ordered against the code
+  -- around it. As no token is in scope, a region cannot occur in token-threaded code, where
+  -- it would forget the order of effects. The binder k is a root. Code generation emits e.
+  | Total Path VExpr
 
   --   f : ∀ā. (q̄ V̄) -> q W ∈ Σ    Γᵢ ⊢ vᵢ :qᵢ Vᵢ[B̄/ā]
   --  ───────────────────────────────────────────────── [call]
@@ -763,7 +776,9 @@ data VExpr
   --   Γ | J ⊢ gen ā. e : (∀ā. A)*
   --
   -- The introduction form of `[tyapp]`. It is an expression, as Koka has no value restriction;
-  -- this is sound because the result is a pointer. The paper's `[gen]` on a value `v : A` is
+  -- this is sound because the result is a pointer. Its body sees no token of Γ: it may be a
+  -- `[total]` region, which elaboration trusts as it trusts the cast of its result (a
+  -- computation that may yield under a type abstraction, `Elab.FromCore.elabGen`). The paper's `[gen]` on a value `v : A` is
   -- `gen ā. ret (ptr v)`.
   | Gen [TVar] VExpr
 

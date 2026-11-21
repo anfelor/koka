@@ -28,7 +28,7 @@ import Data.Functor.Const( Const(..) )
 import Data.Monoid( Any(..) )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Types( inst, forallA, orNull, atAny, vtInt, vtString, vtChar, vtFloat, traverseReuseContents )
+import Backend.Typed.Types( inst, forallA, orNull, withToken, atAny, vtInt, vtString, vtChar, vtFloat, traverseReuseContents )
 import Backend.Typed.Traversal( Destruct(..), descendV, destructAOf, destructVOf )
 import Backend.Typed.Env( Env(..), envOf, funSig, dataBody, lazySides )
 import Backend.Typed.Query( Gamma, bindAll, altTypes, lamGamma, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
@@ -100,6 +100,7 @@ annE c expr w
       CastEv u t e -> do u' <- annTy c u
                          t' <- annTy c t
                          CastEv u' t' <$> annE c e u'
+      Total k e -> Total k <$> annE (bindVars [(k,V VToken)] c) e (withToken w)
       Call f ts vs -> case funSig env f ts of
                         Right (ps,_) | length ps == length vs -> Call f ts <$> zipWithM (checkV c) vs ps
                         _ -> unknown ("unknown function " ++ show f) () >> (Call f ts <$> mapM (synthOrKeep c) vs)

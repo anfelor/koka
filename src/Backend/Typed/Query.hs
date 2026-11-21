@@ -11,7 +11,7 @@
 -- Keep inference in sync with the typing rules in Syntax.
 module Backend.Typed.Query( Gamma, noJoins, bindAll, checkE, inferE, inferA, inferV, signature
                           , inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma
-                          , lamGamma
+                          , lamGamma, tokenTy
                           ) where
 
 import qualified Data.Map as M
@@ -187,8 +187,14 @@ inferExpr env g js expr
       CastEv u t e -> do checkTy (V u)
                          checkTy (V t)
                          checkE env g noJoins e u
-                         if alphaEq (eraseEv u) (eraseEv t) then return t
-                           else Left ("cast-ev of an expression of type " ++ ppr u ++ " to " ++ ppr t)
+                         unless (alphaEq (eraseEv u) (eraseEv t)) (Left ("cast-ev of an expression of type " ++ ppr u ++ " to " ++ ppr t))
+                         unless (holdsToken u == holdsToken t) (Left ("cast-ev that makes or drops a token: " ++ ppr u ++ " to " ++ ppr t))
+                         return t
+      Total k e -> do case [x | (x,t) <- M.toList g, tokenTy t] of
+                        x : _ -> Left ("total region where the token " ++ show x ++ " is in scope")
+                        [] -> return ()
+                      t <- inferE env (M.insert k (V VToken) g) noJoins e
+                      maybe (Left ("total region whose body has the type " ++ ppr t ++ " without a token")) return (unToken t)
       CtxCopy c -> do t <- inferV env g c
                       case t of
                         VCtx _ _ _ -> return t
@@ -206,7 +212,7 @@ inferExpr env g js expr
                                               return (VPtr a)
                               _ -> Left ("memoizing into a non-cell: " ++ ppr tc)
       Gen tvs e -> do unbound tvs (ftvCtx g e)
-                      t <- inferE env g noJoins e
+                      t <- inferE env (M.filter (not . tokenTy) g) noJoins e
                       case t of
                         VPtr a -> return (VPtr (AForall tvs a))
                         _ -> Left ("generalization of a non-pointer: " ++ ppr t)
@@ -303,9 +309,15 @@ isCtxValue k
                 Tuple ws -> any field [w | w <- ws, holes w == 1]
                 _ -> path v
 
--- the context of the body of a lambda with parameters `ps`
+-- the context of the body of a lambda with parameters `ps`, which captures no token
 lamGamma :: [(Path,Mode,VType)] -> Gamma -> Gamma
-lamGamma ps g = bindAll [(x,V t) | (x,_,t) <- ps] (M.delete nameHole g)
+lamGamma ps g = bindAll [(x,V t) | (x,_,t) <- ps] (M.filter (not . tokenTy) (M.delete nameHole g))
+
+-- a type that holds a token
+tokenTy :: Ty -> Bool
+tokenTy t = case t of
+              V u -> holdsToken u
+              A _ -> False
 
 -- The context of the body of `[unbox-ru]`: the contents `z.contents` of the box must have
 -- been read, and the box `z` splits into them and the credit `z.credit` of its block, whose

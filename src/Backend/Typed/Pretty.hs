@@ -68,7 +68,7 @@ reserved s = null s || "(" `isPrefixOf` s || s `elem` keywords || "box@" `isPref
     numbered p = p `isPrefixOf` s && not (null (drop (length p) s)) && all isDigit (drop (length p) s)
     keywords = words ("ret let in of case split at if-whnf whnf delay ptr roll box scalar pack dup drop free"
                       ++ " if-unique if-full then else join rec jump fn gen forall exists unreachable"
-                      ++ " cast-ev memoize ctx ctx-copy hole some null is-null if-yielding yield up down lock @ @copy _"
+                      ++ " cast-ev total memoize ctx ctx-copy hole some null is-null if-yielding yield up down lock @ @copy _"
                       ++ " module data con fun val extern foreign Box Scalar I KCtx NaN Infinity"
                       ++ " char ssize_t intptr_t float64 float32 int64 int32 int16 int8 uint8")
 
@@ -341,6 +341,7 @@ prettyExpr pp expr
       CastEv u t e -> text "cast-ev" <.> brackets (prettyV pp u <.> comma <+> prettyV pp t) <+> align (prettyExpr pp e)
       Memoize c d k v -> text "memoize" <+> atomVal pp c <+> parens (side d <+> parens (text "inj" <.> int k <+> atomVal pp v))
       Gen vs e -> text "gen" <+> hsep (map tv vs) <.> text "." <+> align (prettyExpr pp e)
+      Total k e -> text "total" <+> pp k <.> text "." <+> align (prettyExpr pp e)
       CaseOpen v alts def -> caseOf (text "case") (pp v) ([(nm c <.> parens (commaSep (map pp xs)), e) | (c,xs,e) <- alts] ++ [(text "_", def)])
   where
     -- `let` with a mode, followed by the body on the next line

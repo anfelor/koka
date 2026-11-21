@@ -880,6 +880,8 @@ genE cx dest expr
       Gen _ e -> genE cx dest e
       -- a no-op, as `?` and tokens have no representation of their own
       CastEv _ _ e -> genE cx dest e
+      -- the token has no representation, so the result of e has the layout of the result
+      Total k e -> genE (bindVar cx k (V VToken)) dest e
       -- the body of a recursive join point is a loop, which only sees the join point itself
       Join rc j _ ps e1 e2
         -> do lbl <- fresh "join"

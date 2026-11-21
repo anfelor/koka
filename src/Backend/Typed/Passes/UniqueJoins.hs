@@ -101,6 +101,7 @@ tails expr
       App{} -> [FOther]
       Gen{} -> [FOther]
       CastEv{} -> [FOther]
+      Total{} -> [FOther]
       _ -> getConst (descendE (const (Const [])) (const (Const [])) (\_ e -> Const (tails e)) expr)
 
 -- the binders of a scope (with repetitions), the binders among them that are candidates, the

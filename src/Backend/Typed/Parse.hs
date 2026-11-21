@@ -506,6 +506,7 @@ exprP
       , kw "cast-ev" >> (do (u,t) <- bracketsP ((,) <$> vP <* sym "," <*> vP); CastEv u t <$> exprP)
       , kw "memoize" >> memoizeP
       , kw "gen" >> (do vs <- many1 tvarP; sym "."; Gen vs <$> exprP)
+      , kw "total" >> (do k <- pathP >>= rootBinder; sym "."; Total k <$> exprP)
       , headP ]
 
 -- calls, applications, and plugging and appending contexts

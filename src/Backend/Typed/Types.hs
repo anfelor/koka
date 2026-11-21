@@ -10,7 +10,7 @@
 module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents, collapse
                           , isPtr, forallA, prodV, prodFields
                           , checkDupType, isShape, containsLinear, wellNull, yields, eraseEv, orNull, unNull, underNull
-                          , withToken, unToken, isToken, tokenParam
+                          , withToken, unToken, isToken, holdsToken, tokenParam
                           , applyA, atAny, vtInt, vtString, vtChar, vtFloat
                           ) where
 
@@ -442,6 +442,16 @@ isToken :: VType -> Bool
 isToken t
   = case t of
       VToken -> True
+      _ -> False
+
+-- whether a value of a type holds a token (not behind a pointer)
+holdsToken :: VType -> Bool
+holdsToken t
+  = case t of
+      VToken -> True
+      VProd fs -> any (holdsToken . snd) fs
+      VSum ts -> any (holdsToken . snd) ts
+      VExists _ b -> holdsToken b
       _ -> False
 
 -- the result `V` of a token-threaded function as `V ⊗ KCtx`

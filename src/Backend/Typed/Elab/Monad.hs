@@ -12,7 +12,7 @@ module Backend.Typed.Elab.Monad( Env(..), St(..), E
                               , runE, failE, tr, env, withLocals, withTypedLocals, withFields, withTVars, withHole, inClosure
                               , withResult, result
                               , fresh, freshName, recordSig, note, vt
-                              , currentToken, setToken, takeToken, takeTokenIf, tokenIn, branch
+                              , currentToken, setToken, takeToken, takeTokenIf, tokenIn, region, branch
                               ) where
 
 import Control.Monad.Reader
@@ -22,8 +22,9 @@ import qualified Data.Set as S
 import Common.Name
 import Type.Type( Type )
 import Kind.Newtypes
-import Backend.Typed.Build( K, makeToken )
+import Backend.Typed.Build( K )
 import Backend.Typed.Syntax
+import Backend.Typed.Types( withToken )
 import Backend.Typed.Elab.TypeInfo
 
 -- `envHoles`: the variables bound to the parts of a constructor context under construction:
@@ -117,16 +118,15 @@ currentToken = gets stToken
 setToken :: Maybe Path -> E ()
 setToken k = modify (\st -> st{ stToken = k })
 
--- The current token, which the caller consumes. Without one (in total or `div` code), a fresh
--- token is made (`[cast-ev]`, see "The effect token" in `Syntax`).
+-- The current token, which the caller consumes. Code without a token takes one only inside a
+-- `[total]` region (`region`).
 takeToken :: E (K,VVal)
 takeToken
   = do mk <- currentToken
        case mk of
          Just k -> do setToken Nothing
                       return (id, Var k)
-         Nothing -> do k <- fresh "k"
-                       return (makeToken k, Var k)
+         Nothing -> failE "a token is needed in code without one"
 
 -- the token argument of a call, if the callee takes one (`takeToken`)
 takeTokenIf :: Bool -> E (K,[VVal])
@@ -141,6 +141,17 @@ tokenIn k m = do old <- currentToken
                  x <- m
                  setToken old
                  return x
+
+-- An expression at the type `result` that takes a token: in code without one, it is a
+-- `[total]` region, whose body has a token and its result type with a token.
+region :: E VExpr -> E VExpr
+region m
+  = do mk <- currentToken
+       case mk of
+         Just _ -> m
+         Nothing -> do k <- fresh "k"
+                       r <- result
+                       Total k <$> tokenIn (Just k) (withResult (withToken r) m)
 
 -- a branch, which starts with the current token, as do the other branches
 branch :: E a -> E a

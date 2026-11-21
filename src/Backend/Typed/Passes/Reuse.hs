@@ -200,6 +200,7 @@ ruE expr
       Plug{} -> plain
       CtxCopy{} -> plain
       CastEv{} -> plain
+      Total k e -> Total k <$> bind [(k,V VToken)] (ruE e)
       Memoize{} -> plain
       Dup x e -> Dup x <$> ruE e
       -- destructuring forms are handled above

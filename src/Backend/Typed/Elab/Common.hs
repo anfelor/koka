@@ -8,13 +8,13 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 -- Internal names and structural queries shared by the Core-to-typed-IR passes.
-module Backend.Typed.Elab.Common( isValue, isConExpr, identityCast, isPrim, linearContexts, isLinearContextPrim, nameUnreachable, nameYieldingNonFinal, isJoinName ) where
+module Backend.Typed.Elab.Common( isValue, isConExpr, identityCast, isPrim, linearContexts, isLinearContextPrim, testsYield, nameUnreachable, nameYieldingNonFinal, isJoinName ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.List( isInfixOf )
 import Common.Name
-import Common.NamePrim( nameCCtxApply, nameCCtxExtend, nameEffectOpen, nameCoreHnd )
+import Common.NamePrim( nameCCtxApply, nameCCtxExtend, nameEffectOpen, nameCoreHnd, nameYielding )
 import Core.Core( Expr(..), TName(..), VarInfo(..), Branch(..), Guard(..), Def(..), DefGroup(..), flattenDefGroups )
 
 -- marks an impossible alternative in Core; elaboration turns it into `[unreachable]`
@@ -84,6 +84,22 @@ isLinearContextPrim f
       Var (TName g _) (InfoExternal fmt) -> g `elem` [nameCCtxApply, nameCCtxExtend] && "_linear(" `isInfixOf` fmt
       _ | Just g <- identityCast f -> isLinearContextPrim g
       _ -> False
+
+-- whether an expression tests the yield flag, outside of its lambdas (but in the bodies of its
+-- join points)
+testsYield :: Expr -> Bool
+testsYield expr
+  = case expr of
+      App f args    -> any (`isPrim` f) [nameYielding, nameYieldingNonFinal] || any testsYield (f:args)
+      TypeLam _ e   -> testsYield e
+      TypeApp e _   -> testsYield e
+      Let dgs e     -> testsYield e || any (testsYield . bound) (flattenDefGroups dgs)
+      Case es brs   -> any testsYield es || or [testsYield t || testsYield b | Branch _ gs <- brs, Guard t b <- gs]
+      _             -> False
+  where
+    bound d = case defExpr d of
+                Lam _ _ body | isJoinName (defName d) -> body
+                e -> e
 
 -- The variables whose contexts are plugged or extended in place, directly or by a join point
 -- that they are passed to (pattern matching passes the free variables of a shared branch).

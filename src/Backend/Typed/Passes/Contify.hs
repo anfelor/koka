@@ -20,9 +20,9 @@ import Common.Name
 import Common.NamePrim( nameOpenNone )
 import Backend.Typed.Syntax
 import Backend.Typed.Passes.Common( defGamma, descendTyped, lamsTyped, NameSupply, freshFor, freshNameFrom, perBody, renameE )
-import Backend.Typed.Traversal( bindersE, descendE, fvA, fvE, fvV )
+import Backend.Typed.Traversal( bindersE, descendE, fvA, fvE, fvV, hasRegion )
 import Backend.Typed.Env( Env, envOf, M, evalM, liftE, state )
-import Backend.Typed.Query( Gamma, inferVar )
+import Backend.Typed.Query( Gamma, inferVar, tokenTy )
 
 type P a = M () NameSupply a
 
@@ -37,6 +37,7 @@ contifyE env g expr
   = case expr of
       Let f _ (Ret (Ptr _ lam@(Lam ps _ body))) rest
         | tailOnly f rest
+        , not (hasRegion body && any tokenTy (M.elems g))   -- no `[total]` region in token-threaded code
         , let captures = S.toList (fvA lam)
         , all (`notElem` bindersE rest) (f:captures)
         -> do ts <- mapM (liftE . inferVar g) captures
@@ -71,6 +72,7 @@ tailOnly f e = occurs e && tails e
           Let x _ e1 e2 -> not (occurs e1) && (x == f || tails e2)
           Gen{} -> not (occurs b)
           CastEv{} -> not (occurs b)
+          Total{} -> not (occurs b)
           Join _ _ _ ps e1 e2 -> (f `elem` [x | (x,_,_) <- ps] || not (occurs e1)) && tails e2
           _ -> getAll (getConst (descendE (Const . All . (/= f)) (Const . All . S.notMember f . fvV)
                              (\xs body -> Const (All (f `elem` xs || tails body))) b))

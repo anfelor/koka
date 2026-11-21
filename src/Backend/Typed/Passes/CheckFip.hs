@@ -252,6 +252,7 @@ fipE expr
               return (c <> c',full)
       Gen _ e -> fipE e
       CastEv _ _ e -> fipE e
+      Total k e -> bind [(k,V VToken)] (fipE e)
       Drop x e
         -> do t <- typeOfVar x
               u <- untracked t

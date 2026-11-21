@@ -22,7 +22,7 @@ import Backend.Typed.Syntax
 import Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents )
 import Backend.Typed.Traversal
 import Backend.Typed.Env( Env(..), M, dataBody, ask, local )
-import Backend.Typed.Query( Gamma, bindAll, inferVar, inferV, altTypes, lamGamma, uniqueGamma, unboxRuGamma, copyRuGamma, lockGamma )
+import Backend.Typed.Query( Gamma, bindAll, inferVar, inferV, altTypes, lamGamma, tokenTy, uniqueGamma, unboxRuGamma, copyRuGamma, lockGamma )
 import Backend.Typed.Pretty( ppr )
 import Common.Name( Name, newHiddenName )
 import Common.NamePrim( nameTpReuse )
@@ -527,6 +527,8 @@ subGammas env g expr
   = case expr of
       Let x t _ _ -> return [g, M.insert x (V t) g]
       IfYielding _ (k3,_) (k2,_) -> return [M.insert k3 (V VToken) g, M.insert k2 (V VToken) g]
+      Total k _ -> return [M.insert k (V VToken) g]
+      Gen _ _ -> return [M.filter (not . tokenTy) g]
       Join _ _ _ ps _ _ -> return [bindAll [(x,V t) | (x,_,t) <- ps] g, g]
       Dup _ _ -> return [g]
       IsUnique x _ _ -> return [uniqueGamma g x, g]
@@ -609,4 +611,5 @@ isRead expr
       Plug{}      -> False
       CtxCopy{}   -> False
       CastEv{}    -> False
+      Total{}     -> False
       Memoize{}   -> False

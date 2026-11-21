@@ -28,7 +28,7 @@ import qualified Core.CoreVar as CV
 import Core.Pretty()
 import qualified Type.TypeVar as TV
 import Backend.Typed.Syntax
-import Backend.Typed.Build( K, compose, prodVal, padFields, dropToken )
+import Backend.Typed.Build( K, compose, prodVal, padFields )
 import Backend.Typed.Traversal( child )
 import Backend.Typed.Elab.Types( typeDefs )
 import Backend.Typed.Elab.TypeInfo
@@ -38,7 +38,7 @@ import Backend.Typed.Elab.Representation
 import Backend.Typed.Elab.Monad
 import Backend.Typed.Elab.Coerce
 import Backend.Typed.Elab.Lazy( whnfTests )
-import Backend.Typed.Elab.Common( isValue, identityCast, isPrim, linearContexts, isLinearContextPrim, nameUnreachable, nameYieldingNonFinal, isJoinName )
+import Backend.Typed.Elab.Common( isValue, identityCast, isPrim, linearContexts, isLinearContextPrim, testsYield, nameUnreachable, nameYieldingNonFinal, isJoinName )
 import Backend.Typed.Pretty( ppr )
 
 -- programs
@@ -235,6 +235,15 @@ elabTail :: C.Expr -> E VExpr
 elabTail expr
   = case expr of
       C.Let [] body -> elabTail body
+      C.Let (C.DefNonRec (C.Def{ C.defName = j }) : _) _ | isJoinName j, testsYield expr
+        -> region (elabJoin expr)
+      _ -> elabJoin expr
+
+-- In code without a token, a test for a yield is a `[total]` region (`region`), and so is a
+-- scope of join points that contains one, as a region cannot jump to a join point outside.
+elabJoin :: C.Expr -> E VExpr
+elabJoin expr
+  = case expr of
       C.Let (C.DefNonRec (C.Def{ C.defName = j, C.defExpr = lam }) : dgs) body | isJoinName j, Just (tvs,pars,e1) <- splitLam lam
         -> do let linear = linearContexts e1
                   tvs'   = [typevarId tv | tv <- tvs, tvarStar tv]
@@ -257,9 +266,8 @@ elabTail expr
       C.TypeLam tvs e | not (any tvarStar tvs) -> elabTail e
       C.TypeLam tvs e | not (isValue expr) -> elabGen [typevarId tv | tv <- tvs, tvarStar tv] e (typeOf expr) >>= atResult (typeOf expr)
       _ | Just (e2,e3) <- yieldTest expr
-        -> do token <- currentToken
-              (kt,k) <- takeToken
-              kt <$> testYield token k (elabTail e3) (elabTail e2)
+        -> region $ do (kt,k) <- takeToken
+                       kt <$> testYield k (elabTail e3) (elabTail e2)
       C.Case [scrut] brs -> elabCase scrut brs
       C.Var (TName x _) _ | x == nameUnreachable -> Unreachable <$> result
       C.Case _ _ -> failE "case with multiple scrutinees after matching"
@@ -327,7 +335,7 @@ elabLet def body
                  dummy <- mayBeDummy (C.defExpr def)
                  case yieldTest body of
                    Just (e2,e3) | dummy, not (S.member x (S.map getName (CV.fv e3)))
-                     -> letYield def t e2 e3
+                     -> region (letYield def t e2 e3)
                    _ -> do (k,t') <- bindExpr (root x) t (C.defExpr def)
                            k <$> withTypedLocals [(x,t')] (elabTail body)
   where
@@ -336,38 +344,34 @@ elabLet def body
 
 -- `val x = e₁` followed by a test for a yield: the result `r : t? ⊗ KCtx` of `e₁` is tested on
 -- its token `r.1` (`[if-yielding]`), and the non-yielding branch extracts `x` from `r.0`
--- (`[is-null]`). Each branch continues with its new token, or drops it in an expression
--- without one (where `e₁` takes a fresh token, `takeToken`).
+-- (`[is-null]`). Each branch continues with its new token.
 letYield :: C.Def -> VType -> C.Expr -> C.Expr -> E VExpr
 letYield def t e2 e3
-  = do token <- currentToken
-       let u = withToken (orNull t)
+  = do let u = withToken (orNull t)
            x = C.defName def
        e1' <- elabExprAt u (C.defExpr def)
        r <- fresh "r"
        r0 <- fresh "r"
        k <- fresh "k"
        w <- result
-       test <- testYield token (Var k) (elabTail e3)
+       test <- testYield (Var k) (elabTail e3)
                  (IsNull (Var r0) (Unreachable w) . (,) (root x) <$> withTypedLocals [(x,t)] (elabTail e2))
        return (Let r u e1' (Proj (Var r) 0 r0 (Proj (Var r) 1 k test)))
 
--- `[if-yielding]` on the token `k`, with the yielding branch `m3` and the other branch `m2`.
--- Each branch continues with its new token in a token-threaded expression (`token` is the
--- token before the test), and drops it in an expression without one.
-testYield :: Maybe Path -> VVal -> E VExpr -> E VExpr -> E VExpr
-testYield token k m3 m2
+-- `[if-yielding]` on the token `k`, with the yielding branch `m3` and the other branch `m2`,
+-- each of which continues with its new token
+testYield :: VVal -> E VExpr -> E VExpr -> E VExpr
+testYield k m3 m2
   = IfYielding k <$> branch m3 <*> branch m2
   where
     branch m = do k' <- fresh "k"
-                  e <- if isJust token then tokenIn (Just k') m
-                       else do d <- fresh "u"
-                               dropToken d (Var k') <$> tokenIn Nothing m
+                  e <- tokenIn (Just k') m
                   return (k',e)
 
 -- `let x : t = e in □`, and the type of x. In a token-threaded expression, an `e` that calls
 -- something that takes a token (`usesToken`) is elaborated at `t ⊗ KCtx`, whose token is the
--- next one; any other `e` does not see the token. An `e` that may be the dummy of a yield,
+-- next one; any other `e` does not see the token. In code without a token, such an `e` is one
+-- `[total]` region (`region`). An `e` that may be the dummy of a yield,
 -- which Koka does not test (`mayBeDummy`), is elaborated at `t?`: its uses test it for null,
 -- unless they pass it on (to a prompt function of `std/core/hnd`).
 bindExpr :: Path -> VType -> C.Expr -> E (K,VType)
@@ -383,7 +387,7 @@ bindExpr x t0 expr
                  k <- fresh "k"
                  setToken (Just k)
                  return (Let p tt e . Proj (Var p) 0 x . Proj (Var p) 1 k, t)
-         else do e <- tokenIn Nothing (elabExprAt t expr)
+         else do e <- tokenIn Nothing (withResult t ((if usesToken en expr then region else id) (elabTail expr)))
                  return (Let x t e, t)
 
 -- Whether an expression may be the dummy of a yield, as one of its tails calls a function
@@ -602,14 +606,17 @@ funType f = do t <- vt (typeOf f)
 -- coerced to the type `result` (`coerceExpr`, which tests a result that may be the dummy of a
 -- yield where Koka does not). The result of a final yield (`trusted`) is always the dummy: where
 -- Koka types it at a total type (`prompt` resumes with `{ yield-to-final(m, …) }`), it is cast.
+-- In code without a token, a call that takes one is a `[total]` region.
 callWith :: Bool -> ([VVal] -> E VExpr) -> [VType] -> VType -> [C.Expr] -> E VExpr
 callWith trusted call params res args
-  = do let (params0,token) = tokenParam [((),p) | p <- params]
-       (ks,vs) <- unzip <$> mapM (\(p,arg) -> elabValAt p arg) (zip (map snd params0) args)
+  = (if token then region else id) $
+    do (ks,vs) <- unzip <$> mapM (\(p,arg) -> elabValAt p arg) (zip (map snd params0) args)
        (kt,tv) <- takeTokenIf token
        expect <- result
        app <- call (vs ++ tv)
        compose ks . kt <$> local (\e -> e{ envTrusted = envTrusted e || trusted }) (coerceExpr res expect app)
+  where
+    (params0,token) = tokenParam [((),p) | p <- params]
 
 splitTypeApp :: C.Expr -> (Maybe (TName,C.VarInfo),[Type])
 splitTypeApp expr

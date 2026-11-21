@@ -116,6 +116,7 @@ descendTails go expr
       Jump{} -> Just (pure expr)
       Gen{} -> Nothing
       CastEv{} -> Nothing
+      Total{} -> Nothing
       Join Rec{} _ _ _ _ _ -> Nothing
       _ | null (subexprs expr) -> Nothing
         | otherwise -> Just (descendE pure pure (\_ e -> go e) expr)

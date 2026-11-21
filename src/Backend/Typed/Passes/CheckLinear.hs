@@ -532,6 +532,9 @@ checkE env g js q expr
       Append c d -> uses [uniqueV env g c, uniqueV env g d]
       CtxCopy c -> ownedV env g c
       CastEv _ _ e -> ownedResult expr >> checkE env g M.empty Owned e
+      -- the region makes its token, which its body consumes
+      Total k e -> do ownedResult expr
+                      leave [(k,Owned)] =<< withOwners [(k,Owned)] (checkE env (M.insert k (V VToken) g) M.empty Owned e)
       Plug c v -> ownedResult expr >> uses [uniqueV env g c, ownedV env g v]
       Memoize c _ _ v -> ownedResult expr >> uses [ownedV env g v, ownedV env g c]
       CaseLit v alts def -> before (borrowedV env g v) (branches =<< mapM (checkE env g js q) (def : map snd alts))

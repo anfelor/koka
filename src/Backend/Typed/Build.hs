@@ -19,16 +19,6 @@ type K = VExpr -> VExpr
 compose :: [K] -> K
 compose = foldr (.) id
 
--- The dummy of a yield at the type `W`: `ret null : V?`, where `W` is `V?` or `V`, cast to `W`
--- if that is not `V?`.
-yielded :: VType -> VExpr
-yielded w
-  | alphaEq w (orNull v) = dummy
-  | otherwise = CastEv (orNull v) w dummy
-  where
-    v = unNull w
-    dummy = Ret (Null v)
-
 -- The dummy of a yield with the token `k` at the type `W`, the result of a token-threaded
 -- function: `ret (null, k) : V? ⊗ KCtx`, where `W` is `V? ⊗ KCtx` or `V ⊗ KCtx`, cast to `W`
 -- if that is not `V? ⊗ KCtx`.
@@ -41,7 +31,7 @@ yieldedWith w k
     u = withToken (orNull v)
     dummy = Ret (Tuple [Null v, k])
 
--- the dummy of a yield, as `yielded` or `yieldedWith` builds it
+-- the dummy of a yield, as `yieldedWith` builds it
 isYielded :: VExpr -> Bool
 isYielded e
   = case e of
@@ -53,15 +43,6 @@ isYielded e
                 Null _ -> True
                 Tuple [Null _, _] -> True
                 _ -> False
-
--- `let k : KCtx = cast-ev[𝟙, KCtx] ret ()`: a token where there is none (see "The effect
--- token" in `Syntax`)
-makeToken :: Path -> K
-makeToken k = Let k VToken (CastEv VUnit VToken (Ret UnitV))
-
--- `let x : 𝟙 = cast-ev[KCtx, 𝟙] ret k`: the token `k` dropped where code has none
-dropToken :: Path -> VVal -> K
-dropToken x k = Let x VUnit (CastEv VToken VUnit (Ret k))
 
 -- the product of values (`Types.prodV`)
 prodVal :: [VVal] -> VVal

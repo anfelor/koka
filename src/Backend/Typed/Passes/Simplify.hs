@@ -43,7 +43,7 @@ import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
 import Control.Monad.State( State, evalState, state )
 import Backend.Typed.Syntax
-import Backend.Typed.Traversal( descendA, descendAll, descendV, fvE, fvV, jumpArgs, stepsFrom, within )
+import Backend.Typed.Traversal( descendA, descendAll, descendV, fvE, fvV, hasRegion, jumpArgs, stepsFrom, within )
 import Backend.Typed.Passes.Common( mapAll, NameSupply, SubstExpr, cloneE, defScope, freshFor, freshNameFrom, project, substJump, substJumpM, substName, substStep, substTypesE, valueAt )
 import Backend.Typed.Types( Types(..) )
 
@@ -97,12 +97,13 @@ copyE scope sub expr
       _ -> inlineApply (substStep copyE scope sub expr)
 
 -- Copy propagation exposes let-bound adapters that elaboration cannot fuse.
--- Inline only an immediate, single call, including one whose result is let-bound.
+-- Inline only an immediate, single call, including one whose result is let-bound, and not a
+-- `[total]` region, which may be in token-threaded code here (`Traversal.hasRegion`).
 -- Parameter bindings must not capture names in the actual arguments.
 inlineApply :: VExpr -> VExpr
 inlineApply expr
   = case expr of
-      Let f _ (Ret (Ptr _ (Lam ps _ body))) rest
+      Let f _ (Ret (Ptr _ (Lam ps _ body))) rest | not (hasRegion body)
         -> let apply (Deref (Var x) g (App h vs))
                  | x == f, g == h, length ps == length vs
                  , all (S.notMember f . fvV) vs

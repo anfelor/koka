@@ -92,10 +92,19 @@ descendAll fe = descendE pure (lamsV (\ps _ -> fe [x | (x,_,_) <- ps])) fe
 subexprs :: VExpr -> [VExpr]
 subexprs = getConst . descendE (const (Const [])) (const (Const [])) (\_ e -> Const [e])
 
+-- Whether an expression has a `[total]` region, outside of its lambdas. Such an expression
+-- cannot be inlined into token-threaded code.
+hasRegion :: VExpr -> Bool
+hasRegion expr
+  = case expr of
+      Total{} -> True
+      _ -> any hasRegion (subexprs expr)
+
 -- Like `descendE`, but each binder comes with its steps from the scrutinee, and `fb` gives new
 -- binders for a subexpression. The binders of a `let`, a dup, a join point, the credit of
--- `[unbox-ru]` and `[copy-ru]`, the cell of `[lock]` and the tokens of `[if-yielding]` have no
--- steps, and neither has that of `[unscalar]`, which copies the contents of a scalar.
+-- `[unbox-ru]` and `[copy-ru]`, the cell of `[lock]` and the tokens of `[if-yielding]` and
+-- `[total]` have no steps, and neither has that of `[unscalar]`, which copies the contents of
+-- a scalar.
 descendB :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([(Path,[Step])] -> VExpr -> f ([Path],VExpr)) -> VExpr -> f VExpr
 descendB fn fv fb expr
   = case expr of
@@ -136,6 +145,7 @@ descendB fn fv fb expr
       Plug c v              -> Plug <$> fv c <*> fv v
       CtxCopy c             -> CtxCopy <$> fv c
       CastEv u t e          -> CastEv u t <$> plain e
+      Total k e             -> uncurry Total <$> one k [] e
       Memoize c d k v       -> Memoize <$> fv c <*> pure d <*> pure k <*> fv v
   where
     plain e = snd <$> fb [] e
@@ -357,6 +367,7 @@ destructAOf expr
       Plug{} -> Nothing
       CtxCopy{} -> Nothing
       CastEv{} -> Nothing
+      Total{} -> Nothing
       Memoize{} -> Nothing
 
 destructVOf :: VExpr -> Maybe (Destruct VVal)
@@ -396,6 +407,7 @@ destructVOf expr
       Plug{} -> Nothing
       CtxCopy{} -> Nothing
       CastEv{} -> Nothing
+      Total{} -> Nothing
       Memoize{} -> Nothing
 
 -- An alternative of a test with two alternatives (`[case]`, `[case-a]` or `[split-a]`), taken
