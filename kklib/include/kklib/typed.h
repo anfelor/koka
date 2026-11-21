@@ -32,6 +32,23 @@ static inline kk_tag_t kt_heap_tag(kk_box_t b, kk_context_t* ctx) {
   return kk_block_tag(kt_box_as_ptr(b,ctx));
 }
 #define kt_yielded(T) ({ T _kt_y = {0}; kk_valuetype_unbox_from_any((kk_box_t*)&_kt_y,sizeof(T),kk_box_any(_ctx),KK_OWNED,_ctx); _kt_y; })
+static inline bool kt_is_box_any(kk_box_t b, kk_context_t* ctx) {
+  return kk_box_eq(b,kk_datatype_ptr_box(ctx->kk_box_any));
+}
+// the null tag of a value sum in the dummy of a yield: all ones, an odd word (so dup and drop
+// treat it as a value) that is never one of the small integer tags
+#define kt_null_tag ((kk_integer_t){ (kk_intb_t)-1 })
+static inline bool kt_is_null_tag(kk_integer_t t) {
+  return t.ibox == (kk_intb_t)-1;
+}
+// With KT_CHECK_YIELD, report where the niche test of a yielded value (`CGen.nullTest`)
+// disagrees with the yield flag; on stdout, which the test suite compares.
+#ifndef KT_CHECK_YIELD
+#define KT_CHECK_YIELD 0
+#endif
+#define kt_yield_check(isnull) \
+  do { if (KT_CHECK_YIELD) { bool _kt_n = (isnull); bool _kt_f = kk_yielding(_ctx); \
+       if (_kt_n != _kt_f) { printf("typed yield check: %s: null=%d yielding=%d\n",__func__,(int)_kt_n,(int)_kt_f); fflush(stdout); } } } while(0)
 static inline __attribute__((always_inline)) kk_box_t kt_box_dup_inline(kk_box_t b, kk_context_t* ctx) {
   return kk_box_dup(b,ctx);
 }

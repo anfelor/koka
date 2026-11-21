@@ -613,13 +613,44 @@ unboxBlock t e
                  return ("((" <.> bt <.> "*)kt_box_as_ptr(" <.> e <.> ",_ctx))->p")
 
 -- The dummy value of a yield: Koka's `box-any` in every pointer, which the runtime may drop
--- (`kcompose`), as `kk_valuetype_unbox_from_any` makes it.
+-- (`kcompose`), as `kk_valuetype_unbox_from_any` makes it, with the null in its niche (`niche`).
 yieldedValue :: CT -> G Doc
 yieldedValue ct
-  = case ct of
-      CUnit -> return "kk_Unit"
-      CBox -> return "kk_box_any(_ctx)"
-      _ -> return ("kt_yielded(" <.> cty ct <.> ")")
+  = return $ case (ct, niche ct) of
+      (CUnit, _) -> "kk_Unit"
+      (CBox, _) -> "kk_box_any(_ctx)"
+      (CEnum _, _) -> enumNull ct
+      (_, Just n@(_, leaf)) | leaf /= CBox
+        -> stmtExpr [cty ct <+> "_kt_d = kt_yielded(" <.> cty ct <.> ");", nicheField n "_kt_d" <+> "=" <+> leafNull leaf <.> ";"] "_kt_d"
+      _ -> "kt_yielded(" <.> cty ct <.> ")"
+
+-- The null of a tag (of an enum or a value sum) is all ones, which is never a tag (`enumSize`,
+-- and an odd word that is not one of the small integers 1..n); a pointer's is `box-any`.
+leafNull :: CT -> Doc
+leafNull leaf
+  = case leaf of
+      CSum _ -> "kt_null_tag"
+      _ -> enumNull leaf
+
+enumNull :: CT -> Doc
+enumNull ct = "((" <.> cty ct <.> ")-1)"
+
+-- the niche leaf of a value (`niche`): a pointer or a tag
+nicheField :: ([Int],CT) -> Doc -> Doc
+nicheField (path,leaf) e
+  = let field = hcat (e : [".f" <.> int i | i <- path])
+    in case leaf of
+         CSum _ -> field <.> "._tag"
+         _ -> field
+
+-- whether the niche of a value is the null
+nullTest :: ([Int],CT) -> Doc -> Doc
+nullTest n@(_,leaf) e
+  = let field = nicheField n e
+    in case leaf of
+         CBox -> "kt_is_box_any(" <.> field <.> ",_ctx)"
+         CSum _ -> "kt_is_null_tag(" <.> field <.> ")"
+         _ -> "(" <.> field <+> "==" <+> enumNull leaf <.> ")"
 
 -- literals
 
@@ -775,7 +806,11 @@ genE cx dest expr
         -> do s1 <- genBound cx x t e1
               s2 <- genE (bindVar cx x (V t)) dest e2
               s3 <- genE cx dest e3
-              return (s1 ++ [ifChain [("kk_yielding(_ctx)",s3)] s2])
+              ct <- ctype t
+              let check = case niche ct of
+                            Just n -> ["kt_yield_check(" <.> nullTest n (localName x) <.> ");"]
+                            Nothing -> []
+              return (s1 ++ check ++ [ifChain [("kk_yielding(_ctx)",s3)] s2])
       Yielded t
         -> do ct <- ctype t
               e <- yieldedValue ct

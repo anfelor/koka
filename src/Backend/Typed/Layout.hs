@@ -11,7 +11,7 @@
 -- decreasing alignment. Sums have a tag and storage for their largest alternative.
 -- Sizes and alignment currently assume 64-bit words.
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Layout( leaves, isEnum, CT(..), EnumSize(..), enumBytes, layout, orderFields, shapeIsHeap
+module Backend.Typed.Layout( leaves, isEnum, CT(..), EnumSize(..), enumBytes, layout, orderFields, shapeIsHeap, niche
                            , checkLayout, scanOf, blockSize, sizeAlign, fieldOffsets
                            ) where
 
@@ -101,10 +101,28 @@ layout t
                     CUnit -> Nothing
                     ct    -> Just ct
 
+-- The niche of a layout: the leaf at a path of product positions that the dummy of a yield
+-- (`CGen.yieldedValue`) sets to a pattern that no valid value has: `ctx->kk_box_any` for a
+-- pointer, and all ones for the tag of an enum (`enumSize` keeps it free) or of a value sum
+-- (never a small integer tag). Without a niche, the layout is full: the dummy is a valid value.
+niche :: CT -> Maybe ([Int],CT)
+niche ct
+  = case ct of
+      CBox -> Just ([],ct)
+      CSum _ -> Just ([],ct)
+      CEnum _ -> Just ([],ct)
+      CProd fs -> case [(i:path,leaf) | (i,f) <- fs, Just (path,leaf) <- [niche f]] of
+                    n:_ -> Just n
+                    [] -> Nothing
+      CPrim _ -> Nothing
+      CUnit -> Nothing
+      CReuse -> Nothing
+
+-- the tags are 0 to n-1; all ones stays free for the dummy of a yield (`niche`)
 enumSize :: Int -> EnumSize
 enumSize n
-  | n <= 256   = Enum8
-  | n <= 65536 = Enum16
+  | n <= 255   = Enum8
+  | n <= 65535 = Enum16
   | otherwise  = Enum32
 
 -- scanned fields first (pointers before mixed ones), then raw fields by decreasing alignment
