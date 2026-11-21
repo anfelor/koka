@@ -62,7 +62,7 @@ import Data.Functor.Const( Const(..) )
 import Data.Maybe( isNothing, listToMaybe )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Build( K, compose )
+import Backend.Typed.Build( K, compose, yielded )
 import Backend.Typed.Traversal( Destruct(..), child, descendA, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fieldsAt, fvA, fvE, fvV, scrutVar, stepsFrom, takesContents, within )
 import Backend.Typed.Passes.Common( isRead, paramModes, prefixes, trivialTy, NameSupply, dropValue, freshFor, perDef, freshPathFrom, nameChildren, projectAll, scopeOf )
 import Backend.Typed.Env( Env(..), envOf, M, evalM, get, gets, lift, liftE, put, state, StateT, runStateT )
@@ -302,7 +302,6 @@ percE' pe owned expr
               e2' <- percE (bind pe [(x,V t)]) (own2 `S.union` ownedOf pe [(x,V t)]) e2
               e3' <- percE pe own2 e3
               return (hoistdupAll (\e1'' -> LetYield x t e1'' e2' e3') e1')
-      Yielded _ -> return expr
       Unreachable _ -> return expr
       Call f tys vs
         -> do let ms = paramModes (peEnv pe) f (length vs)
@@ -519,7 +518,7 @@ postCall pe owned mvs k call resTp
                  t <- resTp
                  case t of
                    VYield w -> do body <- dropNames pe drops (Ret (Pure (Var r)))
-                                  yielding <- dropNames pe drops (Yielded w)
+                                  yielding <- dropNames pe drops (yielded t)
                                   return (k (LetYield r w call body yielding))
                    _ -> do body <- dropNames pe drops (Ret (Var r))
                            return (k (Let r t call body))

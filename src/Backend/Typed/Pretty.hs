@@ -67,8 +67,8 @@ reserved s = null s || "(" `isPrefixOf` s || s `elem` keywords || "box@" `isPref
   where
     numbered p = p `isPrefixOf` s && not (null (drop (length p) s)) && all isDigit (drop (length p) s)
     keywords = words ("ret let in of case split at if-whnf whnf delay ptr roll box scalar pack dup drop free"
-                      ++ " if-unique if-full then else join rec jump fn gen forall exists yielded unreachable"
-                      ++ " yielding cast-ev memoize ctx ctx-copy hole pure up down lock @ @copy _"
+                      ++ " if-unique if-full then else join rec jump fn gen forall exists unreachable"
+                      ++ " yielding cast-ev memoize ctx ctx-copy hole pure some null is-null up down lock @ @copy _"
                       ++ " module data con fun val extern foreign Box Scalar I Y NaN Infinity"
                       ++ " char ssize_t intptr_t float64 float32 int64 int32 int16 int8 uint8")
 
@@ -171,6 +171,7 @@ prettyV pp t
       VCtx f a b -> text ("ctx" ++ (if f == Full then "+" else "")) <.> angles (commaSep [prettyA pp a, prettyA pp b])
       VCell n a -> text ("cell" ++ show n) <.> angles (prettyA pp a)
       VYield b  -> text "Y" <+> prettyV pp b
+      VOrNull b -> prettyV pp b <.> text "?"
 
 -- a component of a sum or product with its label, unless that is the default one for its
 -- position (`tagCon`, `posField`)
@@ -260,6 +261,8 @@ prettyVal pp val
       Hole        -> text "hole"
       Context _ v -> text "ctx" <+> atomVal pp v
       Pure v      -> text "pure" <+> atomVal pp v
+      Some v      -> text "some" <+> atomVal pp v
+      Null _      -> text "null"
 
 args :: PP -> [VVal] -> Doc
 args pp vs = parens (commaSep (map (prettyVal pp) vs))
@@ -280,6 +283,7 @@ atomVal pp v
       DupV _      -> parens (prettyVal pp v)
       Context _ _ -> parens (prettyVal pp v)
       Pure _      -> parens (prettyVal pp v)
+      Some _      -> parens (prettyVal pp v)
       Up _        -> parens (prettyVal pp v)
       Down _ _    -> parens (prettyVal pp v)
       _           -> prettyVal pp v
@@ -303,7 +307,6 @@ prettyExpr pp expr
       Let x t e1 e2 -> letIn empty (pp x <+> colon <+> prettyV pp t) (align (prettyExpr pp e1)) e2
       LetYield x t e1 e2 e3 -> text "let" <+> pp x <+> colon <+> prettyV pp t <+> text "=" <+> align (prettyExpr pp e1)
                                <-> indent 2 (text "yielding" <+> align (prettyExpr pp e3)) <-> text "in" <+> align (prettyExpr pp e2)
-      Yielded _ -> text "yielded"
       Unreachable _ -> text "unreachable"
       Call f [] vs -> nm f <.> args pp vs
       Call f ts vs -> nm f <.> tyArgs pp ts <.> args pp vs
@@ -318,6 +321,7 @@ prettyExpr pp expr
       Unroll v x e -> letIn empty (text "roll" <+> pp x) (pp v) e
       Unbox v x e -> letIn empty (text "box" <+> pp x) (pp v) e
       Unscalar m v x e -> letIn (mode m) (text "scalar" <+> pp x) (pp v) e
+      IsNull v n (x,e) -> caseOf (text "is-null") (prettyVal pp v) [(text "null", n), (pp x, e)]
       Unpack v vs x e -> letIn empty (text "pack" <.> brackets (commaSep (map tv vs)) <+> pp x) (prettyVal pp v) e
       CaseLit v alts def -> caseOf (text "case") (prettyVal pp v) ([(prettyLit l, e) | (l,e) <- alts] ++ [(text "_", def)])
       Dup x e -> text "dup" <+> pp x <.> semi <-> prettyExpr pp e

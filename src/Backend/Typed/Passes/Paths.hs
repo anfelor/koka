@@ -130,7 +130,6 @@ renE global ren expr
     annotated = case expr of
       Let x t e1 e2 -> Let x (replaceVType sub t) e1 e2
       LetYield x t e1 e2 e3 -> LetYield x (replaceVType sub t) e1 e2 e3
-      Yielded t -> Yielded (replaceVType sub t)
       CastEv u t e -> CastEv (replaceVType sub u) (replaceVType sub t) e
       Unreachable t -> Unreachable (replaceVType sub t)
       Call f ts vs -> Call f (map (replaceAType sub) ts) vs

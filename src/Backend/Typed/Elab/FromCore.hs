@@ -235,7 +235,8 @@ yieldTest expr
 
 -- The parts of a context under construction are not bound: their uses become parts of the
 -- `ctx` value (see `elabCtx`). Koka's test for a yield after `val x = e₁` (whose yielding
--- branch does not use `x`) is a `[let-yield]`, which elaborates `e₁` at `Y V`.
+-- branch does not use `x`) is a `[let-yield]`, which elaborates `e₁` at `Y (V?)` and extracts
+-- the V (`[is-null]`).
 elabLet :: C.Def -> C.Expr -> E VExpr
 elabLet def body
   = do en <- env
@@ -254,8 +255,11 @@ elabLet def body
          else do t <- vt (C.defType def)
                  case yieldTest body of
                    Just (e2,e3) | not (S.member x (S.map getName (CV.fv e3)))
-                     -> do e1 <- elabExprAt (VYield t) (C.defExpr def)
-                           LetYield (root x) t e1 <$> withLocals [x] (elabTail e2) <*> elabTail e3
+                     -> do e1 <- elabExprAt (VYield (orNull t)) (C.defExpr def)
+                           body <- withLocals [x] (elabTail e2)
+                           r <- fresh "r"
+                           w <- result
+                           LetYield r (orNull t) e1 (IsNull (Var r) (Unreachable w) (root x,body)) <$> elabTail e3
                    _ -> do e1 <- elabExprAt t (C.defExpr def)
                            Let (root x) t e1 <$> withLocals [x] (elabTail body)
   where

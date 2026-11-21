@@ -70,14 +70,14 @@ elabHigher nt tp
       _              -> Left ("unsupported type constructor: " ++ show tp)
 
 -- The result of a function whose calls may yield, as Koka's monadic translation decides
--- (`Core.isMonType`), may be the dummy of a yield (`Y W`).
+-- (`Core.isMonType`), comes with the yield flag and may be the dummy of a yield (`Y (W?)`).
 elabFunType :: Newtypes -> Type -> Tr AType
 elabFunType nt tp
   = case tp of
       TSyn _ _ t      -> elabFunType nt t
       TForall tvs rho -> forallA (map tvarId (filter tvarStar tvs)) <$> elabFunType nt rho
       TFun pars eff res -> AFun <$> mapM (\(_,t) -> (,) Owned <$> elabType nt t) pars
-                                <*> ((if isMonEffect eff then VYield else id) <$> elabType nt res)
+                                <*> ((if isMonEffect eff then VYield . orNull else id) <$> elabType nt res)
       _ -> do t <- elabType nt tp
               case t of
                 VPtr a -> Right a

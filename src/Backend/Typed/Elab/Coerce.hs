@@ -12,7 +12,7 @@ module Backend.Typed.Elab.Coerce( coerce, coerceInst, coerceExpr, genVal, genPtr
 import qualified Data.Map as M
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Build( K, compose )
+import Backend.Typed.Build( K, compose, yielded )
 import Backend.Typed.Traversal( child )
 import Backend.Typed.Types
 import Backend.Typed.Layout( leaves )
@@ -34,18 +34,24 @@ genPtr t@(VPtr (AForall tvs _)) v
        return (Let x t (Gen tvs (Ret v)), Var x)
 genPtr _ v = return (id, v)
 
--- A value is injected into `Y W` by `[pure]`. A value that may be the dummy of a yield is not
--- coerced: `coerceExpr` tests the result of a call, or casts it where Koka does not test it.
--- A function used where its results may yield (`addsY`) is cast (`[cast-ev]`), not
--- eta-expanded: it does not yield, so the tests of its callers take the non-yielding branch.
+-- A value is injected into `Y W` by `[pure]`, and into `W?` by `[some]`. A value that may yield
+-- or be null is not coerced: `coerceExpr` tests the result of a call, or casts it where Koka
+-- does not test it. A function used where its results may yield (`addsY`) is cast
+-- (`[cast-ev]`), not eta-expanded: it does not yield, so the tests of its callers take the
+-- non-yielding branch.
 coerce :: VType -> VType -> VVal -> E (K,VVal)
 coerce from to v
   | alphaEq from to = return (id,v)
   | VYield w <- to, not (isYield from)
   = do (k,v') <- coerce from w v
        return (k, Pure v')
+  | VOrNull w <- to, not (isNull from)
+  = do (k,v') <- coerce from w v
+       return (k, Some v')
   | VYield _ <- from
   = failE ("cannot coerce " ++ ppr from ++ " to " ++ ppr to ++ " without a test for a yield")
+  | VOrNull _ <- from
+  = failE ("cannot coerce " ++ ppr from ++ " to " ++ ppr to ++ " without a test for null")
   | addsY from to = castV from to v
   | not (isPtr from) && alphaEq to (boxrep from) = boxV from v
   | not (isPtr to) && alphaEq from (boxrep to) = unboxV to v
@@ -130,6 +136,7 @@ boxLeaf t v
       VCtx _ _ _  -> Box v
       VCell _ _   -> Box v
       VYield _    -> Box v
+      VOrNull _   -> Box v
 
 isMultiSum :: VType -> Bool
 isMultiSum (VSum ts) = length ts > 1
@@ -162,6 +169,7 @@ unboxAV t a
       VCtx _ _ _  -> unbox Unbox
       VCell _ _   -> unbox Unbox
       VYield _    -> unbox Unbox
+      VOrNull _   -> unbox Unbox
   where
     unbox form = do x <- fresh "x"
                     return (form a x, Var x)
@@ -175,17 +183,19 @@ unboxLeaf t j y
        return (k, Inj i t w)
   | otherwise = unboxAV t y
 
--- whether two types differ only in their `Y`s, so that `[cast-ev]` relates them
+-- whether two types differ only in their `Y`s and `?`s, so that `[cast-ev]` relates them
 castable :: VType -> VType -> Bool
 castable from to = alphaEq (eraseY from) (eraseY to)
 
--- `to` is `from` with `Y`s added to the results of functions (`V` to `Y V`), where function
--- parameters are contravariant and all other types are compared as they are
+-- `to` is `from` with `Y`s and `?`s added to the results of functions (`V` to `Y (V?)`), where
+-- function parameters are contravariant and all other types are compared as they are
 addsY :: VType -> VType -> Bool
 addsY from to
   | alphaEq from to = True
   | VYield t <- to, not (isYield from) = addsY from t
   | VYield f <- from, VYield t <- to = addsY f t
+  | VOrNull t <- to, not (isNull from) = addsY from t
+  | VOrNull f <- from, VOrNull t <- to = addsY f t
   | VPtr a <- from, VPtr b <- to = addsA a b
   | otherwise = False
   where
@@ -214,8 +224,14 @@ coerceInst from to v
 isYield :: VType -> Bool
 isYield = snd . unYield
 
--- The expression `e : from` at the type `to`. Where `to` is `Y W`, a result `Y U` is tested for
--- a yield (`[let-yield]`) and the yielding branch is `yielded`. Otherwise, Koka does not test
+isNull :: VType -> Bool
+isNull t = case t of
+             VOrNull _ -> True
+             _ -> False
+
+-- The expression `e : from` at the type `to`. Where `to` is `Y W`, a result `Y (U?)` is tested
+-- for a yield (`[let-yield]`), its U is extracted (`[is-null]`), and the yielding branch is the
+-- dummy (`Build.yielded`). Otherwise, Koka does not test
 -- the result: it knows that it cannot yield (such as the result of an effect-polymorphic
 -- function at a total effect, of a `deref`, or of a call through `unsafe-total-cast`, which
 -- makes it look total), or the code tests the flag itself (`std/core/hnd`, and its `local-var` and
@@ -223,7 +239,7 @@ isYield = snd . unYield
 -- or `finally-prompt` receives). A result that differs from `to` only in `Y` is then cast
 -- (`[cast-ev]`, unless that would add a `Y`, which is `[pure]`). A coercion (such as an
 -- unboxing) would inspect a dummy, so it is tested, and the yielding branch passes on a dummy
--- of the type `to` (`cast-ev` of `yielded`), as Koka does.
+-- of the type `to` (cast from `Y (to?)`), as Koka does.
 coerceExpr :: VType -> VType -> VExpr -> E VExpr
 coerceExpr from to e
   | alphaEq from to = return e
@@ -231,11 +247,12 @@ coerceExpr from to e
   = return (CastEv from to e)
   | VYield u <- from
   = do r <- fresh "r"
-       (k,v) <- coerce u to (Var r)
-       let yielding = case to of
-                        VYield w -> Yielded w
-                        _ -> CastEv (VYield to) to (Yielded to)
-       return (LetYield r u e (k (Ret v)) yielding)
+       (k1,w) <- case u of
+                   VOrNull _ -> do y <- fresh "y"
+                                   return (\body -> IsNull (Var r) (Unreachable to) (y,body), Var y)
+                   _ -> return (id, Var r)
+       (k2,v) <- coerce (unNull u) to w
+       return (LetYield r u e (k1 (k2 (Ret v))) (yielded to))
   | otherwise
   = do r <- fresh "r"
        (k,v) <- coerce from to (Var r)

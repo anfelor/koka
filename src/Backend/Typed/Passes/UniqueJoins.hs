@@ -28,8 +28,8 @@
   into one is unique given U (`uniq`, as `CheckLinear.uniqueV`): the arguments of every jump
   to a non-recursive join point, those of the jumps in the body of a recursive one, and the
   results of the bound expression of a `let` (`tails`). A result is a value, an append or a
-  copy (which are unique), `yielded` (unique unless the dummy, which never reaches a binder of
-  `[let-yield]`), or a call that is unique if its function has a unique result, or a
+  copy (which are unique), `null` (the dummy, which never reaches a binder of `[let-yield]`),
+  or a call that is unique if its function has a unique result, or a
   worker with one (`UniqueWorkers`) whose unique parameters receive unique values; such a call
   is redirected to the worker. The jumps that enter a recursive join point are exempt: they copy an
   argument for a promoted parameter that is not unique, once per loop instead of once per
@@ -49,7 +49,7 @@ import Data.Monoid( Sum(..) )
 import Common.Name( Name, makeHiddenName )
 import Backend.Typed.Syntax
 import Backend.Typed.Env( Env(..), envOf )
-import Backend.Typed.Traversal( descendE, fvE, fvV, jumpArgs, lamsV, subexprs )
+import Backend.Typed.Traversal( canonical, descendE, fvE, fvV, jumpArgs, lamsV, subexprs )
 import Backend.Typed.Types( inst )
 import Backend.Typed.Build( K, compose )
 import Backend.Typed.Passes.Common( NameSupply, freshFor, freshPathFrom, paramModes, replaceE, resultMode, substJumpM )
@@ -73,9 +73,12 @@ uniqueScope env ps body
   where
     closures e = descendE pure (lamsV (\qs _ b -> snd <$> uniqueScope env qs b)) (\_ b -> closures b) e
 
+-- a context, or a context that may be null (the binder of a `[let-yield]`, whose `[is-null]`
+-- binds the context itself)
 isCtx :: VType -> Bool
 isCtx t = case t of
             VCtx{} -> True
+            VOrNull s -> isCtx s
             _ -> False
 
 -- what flows into a binder: a value, the result of a call, a unique context (of `[ctx-append]`
@@ -99,7 +102,6 @@ tails expr
       LetYield _ _ _ e2 e3 -> tails e2 ++ tails e3
       App{} -> [FOther]
       Gen{} -> [FOther]
-      Yielded{} -> [FUnique]
       CastEv{} -> [FOther]
       _ -> getConst (descendE (const (Const [])) (const (Const [])) (\_ e -> Const (tails e)) expr)
 
@@ -139,7 +141,7 @@ facts env js expr
   where
     sub = getConst (descendE (const (Const mempty)) (const (Const mempty)) (\xs e -> Const (Facts xs [] S.empty [] <> facts env js e)) expr)
     bound x t e1 = Facts [] [x | isCtx t] S.empty [(x,r) | r <- tails e1]
-    demote vs = mempty{ fDemoted = S.unions (map fvV vs) }
+    demote vs = mempty{ fDemoted = S.map canonical (S.unions (map fvV vs)) }
     borrowed ms vs = [v | (Borrowed,v) <- zip ms vs]
 
 -- the number of copies of contexts in an expression, outside of closures
@@ -164,13 +166,15 @@ unique env fs = fixpoint (M.keysSet (M.filter id (M.intersectionWith (==) cands 
 uniq :: S.Set Path -> VVal -> Bool
 uniq u val
   = case val of
-      Var x -> S.member x u
+      Var x -> S.member (canonical x) u
       UnitV -> True
       Inj _ _ w -> uniq u w
       Tuple vs -> all (uniq u) vs
       Pack _ _ w -> uniq u w
       Context _ _ -> True
       Pure w -> uniq u w
+      Some w -> uniq u w
+      Null _ -> True
       Up w -> uniq u w
       Down _ w -> uniq u w
       _ -> False

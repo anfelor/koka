@@ -41,6 +41,7 @@ checkLayoutProgram p = concatMap check (programTypes p)
       VCtx _ a b -> atomic a ++ atomic b
       VCell _ a -> atomic a
       VYield b -> inner b
+      VOrNull b -> inner b
       VReuse _ _ d -> maybe [] (\(Contents _ _ s) -> inner s) d
       _ -> []
     atomic a = case a of
@@ -86,7 +87,6 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
       where here = case e of
                      Let _ t _ _ -> [t]
                      LetYield _ t _ _ _ -> [t]
-                     Yielded t -> [t]
                      CastEv u t _ -> [u,t]
                      Unreachable t -> [t]
                      Join r _ _ ps _ _ -> recResult r ++ map (\(_,_,t) -> t) ps
@@ -103,6 +103,7 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
                      Context a _ -> at a
                      Ptr a _ -> at a
                      Inj _ t _ -> [t]
+                     Null t -> [t]
                      Pack t ts _ -> t : concatMap at ts
                      NoReuse _ p -> maybe [] (\(Contents _ _ t) -> [t]) p
                      _ -> []
@@ -205,7 +206,6 @@ tvarsE bound expr
     annotations = case expr of
       Let _ t _ _        -> ftv t
       LetYield _ t _ _ _ -> ftv t
-      Yielded t          -> ftv t
       CastEv u t _       -> ftv u ++ ftv t
       Unreachable t      -> ftv t
       Call _ ts _        -> concatMap ftv ts
@@ -224,6 +224,7 @@ tvarsV bound val
       TyApp _ ts  -> concatMap ftv ts
       Down b _    -> ftv b
       Context b _ -> ftv b
+      Null t      -> ftv t
       NoReuse _ c -> maybe [] (\(Contents _ p t) -> tvarsV bound p ++ ftv t) c
       _           -> []
 

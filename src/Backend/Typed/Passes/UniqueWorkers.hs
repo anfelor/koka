@@ -22,9 +22,9 @@
   copied, so every call in a tail position must have a unique result. The worker is only
   created if it has fewer copies than `f`. Functions with a unique result already are left out.
 
-  A function in which an effect may yield returns `Y ctx`; its worker returns `:! Y ctx`,
-  unique unless the dummy (`yielded`, which is unique enough). A tail `pure v` with a `v` that
-  is not unique becomes `let c = ctx-copy v in ret (pure c)`.
+  A function in which an effect may yield returns `Y (ctx?)`; its worker returns `:! Y (ctx?)`
+  (the dummy `null` is unique enough). A tail `pure (some v)` with a `v` that is not unique
+  becomes `let c = ctx-copy v in ret (pure (some c))`.
 
   `f` itself is unchanged, for callers that cannot pass unique contexts and for other
   modules. `UniqueJoins` calls the worker where the arguments of its unique parameters are
@@ -38,7 +38,7 @@ import Data.Maybe( maybeToList )
 import Backend.Typed.Syntax
 import Backend.Typed.Env( Env, envOf )
 import Backend.Typed.Traversal( descendE )
-import Backend.Typed.Types( unYield )
+import Backend.Typed.Types( unNull, unYield )
 import Control.Monad.State( State, evalState, state )
 import Backend.Typed.Passes.Common( NameSupply, freshFor, freshPathFrom )
 import Backend.Typed.Passes.UniqueJoins( uniqueScope, Flow(..), tails, uniq, uniqF, copyCount, isCtx, workerName )
@@ -59,7 +59,8 @@ worker env def
         | isCtx ctxT -> promote [x | (x,Owned,t) <- defArgs def, isCtx t]
       _ -> Nothing
   where
-    (ctxT,mayYield) = unYield (defRes def)
+    (resT,mayYield) = unYield (defRes def)
+    ctxT = unNull resT
     -- the greatest set of context parameters that remain unique in the body
     promote [] = Nothing
     promote cs
@@ -83,6 +84,8 @@ worker env def
         copy :: S.Set Path -> VVal -> State NameSupply VExpr
         copy u0 v = case v of
                       _ | uniq u0 v -> return (Ret v)
+                      Pure (Some w) -> do c <- state (freshPathFrom "copy")
+                                          return (Let c ctxT (CtxCopy w) (Ret (Pure (Some (Var c)))))
                       Pure w -> do c <- state (freshPathFrom "copy")
                                    return (Let c ctxT (CtxCopy w) (Ret (Pure (Var c))))
                       _ -> return (CtxCopy v)

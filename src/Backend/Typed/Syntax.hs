@@ -29,7 +29,7 @@
     subexpressions in tail position; outside tail position J is ∅. The result mode works the
     same way: an expression in tail position has the mode of the expression around it (written
     `: W` for both), and one outside tail position is owned (except in `[let-unique]`). Only
-    `[ret]`, `[call]`, `[yielded]` and the operations on contexts and cells have their own mode,
+    `[ret]`, `[call]` and the operations on contexts and cells have their own mode,
     and a jump has the mode of the body of its join point. A unique result can be used as an
     owned one.
 
@@ -81,17 +81,28 @@
   Effect yields
 
     Koka compiles effects to a monadic form: while an effect yields, a call returns a dummy
-    value and sets a global flag. In the dummy, every pointer is Koka's shared `box-any`, and
-    tags and raw values are garbage. A function that may yield returns `Y W`: a W or the dummy.
-    `[pure]` injects a value into `Y W`, and `[yielded]` is the dummy. Only `[let-yield]`
-    eliminates `Y W`, by testing the flag, so the dummy is never inspected (apart from the
-    unchecked `[cast-ev]`). There is no subtyping: elaboration converts between W and `Y W`
-    with `[cast-ev]` or by eta-expansion.
+    value and sets a global flag. The dummy is the *null* of its type (see `V?` below): every
+    pointer is Koka's shared `box-any`, the tags of sums and enums are all ones, and raw
+    values are garbage. A function that may yield returns `Y (W?)`. `Y V` only carries the
+    question "did the call yield?", which `[let-yield]` answers by testing the flag; a `Y V`
+    is always a valid V, and the dummy is `ret (pure null)`. `[is-null]` extracts a W from a
+    `W?`, so a missing or misplaced flag test is a semantic error, never a memory-safety one
+    (apart from the unchecked `[cast-ev]` that removes a `?`). There is no subtyping:
+    elaboration converts between W and `Y (W?)` with `[pure]` and `[some]`, `[cast-ev]` or by
+    eta-expansion.
     `Y` only occurs at the top of the type of an expression or a function result
     (`Types.wellYield`), so a type variable never stands for `Y W`, and no variable (a binder
     or a parameter) has a type `Y W`: the flag is tested, or the result is cast, where the
-    expression returns. W itself contains no `Y`, credits or cells. A unique `Y W` is unique
-    unless it is the dummy.
+    expression returns. W itself contains no `Y`, credits or cells.
+
+  Nullable values
+
+    `V?` has the layout of V, and its null is the dummy of a yield. If V has a *niche* (a
+    pointer, or the tag of a sum or an enum, also as a leaf of a product: `Layout.niche`),
+    the null has a pattern that no valid V has, and `[is-null]` tests it. Otherwise V is
+    *full*: every bit pattern is a valid V, and `[is-null]` takes the value branch. `?` is an
+    unboxed type former only: a type variable never stands for a `V?`, a heap block never
+    contains one (`Types.wellNull`), and `V??` is `V?`. V contains no credits or cells.
 -}
 module Backend.Typed.Syntax where
 
@@ -176,8 +187,10 @@ data Side = Whnf | Delay
 --   never duplicated or dropped, but consumed by `[memoize]`, `[if-unique-cell]`, or a call or
 --   jump with a cell parameter. They never occur inside another type or a closure, and are
 --   never live across `[let-yield]`. A `cell_n` can be used where `cell_m` is expected if m ≤ n.
--- - `Y V` is a `V` or the dummy value of an effect yield (see "Effect yields" above), with the
+-- - `Y V` is a `V` that may come with a set yield flag (see "Effect yields" above), with the
 --   layout of `V`. It is the type of an expression or a function result, never of a variable.
+-- - `V?` is a `V` or its null, the dummy value of an effect yield (see "Nullable values"
+--   above), with the layout of `V`.
 data VType = VPtr AType                 -- A*
            | VUnit                      -- 𝟙
            | VSum [(Con,VType)]         -- ⊕ᵢ Vᵢ, n-ary (a Koka value type with several constructors)
@@ -187,7 +200,8 @@ data VType = VPtr AType                 -- A*
            | VReuse Fill Int (Maybe Contents) -- ◇n[k; p : V] or ◆n[k; p : V]: if nonempty, an n-byte block with tag k containing p
            | VCtx Fill AType AType      -- ctx⟨A,B⟩ or ctx⁺⟨A,B⟩: an A with a hole of type B*, nonempty if full
            | VCell Int AType            -- cell_n⟨τ⟩: the n-byte block of a lazy value under evaluation
-           | VYield VType               -- Y V: a V, or the dummy value of an effect yield
+           | VYield VType               -- Y V: a V, and whether an effect yields
+           | VOrNull VType              -- V?: a V, or the dummy value of an effect yield (`Types.orNull`)
            deriving (Eq,Show)
 
 -- raw types: the primitive value types of Koka (`TypeInfo.rawType`), named by their C type
@@ -269,6 +283,7 @@ data Step = SField Int Field       -- [proj]
           | SWhnf | SDelay         -- [if-whnf]
           | SContents | SCredit    -- [bunbox]: the contents; [unbox-ru], [lock]: the rest of the block
           | SOpen Name             -- [case-open]
+          | SSome                  -- [is-null]
           deriving (Eq,Ord)
 
 instance Show Path where
@@ -290,6 +305,7 @@ instance Show Step where
              SContents -> "contents"
              SCredit   -> "credit"
              SOpen c   -> show c
+             SSome     -> "some"
 
 -- the constructor of an alternative of a sum, for reading the IR: steps and types compare by tag
 newtype Con = Con Name
@@ -333,9 +349,10 @@ nameHole :: Path
 nameHole = root (newHiddenName "hole")
 
 -- Values `Γ ⊢ v :q t`. As in the paper, a borrowed value is structural: a variable, global,
--- literal, `()` or function, or a type application, tuple, injection, pack or cast of borrowed
--- values. A unique value is a variable, a context `ctx K`, `()`, a literal of a trivial type,
--- or a tuple, injection, pack or cast of unique values. All other values are owned.
+-- literal, `()`, `null` or function, or a type application, tuple, injection, pack, `some` or
+-- cast of borrowed values. A unique value is a variable, a context `ctx K`, `()`, `null`, a
+-- literal of a trivial type, or a tuple, injection, pack, `some` or cast of unique values. All
+-- other values are owned.
 --
 -- Boxed values `Γ ⊢ a :q A`. Boxed variables are only operands (see `[var]`).
 data AVal
@@ -525,8 +542,23 @@ data VVal
   --  ───────────────────── [pure]
   --   Γ ⊢ pure v :q Y V
   --
-  -- A value that is not the dummy of a yield. A no-op at run time.
+  -- A value that comes without a yield. A no-op at run time.
   | Pure VVal
+
+  --   Γ ⊢ v :q V
+  --  ──────────────────── [some]
+  --   Γ ⊢ some v :q V?
+  --
+  -- A value that is not null. A no-op at run time.
+  | Some VVal
+
+  --   V contains no credits or cells
+  --  ─────────────────────────── [null]
+  --   ∅ ⊢ null[V] :q V?
+  --
+  -- The dummy value of a yield. It has every mode, as `:! V?` promises nothing about the null.
+  -- Code generation fills its niche (`CGen.yieldedValue`).
+  | Null VType
   deriving (Eq,Show)
 
 -- Whether a join point is recursive (`[join-rec]`), with its result type.
@@ -572,17 +604,11 @@ data VExpr
   -- Koka's monadic bind (`if yielding() then e₃ else e₂`), the only elimination of `Y V`. If e₁
   -- yields, it returns the dummy and e₃ runs, where x is not in scope. e₁ consumes Γ₁ in either
   -- case. Without a value to bind, the test is `let x : 𝟙 = ret (pure ()) yielding e₃ in e₂`.
-  -- No cell is live in e₂ or e₃.
+  -- No cell is live in e₂ or e₃. Elaboration binds x : W? and extracts the W with
+  -- `is-null x of { null -> unreachable; y -> e₂ }`: the flag is clear in e₂, so x is not
+  -- null unless Koka's invariant "the flag is set iff the result is null" is broken. The
+  -- yielding branch passes on the dummy as `ret (pure null)`.
   | LetYield Path VType VExpr VExpr VExpr
-
-  --   W contains no credits or cells
-  --  ──────────────────────────── [yielded]
-  --   ∅ | J ⊢ yielded :q Y W
-  --
-  -- The dummy value, for example in the yielding branch of a `[let-yield]`. It has either mode,
-  -- since `:! Y W` promises nothing about the dummy. Code generation fills its pointers with
-  -- Koka's shared `box-any`.
-  | Yielded VType
 
   --  ───────────────────────── [unreachable]
   --   Γ | J ⊢ unreachable : W
@@ -595,9 +621,10 @@ data VExpr
   --  ────────────────────────────────── [cast-ev]
   --   Γ | J ⊢ cast-ev[U, V] e : V
   --
-  -- Adds or removes `Y`s anywhere in the type of e (`|·|` erases them, `Types.eraseY`). A no-op
-  -- at run time, and unchecked, as the IR has no effects: elaboration emits it where Koka knows
-  -- that the result is not a dummy. It is an expression, like `[gen]`, so that a result `Y U`
+  -- Adds or removes `Y`s and `?`s anywhere in the type of e (`|·|` erases them, `Types.eraseY`).
+  -- A no-op at run time, and unchecked, as the IR has no effects: elaboration emits it where
+  -- Koka knows that the result is not a dummy. Only removing a `?` is trusted with memory
+  -- safety; removing a `Y` only skips a flag test. It is an expression, like `[gen]`, so that a result `Y U`
   -- is cast where it is returned, without a variable of type `Y U`; a value is cast as
   -- `cast-ev[U, V] ret v`. The annotation U is the type of e, which does not follow from e (as
   -- the type of a `let` binder). The result is owned. Examples are an effect variable instantiated at a total
@@ -701,6 +728,17 @@ data VExpr
   --
   -- For a variable scrutinee z, credit descriptions substitute pack[b̄] x for z.
   | Unpack VVal [TVar] Path VExpr
+
+  --   Γ₁ ⊢ v :^ V?    Γ₂, x :^ V ⊢ e₂ : W    Γ₂ ⊢ e₃ : W
+  --  ───────────────────────────────────────────────── [is-null]
+  --   Γ₁, Γ₂ ⊢ is-null v of { null -> e₃; x -> e₂ } : W
+  --
+  -- The value branch runs only with a valid V: if v is not null, it runs; if v is null and V
+  -- is full, either branch may run (code generation takes the value branch without a test).
+  -- For a variable scrutinee z, the binder is z.some, which stands for z itself, and z is
+  -- trivial in the null branch: the null holds no references (its `box-any` pointers are
+  -- never dropped).
+  | IsNull VVal VExpr (Path,VExpr)
 
   --   Γ₁ ⊢ v :^ V    lᵢ : V    Γ₂ ⊢ eᵢ : W    Γ₂ ⊢ e : W
   --  ────────────────────────────────────────────────────── [case-lit]

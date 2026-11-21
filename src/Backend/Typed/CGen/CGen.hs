@@ -203,8 +203,10 @@ genV cx val
       -- every pointer is a `kk_box_t`, `any*` included
       Up v -> genV cx v
       Down _ v -> genV cx v
-      -- the representation of `Y V` is that of `V`
+      -- the representations of `Y V` and `V?` are that of `V`
       Pure v -> genV cx v
+      Some v -> genV cx v
+      Null t -> ctype t >>= yieldedValue
       Ptr _ v -> genA cx v
       Pack _ _ v -> genV cx v
       Inj i t v
@@ -811,10 +813,6 @@ genE cx dest expr
                             Just n -> ["kt_yield_check(" <.> nullTest n (localName x) <.> ");"]
                             Nothing -> []
               return (s1 ++ check ++ [ifChain [("kk_yielding(_ctx)",s3)] s2])
-      Yielded t
-        -> do ct <- ctype t
-              e <- yieldedValue ct
-              return (assignTo dest ct e)
       Unreachable _ -> return ["kt_unreachable();"]
       Drop x e
         | S.member x (cxShared cx)   -- like Koka's C backend: a shared block only needs a decrement
@@ -912,6 +910,17 @@ genE cx dest expr
                          <.> fx <.> ",(" <.> fx <.> hcat [", " <.> a | a <- args] <.> ", _ctx),_ctx)"
               return [block (("kk_function_t" <+> fx <+> "= kk_datatype_unbox(" <.> localName f <.> ");") : assignTo dest rct call)]
       Proj v i x e -> genProjection cx dest v i x e
+      -- the value is bound before the test, which only a niche needs (`niche`): a full value, or
+      -- one that admits null, takes the value branch
+      IsNull v n (x,e)
+        -> do VOrNull t <- tyOf cx v
+              ct <- ctype t
+              ve <- genV cx v
+              s2 <- genE (bindVar cx x (V t)) dest e
+              test <- case (t, niche ct) of
+                        (VOrNull _, _) -> return Nothing
+                        (_, nn) -> traverse (\nn' -> (,) (nullTest nn' (localName x)) <$> genE cx dest n) nn
+              return (declare (cty ct) x ve : maybe s2 (\(c,s3) -> [ifChain [("kk_unlikely(" <.> c <.> ")",s3)] s2]) test)
       Unpack v tvs x e
         -> do VExists bs body <- tyOf cx v
               let t = inst bs (map AVar tvs) body

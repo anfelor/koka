@@ -29,8 +29,11 @@
   whether it is empty (see `genAppend` in `CGen`).
 
   Finally, a case on a known value (an injection, or a value that the definition binds with
-  `let x = ret v`, through the pointers and rolls of `v`) is replaced by its alternative if
-  that does not use its binder. Inlining leaves such cases, mostly on constructors without
+  `let x = ret v`, through the pointers and rolls of `v`), or an `is-null` of a known `some`
+  or `null`, is replaced by its alternative if that does not use its binder. An `is-null`
+  whose value is unused and whose null branch is `unreachable` goes away: in `std/core/hnd`, a
+  dummy may pass with the flag clear (the result of a final yield's continuation, or of a
+  closure at a type variable), and only a used value needs the test. Inlining leaves such cases, mostly on constructors without
   fields. The bindings of values, pointers and rolls that are then unused are removed.
 -}
 module Backend.Typed.Passes.Simplify( simplifyProgram ) where
@@ -159,6 +162,7 @@ knownE known expr
       Deref v x e -> ifUsed x (Deref v x) (knownE (shadow [x] known) e)
       Unroll v x e -> ifUsed x (Unroll v x) (knownE (shadow [x] known) e)
       _ | Just (x,e) <- decided known expr -> taken x e
+      IsNull v n@Unreachable{} (x,e) -> ifUsed x (\e' -> IsNull v n (x,e')) (knownE (shadow [x] known) e)
       _ -> descend
   where
     descend = mapAll (\xs -> knownE (shadow xs known)) expr
@@ -184,6 +188,11 @@ decided known expr
       IfWhnf v (x,e1) (y,e2)
         | Just (InjLazy d _ _) <- knownAt known v
         -> Just (if d == Whnf then (x,e1) else (y,e2))
+      IsNull v n (x,e)
+        -> case case v of { Var y -> valueAt known y; _ -> Just v } of
+             Just (Some _) -> Just (x,e)
+             Just (Null _) -> Just (x,n)
+             _ -> Nothing
       _ -> Nothing
   where
     alt i alts def = case [(x,e) | (j,x,e) <- alts, j == i] ++ maybe [] pure def of

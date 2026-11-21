@@ -193,7 +193,6 @@ ruE expr
               g' <- liftE (lockGamma (reGamma re) z)
               Lock z <$> withGamma g' (ruE e)
       Ret _ -> plain
-      Yielded _ -> plain
       Unreachable _ -> plain
       Call _ _ _ -> plain
       App _ _ -> plain
@@ -207,6 +206,7 @@ ruE expr
       -- destructuring forms are handled above
       Proj{} -> plain
       CaseV{} -> plain
+      IsNull{} -> plain
       CaseA{} -> plain
       SplitA{} -> plain
       IfWhnf{} -> plain

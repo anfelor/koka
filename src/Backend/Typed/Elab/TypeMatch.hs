@@ -42,6 +42,7 @@ matchVWith tvs sub pat t
       (VCtx f p q, VCtx g s u) | f == g -> matchAWith tvs sub p s >>= \sub' -> matchAWith tvs sub' q u
       (VCell n p, VCell m s) | n == m -> matchAWith tvs sub p s
       (VYield p, VYield s) -> matchVWith tvs sub p s
+      (VOrNull p, VOrNull s) -> matchVWith tvs sub p s
       (VExists as p, VExists bs s) | length as == length bs
         -> matchVWith tvs sub p (inst bs (map AVar as) s)
       _ -> if pat == t then Just sub else Nothing

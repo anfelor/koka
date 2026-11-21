@@ -56,6 +56,8 @@ descendV fa fv val
       DupV v         -> DupV <$> fv v
       Context b v    -> Context b <$> fv v
       Pure v         -> Pure <$> fv v
+      Some v         -> Some <$> fv v
+      Null _         -> pure val
       Hole           -> pure val
       Var _          -> pure val
       Glob _ _       -> pure val
@@ -101,7 +103,6 @@ descendB fn fv fb expr
       Ret v                 -> Ret <$> fv v
       Let x t e1 e2         -> (\e1' (x',e2') -> Let x' t e1' e2') <$> plain e1 <*> one x [] e2
       LetYield x t e1 e2 e3 -> (\e1' (x',e2') e3' -> LetYield x' t e1' e2' e3') <$> plain e1 <*> one x [] e2 <*> plain e3
-      Yielded _             -> pure expr
       Unreachable _         -> pure expr
       Call f ts vs          -> Call f ts <$> traverse fv vs
       App f vs              -> App <$> fn f <*> traverse fv vs
@@ -116,6 +117,7 @@ descendB fn fv fb expr
       Unbox v x e           -> (\v' (x',e') -> Unbox v' x' e') <$> fn v <*> one x [SContents] e
       Unscalar m v x e      -> (\v' (x',e') -> Unscalar m v' x' e') <$> fn v <*> one x [] e
       Unpack v tvs x e      -> (\v' (x',e') -> Unpack v' tvs x' e') <$> fv v <*> one x [SPack] e
+      IsNull v n (x,e)      -> (\v' n' (x',e') -> IsNull v' n' (x',e')) <$> fv v <*> plain n <*> one x [SSome] e
       CaseLit v alts def    -> CaseLit <$> fv v <*> traverse (\(l,e) -> (,) l <$> plain e) alts <*> plain def
       CaseOpen v alts def -> CaseOpen <$> fn v <*> traverse (\(c,xs,e) -> (\(xs',e') -> (c,xs',e')) <$> fb (zip xs (openSteps c xs)) e) alts
                                           <*> plain def
@@ -333,10 +335,10 @@ destructAOf expr
       CaseV{} -> Nothing
       Deref{} -> Nothing
       Unpack{} -> Nothing
+      IsNull{} -> Nothing
       Ret{} -> Nothing
       Let{} -> Nothing
       LetYield{} -> Nothing
-      Yielded{} -> Nothing
       Unreachable{} -> Nothing
       Call{} -> Nothing
       App{} -> Nothing
@@ -366,6 +368,7 @@ destructVOf expr
       CaseV v alts          -> Just (Destruct v [([x],e) | (_,x,e) <- alts] (\v' es -> CaseV v' [(i,x,e) | ((i,x,_),e) <- zip alts es]))
       Deref v x e           -> Just (Destruct v [([x],e)] (\v' es -> Deref v' x (head es)))
       Unpack v tvs x e      -> Just (Destruct v [([x],e)] (\v' es -> Unpack v' tvs x (head es)))
+      IsNull v n (x,e)      -> Just (Destruct v [([],n),([x],e)] (\v' es -> IsNull v' (head es) (x,last es)))
       CaseA{} -> Nothing
       Unroll{} -> Nothing
       Unbox{} -> Nothing
@@ -374,7 +377,6 @@ destructVOf expr
       Ret{} -> Nothing
       Let{} -> Nothing
       LetYield{} -> Nothing
-      Yielded{} -> Nothing
       Unreachable{} -> Nothing
       Call{} -> Nothing
       App{} -> Nothing

@@ -63,6 +63,7 @@ expectV _ expected actual
     forget (VCtx f _ _) (VCtx g a b) = VCtx (if f == MaybeEmpty then f else g) a b
     forget (VCell m _) (VCell n a) | m <= n = VCell m a
     forget (VYield a) (VYield b) = VYield (forget a b)
+    forget (VOrNull a) (VOrNull b) = VOrNull (forget a b)
     forget (VProd fs) (VProd gs) | length fs == length gs = VProd (zipWith (\(f,t) (_,u) -> (f,forget t u)) fs gs)
     forget (VSum ts) (VSum us) | length ts == length us = VSum (zipWith (\(c,t) (_,u) -> (c,forget t u)) ts us)
     forget (VExists as a) (VExists bs b) | length as == length bs
@@ -108,8 +109,6 @@ inferExpr env g js expr
                           inferE env (M.insert x (V t) g) js e2
       LetYield x t e1 e2 e3 -> do checkE env g noJoins e1 (VYield t)
                                   branches env [inferE env (M.insert x (V t) g) js e2, inferE env g js e3]
-      Yielded t -> do checkTy (V (VYield t))
-                      return (VYield t)
       Unreachable t -> return t
       Call f tys vs -> do (ps,r) <- funSig env f tys
                           checkArgs env g ps vs
@@ -287,6 +286,7 @@ altTypes env t expr
                             return [[A b]]
       (Unbox{}, A (ABox s)) -> return [[V s]]
       (Unscalar{}, A (AScalar r)) -> return [[V (VRaw r)]]
+      (IsNull{}, V (VOrNull s)) -> return [[], [V s]]
       (Unpack _ tvs _ _, V (VExists bs s)) | length bs == length tvs -> return [[V (inst bs (map AVar tvs) s)]]
       (CaseOpen _ alts _, A a) -> do fss <- mapM (\(c,_,_) -> openFields env c a) alts
                                      return (map (map V) fss ++ [[]])
@@ -398,13 +398,14 @@ checkV env g val t = do checkTy (V t)
                           (NoReuse n _, VReuse MaybeEmpty m _) | n == m -> () <$ inferV env g val
                           _ -> inferV env g val >>= expectV env t
 
--- the checks of a type at the top: its descriptions and where it has `Y`
+-- the checks of a type at the top: its descriptions, where it has `Y`, and where it has `?`
 checkTy :: Ty -> Q ()
 checkTy ty
   = do checkReuseTy ty
        case ty of
-         V t | not (wellYield t) -> Left ("ill-formed type of a value that may be the dummy of a yield: " ++ ppr t)
-         _ -> return ()
+         V t | not (wellYield t) -> Left ("ill-formed type of a value that may yield: " ++ ppr t)
+         _ | not (wellNull ty) -> Left ("ill-formed nullable type: " ++ ppr ty)
+           | otherwise -> return ()
 
 -- Descriptions are checked for layout, but never used as owned values. Their names need not be in
 -- scope: the type of a description is part of it.
@@ -428,6 +429,7 @@ checkReuseTy ty = case ty of
     VCell n a -> do when (n < 0) (Left "negative cell size")
                     checkReuseTy (A a)
     VYield b -> checkReuseTy (V b)
+    VOrNull b -> inner b
     VUnit -> return ()
     VRaw _ -> return ()
   A a -> case a of
@@ -575,6 +577,12 @@ inferV env g val
                    inferV env g v
       Pure v -> do t <- inferV env g v
                    let t' = VYield t
+                   checkTy (V t')
+                   return t'
+      Some v -> do t <- orNull <$> inferV env g v
+                   checkTy (V t)
+                   return t
+      Null t -> do let t' = orNull t
                    checkTy (V t')
                    return t'
       TyApp v tys -> do tv <- inferV env g v

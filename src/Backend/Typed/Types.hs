@@ -9,7 +9,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents, collapse
                           , isPtr, forallA, prodV, prodFields
-                          , checkDupType, isShape, containsLinear, wellYield, unYield, eraseY
+                          , checkDupType, isShape, containsLinear, wellYield, wellNull, unYield, eraseY, orNull, unNull, underNull
                           , applyA, atAny, vtInt, vtString, vtChar, vtFloat
                           ) where
 
@@ -65,6 +65,7 @@ traverseReuseContents f = goV
       VCtx fl a b -> VCtx fl <$> goA a <*> goA b
       VCell n a -> VCell n <$> goA a
       VYield b -> VYield <$> goV b
+      VOrNull b -> VOrNull <$> goV b
       VUnit -> pure t
       VRaw _ -> pure t
     goA a = case a of
@@ -117,6 +118,7 @@ substV sub t
       VCtx f a b -> VCtx f (substA sub a) (substA sub b)
       VCell n a -> VCell n (substA sub a)
       VYield b  -> VYield (substV sub b)
+      VOrNull b -> VOrNull (substV sub b)
 
 substA :: Sub -> AType -> AType
 substA sub a
@@ -158,6 +160,7 @@ ftvV t
       VCtx _ a b    -> ftvA a ++ ftvA b
       VCell _ a     -> ftvA a
       VYield b      -> ftvV b
+      VOrNull b     -> ftvV b
 
 ftvA :: AType -> [TVar]
 ftvA a
@@ -187,6 +190,7 @@ isPtr t
       VCtx _ _ _  -> False
       VCell _ _   -> False
       VYield _    -> False
+      VOrNull _   -> False
 
 eqV :: VType -> VType -> Bool
 eqV s t
@@ -200,6 +204,7 @@ eqV s t
       (VCtx f a b, VCtx g c d) -> f == g && eqA a c && eqA b d
       (VCell n a, VCell m b) -> n == m && eqA a b
       (VYield a, VYield b)   -> eqV a b
+      (VOrNull a, VOrNull b) -> eqV (unNull a) (unNull b)
       _                      -> s == t
 
 -- Contents are descriptions, so only their structural forms need type substitution.
@@ -322,6 +327,7 @@ containsLinear (V v) = case v of
   VCtx _ _ _ -> False
   VCell _ _ -> True
   VYield _ -> True
+  VOrNull b -> containsLinear (V b)
 containsLinear (A a) = case a of
   ABox v -> containsLinear (V v)
   AScalar _ -> False
@@ -345,6 +351,7 @@ wellYield t
   where
     plainV v = case v of
       VYield _ -> False
+      VOrNull b -> plainV b
       VPtr a -> plainA a
       VSum ts -> all (plainV . snd) ts
       VProd fs -> all (plainV . snd) fs
@@ -367,16 +374,74 @@ wellYield t
       AVar _ -> True
       AUnit -> True
 
+-- `V?` contains no credits or cells, and no heap block contains a `V?` (see "Nullable values"
+-- in `Syntax`)
+wellNull :: Ty -> Bool
+wellNull ty
+  = case ty of
+      V t -> goV t
+      A a -> goA a
+  where
+    goV t = case t of
+      VOrNull b -> not (containsLinear (V b)) && goV b
+      VYield b -> goV b
+      VPtr a -> goA a
+      VSum ts -> all (goV . snd) ts
+      VProd fs -> all (goV . snd) fs
+      VExists _ b -> goV b
+      VReuse _ _ p -> maybe True (\(Contents _ _ s) -> goV s) p
+      VCtx _ a b -> goA a && goA b
+      VCell _ a -> goA a
+      VUnit -> True
+      VRaw _ -> True
+    goA a = case a of
+      ABox v -> noNull v && goV v
+      AFun ps r -> all (goV . snd) ps && goV r
+      ASum ts -> all (goA . snd) ts
+      AForall _ b -> goA b
+      ALam _ b -> goA b
+      ALazy l b -> goA l && goA b
+      ACon _ ts -> all goA ts
+      AApp _ ts -> all goA ts
+      AScalar _ -> True
+      AVar _ -> True
+      AUnit -> True
+    -- the unboxed parts of the contents of a block
+    noNull v = case v of
+      VOrNull _ -> False
+      VYield _ -> False
+      VSum ts -> all (noNull . snd) ts
+      VProd fs -> all (noNull . snd) fs
+      VExists _ b -> noNull b
+      _ -> True
+
+-- `V?`, where `V??` is `V?`
+orNull :: VType -> VType
+orNull t@(VOrNull _) = t
+orNull t = VOrNull t
+
+-- the type `V` of `V?`, or the type itself
+unNull :: VType -> VType
+unNull (VOrNull t) = unNull t
+unNull t = t
+
+-- a function applied to `V` in `V?`, or to the type itself
+underNull :: (VType -> VType) -> VType -> VType
+underNull f (VOrNull t) = orNull (f t)
+underNull f t = f t
+
 -- the type `V` of `Y V`, and whether the type is one
 unYield :: VType -> (VType,Bool)
 unYield (VYield t) = (t,True)
 unYield t = (t,False)
 
--- `|V|`: the type without any `Y`, also under boxes, type arguments and function types (`[cast-ev]`)
+-- `|V|`: the type without any `Y` or `?`, also under boxes, type arguments and function types
+-- (`[cast-ev]`)
 eraseY :: VType -> VType
 eraseY t
   = case t of
       VYield v -> eraseY v
+      VOrNull v -> eraseY v
       VPtr a -> VPtr (eraseA a)
       VSum ts -> VSum [(c,eraseY s) | (c,s) <- ts]
       VProd fs -> VProd [(f,eraseY s) | (f,s) <- fs]

@@ -50,7 +50,7 @@
   of a unique variable (`key`). An expression has a unique result (its result mode `q`, which
   follows the join points in scope) if it returns a unique value (a unique variable or a fresh
   context), appends or copies a context, calls a function with a unique result, or is
-  `yielded`, in every tail position (a unique `Y V` is unique unless it is the dummy).
+  `ret (pure null)`, in every tail position (the dummy is unique enough).
   The body of a definition has the definition's result mode. A context is plugged or appended only
   through a unique value. Any borrowed use of a unique variable, or of a variable on its path,
   may duplicate the reference, after which it is only owned.
@@ -360,6 +360,8 @@ ownedV env g val
       Hole -> return noUse
       Context _ k -> ownedV env g k
       Pure v -> ownedV env g v
+      Some v -> ownedV env g v
+      Null _ -> return noUse
   where
     children = uses (getConst (descendV (\a -> Const [ownedA env g a]) (\v -> Const [ownedV env g v]) val))
 
@@ -398,6 +400,8 @@ uniqueV env g val
       Pack _ _ w -> uniqueV env g w
       Context _ k -> ownedV env g k
       Pure w -> uniqueV env g w
+      Some w -> uniqueV env g w
+      Null _ -> return noUse
       Up w -> uniqueV env g w
       Down _ w -> uniqueV env g w
       _ -> fail ("unique use of a value that is not unique: " ++ show val)
@@ -413,6 +417,8 @@ borrowedV env g val
       Inj _ _ w -> borrowedV env g w
       Tuple vs -> uses (map (borrowedV env g) vs)
       Pack _ _ w -> borrowedV env g w
+      Some w -> borrowedV env g w
+      Null _ -> return noUse
       Up w -> borrowedV env g w
       Down _ w -> borrowedV env g w
       _ -> fail ("borrowed use of a value that is not structural: " ++ show val)
@@ -440,7 +446,10 @@ checkE env g js q expr
     destructE infer v alts
       = do t <- infer
            tss <- liftE (altTypes env t expr)
-           destruct env g js q v [(zip xs ts, e) | ((xs,e),ts) <- zip alts tss]
+           destruct env g js q (isNull expr) v [(zip xs ts, e) | ((xs,e),ts) <- zip alts tss]
+    isNull e = case e of
+                 IsNull{} -> True
+                 _ -> False
 checkE env g js q expr
   = case expr of
       Ret v | q == Unique -> uniqueV env g v
@@ -460,7 +469,6 @@ checkE env g js q expr
               u3 <- checkE env g js q e3
               u1 <- checkE env g M.empty m e1
               andThen u1 =<< branches [u2', u3]
-      Yielded _ -> return noUse
       -- control never gets here, so every reference counts as consumed
       Unreachable _ -> return noUse{ uDiverges = True }
       Call f _ vs -> do when (q == Unique && resultMode env f /= Unique)
@@ -565,9 +573,11 @@ notLiveAcrossYield g es
       [] -> return ()
 
 -- The binders of a destructuring of a variable are its children, which the scrutinee only reads.
--- The binders of a destructuring of another value are new borrowed roots.
-destruct :: Env -> Gamma -> Joins -> Mode -> VVal -> [([(Path,Ty)],VExpr)] -> L Use
-destruct env g js q v alts
+-- The binders of a destructuring of another value are new borrowed roots. In the null branch
+-- of `[is-null]` (`nulls`, the alternative without binders), the variable is the null, which
+-- holds no references, so it is trivial there.
+destruct :: Env -> Gamma -> Joins -> Mode -> Bool -> VVal -> [([(Path,Ty)],VExpr)] -> L Use
+destruct env g js q nulls v alts
   = case v of
       Var z -> do zc <- keyOf z
                   rs <- sequence [alt zc bs e | (bs,e) <- alts]
@@ -594,6 +604,6 @@ destruct env g js q v alts
                            tr <- get
                            u <- checkE env (bindAll bs g) js q e
                            tr' <- get
-                           return (not (trivialVar env g z) && any ((== zc) . key tr) ts, u{ uNet = rollUp tr' (uNet u) })
+                           return (not (trivialVar env g z) && (any ((== zc) . key tr) ts || (nulls && null bs)), u{ uNet = rollUp tr' (uNet u) })
       -- the binders borrow the variables of the scrutinee for the whole alternative
       _ -> uses [borrowedV env g v, branches =<< sequence [roots env Borrowed bs (checkE env (bindAll bs g) js q e) | (bs,e) <- alts], borrowedV env g v]

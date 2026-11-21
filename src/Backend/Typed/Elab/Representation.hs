@@ -12,7 +12,7 @@ module Backend.Typed.Elab.Representation( rep, boxrep, boxA, shapeLeaves, leafCo
                                         , scalarField, varV, atAny, sumOf
                                         , tapp, injA, caseSum ) where
 
-import Backend.Typed.Types( atAny )
+import Backend.Typed.Types( atAny, underNull )
 import Backend.Typed.Syntax
 import Backend.Typed.Layout( leaves, isEnum )
 import Backend.Typed.Traversal( child )
@@ -44,11 +44,11 @@ rep t
 boxrep :: VType -> VType
 boxrep t = VPtr (rep t)
 
--- a result that may be the dummy of a yield stays one (`Y (boxrep W)`)
+-- a result that may yield stays one (`Y (boxrep(W)?)`)
 boxFunA :: AType -> AType
 boxFunA a
   = case a of
-      AFun ps r     -> AFun [(m,boxrep p) | (m,p) <- ps] (case r of { VYield w -> VYield (boxrep w); _ -> boxrep r })
+      AFun ps r     -> AFun [(m,boxrep p) | (m,p) <- ps] (case r of { VYield w -> VYield (underNull boxrep w); _ -> boxrep r })
       AForall tvs b -> AForall tvs (boxFunA b)
       ABox _        -> a
       AScalar _     -> a
@@ -105,6 +105,7 @@ shapeLeaves t
       VCtx _ _ _  -> [ABox t]
       VCell _ _   -> [ABox t]
       VYield _    -> [ABox t]
+      VOrNull _   -> [ABox t]
 
 tapp :: VVal -> [AType] -> VVal
 tapp v []  = v

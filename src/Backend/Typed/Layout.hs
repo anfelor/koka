@@ -33,6 +33,7 @@ leaves t
       VCtx _ a b -> [VPtr a, VPtr b]
       VCell _ _ -> [t]
       VYield b -> leaves b
+      VOrNull b -> leaves b
 
 isEnum :: VType -> Bool
 isEnum t
@@ -96,6 +97,7 @@ layout t
       -- a cell is the pointer to its block
       VCell _ _   -> CBox
       VYield b    -> layout b
+      VOrNull b   -> layout b
   where
     altLayout s = case layout s of
                     CUnit -> Nothing

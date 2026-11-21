@@ -64,6 +64,7 @@ isTrivialWith unroll t
                    VCtx _ _ _   -> False
                    VCell _ _    -> False
                    VYield _     -> False
+                   VOrNull b    -> trivialV b
     trivialA a = case a of
                    AUnit     -> True
                    ASum ts   -> all (trivialA . snd) ts
@@ -116,7 +117,6 @@ mentionedE e = annotations ++ getConst (descendE (Const . (:[])) (Const . mentio
   where annotations = case e of
           Let _ t _ _ -> mentionedT t
           LetYield _ t _ _ _ -> mentionedT t
-          Yielded t -> mentionedT t
           CastEv u t _ -> mentionedT u ++ mentionedT t
           Unreachable t -> mentionedT t
           Call _ ts _ -> concatMap (mentionedT . VPtr) ts
@@ -135,6 +135,7 @@ mentionedV v = annotations ++ getConst (descendV (Const . mentionedA) (Const . m
           TyApp _ ts -> concatMap (mentionedT . VPtr) ts
           Down b _ -> mentionedT (VPtr b)
           Context a _ -> mentionedT (VPtr a)
+          Null t -> mentionedT t
           NoReuse _ p -> case p of Nothing -> []; Just (Contents _ w t) -> mentionedV w ++ mentionedT t
           _ -> []
 
@@ -185,6 +186,12 @@ dropValue trivial fresh scope x t e
                     s' = inst tvs (map AVar bs) s
                 body <- dropValue trivial fresh (M.insert y Nothing scope) y (V s') (Ret UnitV)
                 return (Let u VUnit (reuseChildren scope (Unpack (Var x) bs y body)) e)
+        -- the null is not dropped: it may have a garbage tag
+        VOrNull s
+          -> do let y = child x SSome
+                u <- fresh
+                body <- dropValue trivial fresh (M.insert y Nothing scope) y (V s) (Ret UnitV)
+                return (Let u VUnit (reuseChildren scope (IsNull (Var x) (Ret UnitV) (y,body))) e)
         VReuse _ _ _ -> return (Free x e)
         VCtx _ _ _ -> return (Drop x e)
         -- a cell is linear and never dropped, which `Check` rejects, and no variable has a type
@@ -219,6 +226,7 @@ project v (s:ss)
       (Tuple ws, SField i _) | i < length ws -> project (ws !! i) ss
       (Inj i _ w, SInjV j _) | i == j -> project w ss
       (Pack _ _ w, SPack) -> project w ss
+      (Some w, SSome) -> project w ss
       _ -> Nothing
 
 -- the known value of a variable: the descendant of the known value of the longest prefix of its path
@@ -248,7 +256,6 @@ substTypesE sub expr
     annotated = case expr of
       Let x t e1 e2         -> Let x (subst sub t) e1 e2
       LetYield x t e1 e2 e3 -> LetYield x (subst sub t) e1 e2 e3
-      Yielded t             -> Yielded (subst sub t)
       CastEv u t e          -> CastEv (subst sub u) (subst sub t) e
       Unreachable t         -> Unreachable (subst sub t)
       Call f ts vs          -> Call f (map (subst sub) ts) vs
@@ -268,6 +275,7 @@ substTypesV sub val
       TyApp v ts  -> TyApp v (map (subst sub) ts)
       Down b v    -> Down (subst sub b) v
       Context b v -> Context (subst sub b) v
+      Null t      -> Null (subst sub t)
       NoReuse n c -> NoReuse n ((\(Contents k p t) -> Contents k (substTypesV sub p) (subst sub t)) <$> c)
       _           -> val
 
@@ -352,6 +360,7 @@ substVWith renameRoot recur scope sub val
       TyApp v ts -> TyApp (goV v) (map (substAType sub) ts)
       Down b v -> Down (substAType sub b) (goV v)
       Context b v -> Context (substAType sub b) (goV v)
+      Null t -> Null (substVType sub t)
       NoReuse n p -> NoReuse n (fmap (substContents sub) p)
       _ -> mapV goA goV val
   where
@@ -444,7 +453,6 @@ substStepWith renameRoot recur scope sub expr
     annotated = case expr of
       Let x t e1 e2 -> Let x (substVType sub t) e1 e2
       LetYield x t e1 e2 e3 -> LetYield x (substVType sub t) e1 e2 e3
-      Yielded t -> Yielded (substVType sub t)
       CastEv u t e -> CastEv (substVType sub u) (substVType sub t) e
       Unreachable t -> Unreachable (substVType sub t)
       Call f ts vs -> Call f (map (substAType sub) ts) vs
@@ -582,7 +590,7 @@ isRead expr
       Ret{}       -> False
       Let{}       -> False
       LetYield{}  -> False
-      Yielded{}   -> False
+      IsNull{}    -> False
       Unreachable{} -> False
       Call{}      -> False
       App{}       -> False

@@ -35,6 +35,7 @@ import Common.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Pretty( ppr, reserved )
 import Backend.Typed.Traversal( child )
+import Backend.Typed.Types( orNull )
 
 -- the annotations that the printer omits, until `Annotate` fills them in
 unknownA :: AType
@@ -90,7 +91,7 @@ lexToken s
       '\'':_ | [(ch,rest)] <- reads s -> Just (TChar ch, length (show ch), rest)
       '"':_ | [(str,rest)] <- reads s -> Just (TString str, length (show str), rest)
       c:_ | isNameStart c -> let (n,rest) = lexName s in Just (withParts (TName False n) (length n) rest)
-      c:rest | c `elem` "()[]<>,;:=*+!^\\." -> Just (TSym [c], 1, rest)
+      c:rest | c `elem` "()[]<>,;:=*+!^\\.?" -> Just (TSym [c], 1, rest)
       _ -> Nothing
 
 -- the parts of a path after a name
@@ -350,7 +351,10 @@ tyP = choice
         [ do kw "forall"; vs <- many1 tvarP; sym "."; A . AForall vs <$> aP
         , kw "Y" >> (V . VYield <$> vP)
         , do t <- baseTyP
-             (sym "*" >> (V . VPtr <$> asA t)) <|> return t ]
+             t' <- (sym "*" >> (V . VPtr <$> asA t)) <|> return t
+             nullable t' ]
+  where
+    nullable t = (sym "?" >> (asV t >>= nullable . V . orNull)) <|> return t
 
 baseTyP :: P Ty
 baseTyP
@@ -427,6 +431,7 @@ valP
       , kw "dup" >> (DupV <$> atomValP)
       , kw "ctx" >> (Context unknownA <$> atomValP)
       , kw "pure" >> (Pure <$> atomValP)
+      , kw "some" >> (Some <$> atomValP)
       , atomValP ]
 
 atomValP :: P VVal
@@ -440,6 +445,7 @@ baseValP
   = choice
       [ Lit <$> litP
       , Hole <$ kw "hole"
+      , Null unknownV <$ kw "null"
       , do n <- numbered "no-reuse"; NoReuse n <$> optionMaybe contentsP
       , do raw <- pathP
            u <- useP raw
@@ -487,6 +493,7 @@ exprP
       , kw "case" >> caseP
       , kw "split" >> splitP
       , kw "if-whnf" >> ifWhnfP
+      , kw "is-null" >> isNullP
       , kw "dup" >> (Dup <$> localP <* sym ";" <*> exprP)
       , kw "drop" >> (Drop <$> localP <* sym ";" <*> exprP)
       , kw "free" >> (Free <$> localP <* sym ";" <*> exprP)
@@ -494,7 +501,6 @@ exprP
       , kw "if-full" >> (IfFull <$> localP <*> (kw "then" >> exprP) <*> (kw "else" >> exprP))
       , kw "join" >> joinP
       , kw "jump" >> (Jump <$> (localName <$> nameP) <*> option [] tyArgsP <*> argsP)
-      , Yielded unknownV <$ kw "yielded"
       , Unreachable unknownV <$ kw "unreachable"
       , kw "ctx-copy" >> (CtxCopy <$> atomValP)
       , kw "cast-ev" >> (do (u,t) <- bracketsP ((,) <$> vP <* sym "," <*> vP); CastEv u t <$> exprP)
@@ -620,6 +626,12 @@ sideP z step = do raw <- pathP; sym "->"; x <- childBinder (Var z) (const step) 
 splitP :: P VExpr
 splitP = do z <- localP; kw "at"; k <- intP; kw "of"
             SplitA z k <$> sideP z SLo <*> sideP z SHi
+
+isNullP :: P VExpr
+isNullP = do v <- valP; kw "of"
+             kw "null"; sym "->"; n <- exprP
+             raw <- pathP; sym "->"; x <- childBinder v (const SSome) raw
+             IsNull v n . (,) x <$> exprP
 
 ifWhnfP :: P VExpr
 ifWhnfP = do z <- localP; kw "of"

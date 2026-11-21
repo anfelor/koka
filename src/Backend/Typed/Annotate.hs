@@ -10,7 +10,7 @@
 {- Annotating values and expressions with their types, by bidirectional typing.
 
   The printer omits the type annotations of injections, rolls, pointers, packs, contexts,
-  `yielded` and `unreachable`, as they follow from where they occur. This pass fills them in
+  `null` and `unreachable`, as they follow from where they occur. This pass fills them in
   from the signatures and datatypes of the program: an expression is checked against its type,
   a value against the type that its position expects, and the type of a value is synthesized
   where nothing is expected (the scrutinee of a destructuring).
@@ -28,7 +28,7 @@ import Data.Functor.Const( Const(..) )
 import Data.Monoid( Any(..) )
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Types( inst, forallA, atAny, vtInt, vtString, vtChar, vtFloat, traverseReuseContents )
+import Backend.Typed.Types( inst, forallA, orNull, atAny, vtInt, vtString, vtChar, vtFloat, traverseReuseContents )
 import Backend.Typed.Traversal( Destruct(..), descendV, destructAOf, destructVOf )
 import Backend.Typed.Env( Env(..), envOf, funSig, dataBody, lazySides )
 import Backend.Typed.Query( Gamma, bindAll, altTypes, lamGamma, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
@@ -97,9 +97,6 @@ annE c expr w
                                   e1' <- annE c e1 (VYield t')
                                   e2' <- annE (bindVars [(x,V t')] c) e2 w
                                   LetYield x t' e1' e2' <$> annE c e3 w
-      Yielded _ -> case w of
-                     VYield t -> return (Yielded t)
-                     _ -> unknown ("yielded at " ++ ppr w) expr
       Unreachable _ -> return (Unreachable w)
       CastEv u t e -> do u' <- annTy c u
                          t' <- annTy c t
@@ -183,6 +180,8 @@ checkV c val t
       (Pack _ ts v, VExists bs b) | length ts == length bs -> Pack t ts <$> checkV c v (inst bs ts b)
       (Context _ k, VCtx _ a b) -> Context b <$> checkV (bindVars [(nameHole,V (VPtr b))] c) k (VPtr a)
       (Pure v, VYield s) -> Pure <$> checkV c v s
+      (Some v, VOrNull s) -> Some <$> checkV c v s
+      (Null _, VOrNull s) -> return (Null s)
       (DupV v, _) -> DupV <$> checkV c v t
       (Down b v, _) -> Down b <$> checkV c v (VPtr atAny)
       (NoReuse n p, _) -> NoReuse n <$> traverse (annContents c) p
@@ -219,6 +218,9 @@ synthV c val
                    Just (t, DupV <$> mv)
       Pure v -> do (t,mv) <- synthV c v
                    Just (VYield t, Pure <$> mv)
+      Some v -> do (t,mv) <- synthV c v
+                   Just (orNull t, Some <$> mv)
+      Null{} -> Nothing
       Up v -> Just (VPtr atAny, Up <$> synthOrKeep c v)
       Down b v -> Just (VPtr b, Down b <$> checkV c v (VPtr atAny))
       Inj{} -> Nothing
@@ -243,6 +245,7 @@ annotated val
       Ptr{} -> True
       Pack{} -> True
       Context{} -> True
+      Null{} -> True
       _ -> getAny (getConst (descendV (const (Const (Any True))) (Const . Any . annotated) val))
 
 litType :: Lit -> VType
