@@ -251,7 +251,7 @@ elabJoin expr
               (ps,e1') <- withTVars tvs' $
                           do ps <- mapM (\p -> (\t -> (root (getName p),paramMode Own (S.member (getName p) linear),t)) <$> vt (tnameType p)) pars
                              (,) (ps ++ k) <$> withTypedLocals [(getName p,t) | (p,(_,_,t)) <- zip pars ps] (tokenIn token (elabTail e1))
-              Join NonRec j tvs' ps e1' <$> elabTail (C.Let dgs body)
+              Join j tvs' ps e1' <$> elabTail (C.Let dgs body)
       C.App f args | (Just (TName j tp,_),tys) <- splitTypeApp f, isJoinName j, Just (pars,_,_) <- splitFunType (typeOf f)
         -> do tys' <- instArgs tp tys
               (ks,vs) <- unzip <$> mapM (\((_,ptp),arg) -> do t <- vt ptp

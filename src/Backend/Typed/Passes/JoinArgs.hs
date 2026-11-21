@@ -31,8 +31,8 @@
   into the branch that binds the box.
 
   A recursive join point can only capture borrowed variables (`[join-rec]`): a borrowed
-  parameter becomes a capture when every entry jump passes the same variable and every jump
-  in its body passes the parameter itself. The variable must be in scope at the join point
+  parameter becomes a capture when every entry jump (from the scope or the other bodies of
+  its group) passes the same variable and every jump in its body passes the parameter itself. The variable must be in scope at the join point
   and not be bound in the body or scope, and its type must not mention the type parameters
   of the join point. It is then borrowed or trivial there, as the jumps in the scope are
   tail calls that lend it.
@@ -64,30 +64,33 @@ declared :: VExpr -> Declared
 declared expr = M.union here (getConst (descendAll (\_ e -> Const (declared e)) expr))
   where
     here = case expr of
-             Join _ _ _ ps _ _ -> M.fromList [(x,p) | (x,_,VReuse _ _ p) <- ps]
+             Join _ _ ps _ _ -> credits ps
+             JoinRec _ ds _ -> M.unions (map (credits . joinParams) ds)
              Let x (VReuse _ _ p) _ _ -> M.singleton x p
              _ -> M.empty
+    credits ps = M.fromList [(x,p) | (x,_,VReuse _ _ p) <- ps]
 
 -- `outer` are the paths bound outside the innermost lambda
 jaE :: Declared -> S.Set Path -> Scope -> VExpr -> VExpr
 jaE decl outer scope expr
   = case expr of
-      -- a borrowed parameter that the entry jumps pass the same variable to, and the jumps in
-      -- the body the parameter itself
-      Join rc@Rec{} j tvs ps e1 e2
-        -> let e1' = jaE decl outer (scopeOf [x | (x,_,_) <- ps]) e1
-               e2' = jaE decl outer scope e2
-               bound = S.fromList (bindersE e1' ++ bindersE e2')
-               entry = transpose (jumpArgs j e2') ++ repeat []
-               back = transpose (jumpArgs j e1') ++ repeat []
-               invariant (x,Borrowed,t) vs@(Var y : _) ws
+      -- a borrowed parameter that the entry jumps (from the scope and the other bodies of the
+      -- group) pass the same variable to, and the jumps in its body the parameter itself
+      JoinRec t ds e0
+        -> let ds1 = [d{ joinBody = jaE decl outer (scopeOf [x | (x,_,_) <- joinParams d]) (joinBody d) } | d <- ds]
+               e0' = jaE decl outer scope e0
+               bound = S.fromList (concatMap bindersE (e0' : map joinBody ds1))
+               args j es = transpose (concatMap (jumpArgs j) es) ++ repeat []
+               invariant tvs (x,Borrowed,t1) vs@(Var y : _) ws
                  | all (== Var y) vs, all (== Var x) ws, M.member y scope, S.notMember y bound, not (fieldsOutside y)
-                 , all (`notElem` tvs) (ftv t) = Just y
-               invariant _ _ _ = Nothing
-               ys = zipWith3 invariant ps entry back
-               (ps',body) = capture scope ps ys e1'
-           in Join rc j tvs ps' (substJump j (\ts -> Jump j ts . kept ys) body) (substJump j (\ts -> Jump j ts . kept ys) e2')
-      Join NonRec j tvs ps e1 e0
+                 , all (`notElem` tvs) (ftv t1) = Just y
+               invariant _ _ _ _ = Nothing
+               yss = [zipWith3 (invariant tvs) ps (args j (e0' : [joinBody d' | d' <- ds1, joinName d' /= j])) (args j [body])
+                     | JoinDef j tvs ps body <- ds1]
+               uncaptured = foldr (.) id [substJump (joinName d) (\ts -> Jump (joinName d) ts . kept ys) | (d,ys) <- zip ds1 yss]
+               ds2 = [JoinDef j tvs ps' (uncaptured body) | (JoinDef j tvs ps e1,ys) <- zip ds1 yss, let (ps',body) = capture scope ps ys e1]
+           in JoinRec t ds2 (uncaptured e0')
+      Join j tvs ps e1 e0
         -> let e1' = jaE decl outer (M.union (scopeOf [x | (x,_,_) <- ps]) scope) e1
                e0' = jaE decl outer scope e0
                args0 = transpose (jumpArgs j e0') ++ repeat []
@@ -116,7 +119,7 @@ jaE decl outer scope expr
                                _ -> False
                inScope (Contents _ v _) = all (`M.member` scope') (fvV v)
                (ps',body) = capture scope' (zipWith describe ps args) ys e1'
-               join = Join NonRec j tvs ps' body (substJump j (\ts -> Jump j ts . kept ys) e2')
+               join = Join j tvs ps' body (substJump j (\ts -> Jump j ts . kept ys) e2')
            in foldr (\(y,p,i) -> Proj (Var p) i y) join hoisted
       _ -> runIdentity (descendE pure (lamsV (\ps _ e -> Identity (jaE decl (M.keysSet scope) (bindScope expr [x | (x,_,_) <- ps] scope) e)))
                                  (\xs e -> Identity (jaE decl outer (bindScope expr xs scope) e)) expr)

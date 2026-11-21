@@ -87,7 +87,8 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
                      Let _ t _ _ -> [t]
                      CastEv u t _ -> [u,t]
                      Unreachable t -> [t]
-                     Join r _ _ ps _ _ -> recResult r ++ map (\(_,_,t) -> t) ps
+                     Join _ _ ps _ _ -> map (\(_,_,t) -> t) ps
+                     JoinRec t ds _ -> t : [t' | d <- ds, (_,_,t') <- joinParams d]
                      Jump _ ts _ -> concatMap at ts
                      Call _ ts _ -> concatMap at ts
                      Gen vs _ -> map (VPtr . AVar) vs
@@ -197,10 +198,12 @@ tvarsE bound expr
   = case expr of
       Unpack v tvs _ e  -> tvarsV bound v ++ tvarsE (with tvs) e
       Gen tvs e           -> tvarsE (with tvs) e
-      Join r _ tvs ps e1 e2 -> outside bound (concatMap ftv (recResult r)) ++ outside (with tvs) (concat [ftv t | (_,_,t) <- ps]) ++ tvarsE (with tvs) e1 ++ tvarsE bound e2
+      Join _ tvs ps e1 e2 -> joinDef tvs ps e1 ++ tvarsE bound e2
+      JoinRec t ds e -> outside bound (ftv t) ++ concat [joinDef tvs ps e1 | JoinDef _ tvs ps e1 <- ds] ++ tvarsE bound e
       _ -> outside bound annotations ++ getConst (descendE (const (Const [])) (Const . tvarsV bound) (\_ e -> Const (tvarsE bound e)) expr)
   where
     with tvs = S.union bound (S.fromList tvs)
+    joinDef tvs ps e1 = outside (with tvs) (concat [ftv t | (_,_,t) <- ps]) ++ tvarsE (with tvs) e1
     annotations = case expr of
       Let _ t _ _        -> ftv t
       CastEv u t _       -> ftv u ++ ftv t

@@ -42,7 +42,7 @@ module Backend.Typed.Passes.UniqueJoins( uniqueJoinsProgram, uniqueScope, Flow(.
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Control.Monad( zipWithM )
+import Control.Monad( foldM, zipWithM )
 import Control.Monad.State( State, evalState, state )
 import Data.Functor.Const( Const(..) )
 import Data.Monoid( Sum(..) )
@@ -119,18 +119,15 @@ instance Monoid Facts where
 facts :: Env -> M.Map Name [Mode] -> VExpr -> Facts
 facts env js expr
   = case expr of
-      Join r j _ ps e1 e2
-        -> let xs = [x | (x,_,_) <- ps]
-               js' = M.insert j [m | (_,m,_) <- ps] js
-               (body,iters,caps) = case r of
-                                     NonRec -> (js, e2, S.empty)
-                                     Rec _ -> (js', e1, fvE e1 `S.difference` S.fromList xs)
-               cands = [x | (x,m,t) <- ps, isCtx t, m == Unique || (m == Owned && profitable)]
-               profitable = case r of
-                              NonRec -> True
-                              Rec _ -> copyCount e1 > 0
-           in Facts xs cands caps [(x,FVal v) | vs <- jumpArgs j iters, (x,v) <- zip xs vs]
-              <> facts env body e1 <> facts env js' e2
+      Join j _ ps e1 e2
+        -> point ps True S.empty (jumpArgs j e2) <> facts env js e1 <> facts env (M.insert j [m | (_,m,_) <- ps] js) e2
+      -- the jumps in the bodies iterate, and their captures are borrowed
+      JoinRec _ ds e
+        -> let js' = M.union (M.fromList [(j,[m | (_,m,_) <- ps]) | JoinDef j _ ps _ <- ds]) js
+           in mconcat [point ps (copyCount body > 0) (fvE body `S.difference` S.fromList [x | (x,_,_) <- ps])
+                             (concatMap (jumpArgs j . joinBody) ds) <> facts env js' body
+                      | JoinDef j _ ps body <- ds]
+              <> facts env js' e
       Let x t e1 _ -> bound x t e1 <> sub
       Dup x _ -> demote [Var x] <> sub
       Call f _ vs -> demote (borrowed (paramModes env f (length vs)) vs)
@@ -138,6 +135,11 @@ facts env js expr
       _ -> sub
   where
     sub = getConst (descendE (const (Const mempty)) (const (Const mempty)) (\xs e -> Const (Facts xs [] S.empty [] <> facts env js e)) expr)
+    -- a join point with the arguments of the jumps that flow into its parameters
+    point ps profitable caps iters
+      = let xs = [x | (x,_,_) <- ps]
+        in Facts xs [x | (x,m,t) <- ps, isCtx t, m == Unique || (m == Owned && profitable)] caps
+                 [(x,FVal v) | vs <- iters, (x,v) <- zip xs vs]
     bound x t e1 = Facts [] [x | isCtx t] S.empty [(x,r) | r <- tails e1]
     demote vs = mempty{ fDemoted = S.map canonical (S.unions (map fvV vs)) }
     borrowed ms vs = [v | (Borrowed,v) <- zip ms vs]
@@ -204,18 +206,17 @@ callee env u f vs
 rewrite :: Env -> S.Set Path -> VExpr -> State NameSupply VExpr
 rewrite env u expr
   = case expr of
-      Join r j tvs ps e1 e2
-        -> do e1' <- rewrite env u e1
-              e2' <- rewrite env u e2 >>= case r of
-                                            NonRec -> pure
-                                            Rec _ -> substJumpM j entry
-              return (Join r j tvs [(x,if S.member x u then Unique else m,t) | (x,m,t) <- ps] e1' e2')
+      Join j tvs ps e1 e2 -> Join j tvs (params ps) <$> rewrite env u e1 <*> rewrite env u e2
+      JoinRec t ds e
+        -> do ds' <- mapM (\d -> (\b -> d{ joinParams = params (joinParams d), joinBody = b }) <$> rewrite env u (joinBody d)) ds
+              e' <- rewrite env u e
+              JoinRec t ds' <$> foldM (\e1 (JoinDef j tvs ps _) -> substJumpM j (entry j tvs ps) e1) e' ds
         where
-          entry tys vs = do (ks,vs') <- unzip <$> zipWithM (arg tys) ps vs
-                            return (compose ks (Jump j tys vs'))
+          entry j tvs ps tys vs = do (ks,vs') <- unzip <$> zipWithM (arg tvs tys) ps vs
+                                     return (compose ks (Jump j tys vs'))
           -- the argument of an owned parameter that becomes unique is copied unless it is unique
-          arg :: [AType] -> (Path,Mode,VType) -> VVal -> State NameSupply (K,VVal)
-          arg tys (x,m,t) v
+          arg :: [TVar] -> [AType] -> (Path,Mode,VType) -> VVal -> State NameSupply (K,VVal)
+          arg tvs tys (x,m,t) v
             | m == Owned, S.member x u, not (uniq u v)
             = do c <- state (freshPathFrom "copy")
                  return (Let c (inst tvs tys t) (CtxCopy v), Var c)
@@ -224,3 +225,5 @@ rewrite env u expr
       Let x _ (CtxCopy v) e | uniq u v -> rewrite env u (replaceE (M.singleton x v) e)
       Call f tys vs -> pure (Call (callee env u f vs) tys vs)
       _ -> descendE pure pure (\_ e -> rewrite env u e) expr
+  where
+    params ps = [(x,if S.member x u then Unique else m,t) | (x,m,t) <- ps]

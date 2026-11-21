@@ -565,17 +565,9 @@ data VVal
   | Null VType
   deriving (Eq,Show)
 
--- Whether a join point is recursive (`[join-rec]`), with its result type.
-data Recursion = NonRec | Rec VType
+-- A recursive join point `j⟨ā⟩(x̄ :q̄ V̄) = e` of a group (`[join-rec]`).
+data JoinDef = JoinDef{ joinName :: Name, joinTVars :: [TVar], joinParams :: [(Path,Mode,VType)], joinBody :: VExpr }
   deriving (Eq,Show)
-
-mapRecursion :: (VType -> VType) -> Recursion -> Recursion
-mapRecursion _ NonRec = NonRec
-mapRecursion f (Rec t) = Rec (f t)
-
-recResult :: Recursion -> [VType]
-recResult NonRec = []
-recResult (Rec t) = [t]
 
 -- Expressions `Γ | J ⊢ e : W`. As in the paper, expressions always have an unboxed type.
 data VExpr
@@ -874,19 +866,23 @@ data VExpr
   -- is not bound again in e₂. The descriptions in V̄ do not mention x̄. The type parameters ā
   -- abstract over existentials that are unpacked before the jumps (`Elab.Match`).
   --
-  --   ^Γ_c, x̄ :q̄ V̄ | j : ^Γ_c; ∀ā. (q̄ V̄) -> W ⊢ e₁ : W
-  --   Γ, Γ_c | J, j : ^Γ_c; ∀ā. (q̄ V̄) -> W ⊢ e₂ : W    ā ∉ ftv(Γ_c, W)
+  | Join Name [TVar] [(Path,Mode,VType)] VExpr VExpr
+
+  --   ^Γ_c, x̄ᵢ :q̄ᵢ V̄ᵢ | J_rec ⊢ eᵢ : W   (for each i)
+  --   Γ, Γ_c | J, J_rec ⊢ e : W    āᵢ ∉ ftv(Γ_c, W)
   --  ────────────────────────────────────────────────────────────────────────────────── [join-rec]
-  --   Γ, Γ_c | J ⊢ join rec j⟨ā⟩(x̄ :q̄ V̄) : W = e₁ in e₂ : W
+  --   Γ, Γ_c | J ⊢ join rec : W { j₁⟨ā₁⟩(x̄₁ :q̄₁ V̄₁) = e₁; ...; jₙ⟨āₙ⟩(x̄ₙ :q̄ₙ V̄ₙ) = eₙ } in e : W
+  --                 (J_rec = j₁ : ^Γ_c; ∀ā₁. (q̄₁ V̄₁) -> W, ..., jₙ : ^Γ_c; ∀āₙ. (q̄ₙ V̄ₙ) -> W)
   --
-  -- A loop: j is in scope in its body, which may run many times. It therefore only borrows its
-  -- captures, which are consumed after the loop if they are owned, and a captured variable is
-  -- not bound again in e₂. Its body cannot jump to outer joins, and has the result mode of the
-  -- context. Its parameters may have any mode: a borrowed one is lent anew by every jump. W is
-  -- annotated for the jumps in the body. Recursive joins come from self tail calls, after
-  -- Perceus, and are closed until `JoinArgs` turns invariant borrowed parameters into
-  -- captures. (Not in the paper.)
-  | Join Recursion Name [TVar] [(Path,Mode,VType)] VExpr VExpr
+  -- A loop of mutually recursive join points: the group is in scope in its bodies, which may
+  -- run many times. They therefore only borrow their captures Γ_c (those of all bodies), which
+  -- are consumed after the loop if they are owned, and a captured variable is not bound again
+  -- in e. The bodies cannot jump to outer joins, and have the result mode of the context. The
+  -- parameters may have any mode: a borrowed one is lent anew by every jump. W is annotated for
+  -- the jumps in the bodies. Recursive joins come from tail calls within a group of functions
+  -- (`TailRec`, after Perceus), and are closed until `JoinArgs` turns invariant borrowed
+  -- parameters into captures. (Not in the paper.)
+  | JoinRec VType [JoinDef] VExpr
 
   -- Operations on contexts and cells. They write to memory that they did not allocate, or
   -- change reference counts, so they are expressions and cannot be duplicated or reordered

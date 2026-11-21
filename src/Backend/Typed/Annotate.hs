@@ -126,16 +126,16 @@ annE c expr w
       UnboxRu z e -> UnboxRu z <$> within (unboxRuGamma gamma z) e
       CopyRu z r e -> CopyRu z r <$> within (copyRuGamma gamma z r) e
       Lock z e -> Lock z <$> within (lockGamma gamma z) e
-      Join rec j tvs ps e1 e2 -> do ps' <- annParams c ps
-                                    rec' <- case rec of
-                                              NonRec -> return NonRec
-                                              Rec t -> Rec <$> annTy c t
-                                    let c' = c{ ctxJoins = M.insert j (tvs,[t | (_,_,t) <- ps']) (ctxJoins c) }
-                                        body = bindVars [(x,V t) | (x,_,t) <- ps']
-                                    e1' <- case rec' of
-                                             NonRec -> annE (body c) e1 w
-                                             Rec t -> annE (body c') e1 t
-                                    Join rec' j tvs ps' e1' <$> annE c' e2 w
+      Join j tvs ps e1 e2 -> do ps' <- annParams c ps
+                                e1' <- annE (bindVars [(x,V t) | (x,_,t) <- ps'] c) e1 w
+                                Join j tvs ps' e1' <$> annE c{ ctxJoins = M.insert j (tvs,[t | (_,_,t) <- ps']) (ctxJoins c) } e2 w
+      JoinRec t ds e -> do t' <- annTy c t
+                           pss <- mapM (annParams c . joinParams) ds
+                           let points = M.fromList [(j,(tvs,[t1 | (_,_,t1) <- ps])) | (JoinDef j tvs _ _,ps) <- zip ds pss]
+                               c' = c{ ctxJoins = M.union points (ctxJoins c) }
+                           ds' <- sequence [JoinDef j tvs ps <$> annE (bindVars [(x,V t1) | (x,_,t1) <- ps] c') e1 t'
+                                           | (JoinDef j tvs _ e1,ps) <- zip ds pss]
+                           JoinRec t' ds' <$> annE c' e w
       Plug k v -> case synthV c k of
                     Just (VCtx _ _ b, mk) -> Plug <$> mk <*> checkV c v (VPtr b)
                     _ -> unknown ("plugging " ++ ppr k ++ " of an unknown type") () >> (Plug k <$> synthOrKeep c v)

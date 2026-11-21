@@ -120,7 +120,7 @@ specialize ways z s n e
        unique <- dsE (UnboxRu z taken)
        let shared = compose (map (Dup . fst) ways) (Drop z (Jump j [] [NoReuse n payload]))
        body <- bind [(r,V t)] (dsE (Free r e))
-       return (Join NonRec j [] [(r,Owned,t)] body (IsUnique z unique shared))
+       return (Join j [] [(r,Owned,t)] body (IsUnique z unique shared))
 
 -- Drop `v : t` except for its descendants `xs`, which the unique branch passes on.
 dropExcept :: [Path] -> Path -> VType -> VExpr -> D VExpr

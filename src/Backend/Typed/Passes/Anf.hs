@@ -68,7 +68,7 @@ bind g x t e body
   = do j <- fresh "join"
        (qs,body') <- closeOver zs body
        e' <- toJumps j t zs e
-       return (Join NonRec j [] ((x,Owned,t) : qs) body' e')
+       return (Join j [] ((x,Owned,t) : qs) body' e')
   | otherwise = return (Let x t e body)
   where
     captures = filter (\y -> not (y `within` x)) (S.toList (fvE body))
@@ -85,10 +85,10 @@ bind g x t e body
 toJumps :: Name -> VType -> [(Path,VType)] -> VExpr -> P VExpr
 toJumps j t zs expr
   = case expr of
-      Join NonRec k tvs ps body scope
+      Join k tvs ps body scope
         -> do (qs,body') <- closeOver zs =<< toJumps j t zs body
               scope' <- toJumps j t zs (substJump k (\ts vs -> Jump k ts (vs ++ captured)) scope)
-              return (Join NonRec k tvs (ps ++ qs) body' scope')
+              return (Join k tvs (ps ++ qs) body' scope')
       _ -> fromMaybe (tailJump expr) (descendTails (toJumps j t zs) expr)
   where
     captured = map (Var . fst) zs
@@ -117,7 +117,7 @@ descendTails go expr
       Gen{} -> Nothing
       CastEv{} -> Nothing
       Total{} -> Nothing
-      Join Rec{} _ _ _ _ _ -> Nothing
+      JoinRec{} -> Nothing
       _ | null (subexprs expr) -> Nothing
         | otherwise -> Just (descendE pure pure (\_ e -> go e) expr)
 

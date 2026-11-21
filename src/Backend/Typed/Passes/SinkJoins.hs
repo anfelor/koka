@@ -43,19 +43,25 @@ sinkJoinsProgram prog = prog{ progDefs = [d{ defBody = sjE (defBody d) } | d <- 
 sjE :: VExpr -> VExpr
 sjE expr
   = case expr of
-      Join r j tvs ps e1 e2 -> sink r j tvs ps (sjE e1) (sjE e2)
+      Join j tvs ps e1 e2 -> let e1' = sjE e1 in sink [j] (freeIn ps e1') [e1'] (Join j tvs ps e1') (sjE e2)
+      JoinRec t ds e -> let ds' = [d{ joinBody = sjE (joinBody d) } | d <- ds]
+                        in sink (map joinName ds') (S.unions [freeIn ps e1 | JoinDef _ _ ps e1 <- ds']) (map joinBody ds') (JoinRec t ds') (sjE e)
       _ -> mapAll (const sjE) expr
+  where
+    freeIn ps e1 = fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps]
 
--- define `join j(ps) = e1` in the innermost subexpression of `e` that contains every jump to it
-sink :: Recursion -> Name -> [TVar] -> [(Path,Mode,VType)] -> VExpr -> VExpr -> VExpr
-sink r j tvs ps e1 e
+-- define the join points `js` with their free variables and bodies (`point e` defines them
+-- around `e`) in the innermost subexpression of `e` that contains every jump to them
+sink :: [Name] -> S.Set Path -> [VExpr] -> (VExpr -> VExpr) -> VExpr -> VExpr
+sink js free bodies point e
   = case getConst (descendE (const (Const [])) (const (Const [])) (\xs sub -> Const [xs | jumpsIn sub]) e) of
       [xs] | movable, all (`S.notMember` free) xs
-        -> runIdentity (descendE Identity Identity (\_ sub -> Identity (if jumpsIn sub then sink r j tvs ps e1 sub else sub)) e)
-      _ -> Join r j tvs ps e1 e
+        -> runIdentity (descendE Identity Identity (\_ sub -> Identity (if jumpsIn sub then sink js free bodies point sub else sub)) e)
+      _ -> point e
   where
-    jumpsIn sub = not (null (jumpArgs j sub))
-    free = fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps]
+    jumpsIn sub = any (\j -> not (null (jumpArgs j sub))) js
     movable = case e of
-                Join _ k _ _ _ _ -> k /= j && null (jumpArgs k e1)
+                Join k _ _ _ _ -> outside [k]
+                JoinRec _ ds _ -> outside (map joinName ds)
                 _ -> True
+    outside ks = all (`notElem` js) ks && and [null (jumpArgs k b) | k <- ks, b <- bodies]

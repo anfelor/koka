@@ -288,21 +288,22 @@ fipE expr
         -> do fe <- ask
               g' <- liftE (lockGamma (fGamma fe) z)
               local (\fe' -> fe'{ fGamma = g' }) (fipE e)
-      Join NonRec j _ ps e1 e2
+      Join j _ ps e1 e2
         -> do i <- state (\s -> (fsUniq s, s{ fsUniq = fsUniq s + 1 }))
               failing <- asks fFailing
               let enter fe = fe{ fJoins = M.insert j (JoinPt i ps e1 fe) (fJoins fe)
                                , fFailing = if fails failing e1 then S.insert j failing else failing }
               local enter (fipE e2)
-      -- the body is closed, and a jump to the join in its body is a tail call to the
-      -- recursive group (its parameters are those of the function it was made from)
-      Join Rec{} j _ ps e1 e2
-        -> do i <- state (\s -> (fsUniq s, s{ fsUniq = fsUniq s + 1 }))
-              let body fe = fe{ fInfo = (fInfo fe){ iBorrowed = [x | (x,Borrowed,_) <- ps] ++ iBorrowed (fInfo fe) }
-                              , fJoins = M.singleton j Loop, fFailing = S.empty }
-                  enter fe = fe{ fJoins = M.insert j (JoinPt i ps e1 (body fe)) (fJoins fe)
-                               , fFailing = if fails S.empty e1 then S.insert j (fFailing fe) else fFailing fe }
-              local enter (fipE e2)
+      -- the bodies are closed, and a jump to the group in a body is a tail call to the
+      -- recursive group (their parameters are those of the functions they were made from);
+      -- each body runs from the jumps that enter it
+      JoinRec _ ds e
+        -> do is <- mapM (const (state (\s -> (fsUniq s, s{ fsUniq = fsUniq s + 1 })))) ds
+              let body ps fe = fe{ fInfo = (fInfo fe){ iBorrowed = [x | (x,Borrowed,_) <- ps] ++ iBorrowed (fInfo fe) }
+                                 , fJoins = M.fromList [(joinName d,Loop) | d <- ds], fFailing = S.empty }
+                  enter fe = fe{ fJoins = M.union (M.fromList [(j,JoinPt i ps e1 (body ps fe)) | (i,JoinDef j _ ps e1) <- zip is ds]) (fJoins fe)
+                               , fFailing = S.union (S.fromList [j | JoinDef j _ _ e1 <- ds, fails S.empty e1]) (fFailing fe) }
+              local enter (fipE e)
       Jump j _ vs
         -> do cs <- mapM fipV vs
               (c,full) <- jump j vs
@@ -340,8 +341,8 @@ fails failing expr
       Unreachable _ -> True
       Jump j _ _ -> S.member j failing
       Let _ _ e1 e2 -> fails failing e1 || fails failing e2
-      Join NonRec j _ _ e1 e2 -> fails (if fails failing e1 then S.insert j failing else failing) e2
-      Join Rec{} j _ _ e1 e2 -> fails (if fails S.empty e1 then S.insert j failing else failing) e2
+      Join j _ _ e1 e2 -> fails (if fails failing e1 then S.insert j failing else failing) e2
+      JoinRec _ ds e -> fails (S.union (S.fromList [j | JoinDef j _ _ e1 <- ds, fails S.empty e1]) failing) e
       _ -> let es = subexprs expr in not (null es) && all (fails failing) es
 
 -- the continuation of a call only destructures values and builds its result from values, given
@@ -356,8 +357,8 @@ modProduct joins expr
       Jump j _ _ -> S.member j joins
       IfYielding _ _ (_,e2) -> modProduct joins e2
       Let _ _ e1 e2 -> modProduct S.empty e1 && modProduct joins e2
-      Join NonRec j _ _ e1 e2 -> modProduct (if modProduct joins e1 then S.insert j joins else joins) e2
-      Join Rec{} _ _ _ _ e2 -> modProduct joins e2
+      Join j _ _ e1 e2 -> modProduct (if modProduct joins e1 then S.insert j joins else joins) e2
+      JoinRec _ _ e -> modProduct joins e
       _ | Just ds <- destructAOf expr -> single (dsAlts ds)
         | Just ds <- destructVOf expr -> single (dsAlts ds)
         | otherwise -> all (modProduct joins) (subexprs expr)

@@ -474,7 +474,7 @@ checkE env g js q expr
                      Nothing -> fail ("jump to unknown join point " ++ show j)
       -- the captured variables that are not descendants of other captured variables, including those
       -- of the join points that the body jumps to
-      Join NonRec j _ ps e1 e2
+      Join j _ ps e1 e2
                         -> do let fvs = S.toList (S.union (fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps])
                                                            (S.fromList [x | (_,cs) <- M.elems (M.restrictKeys js (jumpTargets e1)), (x,_) <- cs]))
                               let xs = [x | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
@@ -483,14 +483,14 @@ checkE env g js q expr
                               caps <- concat <$> mapM (captured u) xs
                               _ <- leave (params env ps ++ caps) u
                               checkE env g (M.insert j ([m | (_,m,_) <- ps],caps) js) q e2
-      -- a body, like that of a function, in which only the join point itself is in scope, and
-      -- whose captures are borrowed: every jump lends them
-      Join Rec{} j _ ps e1 e2
-        -> do let fvs = S.toList (S.filter (\y -> not (any (y `within`) [x | (x,_,_) <- ps])) (fvE e1))
+      -- bodies, like those of functions, in which only the group is in scope, and whose
+      -- captures (those of all bodies) are borrowed: every jump lends them
+      JoinRec _ ds e
+        -> do let fvs = S.toList (S.unions [S.filter (\y -> not (any (y `within`) [x | (x,_,_) <- ps])) (fvE e1) | JoinDef _ _ ps e1 <- ds])
                   caps = [(x,Borrowed) | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
-                  self = M.insert j ([m | (_,m,_) <- ps],caps)
-              closed (params env ps ++ caps) (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) (self M.empty) q e1)
-              checkE env g (self js) q e2
+                  group = M.fromList [(j,([m | (_,m,_) <- ps],caps)) | JoinDef j _ ps _ <- ds]
+              forM_ ds $ \(JoinDef _ _ ps e1) -> closed (params env ps ++ caps) (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) group q e1)
+              checkE env g (M.union group js) q e
       App f vs -> do ft <- liftE (inferVar g f)
                      case ft of
                        A a -> ownedParams a

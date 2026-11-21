@@ -49,7 +49,7 @@ contifyE env g expr
                                   closed = renameE sub body
                               body' <- contifyE env (M.fromList [(x,V v) | (x,_,v) <- params]) closed
                               rest' <- contifyE env g (redirect f j (map Var captures) rest)
-                              return (Join NonRec j [] params body' rest')
+                              return (Join j [] params body' rest')
                 Nothing -> descend
       _ -> descend
   where
@@ -66,6 +66,7 @@ tailOnly :: Path -> VExpr -> Bool
 tailOnly f e = occurs e && tails e
   where
     occurs b = f `S.member` fvE b
+    bodyOk ps e1 = f `elem` [x | (x,_,_) <- ps] || not (occurs e1)
     tails b
       | Just vs <- callOf f b = all (S.notMember f . fvV) vs
       | otherwise = case b of
@@ -73,7 +74,8 @@ tailOnly f e = occurs e && tails e
           Gen{} -> not (occurs b)
           CastEv{} -> not (occurs b)
           Total{} -> not (occurs b)
-          Join _ _ _ ps e1 e2 -> (f `elem` [x | (x,_,_) <- ps] || not (occurs e1)) && tails e2
+          Join _ _ ps e1 e2 -> bodyOk ps e1 && tails e2
+          JoinRec _ ds e2 -> all (\(JoinDef _ _ ps e1) -> bodyOk ps e1) ds && tails e2
           _ -> getAll (getConst (descendE (Const . All . (/= f)) (Const . All . S.notMember f . fvV)
                              (\xs body -> Const (All (f `elem` xs || tails body))) b))
 

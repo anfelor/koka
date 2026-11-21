@@ -30,7 +30,7 @@ import Backend.Typed.Passes.CheckTypes( checkProgram, checkTypes )
 import Backend.Typed.Passes.Simplify( simplifyProgram )
 import Backend.Typed.Passes.Yields( yieldsProgram )
 import Backend.Typed.Passes.Perceus( perceusProgram )
-import Backend.Typed.Passes.TailRec( tailRecProgram )
+import Backend.Typed.Passes.TailRec( tailRecProgram, loopWorkerName )
 import Backend.Typed.Passes.UniqueJoins( uniqueJoinsProgram, workerName )
 import Backend.Typed.Passes.UniqueWorkers( uniqueWorkersProgram )
 import Backend.Typed.Passes.Reuse( reuseProgram )
@@ -62,7 +62,7 @@ typedFromCore enableReuse nt ffi imports uniq core
           , purePass "yields" yieldsProgram
           , Require "linear" checkLinear
           , Pass "perceus" perceusProgram
-          , purePass "tailrec" tailRecProgram
+          , purePass "tailrec" (tailRecProgram (fipsOf (core:imports)))
           , purePass "uniqueworkers" uniqueWorkersProgram
           , purePass "uniquejoins" uniqueJoinsProgram
           , Pass "dropspec" dropSpecProgram
@@ -90,18 +90,19 @@ typedFromCore enableReuse nt ffi imports uniq core
     purePass name pass = Pass name (\prog -> (pass prog,[]))
     whenReuse steps = if enableReuse then steps else []
 
--- the FIP annotations of the functions, which their workers (`UniqueWorkers`) share
+-- the FIP annotations of the functions, which their workers (`TailRec`, `UniqueWorkers`) share
 fipsOf :: [C.Core] -> M.Map Name Fip
 fipsOf cores
   = withWorkers $ M.fromList ([(C.defName d, fip) | c <- cores, d <- C.flattenDefGroups (C.coreProgDefs c), Syntax.DefFun _ fip <- [C.defSort d]]
                 ++ [(C.externalName x, C.externalFip x) | c <- cores, x@(C.External{}) <- C.coreProgExternals c])
   where
-    withWorkers fips = M.union fips (M.mapKeys workerName fips)
+    withWorkers fips = let fips' = M.union fips (M.mapKeys loopWorkerName fips) in M.union fips' (M.mapKeys workerName fips')
 
 -- the recursive group of each recursive definition
 groupsOf :: C.Core -> M.Map Name (S.Set Name)
 groupsOf core
-  = M.fromList [(C.defName d, names) | C.DefRec ds <- C.coreProgDefs core, let names = S.fromList (map C.defName ds), d <- ds]
+  = M.fromList [(n, names) | C.DefRec ds <- C.coreProgDefs core, let names = S.fromList (map C.defName ds), d <- ds
+                            , n <- [C.defName d, loopWorkerName (C.defName d)]]
 
 type Checker = Program -> [String]
 

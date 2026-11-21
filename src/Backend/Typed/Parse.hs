@@ -646,14 +646,20 @@ ifWhnfP = do z <- localP; kw "of"
 
 joinP :: P VExpr
 joinP = do r <- option False (True <$ kw "rec")
-           j <- localName <$> nameP
-           tvs <- tyParamsP
-           ps <- paramsP
-           rec <- if r then Rec <$> (sym ":" >> vP) else return NonRec
-           sym "="
-           e1 <- exprP
-           kw "in"
-           Join rec j tvs ps e1 <$> exprP
+           if r then do (j,tvs,ps) <- headP
+                        t <- sym ":" >> vP
+                        d <- defP j tvs ps
+                        ds <- many (kw "and" >> headP >>= \(k,ks,qs) -> defP k ks qs)
+                        kw "in"
+                        JoinRec t (d:ds) <$> exprP
+                else do (j,tvs,ps) <- headP
+                        sym "="
+                        e1 <- exprP
+                        kw "in"
+                        Join j tvs ps e1 <$> exprP
+  where
+    headP = (,,) <$> (localName <$> nameP) <*> tyParamsP <*> paramsP
+    defP j tvs ps = sym "=" >> JoinDef j tvs ps <$> exprP
 
 memoizeP :: P VExpr
 memoizeP = do c <- atomValP

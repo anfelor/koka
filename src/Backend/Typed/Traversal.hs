@@ -138,8 +138,8 @@ descendB fn fv fb expr
       UnboxRu v e           -> (\v' (_,e') -> UnboxRu v' e') <$> fn v <*> one (child v SCredit) [SCredit] e
       CopyRu v r e          -> (\v' (r',e') -> CopyRu v' r' e') <$> fn v <*> one r [] e
       Lock z e              -> (\z' (_,e') -> Lock z' e') <$> fn z <*> one (child z SCredit) [SCredit] e
-      Join r j tvs ps e1 e2 -> (\(xs,e1') e2' -> Join r j tvs [(x',m,t) | (x',(_,m,t)) <- zip xs ps] e1' e2')
-                                 <$> fb [(x,[]) | (x,_,_) <- ps] e1 <*> plain e2
+      Join j tvs ps e1 e2   -> (\(ps',e1') e2' -> Join j tvs ps' e1' e2') <$> params ps e1 <*> plain e2
+      JoinRec t ds e        -> JoinRec t <$> traverse (\(JoinDef j tvs ps e1) -> uncurry (JoinDef j tvs) <$> params ps e1) ds <*> plain e
       Jump j ts vs          -> Jump j ts <$> traverse fv vs
       Append c d            -> Append <$> fv c <*> fv d
       Plug c v              -> Plug <$> fv c <*> fv v
@@ -149,6 +149,7 @@ descendB fn fv fb expr
       Memoize c d k v       -> Memoize <$> fv c <*> pure d <*> pure k <*> fv v
   where
     plain e = snd <$> fb [] e
+    params ps e = (\(xs,e') -> ([(x',m,t) | (x',(_,m,t)) <- zip xs ps],e')) <$> fb [(x,[]) | (x,_,_) <- ps] e
     one x s e = (\(xs,e') -> (single xs,e')) <$> fb [(x,s)] e
     single xs = case xs of
                   [x] -> x
@@ -253,8 +254,8 @@ jumps :: Name -> VExpr -> [([AType],[VVal])]
 jumps j expr
   = case expr of
       Jump k ts vs | k == j -> [(ts,vs)]
-      Join NonRec k _ _ e1 _ | k == j -> jumps j e1
-      Join Rec{} k _ _ _ _ | k == j -> []
+      Join k _ _ e1 _ | k == j -> jumps j e1
+      JoinRec _ ds _ | j `elem` map joinName ds -> []
       _ -> getConst (descendE (const (Const [])) (const (Const [])) (\_ e -> Const (jumps j e)) expr)
 
 -- the arguments of each jump to a join point
@@ -267,8 +268,8 @@ jumpTargets :: VExpr -> S.Set Name
 jumpTargets expr
   = case expr of
       Jump k _ _ -> S.singleton k
-      Join NonRec k _ _ e1 e2 -> S.union (jumpTargets e1) (S.delete k (jumpTargets e2))
-      Join Rec{} k _ _ e1 e2 -> S.delete k (S.union (jumpTargets e1) (jumpTargets e2))
+      Join k _ _ e1 e2 -> S.union (jumpTargets e1) (S.delete k (jumpTargets e2))
+      JoinRec _ ds e -> S.unions (jumpTargets e : map (jumpTargets . joinBody) ds) `S.difference` S.fromList (map joinName ds)
       _ -> getConst (descendE (const (Const S.empty)) (const (Const S.empty)) (\_ e -> Const (jumpTargets e)) expr)
 
 -- a top-level value, possibly instantiated (`[dup-glob]`)
@@ -362,6 +363,7 @@ destructAOf expr
       CopyRu{} -> Nothing
       Lock{} -> Nothing
       Join{} -> Nothing
+      JoinRec{} -> Nothing
       Jump{} -> Nothing
       Append{} -> Nothing
       Plug{} -> Nothing
@@ -402,6 +404,7 @@ destructVOf expr
       CopyRu{} -> Nothing
       Lock{} -> Nothing
       Join{} -> Nothing
+      JoinRec{} -> Nothing
       Jump{} -> Nothing
       Append{} -> Nothing
       Plug{} -> Nothing

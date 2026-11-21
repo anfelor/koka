@@ -60,7 +60,7 @@ simplifyDef def = def{ defBody = knownE M.empty (freshE (copyE (defScope def) (c
 inlineE :: VExpr -> State NameSupply VExpr
 inlineE expr
   = case expr of
-      Join NonRec j tvs ps e1 e2
+      Join j tvs ps e1 e2
         -> do e1' <- inlineE e1
               let bindArgs body ts vs = let sub = M.fromList (zip tvs ts)
                                         in foldr (\((x,_,t),v) e -> Let x (subst sub t) (Ret v) e) (substTypesE sub body) (zip ps vs)
@@ -72,7 +72,7 @@ inlineE expr
               return (case length (jumpArgs j e2') of
                         0 -> e2'
                         1 -> substJump j (bindArgs e1') e2'
-                        _ -> Join NonRec j tvs ps e1' e2')
+                        _ -> Join j tvs ps e1' e2')
       _ -> descendAll (const inlineE) expr
 
 -- The alternative of a destructuring (under dereferences and unrolls) that the known values

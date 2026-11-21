@@ -310,10 +310,15 @@ percE' pe owned expr
         -> do ms <- maybe (fail ("unknown join point " ++ show j)) return (M.lookup j (peJoins pe))
               (k,vs') <- useVals pe owned (zip ms vs)
               return (k (Jump j ts vs'))
-      Join rc j tvs ps e1 e2
+      Join j tvs ps e1 e2
         -> do e1' <- percE (paramEnv (peEnv pe) ps (peJoins pe)) (ownedParams (peEnv pe) ps) e1
               e2' <- percE' pe{ peJoins = M.insert j [m | (_,m,_) <- ps] (peJoins pe) } owned e2
-              return (Join rc j tvs ps e1' e2')
+              return (Join j tvs ps e1' e2')
+      -- closed bodies, in which only the group is in scope
+      JoinRec t ds e
+        -> do let group = M.fromList [(j,[m | (_,m,_) <- ps]) | JoinDef j _ ps _ <- ds]
+              ds' <- mapM (\d -> (\b -> d{ joinBody = b }) <$> percE (paramEnv (peEnv pe) (joinParams d) group) (ownedParams (peEnv pe) (joinParams d)) (joinBody d)) ds
+              JoinRec t ds' <$> percE' pe{ peJoins = M.union group (peJoins pe) } owned e
       App f vs
         -> do let move = S.member f owned && all (S.notMember f . fvV) vs
               (k,vs') <- useVals pe (if move then S.delete f owned else owned) [(Owned,v) | v <- vs]

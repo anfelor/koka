@@ -183,7 +183,7 @@ unwrap val ty expr
       Unreachable t -> Unreachable <$> ty t
       Jump{} -> Just expr
       Let x t e1 e2 -> Let x t e1 <$> go e2
-      Join NonRec j tvs ps e1 e2 -> Join NonRec j tvs ps <$> go e1 <*> go e2
+      Join j tvs ps e1 e2 -> Join j tvs ps <$> go e1 <*> go e2
       CaseLit v alts def -> CaseLit v <$> traverse (traverse go) alts <*> go def
       IfYielding v (k3,e3) (k2,e2) -> (\e3' e2' -> IfYielding v (k3,e3') (k2,e2')) <$> go e3 <*> go e2
       _ | Just ds <- destructAOf expr -> dsBuild ds (dsScrut ds) <$> traverse (go . snd) (dsAlts ds)

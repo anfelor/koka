@@ -20,7 +20,7 @@ module Backend.Typed.CGen.CGen( CEnv(..), cgenModule, cgenMain ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Data.List( sortOn )
+import Data.List( intercalate, sortOn )
 import Data.Maybe( fromMaybe, isJust )
 import qualified Numeric
 import Control.Monad( forM )
@@ -882,21 +882,9 @@ genE cx dest expr
       CastEv _ _ e -> genE cx dest e
       -- the token has no representation, so the result of e has the layout of the result
       Total k e -> genE (bindVar cx k (V VToken)) dest e
-      -- the body of a recursive join point is a loop, which only sees the join point itself
-      Join rc j _ ps e1 e2
-        -> do lbl <- fresh "join"
-              decls <- mapM (\(x,_,t) -> do ct <- ctype t
-                                            return (cty ct <+> localName x <.> ";")) ps
-              let point = (lbl,[(x,t) | (x,_,t) <- ps],rc /= NonRec)
-                  inner = case rc of
-                            NonRec -> cxJoins cx
-                            Rec{} -> M.singleton j point
-              s2 <- genE cx{ cxJoins = M.insert j point (cxJoins cx) } dest e2
-              s1 <- genE (foldl (\c (x,_,t) -> bindVar c x (V t)) cx{ cxJoins = inner } ps) dest e1
-              let (skip,end) = case dest of
-                                 DReturn -> ([],[])
-                                 _ -> (["goto" <+> lbl <.> "_end;"], [lbl <.> "_end: ;"])
-              return [block (decls ++ s2 ++ skip ++ [lbl <.> ":" <+> block s1] ++ end)]
+      Join j _ ps e1 e2 -> genJoins cx dest [(j,ps,e1)] False e2
+      -- the bodies of recursive join points are a loop, which only sees the group itself
+      JoinRec _ ds e -> genJoins cx dest [(j,ps,e1) | JoinDef j _ ps e1 <- ds] True e
       Jump j _ vs
         -> do (lbl,xs,recursive) <- maybe (failG ("jump to unknown join point " ++ show j)) return (M.lookup j (cxJoins cx))
               args <- mapM (genV cx) vs
@@ -1029,6 +1017,24 @@ genE cx dest expr
                           return ("kt_open_is(" <.> ve <.> ",kt_pun(kk_string_t," <.> tag <.> "),_ctx)", decls ++ s)
               sd <- genE cx dest def
               return [ifChain brs sd]
+
+-- join points: the parameters are declared before the scope, and each body follows it under
+-- its label; the bodies of recursive join points only see their group
+genJoins :: Ctx -> Dest -> [(Name,[(Path,Mode,VType)],VExpr)] -> Bool -> VExpr -> G [Doc]
+genJoins cx dest js recursive e
+  = do lbls <- mapM (const (fresh "join")) js
+       decls <- sequence [do ct <- ctype t
+                             return (cty ct <+> localName x <.> ";") | (_,ps,_) <- js, (x,_,t) <- ps]
+       let points = M.fromList [(j,(lbl,[(x,t) | (x,_,t) <- ps],recursive)) | ((j,ps,_),lbl) <- zip js lbls]
+           inner = if recursive then points else cxJoins cx
+       s <- genE cx{ cxJoins = M.union points (cxJoins cx) } dest e
+       bodies <- sequence [do s1 <- genE (foldl (\c (x,_,t) -> bindVar c x (V t)) cx{ cxJoins = inner } ps) dest e1
+                              return [lbl <.> ":" <+> block s1] | ((_,ps,e1),lbl) <- zip js lbls]
+       let end = head lbls <.> "_end"
+           (skip,finish) = case dest of
+                             DReturn -> ([],[])
+                             _ -> (["goto" <+> end <.> ";"], [end <.> ": ;"])
+       return [block (decls ++ s ++ skip ++ intercalate skip bodies ++ finish)]
 
 -- declare the binder of a `let` and assign it the value of the bound expression
 genBound :: Ctx -> Path -> VType -> VExpr -> G [Doc]

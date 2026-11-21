@@ -99,9 +99,10 @@ exE full expr
                           e2' <- exE (S.union full (fullOf [(x,t)])) e2
                           t' <- untagged x t
                           return (Let x t' e1' e2')
-      Join rc j tvs ps e1 e2 -> do e1' <- exE (S.union full (fullOf [(x,t) | (x,_,t) <- ps])) e1
-                                   ps' <- mapM (\(x,m,t) -> (,,) x m <$> untagged x t) ps
-                                   Join rc j tvs ps' e1' <$> exE full e2
+      Join j tvs ps e1 e2 -> do (ps',e1') <- point ps e1
+                                Join j tvs ps' e1' <$> exE full e2
+      JoinRec t ds e -> do ds' <- mapM (\(JoinDef j tvs ps e1) -> uncurry (JoinDef j tvs) <$> point ps e1) ds
+                           JoinRec t ds' <$> exE full e
       UnboxRu z e -> UnboxRu z <$> exE (S.insert (child z SCredit) full) e
       CopyRu z r e -> CopyRu z r <$> exE (S.insert r full) e
       IfFull r e1 e2 -> IfFull r <$> exE (S.insert r full) e1 <*> exE full e2
@@ -116,6 +117,9 @@ exE full expr
                       case shared full alts of
                         Just alloc -> merge full (withArms expr alts) alloc
                         Nothing -> descendE pure exV (\_ e -> exE full e) expr
+    point ps e1 = do e1' <- exE (S.union full (fullOf [(x,t) | (x,_,t) <- ps])) e1
+                     ps' <- mapM (\(x,m,t) -> (,,) x m <$> untagged x t) ps
+                     return (ps',e1')
 
 -- a statement, whose closures are expanded
 statement :: VExpr -> X VExpr
@@ -147,14 +151,14 @@ allocate full stmt
         -> do j <- fresh "reusejp"
               (u',bs) <- hoist u
               body <- test full (Jump j [] [u'])
-              return (lets bs (Join NonRec j [] [(x,modeOf u,t)] e body))
+              return (lets bs (Join j [] [(x,modeOf u,t)] e body))
       Just (u,m,t)
         -> do j <- fresh "reusejp"
               x <- root <$> fresh "alloc"
               e <- allocate full (replace u (Var x) stmt)
               (u',bs) <- hoist u
               body <- test full (Jump j [] [u'])
-              return (lets bs (Join NonRec j [] [(x,m,t)] e body))
+              return (lets bs (Join j [] [(x,m,t)] e body))
   where
     modeOf u = case u of
                  Context{} -> Unique
@@ -171,9 +175,9 @@ merge full expr (r,m,t,stmt,us)
        let jumps f = withArms expr [lets bs (f (Jump j [] [u'])) | (u',bs) <- hs]
        when (length (nub (map tagOf us)) > 1) (modify (\(n,u) -> (n,S.insert r u)))
        if S.member r full
-         then return (Join NonRec j [] [(x,m,t)] e (jumps id))
+         then return (Join j [] [(x,m,t)] e (jumps id))
          else do slow <- cloneE (root <$> fresh "reusecopy") (jumps (allocFresh r))
-                 return (Join NonRec j [] [(x,m,t)] e (IfFull r (jumps id) slow))
+                 return (Join j [] [(x,m,t)] e (IfFull r (jumps id) slow))
   where
     tagOf v = case v of
                 Context _ k -> tagOf k

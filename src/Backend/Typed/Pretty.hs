@@ -67,7 +67,7 @@ reserved s = null s || "(" `isPrefixOf` s || s `elem` keywords || "box@" `isPref
   where
     numbered p = p `isPrefixOf` s && not (null (drop (length p) s)) && all isDigit (drop (length p) s)
     keywords = words ("ret let in of case split at if-whnf whnf delay ptr roll box scalar pack dup drop free"
-                      ++ " if-unique if-full then else join rec jump fn gen forall exists unreachable"
+                      ++ " if-unique if-full then else join rec and jump fn gen forall exists unreachable"
                       ++ " cast-ev total memoize ctx ctx-copy hole some null is-null if-yielding yield up down lock @ @copy _"
                       ++ " module data con fun val extern foreign Box Scalar I KCtx NaN Infinity"
                       ++ " char ssize_t intptr_t float64 float32 int64 int32 int16 int8 uint8")
@@ -329,10 +329,11 @@ prettyExpr pp expr
       UnboxRu z e -> letIn empty (text "@" <+> pp (child z SCredit)) (pp z) e
       CopyRu z r e -> letIn empty (text "@copy" <+> pp r) (pp z) e
       Lock z e -> letIn empty (text "lock" <+> pp (child z SCredit)) (pp z) e
-      Join NonRec j tvs ps e1 e2 -> text "join" <+> nm j <.> tyParams tvs <.> params pp ps <+> text "="
+      Join j tvs ps e1 e2 -> text "join" <+> nm j <.> tyParams tvs <.> params pp ps <+> text "="
                          <-> indent 2 (prettyExpr pp e1) <-> text "in" <+> align (prettyExpr pp e2)
-      Join (Rec t) j tvs ps e1 e2 -> text "join rec" <+> nm j <.> tyParams tvs <.> params pp ps <+> colon <+> prettyV pp t <+> text "="
-                         <-> indent 2 (prettyExpr pp e1) <-> text "in" <+> align (prettyExpr pp e2)
+      JoinRec t ds e -> foldr (<->) (text "in" <+> align (prettyExpr pp e))
+                          [text kw <+> nm j <.> tyParams tvs <.> params pp ps <+> res <-> indent 2 (prettyExpr pp e1)
+                          | (kw,res,JoinDef j tvs ps e1) <- zip3 ("join rec" : repeat "and") (colon <+> prettyV pp t <+> text "=" : repeat (text "=")) ds]
       Jump j [] vs -> text "jump" <+> nm j <.> args pp vs
       Jump j ts vs -> text "jump" <+> nm j <.> tyArgs pp ts <.> args pp vs
       Plug c v -> atomVal pp c <.> brackets (prettyVal pp v)

@@ -132,9 +132,11 @@ renE global ren expr
       CastEv u t e -> CastEv (replaceVType sub u) (replaceVType sub t) e
       Unreachable t -> Unreachable (replaceVType sub t)
       Call f ts vs -> Call f (map (replaceAType sub) ts) vs
-      Join r j tvs ps e1 e2 -> Join (mapRecursion (replaceVType sub) r) j tvs [(x,m,replaceVType sub t) | (x,m,t) <- ps] e1 e2
+      Join j tvs ps e1 e2 -> Join j tvs (params ps) e1 e2
+      JoinRec t ds e -> JoinRec (replaceVType sub t) [d{ joinParams = params (joinParams d) } | d <- ds] e
       Jump j ts vs -> Jump j (map (replaceAType sub) ts) vs
       _ -> expr
+    params ps = [(x,m,replaceVType sub t) | (x,m,t) <- ps]
 
 renV :: Global -> Ren -> VVal -> R VVal
 renV global ren val

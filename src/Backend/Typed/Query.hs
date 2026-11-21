@@ -147,7 +147,7 @@ inferExpr env g js expr
                          inferE env g' js e
       Lock z e -> do g' <- lockGamma g z
                      inferE env g' js e
-      Join NonRec j tvs ps e1 e2
+      Join j tvs ps e1 e2
                           -> do let xs = [x | (x,_,_) <- ps]
                                 unless (S.disjoint (fvE e1 `S.difference` S.fromList xs) (S.fromList (bindersE e2)))
                                   (Left ("join point " ++ show j ++ " captures a variable that is bound again in its scope"))
@@ -156,17 +156,16 @@ inferExpr env g js expr
                                 unbound tvs (ftv t ++ ftvCtx g e1)
                                 let caps = S.unions (S.difference (fvE e1) (S.fromList xs) : [cs | (cs,_,_,_) <- M.elems (M.restrictKeys (jsPoints js) (jumpTargets e1))])
                                 t <$ checkE env g js{ jsPoints = M.insert j (caps,tvs,[p | (_,_,p) <- ps],t) (jsPoints js) } e2 t
-      -- only itself is in scope in its body (its captures are borrowed, see `CheckLinear`)
-      Join (Rec t) j tvs ps e1 e2
-                          -> do let xs = [x | (x,_,_) <- ps]
-                                    caps = S.filter (\y -> not (any (y `within`) xs)) (fvE e1)
-                                unless (S.disjoint caps (S.fromList (bindersE e2)))
-                                  (Left ("recursive join point " ++ show j ++ " captures a variable that is bound again in its scope"))
-                                joinDescriptions j ps
-                                unbound tvs (ftv t ++ ftvCtx g e1)
-                                let self = M.insert j (caps,tvs,[p | (_,_,p) <- ps],t)
-                                checkE env (bindAll [(x,V p) | (x,_,p) <- ps] g) js{ jsPoints = self M.empty } e1 t
-                                t <$ checkE env g js{ jsPoints = self (jsPoints js) } e2 t
+      -- only the group is in scope in its bodies (their captures are borrowed, see `CheckLinear`)
+      JoinRec t ds e
+        -> do let xss = [[x | (x,_,_) <- ps] | JoinDef _ _ ps _ <- ds]
+                  caps = S.unions [S.filter (\y -> not (any (y `within`) xs)) (fvE e1) | (xs,JoinDef _ _ _ e1) <- zip xss ds]
+              unless (S.disjoint caps (S.fromList (bindersE e)) && not (any (\y -> any (y `within`) (concat xss)) caps))
+                (Left ("recursive join points " ++ show (map joinName ds) ++ " capture a variable that is bound again in their scope"))
+              forM_ ds $ \(JoinDef j tvs ps e1) -> joinDescriptions j ps >> unbound tvs (ftv t ++ ftvCtx g e1)
+              let group = M.fromList [(j,(caps,tvs,[p | (_,_,p) <- ps],t)) | JoinDef j tvs ps _ <- ds]
+              forM_ ds $ \(JoinDef _ _ ps e1) -> checkE env (bindAll [(x,V p) | (x,_,p) <- ps] g) js{ jsPoints = group } e1 t
+              t <$ checkE env g js{ jsPoints = M.union group (jsPoints js) } e t
       -- the captured variables must still be in scope (`[unbox-ru]` and `[lock]` split a box into its children)
       Jump j ts vs -> case M.lookup j (jsPoints js) of
                      Just (caps,tvs,ps,t) -> do forM_ (S.toList caps) $ \x ->
