@@ -37,7 +37,7 @@ import Backend.Typed.Elab.Representation
 import Backend.Typed.Elab.Monad
 import Backend.Typed.Elab.Coerce
 import Backend.Typed.Elab.Lazy( whnfTests )
-import Backend.Typed.Elab.Common( isValue, identityCast, isPrim, linearContexts, isLinearContextPrim, nameUnreachable, isJoinName )
+import Backend.Typed.Elab.Common( isValue, identityCast, isPrim, linearContexts, isLinearContextPrim, nameUnreachable, nameYieldingNonFinal, isJoinName )
 import Backend.Typed.Pretty( ppr )
 
 -- programs
@@ -45,7 +45,7 @@ import Backend.Typed.Pretty( ppr )
 elabProgram :: Newtypes -> Foreign -> [C.Core] -> C.Core -> (Program,[String],[String])
 elabProgram nt ffi imports core
   = let defs    = map closeDef (filter (not . isLeftOut) (C.flattenDefGroups (C.coreProgDefs core)))
-        isigs   = M.fromList [(n,withModes modes sig) | (n,(tp,isFun,modes)) <- M.toList (importSigs (core:imports)), Right sig <- [typeSig nt tp isFun]]
+        isigs   = M.fromList [(n,withModes modes sig) | (n,(tp,isFun,modes)) <- M.toList (importSigs (core:imports)), Right sig <- [typeSig nt n tp isFun]]
         env0    = Env nt S.empty S.empty isigs M.empty S.empty M.empty VUnit M.empty
         (tdefs,tdefErrs) = typeDefs nt
         run (sigs,ds,errs,notes) def
@@ -90,7 +90,7 @@ elabDef def
 
 elabFunDef :: C.Def -> [TName] -> C.Expr -> E (Def,Sig)
 elabFunDef def pars body
-  = do (tvs,args,res) <- funSig (typeOf (C.defExpr def))
+  = do (tvs,args,res) <- funSig (C.defName def) (typeOf (C.defExpr def))
        (k,token) <- tokenBinder args
        body' <- withTVars tvs (withTypedLocals (map typed pars) (tokenIn token (elabExprAt res body)))
        let params = withParamModes (defModes def) args
@@ -147,14 +147,27 @@ withModes modes sig
 withParamModes :: [Mode] -> [(Mode,VType)] -> [(Mode,VType)]
 withParamModes modes ps = [(m,t) | ((_,t),m) <- zip ps (modes ++ repeat Owned)]
 
-typeSig :: Newtypes -> Type -> Bool -> Tr Sig
-typeSig nt tp isFun
-  | isFun     = (\(tvs,args,res) -> SigFun tvs args Owned res) <$> funSigOf nt tp
+typeSig :: Newtypes -> Name -> Type -> Bool -> Tr Sig
+typeSig nt n tp isFun
+  | isFun     = (\(tvs,args,res) -> SigFun tvs args Owned res) <$> funSigOf nt n tp
   | otherwise = uncurry SigVal <$> elabScheme nt tp
 
-funSigOf :: Newtypes -> Type -> Tr ([TVar],[(Mode,VType)],VType)
-funSigOf nt tp
+-- The IR type of the function `n` of the Koka type `tp`. The tests of the yield flag,
+-- `yielding()` and `yielding-non-final()`, take the token like an effectful external (Koka
+-- types them total), so that they are ordered after the calls whose yields they test.
+funTypeOf :: Newtypes -> Name -> Type -> Tr AType
+funTypeOf nt n tp
   = do a <- elabFunType nt tp
+       return (case a of
+                 AFun ps r | isFlagTest n, not (snd (tokenParam ps)) -> AFun (ps ++ [(Owned,VToken)]) (withToken r)
+                 _ -> a)
+
+isFlagTest :: Name -> Bool
+isFlagTest n = n `elem` [nameYielding, nameYieldingNonFinal]
+
+funSigOf :: Newtypes -> Name -> Type -> Tr ([TVar],[(Mode,VType)],VType)
+funSigOf nt n tp
+  = do a <- funTypeOf nt n tp
        case a of
          AForall tvs (AFun args res) -> Right (tvs,args,res)
          AFun args res               -> Right ([],args,res)
@@ -171,10 +184,10 @@ stripTypeLam :: C.Expr -> C.Expr
 stripTypeLam (C.TypeLam _ e) = e
 stripTypeLam e               = e
 
-funSig :: Type -> E ([TVar],[(Mode,VType)],VType)
-funSig tp
+funSig :: Name -> Type -> E ([TVar],[(Mode,VType)],VType)
+funSig n tp
   = do e <- env
-       tr (funSigOf (envNT e) tp)
+       tr (funSigOf (envNT e) n tp)
 
 -- expressions
 
@@ -210,6 +223,10 @@ elabTail expr
         -> failE ("local recursive definition: " ++ show (map C.defName defs))
       C.TypeLam tvs e | not (any tvarStar tvs) -> elabTail e
       C.TypeLam tvs e | not (isValue expr) -> elabGen [typevarId tv | tv <- tvs, tvarStar tv] e (typeOf expr) >>= atResult (typeOf expr)
+      _ | Just (e2,e3) <- yieldTest expr
+        -> do token <- currentToken
+              (kt,k) <- takeToken
+              kt <$> testYield token k (elabTail e3) (elabTail e2)
       C.Case [scrut] brs -> elabCase scrut brs
       C.Var (TName x _) _ | x == nameUnreachable -> Unreachable <$> result
       C.Case _ _ -> failE "case with multiple scrutinees after matching"
@@ -242,7 +259,8 @@ atResult tp e = do t <- vt tp
                    r <- result
                    coerceExpr t r e
 
--- Koka's test for a yield, `match yielding() { True -> e₃; False -> e₂ }`: `e₂` and `e₃`
+-- Koka's test for a yield, `match yielding() { True -> e₃; False -> e₂ }`: `e₂` and `e₃`. It is
+-- an `[if-yielding]` on the current token (`testYield`).
 yieldTest :: C.Expr -> Maybe (C.Expr,C.Expr)
 yieldTest expr
   = case expr of
@@ -295,15 +313,22 @@ letYield def t e2 e3
        r0 <- fresh "r"
        k <- fresh "k"
        w <- result
-       let branch m = do k' <- fresh "k"
-                         e <- if isJust token then tokenIn (Just k') m
-                              else do d <- fresh "u"
-                                      dropToken d (Var k') <$> tokenIn Nothing m
-                         return (k',e)
-       yielding <- branch (elabTail e3)
-       body <- branch (withTypedLocals [(x,C.defType def)] (elabTail e2))
-       return (Let r u e1' (Proj (Var r) 0 r0 (Proj (Var r) 1 k
-                 (IfYielding (Var k) yielding (fmap (\b -> IsNull (Var r0) (Unreachable w) (root x,b)) body)))))
+       test <- testYield token (Var k) (elabTail e3)
+                 (IsNull (Var r0) (Unreachable w) . (,) (root x) <$> withTypedLocals [(x,C.defType def)] (elabTail e2))
+       return (Let r u e1' (Proj (Var r) 0 r0 (Proj (Var r) 1 k test)))
+
+-- `[if-yielding]` on the token `k`, with the yielding branch `m3` and the other branch `m2`.
+-- Each branch continues with its new token in a token-threaded expression (`token` is the
+-- token before the test), and drops it in an expression without one.
+testYield :: Maybe Path -> VVal -> E VExpr -> E VExpr -> E VExpr
+testYield token k m3 m2
+  = IfYielding k <$> branch m3 <*> branch m2
+  where
+    branch m = do k' <- fresh "k"
+                  e <- if isJust token then tokenIn (Just k') m
+                       else do d <- fresh "u"
+                               dropToken d (Var k') <$> tokenIn Nothing m
+                  return (k',e)
 
 -- `let x : t = e in □`. In a token-threaded expression, an `e` that calls something that takes
 -- a token (`usesToken`) is elaborated at `t ⊗ KCtx`, whose token is the next one; any other
@@ -325,11 +350,12 @@ bindExpr x t expr
 -- which `matchCore` types as total) calls a function that takes a token, overapproximated: a
 -- function is also taken at its generic type (an effect-polymorphic function at a total
 -- instance takes a token), and one under an identity cast (`.open`, `unsafe-total`) at both
--- of its types, as elaboration calls it at its own (`elabApp`).
+-- of its types, as elaboration calls it at its own (`elabApp`). The tests of the yield flag
+-- take a token too (`sigOf`).
 usesToken :: C.Expr -> Bool
 usesToken expr
   = case expr of
-      C.App f args -> any calls (typeOf f : generic f ++ maybe [] (\g -> typeOf g : generic g) (identityCast f)) || any usesToken (f : args)
+      C.App f args -> any calls (typeOf f : generic f ++ maybe [] (\g -> typeOf g : generic g) (identityCast f)) || any (`isPrim` f) [nameYielding, nameYieldingNonFinal] || any usesToken (f : args)
       C.TypeApp e _ -> usesToken e
       C.TypeLam _ e -> usesToken e
       C.Let dgs e -> usesToken e || any bound (C.flattenDefGroups dgs)
@@ -430,7 +456,7 @@ globalSig g gtp info
        sig <- case M.lookup g (envSigs e) of
                 Just sig -> return sig
                 Nothing  -> do note ("signature from use site: " ++ show g)
-                               tr (typeSig (envNT e) gtp (isFunInfo info))
+                               tr (typeSig (envNT e) g gtp (isFunInfo info))
        recordSig g sig
        return sig
 
@@ -443,7 +469,7 @@ instFun :: Name -> Sig -> Type -> [Type] -> E ([AType],[VType],VType)
 instFun g (SigFun tvs params _ res) gtp tys
   = do e <- env
        tys' <- instArgs gtp tys
-       useA <- tr (elabFunType (envNT e) gtp)
+       useA <- tr (funTypeOf (envNT e) g gtp)
        let pat = AFun params res
            (utvs,ubody) = splitForallA useA
            used = inst utvs tys' ubody

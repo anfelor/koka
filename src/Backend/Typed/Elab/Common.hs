@@ -8,18 +8,22 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 
 -- Internal names and structural queries shared by the Core-to-typed-IR passes.
-module Backend.Typed.Elab.Common( isValue, isConExpr, identityCast, isPrim, linearContexts, isLinearContextPrim, nameUnreachable, isJoinName ) where
+module Backend.Typed.Elab.Common( isValue, isConExpr, identityCast, isPrim, linearContexts, isLinearContextPrim, nameUnreachable, nameYieldingNonFinal, isJoinName ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.List( isInfixOf )
 import Common.Name
-import Common.NamePrim( nameCCtxApply, nameCCtxExtend, nameEffectOpen )
+import Common.NamePrim( nameCCtxApply, nameCCtxExtend, nameEffectOpen, nameCoreHnd )
 import Core.Core( Expr(..), TName(..), VarInfo(..), Branch(..), Guard(..), Def(..), DefGroup(..), flattenDefGroups )
 
 -- marks an impossible alternative in Core; elaboration turns it into `[unreachable]`
 nameUnreachable :: Name
 nameUnreachable = newHiddenName "typed-unreachable"
+
+-- `std/core/hnd/yielding-non-final`, which tests the yield flag like `yielding`
+nameYieldingNonFinal :: Name
+nameYieldingNonFinal = qualify nameCoreHnd (newName "yielding-non-final")
 
 isJoinName :: Name -> Bool
 isJoinName x = hiddenNameStartsWith x "join"
