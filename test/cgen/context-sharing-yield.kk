@@ -1,7 +1,4 @@
-// Unique workers (`UniqueWorkers`) of functions that may yield: a helper that extends a
-// context and calls an operation gets a worker with a unique context and a result that is
-// unique unless it is the dummy of a yield. Resuming more than once must not share an
-// accumulator that is appended in place.
+// Each resumption of a yielding context extension must see its own accumulator.
 
 effect choose
   ctl flip() : bool
@@ -18,7 +15,7 @@ noinline fun extend(acc : ctx<list<int>>, d : deriv) : choose ctx<list<int>>
     Right(x) -> acc ++ ctx Cons(x * 10, hole)
     Keep -> acc
 
-// the loop calls the worker
+// this loop extends its accumulator through the yielding helper
 fun walk(xs : list<int>, acc : ctx<list<int>>) : <choose,div> list<int>
   match xs
     Cons(x, xx) -> walk(xx, extend(acc, if x % 3 == 0 then Keep elif x % 2 == 0 then Left(x) else Right(x)))

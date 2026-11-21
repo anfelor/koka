@@ -1,5 +1,4 @@
-// Unique workers (`UniqueWorkers`): a helper that extends a context gets a worker with a
-// unique context and result, which a loop calls with its unique accumulator.
+// A shared context can be extended in a loop or passed to a helper on its own.
 
 type deriv
   Left(x : int)
@@ -13,7 +12,7 @@ noinline fun extend(acc : ctx<list<int>>, d : deriv) : ctx<list<int>>
     Right(x) -> acc ++ ctx Cons(0 - x, hole)
     Keep -> acc
 
-// the loop calls the worker, and copies only at the entry
+// this loop extends its accumulator through the helper
 fun walk(xs : list<int>, acc : ctx<list<int>>) : div list<int>
   match xs
     Cons(x, xx) -> walk(xx, extend(acc, if x % 3 == 0 then Keep elif x % 2 == 0 then Left(x) else Right(x)))
@@ -32,7 +31,7 @@ fun main()
   val shared = ctx Cons(0, hole)
   walk([1, 2, 3, 4], shared).show.println
   walk([5, 6], shared).show.println
-  // the helper outside a loop, with a shared context: the original function copies
+  // the helper can also extend a shared context outside the loop
   val c1 = extend(shared, Left(7))
   val c2 = extend(shared, Right(8))
   (c1 ++. Nil).show.println

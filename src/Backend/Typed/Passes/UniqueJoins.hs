@@ -29,26 +29,23 @@
   to a non-recursive join point, those of the jumps in the body of a recursive one, and the
   results of the bound expression of a `let` (`tails`). A result is a value, an append or a
   copy (which are unique), `null` (the dummy, which never reaches the binder of `[is-null]`),
-  or a call that is unique if its function has a unique result, or a
-  worker with one (`UniqueWorkers`) whose unique parameters receive unique values; such a call
-  is redirected to the worker. The jumps that enter a recursive join point are exempt: they copy an
-  argument for a promoted parameter that is not unique, once per loop instead of once per
+  or a call to a function with a unique result. The jumps that enter a recursive join point
+  can copy a shared argument for a promoted parameter once per loop instead of once per
   iteration. Then `ctx-copy v` of a unique `v` is `v` (`kk_cctx_copy` only copies a shared
   context): `let x = ctx-copy v in e` becomes `e[x := v]`. `CheckLinear` validates the result.
 
   The body of a closure is a scope of its own, in which the variables it captures are owned.
 -}
-module Backend.Typed.Passes.UniqueJoins( uniqueJoinsProgram, uniqueScope, Flow(..), tails, uniq, uniqF, copyCount, isCtx, workerName ) where
+module Backend.Typed.Passes.UniqueJoins( uniqueJoinsProgram ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad( foldM, zipWithM )
 import Control.Monad.State( State, evalState, state )
 import Data.Functor.Const( Const(..) )
-import Data.Monoid( Sum(..) )
-import Common.Name( Name, makeHiddenName )
+import Common.Name( Name )
 import Backend.Typed.Syntax
-import Backend.Typed.Env( Env(..), envOf )
+import Backend.Typed.Env( Env, envOf )
 import Backend.Typed.Traversal( canonical, descendE, fvE, fvV, jumpArgs, lamsV, subexprs )
 import Backend.Typed.Types( inst )
 import Backend.Typed.Build( K, compose )
@@ -58,20 +55,19 @@ uniqueJoinsProgram :: Program -> Program
 uniqueJoinsProgram prog = prog{ progDefs = map def (progDefs prog) }
   where
     env = envOf prog
-    def d = d{ defBody = snd (evalState (uniqueScope env (params d) (defBody d)) (freshFor d)) }
+    def d = d{ defBody = evalState (uniqueScope env (params d) (defBody d)) (freshFor d) }
     params d = case d of
                  DefFun{} -> defArgs d
                  DefVal{} -> []
 
--- the unique binders of a definition or closure body, and the rewritten body; the names
--- are fresh in the whole definition
-uniqueScope :: Env -> [(Path,Mode,VType)] -> VExpr -> State NameSupply (S.Set Path, VExpr)
+-- rewrite the body of a definition or closure; names are fresh in the whole definition
+uniqueScope :: Env -> [(Path,Mode,VType)] -> VExpr -> State NameSupply VExpr
 uniqueScope env ps body
   = do body' <- closures body
        let u = unique env (Facts [x | (x,_,_) <- ps] [x | (x,Unique,t) <- ps, isCtx t] S.empty [] <> facts env M.empty body')
-       (,) u <$> rewrite env u body'
+       rewrite u body'
   where
-    closures e = descendE pure (lamsV (\qs _ b -> snd <$> uniqueScope env qs b)) (\_ b -> closures b) e
+    closures e = descendE pure (lamsV (\qs _ b -> uniqueScope env qs b)) (\_ b -> closures b) e
 
 -- a context, or a context that may be null (whose `[is-null]` binds the context itself)
 isCtx :: VType -> Bool
@@ -82,7 +78,7 @@ isCtx t = case t of
 
 -- what flows into a binder: a value, the result of a call, a unique context (of `[ctx-append]`
 -- or `[ctx-copy]`), or another result
-data Flow = FVal VVal | FCall Name [VVal] | FUnique | FOther
+data Flow = FVal VVal | FCall Name | FUnique | FOther
 
 -- the results of an expression, in its tail positions (the bodies of its join points
 -- included, and its jumps excluded)
@@ -90,7 +86,7 @@ tails :: VExpr -> [Flow]
 tails expr
   = case expr of
       Ret v -> [FVal v]
-      Call f _ vs -> [FCall f vs]
+      Call f _ _ -> [FCall f]
       Append{} -> [FUnique]
       CtxCopy{} -> [FUnique]
       Plug{} -> [FOther]
@@ -124,7 +120,7 @@ facts env js expr
       -- the jumps in the bodies iterate, and their captures are borrowed
       JoinRec _ ds e
         -> let js' = M.union (M.fromList [(j,[m | (_,m,_) <- ps]) | JoinDef j _ ps _ <- ds]) js
-           in mconcat [point ps (copyCount body > 0) (fvE body `S.difference` S.fromList [x | (x,_,_) <- ps])
+           in mconcat [point ps (hasCopy body) (fvE body `S.difference` S.fromList [x | (x,_,_) <- ps])
                              (concatMap (jumpArgs j . joinBody) ds) <> facts env js' body
                       | JoinDef j _ ps body <- ds]
               <> facts env js' e
@@ -144,12 +140,10 @@ facts env js expr
     demote vs = mempty{ fDemoted = S.map canonical (S.unions (map fvV vs)) }
     borrowed ms vs = [v | (Borrowed,v) <- zip ms vs]
 
--- the number of copies of contexts in an expression, outside of closures
-copyCount :: VExpr -> Int
-copyCount e = getSum (copy e <> foldMap (Sum . copyCount) (subexprs e))
-  where
-    copy CtxCopy{} = Sum 1
-    copy _ = Sum 0
+-- whether an expression copies a context outside of closures
+hasCopy :: VExpr -> Bool
+hasCopy CtxCopy{} = True
+hasCopy e = any hasCopy (subexprs e)
 
 -- the greatest set of candidates that only receive unique values
 unique :: Env -> Facts -> S.Set Path
@@ -183,33 +177,19 @@ uniqF :: Env -> S.Set Path -> Flow -> Bool
 uniqF env u r
   = case r of
       FVal v -> uniq u v
-      FCall f vs -> resultMode env (callee env u f vs) == Unique
+      FCall f -> resultMode env f == Unique
       FUnique -> True
       FOther -> False
 
--- the worker of a function `f` (`UniqueWorkers`)
-workerName :: Name -> Name
-workerName = makeHiddenName "unique"
-
--- the function that a call of `f` calls: its worker if the arguments of the worker's unique
--- parameters are unique
-callee :: Env -> S.Set Path -> Name -> [VVal] -> Name
-callee env u f vs
-  = case M.lookup w (envSigs env) of
-      Just (SigFun _ ps _ _) | and [uniq u v | ((Unique,_),v) <- zip ps vs] -> w
-      _ -> f
-  where
-    w = workerName f
-
--- make the unique parameters unique, copy the arguments that are not unique at the entries of
--- recursive join points, remove the copies of unique values, and call workers
-rewrite :: Env -> S.Set Path -> VExpr -> State NameSupply VExpr
-rewrite env u expr
+-- promote unique parameters, copy shared arguments at recursive join entries,
+-- and remove copies of unique values
+rewrite :: S.Set Path -> VExpr -> State NameSupply VExpr
+rewrite u expr
   = case expr of
-      Join j tvs ps e1 e2 -> Join j tvs (params ps) <$> rewrite env u e1 <*> rewrite env u e2
+      Join j tvs ps e1 e2 -> Join j tvs (params ps) <$> rewrite u e1 <*> rewrite u e2
       JoinRec t ds e
-        -> do ds' <- mapM (\d -> (\b -> d{ joinParams = params (joinParams d), joinBody = b }) <$> rewrite env u (joinBody d)) ds
-              e' <- rewrite env u e
+        -> do ds' <- mapM (\d -> (\b -> d{ joinParams = params (joinParams d), joinBody = b }) <$> rewrite u (joinBody d)) ds
+              e' <- rewrite u e
               JoinRec t ds' <$> foldM (\e1 (JoinDef j tvs ps _) -> substJumpM j (entry j tvs ps) e1) e' ds
         where
           entry j tvs ps tys vs = do (ks,vs') <- unzip <$> zipWithM (arg tvs tys) ps vs
@@ -222,8 +202,7 @@ rewrite env u expr
                  return (Let c (inst tvs tys t) (CtxCopy v), Var c)
             | otherwise = return (id,v)
       CtxCopy v | uniq u v -> pure (Ret v)
-      Let x _ (CtxCopy v) e | uniq u v -> rewrite env u (replaceE (M.singleton x v) e)
-      Call f tys vs -> pure (Call (callee env u f vs) tys vs)
-      _ -> descendE pure pure (\_ e -> rewrite env u e) expr
+      Let x _ (CtxCopy v) e | uniq u v -> rewrite u (replaceE (M.singleton x v) e)
+      _ -> descendE pure pure (\_ e -> rewrite u e) expr
   where
     params ps = [(x,if S.member x u then Unique else m,t) | (x,m,t) <- ps]
