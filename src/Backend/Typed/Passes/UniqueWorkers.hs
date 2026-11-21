@@ -22,9 +22,9 @@
   copied, so every call in a tail position must have a unique result. The worker is only
   created if it has fewer copies than `f`. Functions with a unique result already are left out.
 
-  A function in which an effect may yield returns `Y (ctx?)`; its worker returns `:! Y (ctx?)`
-  (the dummy `null` is unique enough). A tail `pure (some v)` with a `v` that is not unique
-  becomes `let c = ctx-copy v in ret (pure (some c))`.
+  A function in which an effect may yield returns `ctx?`; its worker returns `:! ctx?` (the
+  dummy `null` is unique enough). A tail `some v` with a `v` that is not unique becomes
+  `let c = ctx-copy v in ret (some c)`.
 
   `f` itself is unchanged, for callers that cannot pass unique contexts and for other
   modules. `UniqueJoins` calls the worker where the arguments of its unique parameters are
@@ -38,7 +38,7 @@ import Data.Maybe( maybeToList )
 import Backend.Typed.Syntax
 import Backend.Typed.Env( Env, envOf )
 import Backend.Typed.Traversal( descendE )
-import Backend.Typed.Types( unNull, unYield )
+import Backend.Typed.Types( unNull, yields )
 import Control.Monad.State( State, evalState, state )
 import Backend.Typed.Passes.Common( NameSupply, freshFor, freshPathFrom )
 import Backend.Typed.Passes.UniqueJoins( uniqueScope, Flow(..), tails, uniq, uniqF, copyCount, isCtx, workerName )
@@ -59,8 +59,7 @@ worker env def
         | isCtx ctxT -> promote [x | (x,Owned,t) <- defArgs def, isCtx t]
       _ -> Nothing
   where
-    (resT,mayYield) = unYield (defRes def)
-    ctxT = unNull resT
+    ctxT = unNull (defRes def)
     -- the greatest set of context parameters that remain unique in the body
     promote [] = Nothing
     promote cs
@@ -76,18 +75,16 @@ worker env def
         result r = case r of
                      FVal v -> copyable v
                      _ -> uniqF env u r
-        copyable v = uniq u v || not mayYield || isPure v
-        isPure v = case v of
-                     Pure _ -> True
+        copyable v = uniq u v || not (yields (defRes def)) || isSome v
+        isSome v = case v of
+                     Some _ -> True
                      _ -> False
         -- a value that is not unique is copied (`copyable`)
         copy :: S.Set Path -> VVal -> State NameSupply VExpr
         copy u0 v = case v of
                       _ | uniq u0 v -> return (Ret v)
-                      Pure (Some w) -> do c <- state (freshPathFrom "copy")
-                                          return (Let c ctxT (CtxCopy w) (Ret (Pure (Some (Var c)))))
-                      Pure w -> do c <- state (freshPathFrom "copy")
-                                   return (Let c ctxT (CtxCopy w) (Ret (Pure (Var c))))
+                      Some w -> do c <- state (freshPathFrom "copy")
+                                   return (Let c ctxT (CtxCopy w) (Ret (Some (Var c))))
                       _ -> return (CtxCopy v)
 
 -- replace the values in the tail positions of an expression (see `UniqueJoins.tails`)
@@ -96,7 +93,6 @@ mapRets f expr
   = case expr of
       Ret v -> f v
       Let x t e1 e2 -> Let x t e1 <$> mapRets f e2
-      LetYield x t e1 e2 e3 -> LetYield x t e1 <$> mapRets f e2 <*> mapRets f e3
       Gen{} -> return expr
       CastEv{} -> return expr
       _ -> descendE pure pure (\_ e -> mapRets f e) expr

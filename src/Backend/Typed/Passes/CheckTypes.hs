@@ -40,7 +40,6 @@ checkLayoutProgram p = concatMap check (programTypes p)
       VSum ts -> concatMap (inner . snd) ts
       VCtx _ a b -> atomic a ++ atomic b
       VCell _ a -> atomic a
-      VYield b -> inner b
       VOrNull b -> inner b
       VReuse _ _ d -> maybe [] (\(Contents _ _ s) -> inner s) d
       _ -> []
@@ -86,7 +85,6 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
     et e = here ++ getConst (descendE (const (Const [])) (Const . vt) (\_ b -> Const (et b)) e)
       where here = case e of
                      Let _ t _ _ -> [t]
-                     LetYield _ t _ _ _ -> [t]
                      CastEv u t _ -> [u,t]
                      Unreachable t -> [t]
                      Join r _ _ ps _ _ -> recResult r ++ map (\(_,_,t) -> t) ps
@@ -158,7 +156,6 @@ scopeA bound val
 
 -- each binder: its root name, or an error if it is not named by its path
 pathsE :: VExpr -> [Either String Name]
-pathsE (LetYield x _ e1 e2 e3) = rootBinder x ++ concatMap pathsE [e1,e2,e3]   -- one binder for both branches
 pathsE expr = getConst (descendB (const (Const [])) (Const . pathsV) (\bs e -> Const (concatMap binder bs ++ pathsE e)) expr)
   where
     binder (x,s) = case pathOf (scrutVar expr) s of
@@ -206,7 +203,6 @@ tvarsE bound expr
     with tvs = S.union bound (S.fromList tvs)
     annotations = case expr of
       Let _ t _ _        -> ftv t
-      LetYield _ t _ _ _ -> ftv t
       CastEv u t _       -> ftv u ++ ftv t
       Unreachable t      -> ftv t
       Call _ ts _        -> concatMap ftv ts

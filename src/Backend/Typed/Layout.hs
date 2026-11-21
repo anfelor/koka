@@ -32,7 +32,6 @@ leaves t
       VReuse _ _ _ -> [t]
       VCtx _ a b -> [VPtr a, VPtr b]
       VCell _ _ -> [t]
-      VYield b -> leaves b
       VOrNull b -> leaves b
       VToken -> []
 
@@ -97,7 +96,6 @@ layout t
       VCtx _ a b  -> layout (VProd [(posField 0,VPtr a),(posField 1,VPtr b)])
       -- a cell is the pointer to its block
       VCell _ _   -> CBox
-      VYield b    -> layout b
       VOrNull b   -> layout b
       VToken      -> CUnit
   where

@@ -93,10 +93,9 @@ annE c expr w
       Let x t e1 e2 -> do t' <- annTy c t
                           e1' <- annE c e1 t'
                           Let x t' e1' <$> annE (bindVars [(x,V t')] c) e2 w
-      LetYield x t e1 e2 e3 -> do t' <- annTy c t
-                                  e1' <- annE c e1 (VYield t')
-                                  e2' <- annE (bindVars [(x,V t')] c) e2 w
-                                  LetYield x t' e1' e2' <$> annE (bindVars [(x,V t')] c) e3 w
+      IfYielding v (k3,e3) (k2,e2) -> do v' <- checkV c v VToken
+                                         e3' <- annE (bindVars [(k3,V VToken)] c) e3 w
+                                         IfYielding v' (k3,e3') . (,) k2 <$> annE (bindVars [(k2,V VToken)] c) e2 w
       Unreachable _ -> return (Unreachable w)
       CastEv u t e -> do u' <- annTy c u
                          t' <- annTy c t
@@ -179,7 +178,6 @@ checkV c val t
       (Ptr _ a, VPtr b) -> Ptr b <$> checkA c a b
       (Pack _ ts v, VExists bs b) | length ts == length bs -> Pack t ts <$> checkV c v (inst bs ts b)
       (Context _ k, VCtx _ a b) -> Context b <$> checkV (bindVars [(nameHole,V (VPtr b))] c) k (VPtr a)
-      (Pure v, VYield s) -> Pure <$> checkV c v s
       (Some v, VOrNull s) -> Some <$> checkV c v s
       (Null _, VOrNull s) -> return (Null s)
       (DupV v, _) -> DupV <$> checkV c v t
@@ -216,8 +214,6 @@ synthV c val
                          _ -> Nothing
       DupV v -> do (t,mv) <- synthV c v
                    Just (t, DupV <$> mv)
-      Pure v -> do (t,mv) <- synthV c v
-                   Just (VYield t, Pure <$> mv)
       Some v -> do (t,mv) <- synthV c v
                    Just (orNull t, Some <$> mv)
       Null{} -> Nothing

@@ -12,7 +12,7 @@ module Backend.Typed.Elab.Coerce( coerce, coerceInst, coerceExpr, genVal, genPtr
 import qualified Data.Map as M
 import Common.Name
 import Backend.Typed.Syntax
-import Backend.Typed.Build( K, compose, yielded, yieldedWith, withTokenVal )
+import Backend.Typed.Build( K, compose, yielded, yieldedWith, dropToken )
 import Backend.Typed.Traversal( child )
 import Backend.Typed.Types
 import Backend.Typed.Layout( leaves )
@@ -34,25 +34,19 @@ genPtr t@(VPtr (AForall tvs _)) v
        return (Let x t (Gen tvs (Ret v)), Var x)
 genPtr _ v = return (id, v)
 
--- A value is injected into `Y W` by `[pure]`, and into `W?` by `[some]`. A value that may yield
--- or be null is not coerced: `coerceExpr` tests the result of a call, or casts it where Koka
--- does not test it. A function used where its results may yield (`addsY`) is cast
--- (`[cast-ev]`), not eta-expanded: it does not yield, so the tests of its callers take the
--- non-yielding branch.
+-- A value is injected into `W?` by `[some]`. A value that may be null is not coerced:
+-- `coerceExpr` tests the result of a call, or casts it where Koka does not test it. A function
+-- used where its results may yield (`addsNull`) is cast (`[cast-ev]`), not eta-expanded: it
+-- does not yield, so the tests of its callers take the non-yielding branch.
 coerce :: VType -> VType -> VVal -> E (K,VVal)
 coerce from to v
   | alphaEq from to = return (id,v)
-  | VYield w <- to, not (isYield from)
-  = do (k,v') <- coerce from w v
-       return (k, Pure v')
   | VOrNull w <- to, not (isNull from)
   = do (k,v') <- coerce from w v
        return (k, Some v')
-  | VYield _ <- from
-  = failE ("cannot coerce " ++ ppr from ++ " to " ++ ppr to ++ " without a test for a yield")
   | VOrNull _ <- from
   = failE ("cannot coerce " ++ ppr from ++ " to " ++ ppr to ++ " without a test for null")
-  | addsY from to = castV from to v
+  | addsNull from to = castV from to v
   | not (isPtr from) && alphaEq to (boxrep from) = boxV from v
   | not (isPtr to) && alphaEq from (boxrep to) = unboxV to v
   | otherwise
@@ -135,7 +129,6 @@ boxLeaf t v
       VReuse _ _ _  -> Box v
       VCtx _ _ _  -> Box v
       VCell _ _   -> Box v
-      VYield _    -> Box v
       VOrNull _   -> Box v
       VToken      -> Box v
 
@@ -169,7 +162,6 @@ unboxAV t a
       VReuse _ _ _  -> unbox Unbox
       VCtx _ _ _  -> unbox Unbox
       VCell _ _   -> unbox Unbox
-      VYield _    -> unbox Unbox
       VOrNull _   -> unbox Unbox
       VToken      -> unbox Unbox
   where
@@ -185,28 +177,26 @@ unboxLeaf t j y
        return (k, Inj i t w)
   | otherwise = unboxAV t y
 
--- whether two types differ only in their `Y`s and `?`s, so that `[cast-ev]` relates them
+-- whether two types differ only in their `?`s and tokens, so that `[cast-ev]` relates them
 castable :: VType -> VType -> Bool
-castable from to = alphaEq (eraseY from) (eraseY to)
+castable from to = alphaEq (eraseEv from) (eraseEv to)
 
--- `to` is `from` with `Y`s and `?`s added to the results of functions (`V` to `Y (V?)`), where
--- function parameters are contravariant and all other types are compared as they are
-addsY :: VType -> VType -> Bool
-addsY from to
+-- `to` is `from` with `?`s and tokens added to the results of functions (`V` to `V? ⊗ KCtx`),
+-- where function parameters are contravariant and all other types are compared as they are
+addsNull :: VType -> VType -> Bool
+addsNull from to
   | alphaEq from to = True
-  | VYield t <- to, not (isYield from) = addsY from t
-  | VYield f <- from, VYield t <- to = addsY f t
-  | Just t <- unToken to, Nothing <- unToken from = addsY from t
-  | Just f <- unToken from, Just t <- unToken to = addsY f t
-  | VOrNull t <- to, not (isNull from) = addsY from t
-  | VOrNull f <- from, VOrNull t <- to = addsY f t
+  | Just t <- unToken to, Nothing <- unToken from = addsNull from t
+  | Just f <- unToken from, Just t <- unToken to = addsNull f t
+  | VOrNull t <- to, not (isNull from) = addsNull from t
+  | VOrNull f <- from, VOrNull t <- to = addsNull f t
   | VPtr a <- from, VPtr b <- to = addsA a b
   | otherwise = False
   where
     addsA (AFun ps r) (AFun qs s)
       = let (ps0,pk) = tokenParam ps
             (qs0,qk) = tokenParam qs
-        in (qk || not pk) && length ps0 == length qs0 && and [m == n && addsY q p | ((m,p),(n,q)) <- zip ps0 qs0] && addsY r s
+        in (qk || not pk) && length ps0 == length qs0 && and [m == n && addsNull q p | ((m,p),(n,q)) <- zip ps0 qs0] && addsNull r s
     addsA (AForall as a) (AForall bs b)
       = length as == length bs && addsA a (inst bs (map AVar as) b)
     addsA _ _ = False
@@ -218,76 +208,80 @@ castV from to v
        return (Let x to (CastEv from to (Ret v)), Var x)
 
 -- The value `v` of a generic type instantiated at `from`, at its Koka instance `to`. The IR
--- has no effects, so the `Y`s of `from` follow the effect variables of the generic type, while
--- `to` follows their instances. Where these differ only in `Y` (an effect variable
--- instantiated at a total effect, also under a type constructor, as in `list<(int) -> Y int>`
--- at `list<(int) -> int>`), the value is cast (`[cast-ev]`): Koka does not test its results.
+-- has no effects, so the `?`s and tokens of `from` follow the effect variables of the generic type, while
+-- `to` follows their instances. Where these differ only in `?`s and tokens (an effect variable
+-- instantiated at a total effect, also under a type constructor, as in
+-- `list<(int, KCtx) -> int? ⊗ KCtx>` at `list<(int) -> int>`), the value is cast (`[cast-ev]`):
+-- Koka does not test its results.
 coerceInst :: VType -> VType -> VVal -> E (K,VVal)
 coerceInst from to v
   | not (alphaEq from to) && castable from to = castV from to v
   | otherwise = coerce from to v
-
-isYield :: VType -> Bool
-isYield = snd . unYield
 
 isNull :: VType -> Bool
 isNull t = case t of
              VOrNull _ -> True
              _ -> False
 
--- The expression `e : from` at the type `to`. Where `to` is `Y W`, a result `Y (U?)` is tested
--- for a yield (`[let-yield]`), its U is extracted (`[is-null]`), and the yielding branch is the
--- dummy (`Build.yielded`). Otherwise, Koka does not test
--- the result: it knows that it cannot yield (such as the result of an effect-polymorphic
--- function at a total effect, of a `deref`, or of a call through `unsafe-total-cast`, which
--- makes it look total), or the code tests the flag itself (`std/core/hnd`, and its `local-var` and
--- `finally` where they are inlined: there the result may be a dummy, which `prompt-local-var`
--- or `finally-prompt` receives). A result that differs from `to` only in `Y` is then cast
--- (`[cast-ev]`, unless that would add a `Y`, which is `[pure]`). A coercion (such as an
--- unboxing) would inspect a dummy, so it is tested, and the yielding branch passes on a dummy
--- of the type `to` (cast from `Y (to?)`), as Koka does.
+-- The expression `e : from` at the type `to`. Where both may be the dummy of a yield, a
+-- result `U? ⊗ KCtx` is tested for a yield (`[if-yielding]` on its token), its U is
+-- extracted (`[is-null]`), and the yielding branch is the dummy (`Build.yieldedWith`).
+-- Otherwise, Koka does not test the result: it knows that it cannot yield (such as the
+-- result of an effect-polymorphic function at a total effect, of a `deref`, or of a call
+-- through `unsafe-total-cast`, which makes it look total), or the code tests the flag itself
+-- (`std/core/hnd`, and its `local-var` and `finally` where they are inlined: there the result
+-- may be a dummy, which `prompt-local-var` or `finally-prompt` receives). A result that
+-- differs from `to` only in `?`s and tokens is then cast (`[cast-ev]`, unless that would add
+-- a `?` at the top, which is `[some]`). A coercion (such as an unboxing) would inspect a
+-- dummy, so it is tested, and the yielding branch passes on a dummy of the type `to` (cast
+-- from `to?`), as Koka does.
 --
 -- The token of a token-threaded `to` is that of `from`, or the current token (`takeToken`)
 -- if `from` has none. A token of `from` that `to` does not have is dropped by a cast (site 1
--- of "The effect token" in `Syntax`).
+-- of "The effect token" in `Syntax`), or after its test.
 coerceExpr :: VType -> VType -> VExpr -> E VExpr
 coerceExpr from to e
   | alphaEq from to = return e
   | Just to0 <- unToken to, Nothing <- unToken from
   = do (kt,k) <- takeToken
-       kt <$> coerceTo from to0 to e (\v -> Ret (withTokenVal v k)) (yieldedWith to k)
-  | Just from0 <- unToken from, Nothing <- unToken to
-  = coerceExpr from0 to (CastEv from from0 e)
-  | castable from to && (isYield from || not (isYield to))
+       kt <$> coerceTo from to0 e (\v -> Ret (Tuple [v,k]))
+  | castable from to && (yields from || not (yields to))
   = return (CastEv from to e)
   | Just from0 <- unToken from, Just to0 <- unToken to
-  = do let (u,yields) = unYield from
-           u0 = fst (unYield from0)
-       r <- fresh "r"
-       r0 <- fresh "r"
-       k <- fresh "k"
-       (k1,w) <- extract u0 r0 to
-       (k2,v) <- coerce (unNull u0) to0 w
-       let e2 = Proj (Var r) 0 r0 (Proj (Var r) 1 k (k1 (k2 (Ret (withTokenVal v (Var k))))))
-       if yields then do k3 <- fresh "k"
-                         return (LetYield r u e e2 (Proj (Var r) 1 k3 (yieldedWith to (Var k3))))
-                 else return (Let r u e e2)
+  = tested True from0 to0 to e
+  | Just from0 <- unToken from, yields from0
+  = tested False from0 to to e
+  | Just from0 <- unToken from
+  = coerceExpr from0 to (CastEv from from0 e)
   | otherwise
-  = coerceTo from to to e Ret (yielded to)
+  = coerceTo from to e Ret
 
--- `e : from` at `to`, given the tail `ret` of a value and the yielding branch: `full` is the
--- type of the whole expression
-coerceTo :: VType -> VType -> VType -> VExpr -> (VVal -> VExpr) -> VExpr -> E VExpr
-coerceTo from to full e ret dummy
-  | VYield u <- from
-  = do r <- fresh "r"
-       (k1,w) <- extract u r full
-       (k2,v) <- coerce (unNull u) to w
-       return (LetYield r u e (k1 (k2 (ret v))) dummy)
-  | otherwise
+-- `e : from`, which is not the dummy, at `to`, given the tail `ret` of a value
+coerceTo :: VType -> VType -> VExpr -> (VVal -> VExpr) -> E VExpr
+coerceTo from to e ret
   = do r <- fresh "r"
        (k,v) <- coerce from to (Var r)
        return (Let r from e (k (ret v)))
+
+-- `e : from₀ ⊗ KCtx` at `to₀`, the type `to` without its token, tested for a yield if `from₀`
+-- may be the dummy: the result passes on the token if `keep`, and otherwise drops it in both
+-- branches
+tested :: Bool -> VType -> VType -> VType -> VExpr -> E VExpr
+tested keep from0 to0 to e
+  = do r <- fresh "r"
+       r0 <- fresh "r"
+       k <- fresh "k"
+       (k1,w) <- extract from0 r0 to
+       (k2,v) <- coerce (unNull from0) to0 w
+       let value t = k1 (k2 (Ret (if keep then Tuple [v,Var t] else v)))
+           dummy t = if keep then yieldedWith to (Var t) else yielded to
+           branch body t = if keep then return (t, body t)
+                           else do u <- fresh "u"
+                                   return (t, dropToken u (Var t) (body t))
+       test <- if yields from0
+                 then IfYielding (Var k) <$> (branch dummy =<< fresh "k") <*> (branch value =<< fresh "k")
+                 else snd <$> branch value k
+       return (Let r (withToken from0) e (Proj (Var r) 0 r0 (Proj (Var r) 1 k test)))
 
 -- the value of `r : u` after a test for a yield, extracted if `u` is `V?` (in an expression of
 -- type `full`)

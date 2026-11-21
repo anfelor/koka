@@ -19,7 +19,7 @@
        in let c₁ = ctx-copy c₀ in jump j(c₁)
 
   The candidates are the owned or unique parameters of join points and the binders of `let`
-  (`[let-unique]`) and `[let-yield]` (`[let-yield-unique]`) of context type, and the unique parameters of the definition. A candidate is excluded if a borrowed use may demote it: `dup x`, a borrowed
+  (`[let-unique]`) of context type, and the unique parameters of the definition. A candidate is excluded if a borrowed use may demote it: `dup x`, a borrowed
   argument of a call or jump, or a capture of a recursive join point (which is borrowed). So is
   a name that is also bound by another binder, and a parameter of a recursive join point whose
   body has no `ctx-copy` (promoting it would only add a copy at the entry).
@@ -28,7 +28,7 @@
   into one is unique given U (`uniq`, as `CheckLinear.uniqueV`): the arguments of every jump
   to a non-recursive join point, those of the jumps in the body of a recursive one, and the
   results of the bound expression of a `let` (`tails`). A result is a value, an append or a
-  copy (which are unique), `null` (the dummy, which never reaches a binder of `[let-yield]`),
+  copy (which are unique), `null` (the dummy, which never reaches the binder of `[is-null]`),
   or a call that is unique if its function has a unique result, or a
   worker with one (`UniqueWorkers`) whose unique parameters receive unique values; such a call
   is redirected to the worker. The jumps that enter a recursive join point are exempt: they copy an
@@ -73,8 +73,7 @@ uniqueScope env ps body
   where
     closures e = descendE pure (lamsV (\qs _ b -> snd <$> uniqueScope env qs b)) (\_ b -> closures b) e
 
--- a context, or a context that may be null (the binder of a `[let-yield]`, whose `[is-null]`
--- binds the context itself)
+-- a context, or a context that may be null (whose `[is-null]` binds the context itself)
 isCtx :: VType -> Bool
 isCtx t = case t of
             VCtx{} -> True
@@ -99,7 +98,6 @@ tails expr
       Jump{} -> []
       Unreachable{} -> []
       Let _ _ _ e -> tails e
-      LetYield _ _ _ e2 e3 -> tails e2 ++ tails e3
       App{} -> [FOther]
       Gen{} -> [FOther]
       CastEv{} -> [FOther]
@@ -133,7 +131,6 @@ facts env js expr
            in Facts xs cands caps [(x,FVal v) | vs <- jumpArgs j iters, (x,v) <- zip xs vs]
               <> facts env body e1 <> facts env js' e2
       Let x t e1 _ -> bound x t e1 <> sub
-      LetYield x t e1 _ _ -> bound x t e1 <> sub
       Dup x _ -> demote [Var x] <> sub
       Call f _ vs -> demote (borrowed (paramModes env f (length vs)) vs)
       Jump j _ vs -> demote (borrowed (M.findWithDefault [] j js) vs)
@@ -172,7 +169,6 @@ uniq u val
       Tuple vs -> all (uniq u) vs
       Pack _ _ w -> uniq u w
       Context _ _ -> True
-      Pure w -> uniq u w
       Some w -> uniq u w
       Null _ -> True
       Up w -> uniq u w

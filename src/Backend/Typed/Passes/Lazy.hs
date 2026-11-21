@@ -140,8 +140,8 @@ cellE cs expr
          Let x t e1 e2
            -> let (cs1,cs2) = M.partitionWithKey (\c _ -> S.member c (fvE e1)) cs
               in Let x t <$> cellE cs1 e1 <*> cellE cs2 e2
-         LetYield x t e1 e2 e3
-           -> LetYield x t <$> cellE cs e1 <*> cellE M.empty e2 <*> cellE M.empty e3
+         IfYielding v (k3,e3) (k2,e2)
+           -> IfYielding v <$> ((,) k3 <$> cellE M.empty e3) <*> ((,) k2 <$> cellE M.empty e2)
          -- the jumps come first, and give the parameters that are cells
          Join r j tvs ps e1 e2
            -> do e2' <- cellE cs e2

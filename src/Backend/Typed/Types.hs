@@ -9,7 +9,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents, collapse
                           , isPtr, forallA, prodV, prodFields
-                          , checkDupType, isShape, containsLinear, wellYield, wellNull, unYield, eraseY, orNull, unNull, underNull
+                          , checkDupType, isShape, containsLinear, wellNull, yields, eraseEv, orNull, unNull, underNull
                           , withToken, unToken, isToken, tokenParam
                           , applyA, atAny, vtInt, vtString, vtChar, vtFloat
                           ) where
@@ -65,7 +65,6 @@ traverseReuseContents f = goV
       VReuse fl n p -> VReuse fl n <$> f p
       VCtx fl a b -> VCtx fl <$> goA a <*> goA b
       VCell n a -> VCell n <$> goA a
-      VYield b -> VYield <$> goV b
       VOrNull b -> VOrNull <$> goV b
       VToken -> pure t
       VUnit -> pure t
@@ -119,7 +118,6 @@ substV sub t
       VReuse f n p -> VReuse f n (fmap (substContents sub) p)
       VCtx f a b -> VCtx f (substA sub a) (substA sub b)
       VCell n a -> VCell n (substA sub a)
-      VYield b  -> VYield (substV sub b)
       VOrNull b -> VOrNull (substV sub b)
       VToken    -> t
 
@@ -162,7 +160,6 @@ ftvV t
       VReuse _ _ p  -> maybe [] ftvContents p
       VCtx _ a b    -> ftvA a ++ ftvA b
       VCell _ a     -> ftvA a
-      VYield b      -> ftvV b
       VOrNull b     -> ftvV b
       VToken        -> []
 
@@ -193,7 +190,6 @@ isPtr t
       VReuse _ _ _  -> False
       VCtx _ _ _  -> False
       VCell _ _   -> False
-      VYield _    -> False
       VOrNull _   -> False
       VToken      -> False
 
@@ -208,7 +204,6 @@ eqV s t
       (VReuse f n p, VReuse g m q) -> f == g && n == m && eqContentsMaybe p q
       (VCtx f a b, VCtx g c d) -> f == g && eqA a c && eqA b d
       (VCell n a, VCell m b) -> n == m && eqA a b
-      (VYield a, VYield b)   -> eqV a b
       (VOrNull a, VOrNull b) -> eqV (unNull a) (unNull b)
       _                      -> s == t
 
@@ -319,14 +314,9 @@ isShape a = case a of
                 _ -> False
 
 -- Credits, cells and tokens have ownership but no reference count: duplication cannot create
--- another owner, so they are not stored in a heap block or captured by a closure. Nor is a
--- value that may be the dummy of a yield (`Y V`), which is linear.
+-- another owner, so they are not stored in a heap block or captured by a closure.
 containsLinear :: Ty -> Bool
-containsLinear = linear True
-
--- whether a type contains credits or cells, and tokens if `tokens`
-linear :: Bool -> Ty -> Bool
-linear tokens = go
+containsLinear = go
   where
     go (V v) = case v of
        VPtr a -> go (A a)
@@ -338,8 +328,7 @@ linear tokens = go
        VReuse _ _ _ -> True
        VCtx _ _ _ -> False
        VCell _ _ -> True
-       VYield _ -> True
-       VToken -> tokens
+       VToken -> True
        VOrNull b -> go (V b)
     go (A a) = case a of
        ABox v -> go (V v)
@@ -354,40 +343,6 @@ linear tokens = go
        AFun _ _ -> False
        AUnit -> False
 
--- `Y` occurs only at the top of a type, or as the result of a function type, and `Y V` has no
--- `Y`, credits or cells in `V`, but may have a token (see "Effect yields" in `Syntax`)
-wellYield :: VType -> Bool
-wellYield t
-  = case t of
-      VYield v -> plainV v && not (linear False (V v))
-      _ -> plainV t
-  where
-    plainV v = case v of
-      VYield _ -> False
-      VOrNull b -> plainV b
-      VPtr a -> plainA a
-      VSum ts -> all (plainV . snd) ts
-      VProd fs -> all (plainV . snd) fs
-      VExists _ b -> plainV b
-      VReuse _ _ p -> maybe True (\(Contents _ _ s) -> plainV s) p
-      VCtx _ a b -> plainA a && plainA b
-      VCell _ a -> plainA a
-      VToken -> True
-      VUnit -> True
-      VRaw _ -> True
-    plainA a = case a of
-      AFun ps r -> all (plainV . snd) ps && wellYield r
-      ABox v -> plainV v
-      ASum ts -> all (plainA . snd) ts
-      AForall _ b -> plainA b
-      ALam _ b -> plainA b
-      ALazy l b -> plainA l && plainA b
-      ACon _ ts -> all plainA ts
-      AApp _ ts -> all plainA ts
-      AScalar _ -> True
-      AVar _ -> True
-      AUnit -> True
-
 -- `V?` contains no credits or cells, and no heap block contains a `V?` (see "Nullable values"
 -- in `Syntax`)
 wellNull :: Ty -> Bool
@@ -398,7 +353,6 @@ wellNull ty
   where
     goV t = case t of
       VOrNull b -> not (containsLinear (V b)) && goV b
-      VYield b -> goV b
       VPtr a -> goA a
       VSum ts -> all (goV . snd) ts
       VProd fs -> all (goV . snd) fs
@@ -424,7 +378,6 @@ wellNull ty
     -- the unboxed parts of the contents of a block
     noNull v = case v of
       VOrNull _ -> False
-      VYield _ -> False
       VSum ts -> all (noNull . snd) ts
       VProd fs -> all (noNull . snd) fs
       VExists _ b -> noNull b
@@ -445,34 +398,36 @@ underNull :: (VType -> VType) -> VType -> VType
 underNull f (VOrNull t) = orNull (f t)
 underNull f t = f t
 
--- the type `V` of `Y V`, and whether the type is one
-unYield :: VType -> (VType,Bool)
-unYield (VYield t) = (t,True)
-unYield t = (t,False)
+-- Whether a result may be the dummy of a yield: `V?`, or `V? ⊗ KCtx` (see "Effect yields" in
+-- `Syntax`).
+yields :: VType -> Bool
+yields t
+  = case maybe t id (unToken t) of
+      VOrNull _ -> True
+      _ -> False
 
--- `|V|`: the type without any `Y`, `?` or token (a token is 𝟙, and a token field of a product
+-- `|V|`: the type without any `?` or token (a token is 𝟙, and a token field of a product
 -- or a token parameter of a function is left out), also under boxes, type arguments and
 -- function types (`[cast-ev]`)
-eraseY :: VType -> VType
-eraseY t
+eraseEv :: VType -> VType
+eraseEv t
   = case t of
-      VYield v -> eraseY v
-      VOrNull v -> eraseY v
+      VOrNull v -> eraseEv v
       VToken -> VUnit
       VPtr a -> VPtr (eraseA a)
-      VSum ts -> VSum [(c,eraseY s) | (c,s) <- ts]
-      VProd fs -> prodFields [(f,eraseY s) | (f,s) <- fs, not (isToken s)]
-      VExists vs b -> VExists vs (eraseY b)
-      VReuse fl n p -> VReuse fl n (fmap (\(Contents k v s) -> Contents k v (eraseY s)) p)
+      VSum ts -> VSum [(c,eraseEv s) | (c,s) <- ts]
+      VProd fs -> prodFields [(f,eraseEv s) | (f,s) <- fs, not (isToken s)]
+      VExists vs b -> VExists vs (eraseEv b)
+      VReuse fl n p -> VReuse fl n (fmap (\(Contents k v s) -> Contents k v (eraseEv s)) p)
       VCtx fl a b -> VCtx fl (eraseA a) (eraseA b)
       VCell n a -> VCell n (eraseA a)
       VUnit -> t
       VRaw _ -> t
   where
     eraseA a = case a of
-      ABox v -> ABox (eraseY v)
+      ABox v -> ABox (eraseEv v)
       ASum ts -> ASum [(i,eraseA s) | (i,s) <- ts]
-      AFun ps r -> AFun [(m,eraseY p) | (m,p) <- ps, not (isToken p)] (eraseY r)
+      AFun ps r -> AFun [(m,eraseEv p) | (m,p) <- ps, not (isToken p)] (eraseEv r)
       AForall vs b -> AForall vs (eraseA b)
       AApp v ts -> AApp v (map eraseA ts)
       ACon n ts -> ACon n (map eraseA ts)
@@ -489,16 +444,14 @@ isToken t
       VToken -> True
       _ -> False
 
--- the result `V` of a token-threaded function as `V ⊗ KCtx`, inside `Y`
+-- the result `V` of a token-threaded function as `V ⊗ KCtx`
 withToken :: VType -> VType
-withToken (VYield v) = VYield (withToken v)
 withToken v = prodV [v,VToken]
 
--- the result `V` of `V ⊗ KCtx` (inside `Y`), if it is one
+-- the result `V` of `V ⊗ KCtx`, if it is one
 unToken :: VType -> Maybe VType
 unToken t
   = case t of
-      VYield v -> VYield <$> unToken v
       VProd [(_,v),(_,VToken)] -> Just v
       _ -> Nothing
 

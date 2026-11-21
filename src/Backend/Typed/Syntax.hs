@@ -83,17 +83,14 @@
     Koka compiles effects to a monadic form: while an effect yields, a call returns a dummy
     value and sets a global flag. The dummy is the *null* of its type (see `V?` below): every
     pointer is Koka's shared `box-any`, the tags of sums and enums are all ones, and raw
-    values are garbage. A function that may yield returns `Y (W?)`. `Y V` only carries the
-    question "did the call yield?", which `[let-yield]` answers by testing the flag; a `Y V`
-    is always a valid V, and the dummy is `ret (pure null)`. `[is-null]` extracts a W from a
-    `W?`, so a missing or misplaced flag test is a semantic error, never a memory-safety one
-    (apart from the unchecked `[cast-ev]` that removes a `?`). There is no subtyping:
-    elaboration converts between W and `Y (W?)` with `[pure]` and `[some]`, `[cast-ev]` or by
-    eta-expansion.
-    `Y` only occurs at the top of the type of an expression or a function result
-    (`Types.wellYield`), so a type variable never stands for `Y W`, and no variable (a binder
-    or a parameter) has a type `Y W`: the flag is tested, or the result is cast, where the
-    expression returns. W itself contains no `Y`, credits or cells.
+    values are garbage. A function that may yield returns `W? ⊗ KCtx`, and the dummy is
+    `ret (null, k)`. `[if-yielding]` tests the flag on the token (see "The effect token"
+    below), and `[is-null]` extracts a W from a `W?`, so a missing or misplaced flag test is a
+    semantic error, never a memory-safety one (apart from the unchecked `[cast-ev]` that
+    removes a `?`). There is no subtyping: elaboration converts between W and `W?` with
+    `[some]`, `[cast-ev]` or by eta-expansion. A result that may be the dummy has a `?` at the
+    top of its type (beside the token, `Types.yields`); such a result is tested, or cast, where
+    elaboration binds it.
 
   Nullable values
 
@@ -107,11 +104,11 @@
   The effect token
 
     A function whose effect is more than `div` takes the token `KCtx` as its last parameter
-    and returns it as the last field of its result: `(V̄, KCtx) -> Y (W? ⊗ KCtx)`, or
-    `(V̄, KCtx) -> W ⊗ KCtx` for an effect that does not yield. The token stands for the state
-    of the world, including the yield flag. It is linear (never duplicated or dropped, never in
-    a heap block, under `?` or in a closure capture), so passes can neither drop nor reorder
-    effectful calls or the tests of the flag (`[let-yield]` passes the token on in both
+    and returns it as the last field of its result: `(V̄, KCtx) -> W? ⊗ KCtx` if it may yield,
+    and `(V̄, KCtx) -> W ⊗ KCtx` otherwise. The token stands for the state of the world,
+    including the yield flag. It is linear (never duplicated or dropped, never in a heap block,
+    under `?` or in a closure capture), so passes can neither drop nor reorder effectful calls
+    or the tests of the flag (`[if-yielding]` consumes the token and gives a new one in both
     branches). It has no runtime representation: its layout is that of 𝟙, and code
     generation leaves out token parameters and arguments. Total and `div` code has no token;
     where it calls a function that needs one (an effect-polymorphic function at a total
@@ -200,9 +197,7 @@ data Side = Whnf | Delay
 --   `[lock]`, and other references must see a τ once `[memoize]` fills it. Cells are linear:
 --   never duplicated or dropped, but consumed by `[memoize]`, `[if-unique-cell]`, or a call or
 --   jump with a cell parameter. They never occur inside another type or a closure, and are
---   never live across `[let-yield]`. A `cell_n` can be used where `cell_m` is expected if m ≤ n.
--- - `Y V` is a `V` that may come with a set yield flag (see "Effect yields" above), with the
---   layout of `V`. It is the type of an expression or a function result, never of a variable.
+--   never live across `[if-yielding]`. A `cell_n` can be used where `cell_m` is expected if m ≤ n.
 -- - `V?` is a `V` or its null, the dummy value of an effect yield (see "Nullable values"
 --   above), with the layout of `V`.
 -- - `KCtx` is the effect token (see "The effect token" above), with the layout of `𝟙`. Like a
@@ -216,7 +211,6 @@ data VType = VPtr AType                 -- A*
            | VReuse Fill Int (Maybe Contents) -- ◇n[k; p : V] or ◆n[k; p : V]: if nonempty, an n-byte block with tag k containing p
            | VCtx Fill AType AType      -- ctx⟨A,B⟩ or ctx⁺⟨A,B⟩: an A with a hole of type B*, nonempty if full
            | VCell Int AType            -- cell_n⟨τ⟩: the n-byte block of a lazy value under evaluation
-           | VYield VType               -- Y V: a V, and whether an effect yields
            | VOrNull VType              -- V?: a V, or the dummy value of an effect yield (`Types.orNull`)
            | VToken                     -- KCtx: the effect token
            deriving (Eq,Show)
@@ -556,13 +550,6 @@ data VVal
   | Context AType VVal
 
   --   Γ ⊢ v :q V
-  --  ───────────────────── [pure]
-  --   Γ ⊢ pure v :q Y V
-  --
-  -- A value that comes without a yield. A no-op at run time.
-  | Pure VVal
-
-  --   Γ ⊢ v :q V
   --  ──────────────────── [some]
   --   Γ ⊢ some v :q V?
   --
@@ -606,27 +593,8 @@ data VExpr
   --   Γ₁, Γ₂ | J ⊢ let x : V = e₁ in e₂ : W
   --
   -- The binder is unique if every tail position of e₁ has a unique result: a unique value, a
-  -- call of a function with a unique result, `[ctx-append]` or `[ctx-copy]`. V is not `Y U`:
-  -- a result that may be the dummy is tested (`[let-yield]`) or cast (`[cast-ev]`).
+  -- call of a function with a unique result, `[ctx-append]` or `[ctx-copy]`.
   | Let Path VType VExpr VExpr
-
-  --   Γ₁, ^Γ₂ | ∅ ⊢ e₁ : Y V    Γ₂, x : V | J ⊢ e₂ : W    Γ₂, x : V | J ⊢ e₃ : W
-  --  ──────────────────────────────────────────────────────────────────────────────── [let-yield]
-  --   Γ₁, Γ₂ | J ⊢ let x : V = e₁ yielding e₃ in e₂ : W
-  --
-  --   Γ₁, ^Γ₂ | ∅ ⊢ e₁ :! Y V    Γ₂, x :! V | J ⊢ e₂ : W    Γ₂, x :! V | J ⊢ e₃ : W
-  --  ──────────────────────────────────────────────────────────────────────────────── [let-yield-unique]
-  --   Γ₁, Γ₂ | J ⊢ let x : V = e₁ yielding e₃ in e₂ : W
-  --
-  -- Koka's monadic bind (`if yielding() then e₃ else e₂`), the only elimination of `Y V`. If e₁
-  -- yields, it returns the dummy and e₃ runs. e₁ consumes Γ₁ in either case. As a `Y V` is
-  -- always a valid V, x is in scope in both branches: the result of a token-threaded call is
-  -- `W? ⊗ KCtx`, and each branch passes on its token `x.1`. No cell is live in e₂ or e₃.
-  -- Elaboration extracts the W of `x.0 : W?` with `is-null x.0 of { null -> unreachable; y -> e₂ }`:
-  -- the flag is clear in e₂, so x.0 is not null unless Koka's invariant "the flag is set iff
-  -- the result is null" is broken. The yielding branch passes on the dummy as
-  -- `ret (pure (null, x.1))`.
-  | LetYield Path VType VExpr VExpr VExpr
 
   --  ───────────────────────── [unreachable]
   --   Γ | J ⊢ unreachable : W
@@ -639,20 +607,20 @@ data VExpr
   --  ────────────────────────────────── [cast-ev]
   --   Γ | J ⊢ cast-ev[U, V] e : V
   --
-  -- Adds or removes `Y`s, `?`s and tokens anywhere in the type of e (`|·|` erases them,
-  -- `Types.eraseY`). A no-op at run time, and unchecked, as the IR has no effects: elaboration
+  -- Adds or removes `?`s and tokens anywhere in the type of e (`|·|` erases them,
+  -- `Types.eraseEv`). A no-op at run time, and unchecked, as the IR has no effects: elaboration
   -- emits it where Koka knows that the result is not a dummy. Only removing a `?` is trusted
-  -- with memory safety; removing a `Y` only skips a flag test, and adding or removing a token
-  -- (`cast-ev[𝟙, KCtx] ret ()`, a token-threaded function used at a total instance) only
-  -- forgets the order of effects. It is an expression, like `[gen]`, so that a result `Y U`
-  -- is cast where it is returned, without a variable of type `Y U`; a value is cast as
-  -- `cast-ev[U, V] ret v`. The annotation U is the type of e, which does not follow from e (as
-  -- the type of a `let` binder). The result is owned. Examples are an effect variable instantiated at a total
+  -- with memory safety (and skips a flag test where it removes the `?` of a result); adding or
+  -- removing a token (`cast-ev[𝟙, KCtx] ret ()`, a token-threaded function used at a total
+  -- instance) only forgets the order of effects. It is an expression, like `[gen]`, so that a
+  -- result is cast where it is returned; a value is cast as `cast-ev[U, V] ret v`. The
+  -- annotation U is the type of e, which does not follow from e (as the type of a `let`
+  -- binder). The result is owned. Examples are an effect variable instantiated at a total
   -- effect, and the result of a call that Koka does not test (a total call, a call in
   -- `std/core/hnd`, which tests the flag itself, or a call under `unsafe-total`). It also lets a
   -- function that never yields be used as one that may. In `std/core/hnd`, a dummy may pass at
-  -- a type variable, where it is only passed on, duplicated or dropped. `[pure]`, not
-  -- `cast-ev`, injects a value into `Y` at the top of a type.
+  -- a type variable, where it is only passed on, duplicated or dropped. `[some]`, not
+  -- `cast-ev`, injects a value into `?` at the top of a type.
   | CastEv VType VType VExpr
 
   --   f : ∀ā. (q̄ V̄) -> q W ∈ Σ    Γᵢ ⊢ vᵢ :qᵢ Vᵢ[B̄/ā]
@@ -759,6 +727,23 @@ data VExpr
   -- trivial in the null branch: the null holds no references (its `box-any` pointers are
   -- never dropped).
   | IsNull VVal VExpr (Path,VExpr)
+
+  --   Γ₁ ⊢ k : KCtx    Γ₂, k₃ : KCtx | J ⊢ e₃ : W    Γ₂, k₂ : KCtx | J ⊢ e₂ : W
+  --  ────────────────────────────────────────────────────────────────────────── [if-yielding]
+  --   Γ₁, Γ₂ | J ⊢ if-yielding k of { yield k₃ -> e₃; k₂ -> e₂ } : W
+  --
+  -- Koka's monadic bind (`if yielding() then e₃ else e₂`): tests the yield flag, which is part
+  -- of the state that the token stands for, so the test consumes the token and gives a new
+  -- one in each branch. A pass can neither drop the test nor move it past an effectful call.
+  -- The binders are roots, and no cell is live in e₂ or e₃. Elaboration tests the result
+  -- `r : W? ⊗ KCtx` of a call as
+  --
+  --   let r = e₁ in let r₀ = r.0 in let k = r.1 in
+  --   if-yielding k of { yield k₃ -> e₃; k₂ -> is-null r₀ of { null -> unreachable; y -> e₂ } }
+  --
+  -- The flag is clear in e₂, so r₀ is not null unless Koka's invariant "the flag is set iff
+  -- the result is null" is broken. The yielding branch passes on the dummy as `ret (null, k₃)`.
+  | IfYielding VVal (Path,VExpr) (Path,VExpr)
 
   --   Γ₁ ⊢ v :^ V    lᵢ : V    Γ₂ ⊢ eᵢ : W    Γ₂ ⊢ e : W
   --  ────────────────────────────────────────────────────── [case-lit]

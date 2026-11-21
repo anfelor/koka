@@ -71,16 +71,16 @@ elabHigher nt tp
       _              -> Left ("unsupported type constructor: " ++ show tp)
 
 -- The result of a function whose calls may yield, as Koka's monadic translation decides
--- (`Core.isMonType`), comes with the yield flag and may be the dummy of a yield (`Y (W?)`). A
--- function whose effect is more than `div` (`needsToken`) takes the effect token as its last
--- parameter and returns it as the last field of its result (`Types.withToken`).
+-- (`Core.isMonType`), may be the dummy of a yield (`W?`). A function whose effect is more than
+-- `div` (`needsToken`, which every effect that may yield needs) takes the effect token as its
+-- last parameter and returns it as the last field of its result (`Types.withToken`).
 elabFunType :: Newtypes -> Type -> Tr AType
 elabFunType nt tp
   = case tp of
       TSyn _ _ t      -> elabFunType nt t
       TForall tvs rho -> forallA (map tvarId (filter tvarStar tvs)) <$> elabFunType nt rho
       TFun pars eff res -> AFun <$> ((++ [(Owned,VToken) | needsToken eff]) <$> mapM (\(_,t) -> (,) Owned <$> elabType nt t) pars)
-                                <*> ((if needsToken eff then withToken else id) . (if isMonEffect eff then VYield . orNull else id) <$> elabType nt res)
+                                <*> ((if needsToken eff then withToken else id) . (if isMonEffect eff then orNull else id) <$> elabType nt res)
       _ -> do t <- elabType nt tp
               case t of
                 VPtr a -> Right a

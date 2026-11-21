@@ -349,7 +349,6 @@ asV t = case t of
 tyP :: P Ty
 tyP = choice
         [ do kw "forall"; vs <- many1 tvarP; sym "."; A . AForall vs <$> aP
-        , kw "Y" >> (V . VYield <$> vP)
         , do t <- baseTyP
              t' <- (sym "*" >> (V . VPtr <$> asA t)) <|> return t
              nullable t' ]
@@ -431,7 +430,6 @@ valP
       , kw "down" >> (do b <- bracketsP aP; Down b <$> atomValP)
       , kw "dup" >> (DupV <$> atomValP)
       , kw "ctx" >> (Context unknownA <$> atomValP)
-      , kw "pure" >> (Pure <$> atomValP)
       , kw "some" >> (Some <$> atomValP)
       , atomValP ]
 
@@ -495,6 +493,7 @@ exprP
       , kw "split" >> splitP
       , kw "if-whnf" >> ifWhnfP
       , kw "is-null" >> isNullP
+      , kw "if-yielding" >> ifYieldingP
       , kw "dup" >> (Dup <$> localP <* sym ";" <*> exprP)
       , kw "drop" >> (Drop <$> localP <* sym ";" <*> exprP)
       , kw "free" >> (Free <$> localP <* sym ";" <*> exprP)
@@ -549,8 +548,8 @@ letP
                    sym "="
                    x <- rootBinder raw
                    e1 <- exprP
-                   (kw "in" >> (Let x t e1 <$> exprP))
-                     <|> (do kw "yielding"; e3 <- exprP; kw "in"; e2 <- exprP; return (LetYield x t e1 e2 e3))
+                   kw "in"
+                   Let x t e1 <$> exprP
     proj raw = do (v,i) <- projected
                   kw "in"
                   x <- childBinder v (\f -> SField i (Field (labelName f))) raw
@@ -633,6 +632,12 @@ isNullP = do v <- valP; kw "of"
              kw "null"; sym "->"; n <- exprP
              raw <- pathP; sym "->"; x <- childBinder v (const SSome) raw
              IsNull v n . (,) x <$> exprP
+
+ifYieldingP :: P VExpr
+ifYieldingP = do v <- valP; kw "of"
+                 kw "yield"; k3 <- pathP >>= rootBinder; sym "->"; e3 <- exprP
+                 k2 <- pathP >>= rootBinder; sym "->"; e2 <- exprP
+                 return (IfYielding v (k3,e3) (k2,e2))
 
 ifWhnfP :: P VExpr
 ifWhnfP = do z <- localP; kw "of"

@@ -203,8 +203,7 @@ genV cx val
       -- every pointer is a `kk_box_t`, `any*` included
       Up v -> genV cx v
       Down _ v -> genV cx v
-      -- the representations of `Y V` and `V?` are that of `V`
-      Pure v -> genV cx v
+      -- the representation of `V?` is that of `V`
       Some v -> genV cx v
       Null t -> ctype t >>= yieldedValue
       Ptr _ v -> genA cx v
@@ -605,7 +604,7 @@ dropScalar r e
          Just 0  -> empty
          Just n  -> "if (KK_INTF_SIZE <=" <+> int n <.> ")" <+> block [drop]
 
--- the payload of a box, which is never the dummy value of a yield (`[let-yield]`)
+-- the payload of a box, which is never the dummy value of a yield (`[is-null]`)
 unboxBlock :: VType -> Doc -> G Doc
 unboxBlock t e
   = do ct <- ctype t
@@ -814,15 +813,12 @@ genE cx dest expr
                           _ -> cx
               s2 <- genE (bindVar cx' x (V t)) dest e2
               return (s1 ++ s2)
-      LetYield x t e1 e2 e3
-        -> do s1 <- genBound cx x t e1
-              s2 <- genE (bindVar cx x (V t)) dest e2
-              s3 <- genE (bindVar cx x (V t)) dest e3
-              ct <- ctype t
-              let check = case niche ct of
-                            Just n -> ["kt_yield_check(" <.> nullTest n (localName x) <.> ");"]
-                            Nothing -> []
-              return (s1 ++ check ++ [ifChain [("kk_yielding(_ctx)",s3)] s2])
+      -- the tokens are units (`erased`)
+      IfYielding _ (k3,e3) (k2,e2)
+        -> do s3 <- genE (bindVar cx k3 (V VToken)) dest e3
+              s2 <- genE (bindVar cx k2 (V VToken)) dest e2
+              let token k = "kk_unit_t" <+> localName k <+> "= kk_Unit;"
+              return [ifChain [("kk_yielding(_ctx)",token k3 : s3)] (token k2 : s2)]
       Unreachable _ -> return ["kt_unreachable();"]
       Drop x e
         | S.member x (cxShared cx)   -- like Koka's C backend: a shared block only needs a decrement
@@ -882,7 +878,7 @@ genE cx dest expr
       CopyRu z r e -> genCopyRu cx dest z r e
       Lock z e -> genLock cx dest z e
       Gen _ e -> genE cx dest e
-      -- a no-op, as the representation of `Y V` is that of `V`
+      -- a no-op, as `?` and tokens have no representation of their own
       CastEv _ _ e -> genE cx dest e
       -- the body of a recursive join point is a loop, which only sees the join point itself
       Join rc j _ ps e1 e2

@@ -68,8 +68,8 @@ reserved s = null s || "(" `isPrefixOf` s || s `elem` keywords || "box@" `isPref
     numbered p = p `isPrefixOf` s && not (null (drop (length p) s)) && all isDigit (drop (length p) s)
     keywords = words ("ret let in of case split at if-whnf whnf delay ptr roll box scalar pack dup drop free"
                       ++ " if-unique if-full then else join rec jump fn gen forall exists unreachable"
-                      ++ " yielding cast-ev memoize ctx ctx-copy hole pure some null is-null up down lock @ @copy _"
-                      ++ " module data con fun val extern foreign Box Scalar I Y KCtx NaN Infinity"
+                      ++ " cast-ev memoize ctx ctx-copy hole some null is-null if-yielding yield up down lock @ @copy _"
+                      ++ " module data con fun val extern foreign Box Scalar I KCtx NaN Infinity"
                       ++ " char ssize_t intptr_t float64 float32 int64 int32 int16 int8 uint8")
 
 -- a path with all its steps
@@ -170,7 +170,6 @@ prettyV pp t
       VExists vs b -> parens (text "exists" <+> hsep (map tv vs) <.> text "." <+> prettyV pp b)
       VCtx f a b -> text ("ctx" ++ (if f == Full then "+" else "")) <.> angles (commaSep [prettyA pp a, prettyA pp b])
       VCell n a -> text ("cell" ++ show n) <.> angles (prettyA pp a)
-      VYield b  -> text "Y" <+> prettyV pp b
       VOrNull b -> prettyV pp b <.> text "?"
       VToken    -> text "KCtx"
 
@@ -261,7 +260,6 @@ prettyVal pp val
       NoReuse n p -> text "no-reuse" <.> int n <.> prettyContents pp p
       Hole        -> text "hole"
       Context _ v -> text "ctx" <+> atomVal pp v
-      Pure v      -> text "pure" <+> atomVal pp v
       Some v      -> text "some" <+> atomVal pp v
       Null _      -> text "null"
 
@@ -283,7 +281,6 @@ atomVal pp v
       Pack _ _ _  -> parens (prettyVal pp v)
       DupV _      -> parens (prettyVal pp v)
       Context _ _ -> parens (prettyVal pp v)
-      Pure _      -> parens (prettyVal pp v)
       Some _      -> parens (prettyVal pp v)
       Up _        -> parens (prettyVal pp v)
       Down _ _    -> parens (prettyVal pp v)
@@ -306,8 +303,6 @@ prettyExpr pp expr
   = case expr of
       Ret v -> text "ret" <+> atomVal pp v
       Let x t e1 e2 -> letIn empty (pp x <+> colon <+> prettyV pp t) (align (prettyExpr pp e1)) e2
-      LetYield x t e1 e2 e3 -> text "let" <+> pp x <+> colon <+> prettyV pp t <+> text "=" <+> align (prettyExpr pp e1)
-                               <-> indent 2 (text "yielding" <+> align (prettyExpr pp e3)) <-> text "in" <+> align (prettyExpr pp e2)
       Unreachable _ -> text "unreachable"
       Call f [] vs -> nm f <.> args pp vs
       Call f ts vs -> nm f <.> tyArgs pp ts <.> args pp vs
@@ -323,6 +318,7 @@ prettyExpr pp expr
       Unbox v x e -> letIn empty (text "box" <+> pp x) (pp v) e
       Unscalar m v x e -> letIn (mode m) (text "scalar" <+> pp x) (pp v) e
       IsNull v n (x,e) -> caseOf (text "is-null") (prettyVal pp v) [(text "null", n), (pp x, e)]
+      IfYielding v (k3,e3) (k2,e2) -> caseOf (text "if-yielding") (prettyVal pp v) [(text "yield" <+> pp k3, e3), (pp k2, e2)]
       Unpack v vs x e -> letIn empty (text "pack" <.> brackets (commaSep (map tv vs)) <+> pp x) (prettyVal pp v) e
       CaseLit v alts def -> caseOf (text "case") (prettyVal pp v) ([(prettyLit l, e) | (l,e) <- alts] ++ [(text "_", def)])
       Dup x e -> text "dup" <+> pp x <.> semi <-> prettyExpr pp e

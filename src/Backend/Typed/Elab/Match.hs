@@ -22,7 +22,7 @@
 
   Koka's test for a yield, `match yielding() { True -> e₃; False -> e₂ }`, is already a
   one-level match: it stays a match on `yielding()` (without the unused aliases of its
-  patterns), which elaboration turns into `[let-yield]`.
+  patterns), which elaboration turns into `[if-yielding]`.
 -}
 module Backend.Typed.Elab.Match( matchCore ) where
 

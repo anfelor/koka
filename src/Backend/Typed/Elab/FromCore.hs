@@ -27,7 +27,7 @@ import qualified Core.CoreVar as CV
 import Core.Pretty()
 import qualified Type.TypeVar as TV
 import Backend.Typed.Syntax
-import Backend.Typed.Build( K, compose, prodVal, padFields, withTokenVal )
+import Backend.Typed.Build( K, compose, prodVal, padFields, dropToken )
 import Backend.Typed.Traversal( child )
 import Backend.Typed.Elab.Types( typeDefs )
 import Backend.Typed.Elab.TypeInfo
@@ -179,7 +179,7 @@ funSig tp
 -- expressions
 
 -- An expression at the type `t`, which its expressions in tail position take (`result`): the
--- result of each is coerced there, so that a result that may be the dummy of a yield (`Y W`)
+-- result of each is coerced there, so that a result that may be the dummy of a yield (`W?`)
 -- is tested where it is coerced.
 elabExprAt :: VType -> C.Expr -> E VExpr
 elabExprAt t e = withResult t (elabTail e)
@@ -232,7 +232,7 @@ retAt t v = do r <- result
                case unToken r of
                  Just r0 -> do (k,w) <- coerce t r0 v
                                (kt,tok) <- takeToken
-                               return (k (kt (Ret (withTokenVal w tok))))
+                               return (k (kt (Ret (Tuple [w,tok]))))
                  Nothing -> do (k,w) <- coerce t r v
                                return (k (Ret w))
 
@@ -255,8 +255,7 @@ yieldTest expr
 
 -- The parts of a context under construction are not bound: their uses become parts of the
 -- `ctx` value (see `elabCtx`). Koka's test for a yield after `val x = e₁` (whose yielding
--- branch does not use `x`) is a `[let-yield]`, which elaborates `e₁` at `Y (V?)` and extracts
--- the V (`[is-null]`).
+-- branch does not use `x`) is an `[if-yielding]` (`letYield`).
 elabLet :: C.Def -> C.Expr -> E VExpr
 elabLet def body
   = do en <- env
@@ -273,37 +272,38 @@ elabLet def body
                  (k,v) <- elabValAt t (C.defExpr def)
                  k <$> withFields [(x,(id,v))] (elabTail body)
          else do t <- vt (C.defType def)
-                 token <- currentToken
                  case yieldTest body of
                    Just (e2,e3) | not (S.member x (S.map getName (CV.fv e3)))
-                     -> if isJust token then letYieldToken def t e2 e3 else
-                        do e1 <- elabExprAt (VYield (orNull t)) (C.defExpr def)
-                           body <- withTypedLocals [(x,C.defType def)] (elabTail e2)
-                           r <- fresh "r"
-                           w <- result
-                           LetYield r (orNull t) e1 (IsNull (Var r) (Unreachable w) (root x,body)) <$> elabTail e3
+                     -> letYield def t e2 e3
                    _ -> do k <- bindExpr (root x) t (C.defExpr def)
                            k <$> withTypedLocals [(x,C.defType def)] (elabTail body)
   where
     fieldAlias en (C.Var (TName y _) _) = M.member y (envFields en)
     fieldAlias _ _ = False
 
--- `[let-yield]` on the token: the result `r : t? ⊗ KCtx` of `e₁`, whose token `r.1` each
--- branch takes
-letYieldToken :: C.Def -> VType -> C.Expr -> C.Expr -> E VExpr
-letYieldToken def t e2 e3
-  = do let u = withToken (orNull t)
+-- `val x = e₁` followed by a test for a yield: the result `r : t? ⊗ KCtx` of `e₁` is tested on
+-- its token `r.1` (`[if-yielding]`), and the non-yielding branch extracts `x` from `r.0`
+-- (`[is-null]`). Each branch continues with its new token, or drops it in an expression
+-- without one (where `e₁` takes a fresh token, `takeToken`).
+letYield :: C.Def -> VType -> C.Expr -> C.Expr -> E VExpr
+letYield def t e2 e3
+  = do token <- currentToken
+       let u = withToken (orNull t)
            x = C.defName def
-       e1' <- elabExprAt (VYield u) (C.defExpr def)
+       e1' <- elabExprAt u (C.defExpr def)
        r <- fresh "r"
        r0 <- fresh "r"
-       k2 <- fresh "k"
-       k3 <- fresh "k"
+       k <- fresh "k"
        w <- result
-       body <- tokenIn (Just k2) (withTypedLocals [(x,C.defType def)] (elabTail e2))
-       yielding <- tokenIn (Just k3) (elabTail e3)
-       return (LetYield r u e1' (Proj (Var r) 0 r0 (Proj (Var r) 1 k2 (IsNull (Var r0) (Unreachable w) (root x,body))))
-                                (Proj (Var r) 1 k3 yielding))
+       let branch m = do k' <- fresh "k"
+                         e <- if isJust token then tokenIn (Just k') m
+                              else do d <- fresh "u"
+                                      dropToken d (Var k') <$> tokenIn Nothing m
+                         return (k',e)
+       yielding <- branch (elabTail e3)
+       body <- branch (withTypedLocals [(x,C.defType def)] (elabTail e2))
+       return (Let r u e1' (Proj (Var r) 0 r0 (Proj (Var r) 1 k
+                 (IfYielding (Var k) yielding (fmap (\b -> IsNull (Var r0) (Unreachable w) (root x,b)) body)))))
 
 -- `let x : t = e in □`. In a token-threaded expression, an `e` that calls something that takes
 -- a token (`usesToken`) is elaborated at `t ⊗ KCtx`, whose token is the next one; any other
@@ -552,7 +552,7 @@ elabVal expr
               (kg,v) <- genVal t lam
               return (k . kg,v)
       C.TypeLam tvs e | isValue e -> elabTypeLam [typevarId tv | tv <- tvs, tvarStar tv] e (typeOf expr)
-      -- an identity external changes only effects: its argument, cast where it differs in `Y`
+      -- an identity external changes only effects: its argument, cast where it differs in `?`s and tokens
       _ | Just g <- identityCast expr, isValue g
         -> do (k1,v) <- elabVal g
               from <- vt (typeOf g)

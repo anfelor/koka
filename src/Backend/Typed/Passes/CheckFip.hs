@@ -34,7 +34,7 @@
 
   As in the frontend, `int` is assumed small (it is neither shared nor freed), and literals,
   scalars and globals are not counted. The frontend checks a function before its monadic
-  translation, so the paths on which an effect yields (`[let-yield]`) are not taken either,
+  translation, so the paths on which an effect yields (`[if-yielding]`) are not taken either,
   and the evidence operations (`evv-*`) that open effects are free. Neither are paths that
   end in a pattern match failure. The frontend does not report on
   `std/core/debug`, and neither does this check.
@@ -229,7 +229,7 @@ fipE expr
   = case expr of
       Ret v -> (,) <$> fipV v <*> fullV v
       -- the yielding branch is not taken
-      LetYield x t e1 e2 _ -> fipE (Let x t e1 e2)
+      IfYielding _ _ (k,e2) -> bind [(k,V VToken)] (fipE e2)
       Let x t e1 e2
         -> do tl <- asks fTail
               let tailModProduct = tl && modProduct S.empty e2
@@ -339,7 +339,6 @@ fails failing expr
       Unreachable _ -> True
       Jump j _ _ -> S.member j failing
       Let _ _ e1 e2 -> fails failing e1 || fails failing e2
-      LetYield _ _ e1 e2 e3 -> fails failing e1 || (fails failing e2 && fails failing e3)
       Join NonRec j _ _ e1 e2 -> fails (if fails failing e1 then S.insert j failing else failing) e2
       Join Rec{} j _ _ e1 e2 -> fails (if fails S.empty e1 then S.insert j failing else failing) e2
       _ -> let es = subexprs expr in not (null es) && all (fails failing) es
@@ -354,7 +353,7 @@ modProduct joins expr
       App _ _ -> False
       CaseLit{} -> False
       Jump j _ _ -> S.member j joins
-      LetYield x t e1 e2 _ -> modProduct joins (Let x t e1 e2)
+      IfYielding _ _ (_,e2) -> modProduct joins e2
       Let _ _ e1 e2 -> modProduct S.empty e1 && modProduct joins e2
       Join NonRec j _ _ e1 e2 -> modProduct (if modProduct joins e1 then S.insert j joins else joins) e2
       Join Rec{} _ _ _ _ e2 -> modProduct joins e2

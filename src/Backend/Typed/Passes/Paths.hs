@@ -104,14 +104,7 @@ renE global ren expr
        case known rests of
          Just (bs,e) -> do mapM_ (uncurry record) bs
                            renE global (M.union (M.fromList bs) ren) e
-         Nothing -> case annotated of
-                      -- the binder of `[let-yield]` is in scope in both branches, under one name
-                      LetYield x t e1 e2 e3
-                        -> do e1' <- renE global ren e1
-                              x' <- bindRoot x
-                              let ren' = M.insert x x' ren
-                              LetYield x' t e1' <$> renE global ren' e2 <*> renE global ren' e3
-                      _ -> descendB (pure . look ren) (renV global ren) alt annotated
+         Nothing -> descendB (pure . look ren) (renV global ren) alt annotated
   where
     -- an alternative whose binders are in scope
     known rests
@@ -136,7 +129,6 @@ renE global ren expr
                    Nothing -> bindRoot x
     annotated = case expr of
       Let x t e1 e2 -> Let x (replaceVType sub t) e1 e2
-      LetYield x t e1 e2 e3 -> LetYield x (replaceVType sub t) e1 e2 e3
       CastEv u t e -> CastEv (replaceVType sub u) (replaceVType sub t) e
       Unreachable t -> Unreachable (replaceVType sub t)
       Call f ts vs -> Call f (map (replaceAType sub) ts) vs

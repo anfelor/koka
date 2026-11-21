@@ -9,30 +9,36 @@
 
 {- Fewer tests for a yield (after Simplify, before Perceus).
 
-  Elaboration tests the result of every call that may yield where it needs it (`[let-yield]`),
-  which is correct but often tests twice, or tests a value that cannot be a dummy. Each rule
-  preserves the types:
+  Elaboration tests the result of every call that may yield where it needs it, which is
+  correct but often tests twice, or tests a value that cannot be a dummy. A test of the
+  result `r : U? ⊗ KCtx` of `e₁` binds its fields and tests the token (`[if-yielding]`):
 
-  - A bound expression whose results are all `pure` (and not the dummy), and that calls
+    T(e₁; k₃.e₃; k₂.e₂)  ≜  let r = e₁ in let r₀ = r.0 in let k = r.1 in
+                            if-yielding k of { yield k₃ -> e₃; k₂ -> e₂ }
+
+  Each rule preserves the types:
+
+  - A bound expression whose results are all `(v, k)` with v not the dummy, and that calls
     nothing that may yield, cannot yield, so it needs no test. (A call whose result is cast
     without a test, such as one under a type abstraction that Koka tests only afterwards, may
-    leave the flag set although the results are `pure`.)
+    leave the flag set although the results are not the dummy.)
 
-      let x : V = K[ret (pure v)] yielding e₃ in e₂   ~>   let x : V = K[ret v] in e₂
+      T(K[ret (v, k')]; k₃.e₃; k₂.e₂)   ~>   let r = K[ret (v, k')] in ... e₂[k₂ := k]
 
-  - A coercion `c` of the result `r` of a call, tested inside the bound expression of another
+  - A coercion `c` of the result `q` of a call, tested inside the bound expression of another
     test, moves into the continuation, so that one test remains:
 
-      let x : V = K[let r : U = e yielding ret (pure null) in c] yielding e₃ in e₂
-        ~>   let r : U = K[e] yielding e₃ in let x : V = c' in e₂
+      T(K[T(e; j₃.ret (null, j₃); j₂.c)]; k₃.e₃; k₂.e₂)
+        ~>   T(K[e]; j₃.e₃[k₃ := j₃]; j₂.let r = c in let r₀ = r.0 in let k = r.1 in e₂[k₂ := k])
 
-    where `c'` is `c` with its results unwrapped from `pure` (`c` cannot yield, as in the
-    first rule).
+    where `c` only uses `q` and its token `j₂`, and cannot yield (as in the first rule).
 
   - A bound expression whose results are all `some` needs no null test:
 
       let x : V? = K[ret (some v)] in is-null x of { null -> e₃; x.some -> e₂ }
         ~>   let x : V = K[ret v] in e₂[x.some := x]
+
+    and likewise for `x : V? ⊗ KCtx`, results `(some v, k)`, and the null test of `x.0`.
 
   - `yield-extend` and `yield-cont` return while the effect still yields, so the continuation
     of their test is dead: `unreachable`.
@@ -42,19 +48,20 @@
     unboxing, as in the inlined `local-var`, whose `prompt-local-var` tests the flag itself),
     the test goes away, and the result is passed on with a cast, as by Koka's C backend:
 
-      let x : V = (let r : U? = e yielding cast-ev[Y (V?), V] ret (pure null) in
-                   is-null r of { null -> unreachable; r.some -> unbox r.some }) in B[box x]
-        ~>   let x : U = cast-ev[Y (U?), U] e in B[x]
+      let x : V = T(e; k₃.drop k₃; cast-ev[V?, V] ret null;
+                       k₂.drop k₂; is-null r₀ of { null -> unreachable; r₀.some -> unbox r₀.some }) in B[box x]
+        ~>   let x : U = cast-ev[U? ⊗ KCtx, U] e in B[x]
 -}
 module Backend.Typed.Passes.Yields( yieldsProgram ) where
 
 import Data.Functor.Identity( Identity(..) )
+import Data.Maybe( isJust )
 import Common.Name
 import Common.NamePrim( nameYieldExtend, nameCoreHnd )
 import Backend.Typed.Syntax
 import Backend.Typed.Build( isYielded )
 import Backend.Typed.Traversal( descendE, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fvE, lamsV, mapA, mapV, subexprs, within )
-import Backend.Typed.Types( Types(..), alphaEq, inst, unNull )
+import Backend.Typed.Types( Types(..), alphaEq, inst, unNull, unToken, yields )
 import Backend.Typed.Passes.Common( renamePath )
 
 yieldsProgram :: Program -> Program
@@ -64,15 +71,35 @@ yieldsProgram prog = prog{ progDefs = [d{ defBody = yE (result d) (defBody d) } 
                  DefFun{ defRes = t } -> t
                  DefVal{ defType = t } -> t
 
+-- A test of the result `r : U` of `e` for a yield, as elaboration builds it: the fields `r.0`
+-- and `r.1` are bound, and the token `r.1` is tested.
+data Test = Test{ tRes :: Path, tType :: VType, tExpr :: VExpr, tVal :: Path, tToken :: Path
+                , tYielding :: (Path,VExpr), tCont :: (Path,VExpr) }
+
+testOf :: VExpr -> Maybe Test
+testOf expr
+  = case expr of
+      Let r u e (Proj (Var r1) 0 r0 (Proj (Var r2) 1 k (IfYielding (Var k') y c)))
+        | r1 == r, r2 == r, k' == k -> Just (Test r u e r0 k y c)
+      _ -> Nothing
+
+-- the test, or its body `b` in place of the test
+fromTest :: Test -> VExpr
+fromTest t = withFields t (IfYielding (Var (tToken t)) (tYielding t) (tCont t))
+
+withFields :: Test -> VExpr -> VExpr
+withFields t b = Let (tRes t) (tType t) (tExpr t) (Proj (Var (tRes t)) 0 (tVal t) (Proj (Var (tRes t)) 1 (tToken t) b))
+
 -- an expression with its result type `w`
 yE :: VType -> VExpr -> VExpr
 yE w expr
   = case expr of
       Let r u e (Let x _ c body) | Just boxedAs <- reboxed r u x c body -> yE w (Let r u e (boxedAs r))
-      Let x _ (LetYield r u e c d) body | dummy d, (r',c') <- extracted r c, Just boxedAs <- reboxed r' (unNull u) x c' body
-        -> Let x (unNull u) (CastEv (VYield u) (unNull u) (yE (VYield u) e)) (yE w (boxedAs x))
+      Let x _ inner body | Just t <- testOf inner, Just u <- unToken (tType t), Just boxedAs <- reboxedTest t x body
+        -> Let x (unNull u) (CastEv (tType t) (unNull u) (yE (tType t) (tExpr t))) (yE w (boxedAs x))
+      _ | Just t <- testOf expr
+        -> test w t{ tExpr = yE (tType t) (tExpr t), tYielding = fmap (yE w) (tYielding t), tCont = fmap (yE w) (tCont t) }
       Let x t e1 e2 -> nonNull (Let x t (yE t e1) (yE w e2))
-      LetYield x t e1 e2 e3 -> letYield w x t (yE (VYield t) e1) (yE w e2) (yE w e3)
       CastEv u t e -> CastEv u t (yE u e)
       Gen tvs e -> case w of
                      VPtr (AForall bs a) -> Gen tvs (yE (VPtr (inst bs (map AVar tvs) a)) e)
@@ -83,50 +110,68 @@ yV :: VVal -> VVal
 yV = runIdentity . lamsV (\_ r e -> Identity (yE r e))
 
 -- a test whose subexpressions are done
-letYield :: VType -> Path -> VType -> VExpr -> VExpr -> VExpr -> VExpr
-letYield w x t e1 e2 e3
-  | stillYields e1 = LetYield x t e1 (Unreachable w) e3
-  | Just e1' <- unpure e1 = nonNull (Let x t e1' e2)
-  | Just (e,r,u,c) <- coerced e1, Just c' <- unpure c = letYield w r u e (nonNull (Let x t c' e2)) e3
-  | otherwise = LetYield x t e1 e2 e3
-
--- An expression that cannot yield: its results are all `pure` and not the dummy, with these
--- results unwrapped, and it calls nothing that may yield (`mayYield`).
-unpure :: VExpr -> Maybe VExpr
-unpure expr
-  | mayYield expr = Nothing
-  | otherwise = unwrap pureVal (\t -> case t of { VYield s -> Just s; _ -> Nothing }) expr
+test :: VType -> Test -> VExpr
+test w t
+  | stillYields (tExpr t) = fromTest t{ tCont = (k2, Unreachable w) }
+  | cannotYield (tExpr t) = nonNull (withFields t (renamePath k2 (tToken t) e2))
+  | Just (inner,c) <- coerced t, cannotYield c
+  = let (j2,_) = tCont inner
+        (j3,_) = tYielding inner
+        x = tRes t
+    in test w inner{ tYielding = (j3, renamePath k3 j3 e3)
+                   , tCont = (j2, nonNull (Let x (tType t) c (Proj (Var x) 0 (tVal t) (Proj (Var x) 1 (tToken t) (renamePath k2 (tToken t) e2))))) }
+  | otherwise = fromTest t
   where
-    pureVal v = case v of
-                  Pure (Null _) -> Nothing
-                  Pure (Tuple [Null _, _]) -> Nothing   -- with the token
-                  Pure w -> Just w
-                  _ -> Nothing
+    (k2,e2) = tCont t
+    (k3,e3) = tYielding t
+
+-- An expression that cannot yield: its results are not the dummy, and it calls nothing that
+-- may yield (`mayYield`).
+cannotYield :: VExpr -> Bool
+cannotYield expr = not (mayYield expr) && isJust (unwrap valid Just expr)
+  where
+    valid v = case v of
+                Null _ -> Nothing
+                Tuple [Null _, _] -> Nothing   -- with the token
+                _ -> Just v
 
 -- `let x : V? = e₁ in is-null x of { null -> e₃; x.some -> e₂ }`, where the results of e₁ are
--- all `some`, as `let x : V = e₁' in e₂[x.some := x]`
+-- all `some`, as `let x : V = e₁' in e₂[x.some := x]`, and likewise for `x : V? ⊗ KCtx` and
+-- the null test of `x.0`
 nonNull :: VExpr -> VExpr
 nonNull expr
   = case expr of
-      Let x (VOrNull t) e1 (IsNull (Var x') _ (y,e2))
-        | x' == x, all (\z -> z `within` y || not (z `within` x)) (fvE e2)
-        , Just e1' <- unwrap someVal (\s -> case s of { VOrNull u -> Just u; _ -> Nothing }) e1
-        -> Let x t e1' (renamePath y x e2)
+      Let x t e1 body
+        | Just (t',fields,x0,(y,e2)) <- nullTest x t body
+        , all (\z -> z `within` y || not (z `within` x0 || x0 `within` z)) (fvE e2)
+        , Just e1' <- unwrap someVal nonNullType e1
+        -> Let x t' e1' (fields (renamePath y x0 e2))
       _ -> expr
   where
     someVal v = case v of
                   Some w -> Just w
+                  Tuple [Some w, k] -> Just (Tuple [w,k])
                   _ -> Nothing
+    nonNullType s = case s of
+                      VOrNull u -> Just u
+                      VProd [(f,VOrNull u),tok] -> Just (VProd [(f,u),tok])
+                      _ -> Nothing
+    nullTest x t body
+      = case (t,body) of
+          (VOrNull u, IsNull (Var x') _ alt) | x' == x -> Just (u,id,x,alt)
+          (VProd [(f,VOrNull u),tok], Proj (Var x1) 0 x0 (Proj (Var x2) 1 k (IsNull (Var x0') _ alt)))
+            | x1 == x, x2 == x, x0' == x0 -> Just (VProd [(f,u),tok], Proj (Var x) 0 x0 . Proj (Var x) 1 k, x0, alt)
+          _ -> Nothing
 
--- Whether an expression calls something that may yield: a test, or a cast that removes the `Y`
+-- Whether an expression calls something that may yield: a test, or a cast that removes the `?`
 -- of a result without a test (such as of a call that Koka tests only after an enclosing type
--- abstraction). The flag may then be set although the results are `pure`. Lambdas do not run
--- here.
+-- abstraction). The flag may then be set although the results are not the dummy. Lambdas do
+-- not run here.
 mayYield :: VExpr -> Bool
 mayYield expr
   = case expr of
-      LetYield{} -> True
-      CastEv VYield{} _ _ -> True
+      IfYielding{} -> True
+      CastEv u _ _ | yields u -> True
       _ -> any mayYield (subexprs expr)
 
 -- The results of an expression unwrapped by `val`, and the types of its `unreachable`s by `ty`.
@@ -141,29 +186,42 @@ unwrap val ty expr
       Let x t e1 e2 -> Let x t e1 <$> go e2
       Join NonRec j tvs ps e1 e2 -> Join NonRec j tvs ps <$> go e1 <*> go e2
       CaseLit v alts def -> CaseLit v <$> traverse (traverse go) alts <*> go def
+      IfYielding v (k3,e3) (k2,e2) -> (\e3' e2' -> IfYielding v (k3,e3') (k2,e2')) <$> go e3 <*> go e2
       _ | Just ds <- destructAOf expr -> dsBuild ds (dsScrut ds) <$> traverse (go . snd) (dsAlts ds)
         | Just ds <- destructVOf expr -> dsBuild ds (dsScrut ds) <$> traverse (go . snd) (dsAlts ds)
         | otherwise -> Nothing
   where
     go = unwrap val ty
 
--- `K[let r : U = e yielding ret (pure null) in c]` as `K[e]`, `r`, `U` and `c`, where `c` only
--- uses `r`
-coerced :: VExpr -> Maybe (VExpr,Path,VType,VExpr)
-coerced expr
-  = case expr of
-      LetYield r u e c d | isYielded d, all (`within` r) (fvE c) -> Just (e,r,u,c)
-      Let y s a b -> under (Let y s a) b
-      _ | Just ds <- destructAOf expr, [(_,b)] <- dsAlts ds -> under (\b' -> dsBuild ds (dsScrut ds) [b']) b
-        | Just ds <- destructVOf expr, [(_,b)] <- dsAlts ds
-        -> case expr of
-             -- the type of `r` must not mention the unpacked type variables
-             Unpack _ tvs _ _ -> do res@(_,_,u,_) <- under (\b' -> dsBuild ds (dsScrut ds) [b']) b
-                                    if any (`elem` tvs) (ftv u) then Nothing else Just res
-             _ -> under (\b' -> dsBuild ds (dsScrut ds) [b']) b
-        | otherwise -> Nothing
+-- The test of a result inside the bound expression of the test `t`, whose yielding branch
+-- passes on the dummy and whose continuation `c` only uses the result and its token: the
+-- inner test with `K[e]` as its bound expression, and `c`. The yielding branch of `t` does
+-- not use the result of `t`.
+coerced :: Test -> Maybe (Test,VExpr)
+coerced t
+  | not (any (`within` tRes t) (fvE (snd (tYielding t)))) = inside (tExpr t)
+  | otherwise = Nothing
   where
-    under k b = (\(b',r,u,c) -> (k b',r,u,c)) <$> coerced b
+    inside expr
+      = case expr of
+          _ | Just i <- testOf expr, (j3,d) <- tYielding i, (j2,c) <- tCont i
+            , isYielded d, all (== Var j3) (dummyToken d)
+            , all (\z -> z `within` tRes i || z == j2) (fvE c)
+            -> Just (i,c)
+          Let y s a b -> under (Let y s a) b
+          _ | Just ds <- destructAOf expr, [(_,b)] <- dsAlts ds -> under (\b' -> dsBuild ds (dsScrut ds) [b']) b
+            | Just ds <- destructVOf expr, [(_,b)] <- dsAlts ds
+            -> case expr of
+                 -- the type of the result must not mention the unpacked type variables
+                 Unpack _ tvs _ _ -> do res@(i,_) <- under (\b' -> dsBuild ds (dsScrut ds) [b']) b
+                                        if any (`elem` tvs) (ftv (tType i)) then Nothing else Just res
+                 _ -> under (\b' -> dsBuild ds (dsScrut ds) [b']) b
+            | otherwise -> Nothing
+    under k b = (\(i,c) -> (i{ tExpr = k (tExpr i) },c)) <$> inside b
+    dummyToken d = case d of
+                     Ret (Tuple [_,k]) -> [k]
+                     CastEv _ _ (Ret (Tuple [_,k])) -> [k]
+                     _ -> [UnitV]
 
 -- Where `c` unboxes `r : U` to `x`, and `body` uses `x` only boxed: `body` with a variable
 -- `z : U` for `box x`.
@@ -183,20 +241,20 @@ reboxed r u x c body
                        Lam ps t b -> Lam ps t (replaceE b)
                        _ -> mapA id replaceA replaceV a
 
--- the dummy of the type of a result that elaboration tested only to coerce it
-dummy :: VExpr -> Bool
-dummy expr
-  = case expr of
-      CastEv _ _ d -> isYielded d
-      _ -> False
-
--- the value `y` that `c` extracts from `r` before it uses it (`Elab.Coerce.coerceExpr`), and
--- the rest of `c`
-extracted :: Path -> VExpr -> (Path,VExpr)
-extracted r c
-  = case c of
-      IsNull (Var r') Unreachable{} (y,c') | r' == r -> (y,c')
-      _ -> (r,c)
+-- `reboxed` for a test that elaboration made only to unbox the result, at a type without a
+-- token: its branches drop their tokens, the yielding one passes on a dummy, and the other
+-- extracts the result and unboxes it
+reboxedTest :: Test -> Path -> VExpr -> Maybe (Path -> VExpr)
+reboxedTest t x body
+  | Just (CastEv _ _ d) <- dropped (tYielding t), isYielded d
+  , Just (IsNull (Var r0) Unreachable{} (y,c)) <- dropped (tCont t), r0 == tVal t
+  , Just u <- unToken (tType t)
+  = reboxed y (unNull u) x c body
+  | otherwise = Nothing
+  where
+    dropped (k,e) = case e of
+                      Let _ VUnit (CastEv VToken VUnit (Ret (Var k'))) b | k' == k -> Just b
+                      _ -> Nothing
 
 -- a call to `yield-extend` or `yield-cont`, which return while the effect still yields
 stillYields :: VExpr -> Bool

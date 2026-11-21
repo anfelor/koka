@@ -128,10 +128,9 @@ ruE expr
                       VReuse _ _ Nothing -> liftE (inferE (reEnv re) (reGamma re) noJoins e1')
                       _ -> return t
               Let x t' e1' <$> bind [(x,V t')] (ruE e2)
-      LetYield x t e1 e2 e3
-        -> do e1' <- ruE e1
-              es <- branches [([(x,V t)],e2),([(x,V t)],e3)]
-              return (LetYield x t e1' (es !! 0) (es !! 1))
+      IfYielding v (k3,e3) (k2,e2)
+        -> do es <- branches [([(k3,V VToken)],e3),([(k2,V VToken)],e2)]
+              return (IfYielding v (k3,es !! 0) (k2,es !! 1))
       Join NonRec j tvs ps e1 e2
         -> do (e1',as) <- scope (Just []) (bind [(x,V t) | (x,_,t) <- ps] (ruE e1))
               let rs = fromMaybe [] as

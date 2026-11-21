@@ -63,7 +63,6 @@ isTrivialWith unroll t
                    VReuse _ _ _   -> False
                    VCtx _ _ _   -> False
                    VCell _ _    -> False
-                   VYield _     -> False
                    VOrNull b    -> trivialV b
                    VToken       -> False
     trivialA a = case a of
@@ -117,7 +116,6 @@ mentionedE :: VExpr -> [Path]
 mentionedE e = annotations ++ getConst (descendE (Const . (:[])) (Const . mentionedV) (\xs body -> Const (xs ++ mentionedE body)) e)
   where annotations = case e of
           Let _ t _ _ -> mentionedT t
-          LetYield _ t _ _ _ -> mentionedT t
           CastEv u t _ -> mentionedT u ++ mentionedT t
           Unreachable t -> mentionedT t
           Call _ ts _ -> concatMap (mentionedT . VPtr) ts
@@ -195,11 +193,9 @@ dropValue trivial fresh scope x t e
                 return (Let u VUnit (reuseChildren scope (IsNull (Var x) (Ret UnitV) (y,body))) e)
         VReuse _ _ _ -> return (Free x e)
         VCtx _ _ _ -> return (Drop x e)
-        -- a cell or a token is linear and never dropped, which `Check` rejects, and no variable
-        -- has a type `Y V`
+        -- a cell or a token is linear and never dropped, which `Check` rejects
         VCell _ _ -> return (Drop x e)
         VToken -> return (Drop x e)
-        VYield _ -> return (Drop x e)
         VUnit -> return e
         VRaw _ -> return e
 
@@ -207,12 +203,12 @@ dropValue trivial fresh scope x t e
 projectAll :: Scope -> Path -> [(Path,Int,VType)] -> VExpr -> VExpr
 projectAll scope x fields body = foldr (\(y,i,_) e -> reuseChildren scope (Proj (Var x) i y e)) body fields
 
--- A `[let-yield]` as the `let` that is taken if no effect yields, and its yielding branch,
+-- An `[if-yielding]` as the branch that is taken if no effect yields, and its yielding branch,
 -- which is cold.
 yieldingAlts :: VExpr -> Maybe (VExpr,VExpr)
 yieldingAlts expr
   = case expr of
-      LetYield x t e1 e2 e3 -> Just (Let x t e1 e2,e3)
+      IfYielding _ (_,e3) (_,e2) -> Just (e2,e3)
       _ -> Nothing
 
 -- the bodies of the alternatives of a `CaseV`, by index
@@ -257,7 +253,6 @@ substTypesE sub expr
   where
     annotated = case expr of
       Let x t e1 e2         -> Let x (subst sub t) e1 e2
-      LetYield x t e1 e2 e3 -> LetYield x (subst sub t) e1 e2 e3
       CastEv u t e          -> CastEv (subst sub u) (subst sub t) e
       Unreachable t         -> Unreachable (subst sub t)
       Call f ts vs          -> Call f (map (subst sub) ts) vs
@@ -454,7 +449,6 @@ substStepWith renameRoot recur scope sub expr
   where
     annotated = case expr of
       Let x t e1 e2 -> Let x (substVType sub t) e1 e2
-      LetYield x t e1 e2 e3 -> LetYield x (substVType sub t) e1 e2 e3
       CastEv u t e -> CastEv (substVType sub u) (substVType sub t) e
       Unreachable t -> Unreachable (substVType sub t)
       Call f ts vs -> Call f (map (substAType sub) ts) vs
@@ -530,7 +524,7 @@ subGammas env g expr
   | otherwise
   = case expr of
       Let x t _ _ -> return [g, M.insert x (V t) g]
-      LetYield x t _ _ _ -> return [g, M.insert x (V t) g, M.insert x (V t) g]
+      IfYielding _ (k3,_) (k2,_) -> return [M.insert k3 (V VToken) g, M.insert k2 (V VToken) g]
       Join _ _ _ ps _ _ -> return [bindAll [(x,V t) | (x,_,t) <- ps] g, g]
       Dup _ _ -> return [g]
       IsUnique x _ _ -> return [uniqueGamma g x, g]
@@ -591,7 +585,7 @@ isRead expr
       Unpack{}    -> False
       Ret{}       -> False
       Let{}       -> False
-      LetYield{}  -> False
+      IfYielding{} -> False
       IsNull{}    -> False
       Unreachable{} -> False
       Call{}      -> False

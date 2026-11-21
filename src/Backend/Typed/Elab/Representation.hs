@@ -44,8 +44,8 @@ rep t
 boxrep :: VType -> VType
 boxrep t = VPtr (rep t)
 
--- A result that may yield stays one (`Y (boxrep(W)?)`), and the token stays a token
--- (`(boxrep(V), KCtx) -> Y (boxrep(W)? ⊗ KCtx)`).
+-- A result that may yield stays one (`boxrep(W)?`), and the token stays a token
+-- (`(boxrep(V), KCtx) -> boxrep(W)? ⊗ KCtx`).
 boxFunA :: AType -> AType
 boxFunA a
   = case a of
@@ -61,9 +61,7 @@ boxFunA a
       ALam _ _      -> a
       ALazy _ _     -> a
   where
-    boxRes r = case r of
-                 VYield w -> VYield (boxRes w)
-                 _ -> maybe (underNull boxrep r) (withToken . underNull boxrep) (unToken r)
+    boxRes r = maybe (underNull boxrep r) (withToken . underNull boxrep) (unToken r)
 
 -- Koka's `box`: a raw value is boxed by itself, any other value as a shape, and a product of a
 -- single raw value or enumeration (`scalarField`) like that field
@@ -109,7 +107,6 @@ shapeLeaves t
       VReuse _ _ _  -> [ABox t]
       VCtx _ _ _  -> [ABox t]
       VCell _ _   -> [ABox t]
-      VYield _    -> [ABox t]
       VOrNull _   -> [ABox t]
       VToken      -> [ABox t]
 

@@ -13,8 +13,7 @@
   exactly once and a set of borrowed variables it may only inspect. Owned
   variables that are not free in an expression are dropped at its start.
   In `let x = e1 in e2`, the owned variables that are still needed in `e2` are
-  borrowed in `e1`; a `[let-yield]` is a `let` whose continuation is one of two branches,
-  and `x` is only bound in the one where no effect yields.
+  borrowed in `e1`. `[if-yielding]` moves its token, and each branch owns its new token.
 
   Destructuring a dead owned variable moves its ownership to the binders, which the
   alternatives consume. Otherwise the binders are borrowed from the scrutinee. A borrowed
@@ -46,8 +45,8 @@
   and its cell is a new owned root. So `lazy-eval-locked` takes the fields of
   the lazy value under evaluation without duplicating them, as Koka's Parc does. A cell is linear: it is never copied, and a
   dead cell is an error (it must be filled by `memoize`, or freed in the unique branch of a
-  test, where it is a credit). So is a value that may be the dummy of a yield (`Y V`), which is
-  never duplicated or dropped. The branches of `if-unique` own the same variables.
+  test, where it is a credit). So is a token, which is never duplicated or dropped. The
+  branches of `if-unique` own the same variables.
 
   The body of a join point is closed and processed like the body of a function; a jump
   is like a call, but nothing follows it, so owned variables are only dropped before it.
@@ -206,7 +205,6 @@ consumedWith expr z x
       App f _    -> x /= f
       Jump{}     -> True
       Let _ _ _ e2 -> not (S.member z (needs (fvE e2))) && S.member x (fvE e2)
-      LetYield _ _ _ e2 e3 -> let live = fvE e2 `S.union` fvE e3 in not (S.member z (needs live)) && S.member x live
       _ | Just ds <- destructAOf expr
         -> dsScrut ds == z && not (isRead expr) && not (any (S.member z . uncurry neededAlt) (dsAlts ds))
       _ | Just ds <- destructVOf expr
@@ -293,15 +291,11 @@ percE' pe owned expr
               e1' <- percE pe{ peBorrowed = peBorrowed pe `S.union` own2 } own1 e1
               e2' <- percE (bind pe [(x,V t)]) (own2 `S.union` ownedOf pe [(x,V t)]) e2
               return (hoistdupAll (\e1'' -> Let x t e1'' e2') e1')
-      -- like a `let`, whose continuation is one of two branches, both with `x`
-      LetYield x t e1 e2 e3
-        -> do let live = needs (fvE e2 `S.union` fvE e3)
-                  own2 = owned `S.intersection` live
-                  own1 = owned `S.difference` live
-              e1' <- percE pe{ peBorrowed = peBorrowed pe `S.union` own2 } own1 e1
-              e2' <- percE (bind pe [(x,V t)]) (own2 `S.union` ownedOf pe [(x,V t)]) e2
-              e3' <- percE (bind pe [(x,V t)]) (own2 `S.union` ownedOf pe [(x,V t)]) e3
-              return (hoistdupAll (\e1'' -> LetYield x t e1'' e2' e3') e1')
+      -- the token moves into the test, and each branch owns its new token
+      IfYielding v (k3,e3) (k2,e2)
+        -> do let own = owned `S.difference` fvV v
+                  branch k e = (,) k <$> percE (bind pe [(k,V VToken)]) (S.insert k own) e
+              IfYielding v <$> branch k3 e3 <*> branch k2 e2
       Unreachable _ -> return expr
       Call f tys vs
         -> do let ms = paramModes (peEnv pe) f (length vs)
@@ -506,8 +500,7 @@ valName :: VVal -> Maybe Path
 valName (Var x) = Just x
 valName _ = Nothing
 
--- After a call: drop owned variables that were only passed as borrowed arguments. A result that
--- may come with a yield is tested, and the drops come in both branches, which pass the result on.
+-- After a call: drop owned variables that were only passed as borrowed arguments.
 postCall :: PEnv -> VarSet -> [(Mode,VVal)] -> K -> VExpr -> P VType -> P VExpr
 postCall pe owned mvs k call resTp
   = do let borrowedVars = S.fromList (concat [occurrences v | (Borrowed,v) <- mvs])
@@ -515,12 +508,8 @@ postCall pe owned mvs k call resTp
        if null drops then return (k call)
          else do r <- fresh "r"
                  t <- resTp
-                 case t of
-                   VYield w -> do body <- dropNames pe drops (Ret (Pure (Var r)))
-                                  yielding <- dropNames pe drops (Ret (Pure (Var r)))
-                                  return (k (LetYield r w call body yielding))
-                   _ -> do body <- dropNames pe drops (Ret (Var r))
-                           return (k (Let r t call body))
+                 body <- dropNames pe drops (Ret (Var r))
+                 return (k (Let r t call body))
 
 isAtom :: VVal -> Bool
 isAtom (Var _) = True

@@ -10,7 +10,9 @@
 {- A-normal form (after `Contify`).
 
   Nested lets are reassociated. Roots are unique throughout a definition, so moving a let
-  out of its bound computation cannot capture a variable in its continuation.
+  out of its bound computation cannot capture a variable in its continuation. A test for a
+  yield keeps its shape (see `Yields`): a let is not moved into or out of the bound
+  computation of a result that may yield.
 
   A let whose bound computation has several tail positions becomes a join point for its
   continuation (a commuting conversion, as in case-of-case):
@@ -42,6 +44,7 @@ import Backend.Typed.Traversal( descendE, fvE, subexprs, within )
 import Backend.Typed.Passes.Common( defGamma, descendTyped, lamsTyped, NameSupply, freshFor, freshNameFrom, perBody, renameE, substJump )
 import Backend.Typed.Env( Env, envOf, M, evalM, state )
 import Backend.Typed.Query( Gamma )
+import Backend.Typed.Types( yields )
 
 type P a = M () NameSupply a
 
@@ -59,7 +62,7 @@ anfE env g expr
          _ -> return expr'
 
 bind :: Gamma -> Path -> VType -> VExpr -> VExpr -> P VExpr
-bind g x t (Let y s e1 e2) body = Let y s e1 <$> bind g x t e2 body
+bind g x t (Let y s e1 e2) body | not (yields t || yields s) = Let y s e1 <$> bind g x t e2 body
 bind g x t e body
   | tailCount e > 1, joinable t, Just zs <- mapM unboxed captures, all (joinable . snd) zs
   = do j <- fresh "join"
@@ -74,8 +77,7 @@ bind g x t e body
                   _ -> Nothing
     joinable s = case s of
                    VCtx{} -> False
-                   VYield{} -> False
-                   _ -> True
+                   _ -> not (yields s)
 
 -- Replace each tail position of an expression by a jump to `j` that passes its result and
 -- the captures `zs`. The join points of the expression are closed, so they take the captures
@@ -110,7 +112,7 @@ descendTails :: Applicative f => (VExpr -> f VExpr) -> VExpr -> Maybe (f VExpr)
 descendTails go expr
   = case expr of
       Let x t e1 e2 -> Just (Let x t e1 <$> go e2)
-      LetYield{} -> Nothing
+      IfYielding{} -> Nothing
       Jump{} -> Just (pure expr)
       Gen{} -> Nothing
       CastEv{} -> Nothing

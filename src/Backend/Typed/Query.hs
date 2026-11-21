@@ -62,7 +62,6 @@ expectV _ expected actual
     forget (VReuse f _ p) (VReuse g n q) = VReuse (if f == MaybeEmpty then f else g) n (forgetDesc p q)
     forget (VCtx f _ _) (VCtx g a b) = VCtx (if f == MaybeEmpty then f else g) a b
     forget (VCell m _) (VCell n a) | m <= n = VCell m a
-    forget (VYield a) (VYield b) = VYield (forget a b)
     forget (VOrNull a) (VOrNull b) = VOrNull (forget a b)
     forget (VProd fs) (VProd gs) | length fs == length gs = VProd (zipWith (\(f,t) (_,u) -> (f,forget t u)) fs gs)
     forget (VSum ts) (VSum us) | length ts == length us = VSum (zipWith (\(c,t) (_,u) -> (c,forget t u)) ts us)
@@ -104,11 +103,10 @@ inferExpr env g js expr
 inferExpr env g js expr
   = case expr of
       Ret v -> inferV env g v
-      Let x t e1 e2 -> do noYieldVars [t]
-                          checkE env g noJoins e1 t
+      Let x t e1 e2 -> do checkE env g noJoins e1 t
                           inferE env (M.insert x (V t) g) js e2
-      LetYield x t e1 e2 e3 -> do checkE env g noJoins e1 (VYield t)
-                                  branches env [inferE env (M.insert x (V t) g) js e2, inferE env (M.insert x (V t) g) js e3]
+      IfYielding v (k3,e3) (k2,e2) -> do checkV env g v VToken
+                                         branches env [inferE env (M.insert k3 (V VToken) g) js e3, inferE env (M.insert k2 (V VToken) g) js e2]
       Unreachable t -> return t
       Call f tys vs -> do (ps,r) <- funSig env f tys
                           checkArgs env g ps vs
@@ -150,8 +148,7 @@ inferExpr env g js expr
       Lock z e -> do g' <- lockGamma g z
                      inferE env g' js e
       Join NonRec j tvs ps e1 e2
-                          -> do noYieldVars [p | (_,_,p) <- ps]
-                                let xs = [x | (x,_,_) <- ps]
+                          -> do let xs = [x | (x,_,_) <- ps]
                                 unless (S.disjoint (fvE e1 `S.difference` S.fromList xs) (S.fromList (bindersE e2)))
                                   (Left ("join point " ++ show j ++ " captures a variable that is bound again in its scope"))
                                 joinDescriptions j ps
@@ -161,8 +158,7 @@ inferExpr env g js expr
                                 t <$ checkE env g js{ jsPoints = M.insert j (caps,tvs,[p | (_,_,p) <- ps],t) (jsPoints js) } e2 t
       -- only itself is in scope in its body (its captures are borrowed, see `CheckLinear`)
       Join (Rec t) j tvs ps e1 e2
-                          -> do noYieldVars [p | (_,_,p) <- ps]
-                                let xs = [x | (x,_,_) <- ps]
+                          -> do let xs = [x | (x,_,_) <- ps]
                                     caps = S.filter (\y -> not (any (y `within`) xs)) (fvE e1)
                                 unless (S.disjoint caps (S.fromList (bindersE e2)))
                                   (Left ("recursive join point " ++ show j ++ " captures a variable that is bound again in its scope"))
@@ -191,7 +187,7 @@ inferExpr env g js expr
       CastEv u t e -> do checkTy (V u)
                          checkTy (V t)
                          checkE env g noJoins e u
-                         if alphaEq (eraseY u) (eraseY t) then return t
+                         if alphaEq (eraseEv u) (eraseEv t) then return t
                            else Left ("cast-ev of an expression of type " ++ ppr u ++ " to " ++ ppr t)
       CtxCopy c -> do t <- inferV env g c
                       case t of
@@ -223,16 +219,10 @@ joinDescriptions j ps
       (Left ("a description in the parameters of join point " ++ show j ++ " names a parameter"))
 
 -- Descriptions are local to a definition: the parameters and results of functions and
--- closures carry none, as their names would denote values of another scope. Parameters are
--- never the dummy of a yield.
+-- closures carry none, as their names would denote values of another scope.
 signature :: [VType] -> VType -> Q ()
 signature ps r
-  = do unless (null (concatMap descriptions (r : ps))) (Left "a description in the signature of a function or closure")
-       noYieldVars ps
-
--- the types of variables (binders and parameters) are not `Y U`
-noYieldVars :: [VType] -> Q ()
-noYieldVars ts = forM_ ts $ \t -> when (snd (unYield t)) (Left ("a variable that may be the dummy of a yield: " ++ ppr t))
+  = unless (null (concatMap descriptions (r : ps))) (Left "a description in the signature of a function or closure")
 
 -- The two scrutinee categories share branch checking and existential escape checks.
 inferDestruct :: Env -> Gamma -> Joins -> VExpr -> Ty -> [([Path],VExpr)] -> Q VType
@@ -398,14 +388,11 @@ checkV env g val t = do checkTy (V t)
                           (NoReuse n _, VReuse MaybeEmpty m _) | n == m -> () <$ inferV env g val
                           _ -> inferV env g val >>= expectV env t
 
--- the checks of a type at the top: its descriptions, where it has `Y`, and where it has `?`
+-- the checks of a type at the top: its descriptions, and where it has `?`
 checkTy :: Ty -> Q ()
 checkTy ty
   = do checkReuseTy ty
-       case ty of
-         V t | not (wellYield t) -> Left ("ill-formed type of a value that may yield: " ++ ppr t)
-         _ | not (wellNull ty) -> Left ("ill-formed nullable type: " ++ ppr ty)
-           | otherwise -> return ()
+       unless (wellNull ty) (Left ("ill-formed nullable type: " ++ ppr ty))
 
 -- Descriptions are checked for layout, but never used as owned values. Their names need not be in
 -- scope: the type of a description is part of it.
@@ -428,7 +415,6 @@ checkReuseTy ty = case ty of
     VCtx _ a b -> checkReuseTy (A a) >> checkReuseTy (A b)
     VCell n a -> do when (n < 0) (Left "negative cell size")
                     checkReuseTy (A a)
-    VYield b -> checkReuseTy (V b)
     VOrNull b -> inner b
     VToken -> return ()
     VUnit -> return ()
@@ -576,10 +562,6 @@ inferV env g val
                           _ -> Left ("context of a non-pointer: " ++ ppr t)
       DupV v -> do unless (isGlob v) (Left ("dup of a value that is not a global: " ++ ppr val))
                    inferV env g v
-      Pure v -> do t <- inferV env g v
-                   let t' = VYield t
-                   checkTy (V t')
-                   return t'
       Some v -> do t <- orNull <$> inferV env g v
                    checkTy (V t)
                    return t

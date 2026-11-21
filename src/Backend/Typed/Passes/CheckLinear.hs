@@ -43,9 +43,9 @@
   is checked like `UnboxRu`, but needs an owned box, and its block is a cell. A cell is
   linear: it is owned and not trivial, so it must be consumed (as `Check` rejects a dup or a
   drop of it, by `memoize`, a uniqueness test or a call or jump), and it must not be live
-  across a `[let-yield]`, whose yielding branch could not consume it. (No variable has a type
-  `Y V`, see `CheckTypes`.) An owned variable is unique in the
-  first branch of `IsUnique`; unique parameters and a `let` or `[let-yield]` whose bound
+  across an `[if-yielding]`, whose yielding branch could not consume it. A token is linear
+  too, and `[if-yielding]` consumes it. An owned variable is unique in the
+  first branch of `IsUnique`; unique parameters and a `let` whose bound
   expression has a unique result are unique too, and so are the binders that are the pointer
   of a unique variable (`key`). An expression has a unique result (its result mode `q`, which
   follows the join points in scope) if it returns a unique value (a unique variable or a fresh
@@ -359,7 +359,6 @@ ownedV env g val
       Down _ _ -> children
       Hole -> return noUse
       Context _ k -> ownedV env g k
-      Pure v -> ownedV env g v
       Some v -> ownedV env g v
       Null _ -> return noUse
   where
@@ -399,7 +398,6 @@ uniqueV env g val
       Tuple vs -> uses (map (uniqueV env g) vs)
       Pack _ _ w -> uniqueV env g w
       Context _ k -> ownedV env g k
-      Pure w -> uniqueV env g w
       Some w -> uniqueV env g w
       Null _ -> return noUse
       Up w -> uniqueV env g w
@@ -459,17 +457,13 @@ checkE env g js q expr
                           let m = if S.member x (uUnique u2) then Unique else Owned
                           u1 <- checkE env g M.empty m e1
                           andThen u1 =<< leave [(x,m) | not (trivialTy env (V t))] u2
-      -- the binder is in scope in both branches; as for `Let`, it is unique if it is used as
-      -- unique
-      LetYield x t e1 e2 e3
+      -- the test consumes the token, and each branch has a new one
+      IfYielding v (k3,e3) (k2,e2)
         -> do notLiveAcrossYield g [e2,e3]
-              let branchE e = withOwners [(x,Owned)] (checkE env (M.insert x (V t) g) js q e)
-              u2 <- branchE e2
-              u3 <- branchE e3
-              let m = if S.member x (S.union (uUnique u2) (uUnique u3)) then Unique else Owned
-              us <- mapM (leave [(x,m) | not (trivialTy env (V t))]) [u2,u3]
-              u1 <- checkE env g M.empty m e1
-              andThen u1 =<< branches us
+              let branchE (k,e) = leave [(k,Owned)] =<< withOwners [(k,Owned)] (checkE env (M.insert k (V VToken) g) js q e)
+              us <- mapM branchE [(k3,e3),(k2,e2)]
+              u <- ownedV env g v
+              andThen u =<< branches us
       -- control never gets here, so every reference counts as consumed
       Unreachable _ -> return noUse{ uDiverges = True }
       Call f _ vs -> do when (q == Unique && resultMode env f /= Unique)

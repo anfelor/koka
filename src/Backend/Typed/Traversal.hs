@@ -55,7 +55,6 @@ descendV fa fv val
       Down b v       -> Down b <$> fv v
       DupV v         -> DupV <$> fv v
       Context b v    -> Context b <$> fv v
-      Pure v         -> Pure <$> fv v
       Some v         -> Some <$> fv v
       Null _         -> pure val
       Hole           -> pure val
@@ -95,14 +94,13 @@ subexprs = getConst . descendE (const (Const [])) (const (Const [])) (\_ e -> Co
 
 -- Like `descendE`, but each binder comes with its steps from the scrutinee, and `fb` gives new
 -- binders for a subexpression. The binders of a `let`, a dup, a join point, the credit of
--- `[unbox-ru]` and `[copy-ru]`, and the cell of `[lock]` have no steps, and neither has that of `[unscalar]`,
--- which copies the contents of a scalar.
+-- `[unbox-ru]` and `[copy-ru]`, the cell of `[lock]` and the tokens of `[if-yielding]` have no
+-- steps, and neither has that of `[unscalar]`, which copies the contents of a scalar.
 descendB :: Applicative f => (Path -> f Path) -> (VVal -> f VVal) -> ([(Path,[Step])] -> VExpr -> f ([Path],VExpr)) -> VExpr -> f VExpr
 descendB fn fv fb expr
   = case expr of
       Ret v                 -> Ret <$> fv v
       Let x t e1 e2         -> (\e1' (x',e2') -> Let x' t e1' e2') <$> plain e1 <*> one x [] e2
-      LetYield x t e1 e2 e3 -> (\e1' (x',e2') (_,e3') -> LetYield x' t e1' e2' e3') <$> plain e1 <*> one x [] e2 <*> one x [] e3
       Unreachable _         -> pure expr
       Call f ts vs          -> Call f ts <$> traverse fv vs
       App f vs              -> App <$> fn f <*> traverse fv vs
@@ -118,6 +116,7 @@ descendB fn fv fb expr
       Unscalar m v x e      -> (\v' (x',e') -> Unscalar m v' x' e') <$> fn v <*> one x [] e
       Unpack v tvs x e      -> (\v' (x',e') -> Unpack v' tvs x' e') <$> fv v <*> one x [SPack] e
       IsNull v n (x,e)      -> (\v' n' (x',e') -> IsNull v' n' (x',e')) <$> fv v <*> plain n <*> one x [SSome] e
+      IfYielding v (k3,e3) (k2,e2) -> IfYielding <$> fv v <*> one k3 [] e3 <*> one k2 [] e2
       CaseLit v alts def    -> CaseLit <$> fv v <*> traverse (\(l,e) -> (,) l <$> plain e) alts <*> plain def
       CaseOpen v alts def -> CaseOpen <$> fn v <*> traverse (\(c,xs,e) -> (\(xs',e') -> (c,xs',e')) <$> fb (zip xs (openSteps c xs)) e) alts
                                           <*> plain def
@@ -338,7 +337,7 @@ destructAOf expr
       IsNull{} -> Nothing
       Ret{} -> Nothing
       Let{} -> Nothing
-      LetYield{} -> Nothing
+      IfYielding{} -> Nothing
       Unreachable{} -> Nothing
       Call{} -> Nothing
       App{} -> Nothing
@@ -376,7 +375,7 @@ destructVOf expr
       CaseOpen{} -> Nothing
       Ret{} -> Nothing
       Let{} -> Nothing
-      LetYield{} -> Nothing
+      IfYielding{} -> Nothing
       Unreachable{} -> Nothing
       Call{} -> Nothing
       App{} -> Nothing
