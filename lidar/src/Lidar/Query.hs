@@ -443,6 +443,7 @@ checkReuseTy ty = case ty of
     AApp _ ts -> mapM_ (checkReuseTy . A) ts
     AVar _ -> return ()
     AUnit -> return ()
+    AAny -> return ()
   where
     -- a cell only occurs on its own
     inner t = case t of

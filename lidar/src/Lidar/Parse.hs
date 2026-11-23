@@ -370,6 +370,7 @@ baseTyP
       , do kw "ctx"; f <- option MaybeEmpty (Full <$ sym "+"); sym "<"; a <- aP; sym ","; b <- aP; sym ">"; return (V (VCtx f a b))
       , do n <- numbered "cell"; V . VCell n <$> anglesP aP
       , do v <- tvarP; mts <- optionMaybe (anglesP (commaSep aP)); return (A (maybe (AVar v) (AApp v) mts))
+      , A AAny <$ kw "any"
       , do n <- nameP; ts <- option [] (anglesP (commaSep aP)); return (A (ACon (globalName n) ts))
       , sym "(" >> parenTyP ]
 

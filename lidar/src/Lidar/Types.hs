@@ -16,7 +16,7 @@ module Lidar.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContent
 
 import Data.Functor.Identity( Identity(..) )
 import qualified Data.Map as M
-import Lidar.Prim( nameTpAny, nameTpInt, nameTpString )
+import Lidar.Prim( nameTpInt, nameTpString )
 import Lidar.Syntax
 
 type Sub = M.Map TVar AType
@@ -80,6 +80,7 @@ traverseReuseContents f = goV
       ALam vs b -> ALam vs <$> goA b
       ALazy l b -> ALazy <$> goA l <*> goA b
       AUnit -> pure a
+      AAny -> pure a
       AVar _ -> pure a
 
 forallA :: [TVar] -> AType -> AType
@@ -98,7 +99,7 @@ prodFields fs      = VProd fs
 
 -- the top type `any` of `[up]` and `[down]`, which also instantiates unconstrained type variables
 atAny :: AType
-atAny = ACon nameTpAny []
+atAny = AAny
 
 vtInt, vtString, vtChar, vtFloat :: VType
 vtInt    = VPtr (ACon nameTpInt [])
@@ -127,6 +128,7 @@ substA sub a
       AVar v        -> M.findWithDefault a v sub
       AApp v ts     -> applyA (M.findWithDefault (AVar v) v sub) (map (substA sub) ts)
       ACon n ts     -> ACon n (map (substA sub) ts)
+      AAny          -> a
       ABox t        -> ABox (substV sub t)
       AScalar _     -> a
       ASum ts       -> ASum [(i,substA sub t) | (i,t) <- ts]
@@ -169,6 +171,7 @@ ftvA a
       AVar v        -> [v]
       AApp v ts     -> v : concatMap ftvA ts
       ACon _ ts     -> concatMap ftvA ts
+      AAny          -> []
       ABox t        -> ftvV t
       AScalar _     -> []
       ASum ts       -> concatMap (ftvA . snd) ts
@@ -342,6 +345,7 @@ containsLinear = go
        AVar _ -> False
        AFun _ _ -> False
        AUnit -> False
+       AAny -> False
 
 -- `V?` contains no credits or cells, and no heap block contains a `V?` (see "Nullable values"
 -- in `Syntax`)
@@ -375,6 +379,7 @@ wellNull ty
       AScalar _ -> True
       AVar _ -> True
       AUnit -> True
+      AAny -> True
     -- the unboxed parts of the contents of a block
     noNull v = case v of
       VOrNull _ -> False
@@ -436,6 +441,7 @@ eraseEv t
       AScalar _ -> a
       AUnit -> a
       AVar _ -> a
+      AAny -> a
 
 -- the effect token
 isToken :: VType -> Bool

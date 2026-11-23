@@ -170,6 +170,7 @@ data AType = ABox VType                 -- Box V
            | AVar TVar                  -- a
            | AApp TVar [AType]          -- a⟨B̄⟩, an applied higher-kinded variable
            | ACon Name [AType]          -- T⟨B̄⟩, a named type
+           | AAny                       -- any, the top type of `[up]` and `[down]`
            | ALam [TVar] AType          -- λā. A, a partially applied type
            deriving (Eq,Show)
 

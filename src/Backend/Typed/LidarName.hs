@@ -28,7 +28,6 @@ namePairs :: [(Name,L.Name)]
 namePairs
   = [ (K.nameCoreHnd, L.nameCoreHnd)
     , (K.nameCoreDebug, L.nameCoreDebug)
-    , (K.nameTpAny, L.nameTpAny)
     , (K.nameTpInt, L.nameTpInt)
     , (K.nameTpString, L.nameTpString)
     , (K.nameYielding, L.nameYielding)

@@ -58,6 +58,7 @@ boxFunA a
       AVar _        -> a
       AApp _ _      -> a
       ACon _ _      -> a
+      AAny          -> a
       ALam _ _      -> a
       ALazy _ _     -> a
   where

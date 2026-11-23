@@ -68,6 +68,7 @@ isTrivialWith unroll t
                    AUnit     -> True
                    ASum ts   -> all (trivialA . snd) ts
                    ACon _ _  -> maybe False trivialA (unroll a)
+                   AAny      -> False
                    ALazy l b -> trivialA l && trivialA b
                    ABox _    -> False
                    AScalar _ -> False
