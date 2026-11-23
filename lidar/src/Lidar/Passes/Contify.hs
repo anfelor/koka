@@ -17,7 +17,6 @@ import Data.Functor.Const( Const(..) )
 import Data.Monoid( All(..) )
 import Data.Functor.Identity( Identity(..) )
 import Lidar.Name
-import Lidar.Prim( nameOpenNone )
 import Lidar.Syntax
 import Lidar.Passes.Common( defGamma, descendTyped, lamsTyped, NameSupply, freshFor, freshNameFrom, perBody, renameE )
 import Lidar.Traversal( bindersE, descendE, fvA, fvE, fvV, hasRegion )
@@ -58,7 +57,6 @@ contifyE env g expr
 -- Elaboration applies a closure by dereferencing it into a boxed operand.
 callOf :: Path -> VExpr -> Maybe [VVal]
 callOf f (Deref (Var x) g (App h vs)) | x == f, g == h = Just vs
-callOf f (Call o _ (Var x : vs)) | x == f, o == nameOpenNone (length vs) = Just vs
 callOf _ _ = Nothing
 
 -- Ordinary uses, including captures and non-tail calls, prevent contification.

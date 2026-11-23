@@ -32,7 +32,6 @@ namePairs
     , (K.nameTpString, L.nameTpString)
     , (K.nameYielding, L.nameYielding)
     , (K.nameYieldExtend, L.nameYieldExtend)
-    , (K.nameOpenNone 2, L.nameOpenNone 2)
     , (K.namePatternMatchError, L.namePatternMatchError)
     , (K.nameLazyMemoize, L.nameLazyMemoize)
     , (K.nameLazyMemoizeTarget, L.nameLazyMemoizeTarget)

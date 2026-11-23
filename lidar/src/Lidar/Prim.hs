@@ -12,7 +12,7 @@
 module Lidar.Prim
   ( nameCoreHnd, nameCoreDebug
   , nameTpInt, nameTpString
-  , nameYielding, nameYieldExtend, nameOpenNone
+  , nameYielding, nameYieldExtend
   , namePatternMatchError
   , nameLazyMemoize, nameLazyMemoizeTarget
   ) where
@@ -35,9 +35,6 @@ nameTpString = coreTypesName "string"
 nameYielding, nameYieldExtend :: Name
 nameYielding    = coreHndName "yielding"
 nameYieldExtend = coreHndName "yield-extend"
-
-nameOpenNone :: Int -> Name
-nameOpenNone i = coreHndName ("@open-none" ++ show i)
 
 namePatternMatchError :: Name
 namePatternMatchError = newQualified "std/core/exn" "error-pattern"
