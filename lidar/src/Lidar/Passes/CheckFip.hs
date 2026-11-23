@@ -28,9 +28,9 @@
     has no borrowed application, so applying it duplicates it first.
   - A call to the recursive group outside of a tail position uses stack. A join point runs
     in the position of its definition. A jump to a recursive join point in its body is a tail
-    call to the recursive group. As in the frontend, a call whose continuation only
-    destructures values and builds the result from them is in a tail position (modulo
-    product contexts).
+    call to the recursive group. Unlike in the frontend, a call whose continuation only
+    destructures values and builds the result from them is not in a tail position: TRMC has
+    already turned the calls in constructor contexts into tail calls.
 
   As in the frontend, `int` is assumed small (it is neither shared nor freed), and literals,
   scalars and globals are not counted. The frontend checks a function before its monadic
@@ -228,9 +228,7 @@ fipE expr
       -- the yielding branch is not taken
       IfYielding _ _ (k,e2) -> bind [(k,V VToken)] (fipE e2)
       Let x t e1 e2
-        -> do tl <- asks fTail
-              let tailModProduct = tl && modProduct S.empty e2
-              (c1,full) <- (if tailModProduct then id else nonTail) (fipE e1)
+        -> do (c1,full) <- nonTail (fipE e1)
               (c2,full') <- bind [(x,V t)] (withFull [x | full] (fipE e2))
               return (c1 <> c2,full')
       Call f _ vs
@@ -339,27 +337,6 @@ fails failing expr
       Join j _ _ e1 e2 -> fails (if fails failing e1 then S.insert j failing else failing) e2
       JoinRec _ ds e -> fails (S.union (S.fromList [j | JoinDef j _ _ e1 <- ds, fails S.empty e1]) failing) e
       _ -> let es = subexprs expr in not (null es) && all (fails failing) es
-
--- the continuation of a call only destructures values and builds its result from values, given
--- the join points (in the continuation) whose bodies do so as well
-modProduct :: S.Set Name -> VExpr -> Bool
-modProduct joins expr
-  = case expr of
-      Ret _ -> True
-      Call{} -> False
-      App _ _ -> False
-      CaseLit{} -> False
-      Jump j _ _ -> S.member j joins
-      IfYielding _ _ (_,e2) -> modProduct joins e2
-      Let _ _ e1 e2 -> modProduct S.empty e1 && modProduct joins e2
-      Join j _ _ e1 e2 -> modProduct (if modProduct joins e1 then S.insert j joins else joins) e2
-      JoinRec _ _ e -> modProduct joins e
-      _ | Just ds <- destructAOf expr -> single (dsAlts ds)
-        | Just ds <- destructVOf expr -> single (dsAlts ds)
-        | otherwise -> all (modProduct joins) (subexprs expr)
-  where
-    single [(_,e)] = modProduct joins e
-    single _ = False
 
 -- the subexpressions of an expression
 subexprs :: VExpr -> [VExpr]
