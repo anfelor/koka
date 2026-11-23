@@ -199,13 +199,17 @@ primSize r
   = case r of
       RUInt8   -> 1
       RInt8    -> 1
+      RUInt16  -> 2
       RInt16   -> 2
+      RUInt32  -> 4
       RInt32   -> 4
       RChar    -> 4
       RFloat32 -> 4
       RSSize   -> 8
+      RUSize   -> 8
       RIntPtr  -> 8
       RFloat64 -> 8
+      RUInt64  -> 8
       RInt64   -> 8
 
 -- Every advertised scanned word must be a boxed word, at the start of the

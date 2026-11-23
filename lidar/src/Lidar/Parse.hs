@@ -382,7 +382,8 @@ rawP = tokenP (\t -> case t of
                        _ -> Nothing) <?> "raw type"
   where
     raws = [("char",RChar),("ssize_t",RSSize),("intptr_t",RIntPtr),("float64",RFloat64),("float32",RFloat32)
-           ,("int64",RInt64),("int32",RInt32),("int16",RInt16),("int8",RInt8),("uint8",RUInt8)]
+           ,("int64",RInt64),("int32",RInt32),("int16",RInt16),("int8",RInt8)
+           ,("uint64",RUInt64),("uint32",RUInt32),("uint16",RUInt16),("uint8",RUInt8),("size_t",RUSize)]
 
 contentsP :: P Contents
 contentsP = bracketsP (do k <- (Nothing <$ kw "_") <|> (Just <$> intP)

@@ -205,7 +205,11 @@ prettyRaw r
       RInt32   -> "int32"
       RInt16   -> "int16"
       RInt8    -> "int8"
+      RUInt64  -> "uint64"
+      RUInt32  -> "uint32"
+      RUInt16  -> "uint16"
       RUInt8   -> "uint8"
+      RUSize   -> "size_t"
 
 prettyT :: PP ann -> Ty -> Doc ann
 prettyT pp (A a) = prettyA pp a

@@ -223,9 +223,11 @@ data VType = VPtr AType                 -- A*
            | VToken                     -- KCtx: the effect token
            deriving (Eq,Show)
 
--- raw types: the primitive value types of Koka (`TypeInfo.rawType`), named by their C type
+-- raw types: unboxed primitive values, named by their C type (Koka's `TypeInfo.rawType`; the
+-- unsigned types wider than `uint8` are only Lean's)
 data Raw = RChar | RSSize | RIntPtr | RFloat64 | RFloat32
-         | RInt64 | RInt32 | RInt16 | RInt8 | RUInt8
+         | RInt64 | RInt32 | RInt16 | RInt8
+         | RUInt64 | RUInt32 | RUInt16 | RUInt8 | RUSize
          deriving (Eq,Show)
 
 -- The description `k; p : V` of a credit's block: the tag k in its header and its contents p,

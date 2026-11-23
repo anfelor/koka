@@ -173,6 +173,11 @@ primName r
       RInt16   -> "int16_t"
       RInt8    -> "int8_t"
       RUInt8   -> "uint8_t"
+      _        -> noKokaRaw r
+
+-- the unsigned raw types wider than `uint8` are Lean's; Koka's elaboration never produces them
+noKokaRaw :: Raw -> a
+noKokaRaw r = error ("Backend.Typed.CGen.Layout: no Koka type for the raw type " ++ show r)
 
 -- immediate boxing of raw values (as in Koka)
 -- the largest `KK_INTF_SIZE` at which Koka's box of a scalar may be a heap block (kklib's
@@ -190,6 +195,7 @@ scalarHeapSize r
       RFloat64 -> Just 8
       RSSize   -> Nothing
       RIntPtr  -> Nothing
+      _        -> noKokaRaw r
 
 primBox :: Raw -> (String,String)
 primBox r
@@ -205,6 +211,7 @@ primBox r
       RInt16   -> "kk_int16"
       RInt8    -> "kk_int8"
       RUInt8   -> "kk_uint8"
+      _        -> noKokaRaw r
 
 -- The small free path requires a fixed allocation of at most 128 words and a kklib tag (`kkTag`)
 -- of at most 0xFFC0, excluding runtime objects such as strings, vectors and arbitrary opaque boxes.
