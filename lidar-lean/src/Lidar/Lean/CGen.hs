@@ -713,8 +713,51 @@ prototypes d
             let kept = [p | p <- ps, impureLeaf p /= Nothing, not (isStandard c && isErased p)]
             in Just (ctype r ++ " " ++ tgtName tgt ++ "(" ++ intercalate ", " (map ctype kept) ++ ");")
     ctype t = maybe "lean_object*" cType (impureLeaf t)
-    isStandard Standard = True
-    isStandard _ = False
+
+-- | The boxed version of a declaration (Lean's `mkBoxedVersion`), which Lean's closures and
+-- other modules call instead of the declaration if its impure signature has a scalar, borrowed
+-- or `lcVoid` parameter or a scalar result, if it is external, or if it has more parameters than
+-- a closure passes one by one (`requiresBoxedVersion`). It takes every parameter as an object (in
+-- an array beyond that), unboxes and releases the scalars, calls the declaration, releases the
+-- borrowed objects and boxes a scalar result. Its C name is the declaration's symbol stem with
+-- `___boxed`; the stem is the C name, except for `main` and exported declarations, which get no
+-- boxed version.
+boxedFn :: D.Decl -> [C]
+boxedFn x
+  = case D.linkImpure link of
+      Just (ips,ir) | needsBoxed ips ir, Nothing <- D.linkExport link, D.declName x /= "main"
+        -> let n = length ips
+               xs = ["x_" ++ show i | i <- [1..n]]
+               (params,loads)
+                 | n > closureMaxArgs = (["lean_object** _args"], ["lean_object* " ++ x' ++ " = _args[" ++ show i ++ "];" | (i,x') <- zip [0 :: Int ..] xs])
+                 | otherwise = (["lean_object* " ++ x' | x' <- xs], [])
+               unboxes = concat [ [cType l ++ " " ++ x' ++ "_u = " ++ unboxScalar r x' ++ ";", "lean_dec(" ++ x' ++ ");"]
+                                | (p,x') <- zip ips xs, Just l@(LScalar r) <- [impureLeaf (D.paramType p)] ]
+               cargs = [ case l of { LScalar _ -> x' ++ "_u"; _ -> x' }
+                       | (p,x') <- zip ips xs, Just l <- [impureLeaf (D.paramType p)]
+                       , not (isStandard (tgtCall tgt) && isErased (D.paramType p)) ]
+               app = case tgtCall tgt of
+                       Pattern -> expand (tgtName tgt) cargs
+                       _ -> call (tgtName tgt) cargs
+               (rt,res) = case impureLeaf ir of
+                            Just l@(LScalar r) -> (cType l, boxScalar r "res")
+                            _ -> ("lean_object*", "res")
+               releases = ["lean_dec(" ++ x' ++ ");" | (p,x') <- zip ips xs, D.paramBorrow p, impureLeaf (D.paramType p) == Just LObj]
+           in ["LEAN_EXPORT lean_object*" <+> text (call (D.linkCName link ++ "___boxed") params)
+               <+> block (map text (loads ++ unboxes ++ [rt ++ " res = " ++ app ++ ";"] ++ releases ++ ["return " ++ res ++ ";"]))]
+      _ -> []
+  where
+    link = D.declLink x
+    tgt = linkTarget True link
+    needsBoxed ips ir
+      = (not (null ips) && (isScalar ir || any (\p -> isScalar (D.paramType p) || D.paramBorrow p || impureLeaf (D.paramType p) == Nothing) ips
+                                || D.linkExtern link /= Nothing))
+        || length ips > closureMaxArgs
+    isScalar t = case impureLeaf t of { Just (LScalar _) -> True; _ -> False }
+
+isStandard :: Call -> Bool
+isStandard Standard = True
+isStandard _ = False
 
 -- The module's initializers, as Lean's `emitInitFn` and `emitLegacyInitFn` write them. The
 -- runtime phase (or all phases) also initializes the module's values.
@@ -856,6 +899,7 @@ cgenModule d prog
                             ++ [p | (p,_,_) <- ok]
                             ++ stLams st
                             ++ [c | (_,c,_) <- ok]
+                            ++ concatMap boxedFn [x | x <- D.dumpDecls d, defined x]
                             ++ initFns (D.dumpInits d) (concat [inits M.! x | x <- initOrder (progDefs prog), M.member x inits])
                             ++ maybe [] (mainFn d leanMain) (D.dumpMain d)
                             ++ ["#ifdef __cplusplus", "}", "#endif"])
@@ -864,6 +908,11 @@ cgenModule d prog
     env = envOf prog
     tgts = targetsOf d
     cnames = M.fromList [(leanName (D.declName x), D.linkCName (D.declLink x)) | x <- D.dumpDecls d]
+    -- the declarations that have a C function: the externs, and the functions that lowering kept
+    funs = S.fromList [f | DefFun{ defName = f } <- progDefs prog]
+    defined x = case D.declValue x of
+                  D.Extern _ -> True
+                  D.Body _ -> S.member (leanName (D.declName x)) funs
     -- a definition that fails leaves the state as it was
     genOne :: Def -> G (Either String (C,C,[C]))
     genOne def = do st <- get
