@@ -14,7 +14,7 @@ lazy type thunk<a>
         match front
           Nil -> Done( front-ctx ++. Cons(y,rear-rev) )
           Cons(x,f) -> Reverse(f, front-ctx ++ ctx Cons(x,hole), r, Cons(y,rear-rev) )
-      _ -> impossible("rear must be longer than front")
+      _ -> unreachable()
 
 fbip fun tick( t : thunk<a> ) : thunk<a>
   thunk/lazy-step(t)

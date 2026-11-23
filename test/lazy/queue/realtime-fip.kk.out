@@ -19,11 +19,10 @@ lazy/queue/realtime-fip/Queue: forall<a> (front : stream<a>, rear : list<a>, sch
 lazy/queue/realtime-fip/SCons: forall<a> (x : a, xs : stream<a>) -> stream<a>
 lazy/queue/realtime-fip/SNil: forall<a> stream<a>
 lazy/queue/realtime-fip/SRotate: forall<a> (xs : stream<a>, ysacc : pair<list<a>,stream<a>>) -> stream<a>
-lazy/queue/realtime-fip/canthappen: forall<a> (x : a) -> a
 lazy/queue/realtime-fip/exec: forall<a> (queue<a>) -> div queue<a>
 lazy/queue/realtime-fip/is-empty: forall<a> (queue<a>) -> div bool
 lazy/queue/realtime-fip/main: () -> io ()
 lazy/queue/realtime-fip/snoc: forall<a> (queue<a>, x : a) -> div queue<a>
 lazy/queue/realtime-fip/uncons: forall<a> (queue<a>) -> div maybe2<a,queue<a>>
-test/lazy/queue/realtime-fip@kk(31,10): warning: fbip fun is-empty: calling a non-fip function: stream/lazy-force
-test/lazy/queue/realtime-fip@kk(24,12): kind warning: Cannot update the lazy constructor SRotate in-place as the result constructor is not statically known -- using an indirection instead
+test/lazy/queue/realtime-fip@kk(27,10): warning: fbip fun is-empty: calling a non-fip function: stream/lazy-force
+test/lazy/queue/realtime-fip@kk(20,12): kind warning: Cannot update the lazy constructor SRotate in-place as the result constructor is not statically known -- using an indirection instead

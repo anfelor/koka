@@ -29,7 +29,7 @@ lazy type queue<a>
         Deep( front, middle', One(y, Pad, Pad) )
       Deep( front, middle', One(x, _, p0) ) ->
         Deep( front, Snoc(middle', Pair3(x, y, p0), Pad), Zero )
-      _ -> impossible("Snoc")
+      _ -> unreachable()
 
 val implicit/empty = Shallow(Zero, Pad, Pad)
 
@@ -49,7 +49,7 @@ fbip fun uncons( q : queue<a> ) : div maybe2<a, queue<a>>
       Just2( x, DeepOne( Pad, middle, rear ) )
     Deep( Two(x, y, p), middle, rear ) ->
       Just2( x, Deep( One(y, Pad, p), middle, rear ) )
-    _ -> impossible("uncons")
+    _ -> unreachable()
 
 fbip(1) fun snoc( q : queue<a>, y : a ) : div queue<a>
   queue/lazy-step(Snoc( q, y, Pad ))

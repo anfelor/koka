@@ -4,10 +4,6 @@ import bench
 
 struct pair<a,b>(fst : a, snd : b)
 
-noinline fun canthappen(x : a ) : a
-  trace("** this should not happen **")
-  x
-
 // For the defunctionalization, we make the rotate function 'lazy'
 // and put ys,acc in a pair to keep SRotate a binary constructor.
 // We could also make SCons a ternary constructor, but that
@@ -21,7 +17,7 @@ lazy type stream<a>
         match xs
           SNil        -> SCons(y,acc)
           SCons(x,xx) -> SCons(x,SRotate(xx,Pair(ys,SCons(y,acc))))
-      _ -> canthappen(SNil)
+      _ -> unreachable()
 
 value type queue<a>
   Queue( front : stream<a>, rear : list<a>, sched : stream<a> )
