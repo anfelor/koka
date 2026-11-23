@@ -11,7 +11,7 @@
 -}
 module Lidar.Prim
   ( nameCoreHnd, nameCoreDebug
-  , nameTpAny, nameTpInt, nameTpString, nameTpReuse
+  , nameTpAny, nameTpInt, nameTpString
   , nameYielding, nameYieldExtend, nameOpenNone
   , namePatternMatchError
   , nameLazyMemoize, nameLazyMemoizeTarget
@@ -28,11 +28,10 @@ coreTypesName, coreHndName :: String -> Name
 coreTypesName s = qualify nameCoreTypes (newName s)
 coreHndName s   = qualify nameCoreHnd (newName s)
 
-nameTpAny, nameTpInt, nameTpString, nameTpReuse :: Name
+nameTpAny, nameTpInt, nameTpString :: Name
 nameTpAny    = coreTypesName "any"
 nameTpInt    = coreTypesName "int"
 nameTpString = coreTypesName "string"
-nameTpReuse  = coreTypesName "@reuse"
 
 nameYielding, nameYieldExtend :: Name
 nameYielding    = coreHndName "yielding"

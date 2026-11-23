@@ -25,7 +25,6 @@ import Lidar.Env( Env(..), M, dataBody, ask, local )
 import Lidar.Query( Gamma, bindAll, inferVar, inferV, altTypes, lamGamma, tokenTy, uniqueGamma, unboxRuGamma, copyRuGamma, lockGamma )
 import Lidar.Pretty( ppr )
 import Lidar.Name( Name, newHiddenName )
-import Lidar.Prim( nameTpReuse )
 
 -- the modes of the parameters of a call with n arguments
 paramModes :: Env -> Name -> Int -> [Mode]
@@ -68,7 +67,7 @@ isTrivialWith unroll t
     trivialA a = case a of
                    AUnit     -> True
                    ASum ts   -> all (trivialA . snd) ts
-                   ACon n _  -> n == nameTpReuse || maybe False trivialA (unroll a)
+                   ACon _ _  -> maybe False trivialA (unroll a)
                    ALazy l b -> trivialA l && trivialA b
                    ABox _    -> False
                    AScalar _ -> False

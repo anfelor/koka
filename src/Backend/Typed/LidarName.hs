@@ -31,7 +31,6 @@ namePairs
     , (K.nameTpAny, L.nameTpAny)
     , (K.nameTpInt, L.nameTpInt)
     , (K.nameTpString, L.nameTpString)
-    , (K.nameTpReuse, L.nameTpReuse)
     , (K.nameYielding, L.nameYielding)
     , (K.nameYieldExtend, L.nameYieldExtend)
     , (K.nameOpenNone 2, L.nameOpenNone 2)

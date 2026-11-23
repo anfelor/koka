@@ -183,7 +183,7 @@ data Side = Whnf | Delay
 --   possibly an immediate value with its tag.
 -- - Types are equal up to renaming of bound variables and β-reduction.
 -- - A type is *trivial* if it contains no pointers (`Passes.Common.trivialTy`): `𝟙`, raw
---   types, `@reuse*`, and sums, products, existentials and named types of trivial types.
+--   types, and sums, products, existentials and named types of trivial types.
 -- - `|V|` is the size of the heap block of a `Box V` (`Layout.blockSize`); unit has a block
 --   with just a header. Fields are laid out in memory order, whatever the order of a product.
 --   Heap blocks never contain credits or cells.
