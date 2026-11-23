@@ -30,13 +30,11 @@ library
       Backend.C.ParcReuseSpec
       Backend.CSharp.FromCore
       Backend.JavaScript.FromCore
-      Backend.Typed.Annotate
       Backend.Typed.CGen.CGen
       Backend.Typed.CGen.Decls
       Backend.Typed.CGen.Koka
       Backend.Typed.CGen.Layout
       Backend.Typed.CGen.ReuseSlots
-      Backend.Typed.Build
       Backend.Typed.CFromCore
       Backend.Typed.Elab.Coerce
       Backend.Typed.Elab.Common
@@ -49,38 +47,8 @@ library
       Backend.Typed.Elab.TypeInfo
       Backend.Typed.Elab.TypeMatch
       Backend.Typed.Elab.Types
-      Backend.Typed.Env
-      Backend.Typed.Layout
       Backend.Typed.LidarName
-      Backend.Typed.Parse
-      Backend.Typed.Passes.Anf
-      Backend.Typed.Passes.CheckFip
-      Backend.Typed.Passes.CheckLinear
-      Backend.Typed.Passes.CheckTypes
-      Backend.Typed.Passes.Common
-      Backend.Typed.Passes.Contify
-      Backend.Typed.Passes.DropSpec
-      Backend.Typed.Passes.ExpandReuse
-      Backend.Typed.Passes.FillCredits
-      Backend.Typed.Passes.Inline
-      Backend.Typed.Passes.JoinArgs
-      Backend.Typed.Passes.Lazy
-      Backend.Typed.Passes.Match
-      Backend.Typed.Passes.Paths
-      Backend.Typed.Passes.Peephole
-      Backend.Typed.Passes.Perceus
-      Backend.Typed.Passes.Reuse
-      Backend.Typed.Passes.Simplify
-      Backend.Typed.Passes.SinkJoins
-      Backend.Typed.Passes.TailRec
-      Backend.Typed.Passes.UniqueJoins
-      Backend.Typed.Passes.Yields
-      Backend.Typed.Pretty
-      Backend.Typed.Query
-      Backend.Typed.Syntax
-      Backend.Typed.Traversal
       Backend.Typed.Typed
-      Backend.Typed.Types
       Common.ColorScheme
       Common.Error
       Common.Failure

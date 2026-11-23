@@ -21,8 +21,8 @@ import qualified Common.Name as K
 import Common.NamePrim
 import Lidar.Name
 import Backend.Typed.LidarName( toLidar, fromLidar )
-import Backend.Typed.Syntax
-import Backend.Typed.Layout( CT(..) )
+import Lidar.Syntax
+import Lidar.Layout( CT(..) )
 import Backend.Typed.CGen.Layout( ctName )
 
 -- Koka's C names (see Backend.C.FromCore)

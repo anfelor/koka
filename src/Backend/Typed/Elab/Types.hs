@@ -17,9 +17,9 @@ import Data.List( partition )
 import Common.Syntax( dataDefIsOpen )
 import Kind.Newtypes
 import Type.Type( ConInfo, typevarId, conInfoName, conInfoParams, conInfoIsLazy, dataInfoIsLazy )
-import Backend.Typed.Syntax
+import Lidar.Syntax
 import Backend.Typed.LidarName( toLidar )
-import Backend.Typed.Env( reuseSize )
+import Lidar.Env( reuseSize )
 import Backend.Typed.Elab.TypeInfo
 
 -- The body of a datatype. Only that of a reference datatype is part of the typing rules; the

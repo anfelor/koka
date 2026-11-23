@@ -27,21 +27,21 @@ import Core.Core( TName(..), typeOf )
 import qualified Core.CoreVar as CV
 import Core.Pretty()
 import qualified Type.TypeVar as TV
-import Backend.Typed.Syntax
+import Lidar.Syntax
 import Backend.Typed.LidarName( toLidar )
 import qualified Lidar.Name as L
-import Backend.Typed.Build( K, compose, prodVal, padFields )
-import Backend.Typed.Traversal( child )
+import Lidar.Build( K, compose, prodVal, padFields )
+import Lidar.Traversal( child )
 import Backend.Typed.Elab.Types( typeDefs )
 import Backend.Typed.Elab.TypeInfo
-import Backend.Typed.Types
+import Lidar.Types
 import Backend.Typed.Elab.TypeMatch( match )
 import Backend.Typed.Elab.Representation
 import Backend.Typed.Elab.Monad
 import Backend.Typed.Elab.Coerce
 import Backend.Typed.Elab.Lazy( whnfTests )
 import Backend.Typed.Elab.Common( isValue, identityCast, isPrim, linearContexts, isLinearContextPrim, testsYield, nameUnreachable, nameYieldingNonFinal, isJoinName )
-import Backend.Typed.Pretty( ppr )
+import Lidar.Pretty( ppr )
 
 -- programs
 

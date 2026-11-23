@@ -1,0 +1,443 @@
+-----------------------------------------------------------------------------
+-- Copyright 2026, Microsoft Research, Daan Leijen, Anton Lorenzen.
+--
+-- This is free software; you can redistribute it and/or modify it under the
+-- terms of the Apache License, Version 2.0. A copy of the License can be
+-- found in the LICENSE file at the root of this distribution.
+-----------------------------------------------------------------------------
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
+
+{- Validation of `fip`, `fbip` and `tail` annotations from Reuse onward, independently of
+  the frontend's check (`Core.CheckFBIP`), whose rules it follows.
+
+  A FIP function makes no allocations or deallocations when its owned arguments are unique.
+  The check runs a definition under that assumption: `if-unique` takes its first branch,
+  and a credit is full where it is bound at a full type (`[unbox-ru]`), in the first
+  branch of `if-full`, and where it is the result of such a branch (through a `let` or a
+  jump). On these paths:
+
+  - `box` allocates, as do `box@r` for a credit that may
+    be empty and open constructors. A box that is not the payload of a constructor (below
+    `roll`) boxes a value for polymorphism, which Koka's frontend does not count. The count
+    follows the frontend: the maximum over branches, the sum in sequence, and an allocation
+    in sequence with a call to the recursive group is unbounded. A call adds the
+    allocations its callee is annotated with, and must be callable from the definition.
+  - A drop of a value with a heap block, a `free` of a full credit and the application of an
+    owned closure deallocate.
+  - A `dup` shares a value and prevents its reuse, except for a borrowed function: the IR
+    has no borrowed application, so applying it duplicates it first.
+  - A call to the recursive group outside of a tail position uses stack. A join point runs
+    in the position of its definition. A jump to a recursive join point in its body is a tail
+    call to the recursive group. As in the frontend, a call whose continuation only
+    destructures values and builds the result from them is in a tail position (modulo
+    product contexts).
+
+  As in the frontend, `int` is assumed small (it is neither shared nor freed), and literals,
+  scalars and globals are not counted. The frontend checks a function before its monadic
+  translation, so the paths on which an effect yields (`[if-yielding]`) are not taken either,
+  and the evidence operations (`evv-*`) that open effects are free. Neither are paths that
+  end in a pattern match failure. The frontend does not report on
+  `std/core/debug`, and neither does this check.
+-}
+module Lidar.Passes.CheckFip( checkFip ) where
+
+import qualified Data.Map as M
+import qualified Data.Set as S
+import Data.List( nub, intercalate, isPrefixOf )
+import Data.Functor.Const( Const(..) )
+import Control.Monad( unless, when )
+import Lidar.Name
+import Lidar.Prim( nameTpInt, nameYielding, nameCoreDebug, nameCoreHnd, namePatternMatchError )
+import Lidar.Syntax
+import Lidar.Traversal( descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsScrut, canonical, within )
+import Lidar.Pretty( ppr )
+import Lidar.Passes.Common( trivialTy )
+import Lidar.Env( Env, envOf, M, ask, asks, gets, liftE, local, modify, runM, state )
+import Lidar.Query( Gamma, bindAll, inferVar, inferV, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
+
+-- The allocations of the most allocating path; whether there are allocations, calls to the
+-- recursive group, and both in sequence; and the types of the values boxed for polymorphism.
+data Cost = Cost{ cAlloc :: FipAlloc, cAllocs :: Bool, cSelf :: Bool, cLoop :: Bool, cBoxed :: S.Set String }
+
+-- sequential composition
+instance Semigroup Cost where
+  Cost n a s l b <> Cost n' a' s' l' b'
+    = Cost (n <> n') (a || a') (s || s') (l || l' || (a && s') || (a' && s)) (S.union b b')
+
+instance Monoid Cost where
+  mempty = Cost (AllocAtMost 0) False False False S.empty
+
+-- alternative composition
+alternatives :: [Cost] -> Cost
+alternatives = foldr alt mempty
+  where
+    alt (Cost n a s l b) (Cost n' a' s' l' b') = Cost (max n n') (a || a') (s || s') (l || l') (S.union b b')
+
+allocation :: Cost
+allocation = mempty{ cAlloc = AllocAtMost 1, cAllocs = True }
+
+-- the definition under check: its annotation, its recursive group, the annotations of all
+-- functions, and its borrowed parameters
+data Info = Info{ iFip :: Fip, iGroup :: S.Set Name, iFips :: M.Map Name Fip, iBorrowed :: [Path] }
+
+-- a join point in scope: its instance, parameters, body, and the environment of its
+-- definition; or a recursive join point in its own body
+data JoinPt = JoinPt Int [(Path,Mode,VType)] VExpr FEnv | Loop
+
+-- `fFull`: the credits that are full besides those of a full type;
+-- `fFailing`: the join points whose bodies fail
+data FEnv = FEnv{ fInfo :: Info, fEnv :: Env, fGamma :: Gamma, fFull :: S.Set Path
+                , fJoins :: M.Map Name JoinPt, fFailing :: S.Set Name, fTail :: Bool }
+
+-- `fsRuns`: the results of the join point bodies, for each instance and the fullness of its arguments
+data FS = FS{ fsUniq :: Int, fsRuns :: M.Map (Int,[Bool]) (Cost,Bool), fsMsgs :: [String] }
+
+type F a = M FEnv FS a
+
+-- the messages for the definitions with a `fip`, `fbip` or `tail` annotation; `groups` gives
+-- the recursive group of each definition
+checkFip :: M.Map Name Fip -> M.Map Name (S.Set Name) -> Program -> [String]
+checkFip fips groups prog
+  = concat [checkDef d fip | d@DefFun{} <- progDefs prog, qualifier (defName d) /= nameCoreDebug
+                            , Just fip <- [M.lookup (defName d) fips], not (isFipTop fip)]
+  where
+    checkDef d fip
+      = let info = Info fip (M.findWithDefault S.empty (defName d) groups) fips [x | (x,Borrowed,_) <- defArgs d]
+            fenv = FEnv info (envOf prog) (M.fromList [(x,V t) | (x,_,t) <- defArgs d]) S.empty M.empty S.empty True
+            label msg = show (defName d) ++ ": " ++ show fip ++ " fun: " ++ msg
+        in case runM (fipE (defBody d)) fenv (FS 0 M.empty []) of
+             Right ((cost,_),st) -> map label (nub (fsMsgs st) ++ allocMsg fip cost)
+             Left err -> [label ("internal: " ++ err)]
+
+allocMsg :: Fip -> Cost -> [String]
+allocMsg fip cost
+  = ["function allocates " ++ prettyAlloc n ++ " but was declared as allocating " ++ prettyAlloc (fipAlloc fip) ++ boxed
+    | n > fipAlloc fip]
+  where
+    n = if cLoop cost then AllocUnlimited else cAlloc cost
+    boxed | S.null (cBoxed cost) = ""
+          | otherwise = " (it boxes values for polymorphism as " ++ intercalate ", " (S.toList (cBoxed cost)) ++ ")"
+
+prettyAlloc :: FipAlloc -> String
+prettyAlloc a
+  = case a of
+      AllocAtMost 0  -> "nothing"
+      AllocAtMost n  -> "at most " ++ show n
+      AllocFinitely  -> "a finite amount"
+      AllocUnlimited -> "unlimited"
+
+mayAlloc, mayDealloc, mayRecurse :: Fip -> Bool
+mayAlloc fip = fipAlloc fip == AllocUnlimited
+mayDealloc fip
+  = case fip of
+      Fip _ -> False
+      _     -> True
+mayRecurse fip
+  = case fip of
+      Fip _    -> False
+      Fbip _ t -> not t
+      NoFip t  -> not t
+
+-- `callable f g`: a function annotated with f may be called from one annotated with g
+callable :: Fip -> Fip -> Bool
+callable f g
+  = case (f,g) of
+      (Fip _, _)        -> True
+      (Fbip _ _, Fbip _ _) -> True
+      (_, NoFip _)      -> True
+      _                 -> False
+
+warn :: String -> F ()
+warn msg = modify (\s -> s{ fsMsgs = fsMsgs s ++ [msg] })
+
+-- report the message unless the annotation allows it
+require :: (Fip -> Bool) -> String -> F ()
+require may msg
+  = do fip <- asks (iFip . fInfo)
+       unless (may fip) (warn msg)
+
+bind :: [(Path,Ty)] -> F a -> F a
+bind bs = local (\fe -> fe{ fGamma = bindAll bs (fGamma fe) })
+
+withFull :: [Path] -> F a -> F a
+withFull rs = local (\fe -> fe{ fFull = S.union (S.fromList rs) (fFull fe) })
+
+nonTail :: F a -> F a
+nonTail = local (\fe -> fe{ fTail = False })
+
+typeOfVar :: Path -> F Ty
+typeOfVar x = asks fGamma >>= liftE . flip inferVar x
+
+isFull :: Path -> F Bool
+isFull r
+  = do full <- asks fFull
+       t <- typeOfVar r
+       return (S.member r full || isFullType t)
+  where
+    isFullType (V (VReuse Full _ _)) = True
+    isFullType _ = False
+
+-- whether a value is a full credit
+fullV :: VVal -> F Bool
+fullV v
+  = case v of
+      Var r -> isFull r
+      _     -> return False
+
+-- values that need no reference counting, and `int`, which the frontend assumes to be small
+untracked :: Ty -> F Bool
+untracked t
+  = do env <- asks fEnv
+       return (trivialTy env t || isInt t)
+  where
+    isInt (A a) = isIntA a
+    isInt (V (VPtr a)) = isIntA a
+    isInt _ = False
+    isIntA (ACon n []) = n == nameTpInt
+    isIntA _ = False
+
+-- `x` is an immediate value on this path: one of its binders that is all of it (`canonical`)
+-- is of a trivial type
+immediate :: Path -> F Bool
+immediate x
+  = do fe <- ask
+       return (or [trivialTy (fEnv fe) t | (y,t) <- M.toList (fGamma fe), y `within` x, canonical y == canonical x])
+
+isBorrowed :: Path -> F Bool
+isBorrowed x = asks (any (x `within`) . iBorrowed . fInfo)
+
+-- the cost of an expression, and whether the credit it returns (if any) is full
+fipE :: VExpr -> F (Cost,Bool)
+fipE expr
+  | Just ds <- destructAOf expr
+  = do t <- typeOfVar (dsScrut ds)
+       destruct t ds
+  | Just ds <- destructVOf expr
+  = do fe <- ask
+       t <- liftE (inferV (fEnv fe) (fGamma fe) (dsScrut ds))
+       c <- fipV (dsScrut ds)
+       (c',full) <- destruct (V t) ds
+       return (c <> c',full)
+  where
+    destruct t ds
+      = do env <- asks fEnv
+           tss <- liftE (altTypes env t expr)
+           alive <- alivePaths
+           branches [bind (zip xs ts) (fipE e) | ((xs,e),ts) <- zip (dsAlts ds) tss, alive e]
+fipE expr
+  = case expr of
+      Ret v -> (,) <$> fipV v <*> fullV v
+      -- the yielding branch is not taken
+      IfYielding _ _ (k,e2) -> bind [(k,V VToken)] (fipE e2)
+      Let x t e1 e2
+        -> do tl <- asks fTail
+              let tailModProduct = tl && modProduct S.empty e2
+              (c1,full) <- (if tailModProduct then id else nonTail) (fipE e1)
+              (c2,full') <- bind [(x,V t)] (withFull [x | full] (fipE e2))
+              return (c1 <> c2,full')
+      Call f _ vs
+        -> do cs <- mapM fipV vs
+              c <- call f
+              return (mconcat cs <> c,False)
+      App f vs
+        -> do cs <- mapM fipV vs
+              b <- isBorrowed f
+              unless b (require mayDealloc ("owned calls to functions require deallocation: " ++ show f))
+              return (mconcat cs,False)
+      CaseLit v alts def
+        -> do c <- fipV v
+              alive <- alivePaths
+              (c',full) <- branches [fipE e | e <- map snd alts ++ [def], alive e]
+              return (c <> c',full)
+      Gen _ e -> fipE e
+      CastEv _ _ e -> fipE e
+      Total k e -> bind [(k,V VToken)] (fipE e)
+      Drop x e
+        -> do t <- typeOfVar x
+              u <- untracked t
+              i <- immediate x
+              unless (u || i) (require mayDealloc ("dropping " ++ show x ++ " causes deallocation"))
+              fipE e
+      Free r e
+        -> do full <- isFull r
+              when full (require mayDealloc ("freeing the reuse credit " ++ show r ++ " causes deallocation"))
+              fipE e
+      Dup x e
+        -> do t <- typeOfVar x
+              u <- untracked t
+              b <- isBorrowed x
+              unless (u || (b && isFun t))
+                (require mayAlloc ("the variable " ++ show x ++ " is duplicated (causing sharing and preventing reuse)"))
+              fipE e
+      IsUnique x e1 _ -> local (\fe -> fe{ fGamma = uniqueGamma (fGamma fe) x }) (fipE e1)
+      IfFull r e1 e2
+        -> do full <- isFull r
+              alive <- alivePaths
+              if full then fipE e1 else branches ([withFull [r] (fipE e1) | alive e1] ++ [fipE e2 | alive e2])
+      UnboxRu z e
+        -> do g <- asks fGamma
+              g' <- liftE (unboxRuGamma g z)
+              local (\fe -> fe{ fGamma = g' }) (fipE e)
+      -- only in the shared branch of `if-unique`, which is not taken
+      CopyRu z r e
+        -> do g <- asks fGamma
+              g' <- liftE (copyRuGamma g z r)
+              local (\fe -> fe{ fGamma = g' }) (fipE e)
+      Lock z e
+        -> do fe <- ask
+              g' <- liftE (lockGamma (fGamma fe) z)
+              local (\fe' -> fe'{ fGamma = g' }) (fipE e)
+      Join j _ ps e1 e2
+        -> do i <- state (\s -> (fsUniq s, s{ fsUniq = fsUniq s + 1 }))
+              failing <- asks fFailing
+              let enter fe = fe{ fJoins = M.insert j (JoinPt i ps e1 fe) (fJoins fe)
+                               , fFailing = if fails failing e1 then S.insert j failing else failing }
+              local enter (fipE e2)
+      -- the bodies are closed, and a jump to the group in a body is a tail call to the
+      -- recursive group (their parameters are those of the functions they were made from);
+      -- each body runs from the jumps that enter it
+      JoinRec _ ds e
+        -> do is <- mapM (const (state (\s -> (fsUniq s, s{ fsUniq = fsUniq s + 1 })))) ds
+              let body ps fe = fe{ fInfo = (fInfo fe){ iBorrowed = [x | (x,Borrowed,_) <- ps] ++ iBorrowed (fInfo fe) }
+                                 , fJoins = M.fromList [(joinName d,Loop) | d <- ds], fFailing = S.empty }
+                  enter fe = fe{ fJoins = M.union (M.fromList [(j,JoinPt i ps e1 (body ps fe)) | (i,JoinDef j _ ps e1) <- zip is ds]) (fJoins fe)
+                               , fFailing = S.union (S.fromList [j | JoinDef j _ _ e1 <- ds, fails S.empty e1]) (fFailing fe) }
+              local enter (fipE e)
+      Jump j _ vs
+        -> do cs <- mapM fipV vs
+              (c,full) <- jump j vs
+              return (mconcat cs <> c,full)
+      Unreachable _ -> return (mempty,False)
+      -- the operations on contexts cost what their operands do, and memoization writes over the
+      -- block of its cell: it neither allocates nor frees
+      Append c d -> operands [c,d]
+      Plug c v -> operands [c,v]
+      CtxCopy c -> operands [c]
+      Memoize _ _ _ w -> operands [w]
+      _ -> fail ("unexpected expression: " ++ ppr expr)
+  where
+    operands vs = do cs <- mapM fipV vs
+                     return (mconcat cs,False)
+    isFun t = case t of
+                V (VPtr a) -> isFunA a
+                A a        -> isFunA a
+                _          -> False
+    isFunA a = case a of
+                 AFun _ _      -> True
+                 AForall _ b   -> isFunA b
+                 _             -> False
+
+-- the expressions that do not fail
+alivePaths :: F (VExpr -> Bool)
+alivePaths = asks (\fe -> not . fails (fFailing fe))
+
+-- every path of an expression ends in a pattern match failure (or is unreachable), given the
+-- join points whose bodies fail
+fails :: S.Set Name -> VExpr -> Bool
+fails failing expr
+  = case expr of
+      Call f _ _ -> f == namePatternMatchError
+      Unreachable _ -> True
+      Jump j _ _ -> S.member j failing
+      Let _ _ e1 e2 -> fails failing e1 || fails failing e2
+      Join j _ _ e1 e2 -> fails (if fails failing e1 then S.insert j failing else failing) e2
+      JoinRec _ ds e -> fails (S.union (S.fromList [j | JoinDef j _ _ e1 <- ds, fails S.empty e1]) failing) e
+      _ -> let es = subexprs expr in not (null es) && all (fails failing) es
+
+-- the continuation of a call only destructures values and builds its result from values, given
+-- the join points (in the continuation) whose bodies do so as well
+modProduct :: S.Set Name -> VExpr -> Bool
+modProduct joins expr
+  = case expr of
+      Ret _ -> True
+      Call f _ _ -> isEvidence f
+      App _ _ -> False
+      CaseLit{} -> False
+      Jump j _ _ -> S.member j joins
+      IfYielding _ _ (_,e2) -> modProduct joins e2
+      Let _ _ e1 e2 -> modProduct S.empty e1 && modProduct joins e2
+      Join j _ _ e1 e2 -> modProduct (if modProduct joins e1 then S.insert j joins else joins) e2
+      JoinRec _ _ e -> modProduct joins e
+      _ | Just ds <- destructAOf expr -> single (dsAlts ds)
+        | Just ds <- destructVOf expr -> single (dsAlts ds)
+        | otherwise -> all (modProduct joins) (subexprs expr)
+  where
+    single [(_,e)] = modProduct joins e
+    single _ = False
+
+-- the subexpressions of an expression
+subexprs :: VExpr -> [VExpr]
+subexprs = getConst . descendE (const (Const [])) (const (Const [])) (\_ e -> Const [e])
+
+-- an operation on the evidence vector that opens an effect
+isEvidence :: Name -> Bool
+isEvidence f = qualifier f == nameCoreHnd && "evv-" `isPrefixOf` nameLocal f
+
+branches :: [F (Cost,Bool)] -> F (Cost,Bool)
+branches fs
+  = do rs <- sequence fs
+       return (alternatives (map fst rs),all snd rs)
+
+-- the body of a join point for the arguments of a jump, once for each fullness of the arguments
+jump :: Name -> [VVal] -> F (Cost,Bool)
+jump j vs
+  = do js <- asks fJoins
+       pt <- maybe (fail ("unknown join point " ++ show j)) return (M.lookup j js)
+       case pt of
+         Loop -> return (mempty{ cSelf = True },False)
+         JoinPt i ps body fe
+           -> do fulls <- mapM fullV vs
+                 runs <- gets fsRuns
+                 case M.lookup (i,fulls) runs of
+                   Just r -> return r
+                   Nothing -> do let enter = fe{ fGamma = bindAll [(x,V t) | (x,_,t) <- ps] (fGamma fe)
+                                               , fFull = S.union (S.fromList [x | ((x,_,_),True) <- zip ps fulls]) (fFull fe) }
+                                 r <- local (const enter) (fipE body)
+                                 modify (\s -> s{ fsRuns = M.insert (i,fulls) r (fsRuns s) })
+                                 return r
+
+call :: Name -> F Cost
+call f
+  = do info <- asks fInfo
+       tl <- asks fTail
+       let self = S.member f (iGroup info)
+       when (self && not tl) (require mayRecurse ("non-tail call to a (mutually) recursive function: " ++ show f))
+       if f == nameYielding || isEvidence f then return mempty
+       else case M.lookup f (iFips info) of
+              Nothing -> do warn ("no fip information for the function " ++ show f)
+                            return mempty
+              Just fip | callable fip (iFip info) -> return (credits fip){ cSelf = self }
+                       | otherwise -> do warn ("calling a non-fip function: " ++ show f)
+                                         return mempty
+  where
+    credits fip = case fip of
+                    Fip n    -> mempty{ cAlloc = n }
+                    Fbip n _ -> mempty{ cAlloc = n }
+                    NoFip _  -> mempty
+
+fipV :: VVal -> F Cost
+fipV v
+  = case v of
+      Ptr t a -> fipA (Just t) a
+      Context b k -> bind [(nameHole,V (VPtr b))] (fipV k)
+      _ -> mconcat <$> sequence (getConst (descendV (\a -> Const [fipA Nothing a]) (\w -> Const [fipV w]) v))
+
+-- the cost of a boxed value, given the type of the pointer to it unless it is the payload of a
+-- constructor
+fipA :: Maybe AType -> AVal -> F Cost
+fipA ptr val
+  = case val of
+      Box w -> (<> boxing) <$> fipV w
+      BoxAt r w -> do c <- fipV w
+                      full <- isFull r
+                      return (if full then c else c <> boxing)
+      Roll _ a -> fipA Nothing a
+      InjA _ _ a -> fipA ptr a
+      InjLazy _ _ a -> fipA ptr a
+      OpenCon _ _ ws -> (<> allocation) . mconcat <$> mapM fipV ws
+      Lam ps _ e -> do require mayAlloc "allocating a lambda expression"
+                       let enter fe = fe{ fGamma = bindAll [(x,V t) | (x,_,t) <- ps] (fGamma fe), fJoins = M.empty, fTail = False }
+                       fst <$> local enter (fipE e)
+      _ -> mconcat <$> sequence (getConst (descendA (const (Const [])) (\a -> Const [fipA Nothing a]) (\w -> Const [fipV w]) val))
+  where
+    boxing = maybe allocation (\a -> allocation{ cBoxed = S.singleton (ppr (A a)) }) ptr

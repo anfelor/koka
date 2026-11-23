@@ -20,8 +20,8 @@ import Data.Word( Word64 )
 import Data.List( intercalate, foldl', sortOn )
 import qualified Numeric
 import Lidar.Name( Name )
-import Backend.Typed.Syntax
-import Backend.Typed.Layout
+import Lidar.Syntax
+import Lidar.Layout
 
 -- the C name of a top-level value (Koka's own names are `kk_` names, see `CGen.Koka`)
 cName :: Name -> String

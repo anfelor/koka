@@ -9,6 +9,7 @@ dependencies:
   - base >= 4.9
   - containers
   - mtl
+  - parsec
 
 library:
   source-dirs:

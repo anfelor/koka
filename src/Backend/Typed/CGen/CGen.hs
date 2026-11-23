@@ -30,12 +30,12 @@ import Common.NamePrim( nameInt32, nameInternalInt32, nameInt64, nameSSizeT, nam
 import Lidar.Name
 import Backend.Typed.LidarName( fromLidar )
 import Platform.Runtime( showHFloat )
-import Backend.Typed.Syntax
-import Backend.Typed.Traversal( child, TestSide(..), boxTag, canonical, failingTo, fvA, fvE, fvV, holes, testSides, within )
-import Backend.Typed.Types( inst, isShape, isToken, unToken )
-import Backend.Typed.Env( Env(..), envOf, dataBody, openFields, boxContents, M, get, gets, liftE, modify, put, runM, state )
-import Backend.Typed.Query( Gamma, inferE, inferV, inferVar, noJoins, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
-import Backend.Typed.Layout
+import Lidar.Syntax
+import Lidar.Traversal( child, TestSide(..), boxTag, canonical, failingTo, fvA, fvE, fvV, holes, testSides, within )
+import Lidar.Types( inst, isShape, isToken, unToken )
+import Lidar.Env( Env(..), envOf, dataBody, openFields, boxContents, M, get, gets, liftE, modify, put, runM, state )
+import Lidar.Query( Gamma, inferE, inferV, inferVar, noJoins, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
+import Lidar.Layout
 import Backend.Typed.CGen.Layout hiding( dupExpr, dropStmt )
 import Backend.Typed.CGen.Koka
 import Backend.Typed.CGen.Decls( typeDecls, openPayload, openTagName )

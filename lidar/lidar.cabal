@@ -16,9 +16,41 @@ build-type:     Simple
 library
   exposed-modules:
       Lidar
+      Lidar.Annotate
+      Lidar.Build
+      Lidar.Env
+      Lidar.Layout
       Lidar.Name
+      Lidar.Parse
+      Lidar.Passes.Anf
+      Lidar.Passes.CheckFip
+      Lidar.Passes.CheckLinear
+      Lidar.Passes.CheckTypes
+      Lidar.Passes.Common
+      Lidar.Passes.Contify
+      Lidar.Passes.DropSpec
+      Lidar.Passes.ExpandReuse
+      Lidar.Passes.FillCredits
+      Lidar.Passes.Inline
+      Lidar.Passes.JoinArgs
+      Lidar.Passes.Lazy
+      Lidar.Passes.Match
+      Lidar.Passes.Paths
+      Lidar.Passes.Peephole
+      Lidar.Passes.Perceus
+      Lidar.Passes.Reuse
+      Lidar.Passes.Simplify
+      Lidar.Passes.SinkJoins
+      Lidar.Passes.TailRec
+      Lidar.Passes.UniqueJoins
+      Lidar.Passes.Yields
       Lidar.PPrint
+      Lidar.Pretty
       Lidar.Prim
+      Lidar.Query
+      Lidar.Syntax
+      Lidar.Traversal
+      Lidar.Types
   other-modules:
       Paths_lidar
   hs-source-dirs:
@@ -28,4 +60,5 @@ library
       base >=4.9
     , containers
     , mtl
+    , parsec
   default-language: Haskell2010

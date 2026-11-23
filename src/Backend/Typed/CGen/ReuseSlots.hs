@@ -10,10 +10,10 @@
 -- Reuse-slot analysis for described credits in typed C code generation.
 module Backend.Typed.CGen.ReuseSlots( keptLeaves ) where
 
-import Backend.Typed.Syntax
-import Backend.Typed.Traversal( child, fieldsAt )
-import Backend.Typed.Types( collapse )
-import Backend.Typed.Layout( layout, leaves, scanOf )
+import Lidar.Syntax
+import Lidar.Traversal( child, fieldsAt )
+import Lidar.Types( collapse )
+import Lidar.Layout( layout, leaves, scanOf )
 import Backend.Typed.CGen.Layout( leafSlots )
 
 -- The tag and the scan size that the description of a credit records for its block, and for

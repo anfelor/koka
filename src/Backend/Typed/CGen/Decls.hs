@@ -27,8 +27,8 @@ import Data.Maybe( catMaybes, isNothing )
 import Lib.PPrint( text )
 import Lidar.Name
 import Lidar.Prim( nameTpString )
-import Backend.Typed.Syntax
-import Backend.Typed.Layout
+import Lidar.Syntax
+import Lidar.Layout
 import Backend.Typed.CGen.Layout( cName, ctName, structDefs, blockName, blockDef, dupFun, dropFun, primBox )
 import Backend.Typed.CGen.Koka( kokaName, kokaTypeName, kokaLocal, kokaKType, kokaPrimTypes, fromKoka )
 

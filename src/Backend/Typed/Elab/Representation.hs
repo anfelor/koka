@@ -12,10 +12,10 @@ module Backend.Typed.Elab.Representation( rep, boxrep, boxA, shapeLeaves, leafCo
                                         , scalarField, varV, atAny, sumOf
                                         , tapp, injA, caseSum ) where
 
-import Backend.Typed.Types( atAny, underNull, withToken, unToken, isToken )
-import Backend.Typed.Syntax
-import Backend.Typed.Layout( leaves, isEnum )
-import Backend.Typed.Traversal( child )
+import Lidar.Types( atAny, underNull, withToken, unToken, isToken )
+import Lidar.Syntax
+import Lidar.Layout( leaves, isEnum )
+import Lidar.Traversal( child )
 
 -- a value at a type variable: `a*`
 varV :: TVar -> VType

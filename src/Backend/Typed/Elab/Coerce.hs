@@ -12,16 +12,16 @@ module Backend.Typed.Elab.Coerce( coerce, coerceInst, coerceExpr, genVal, genPtr
 import qualified Data.Map as M
 import Data.Maybe( isJust )
 import Lidar.Name( Name )
-import Backend.Typed.Syntax
-import Backend.Typed.Build( K, compose, yieldedWith )
-import Backend.Typed.Traversal( child, hasRegion )
-import Backend.Typed.Types
-import Backend.Typed.Layout( leaves )
+import Lidar.Syntax
+import Lidar.Build( K, compose, yieldedWith )
+import Lidar.Traversal( child, hasRegion )
+import Lidar.Types
+import Lidar.Layout( leaves )
 import Backend.Typed.Elab.TypeMatch( match )
 import Backend.Typed.Elab.Representation
 import Backend.Typed.Elab.Monad
 import Control.Monad.Reader( asks )
-import Backend.Typed.Pretty( ppr )
+import Lidar.Pretty( ppr )
 
 -- a pointer to a value `w : A`, generalized at `(∀ā. A)*`
 genVal :: VType -> AVal -> E (K,VVal)

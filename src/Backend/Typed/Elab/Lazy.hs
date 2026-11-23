@@ -19,10 +19,10 @@ import Common.Name
 import Common.NamePrim( nameLazyIsWhnf, nameLazyPtrIsWhnf )
 import Kind.Newtypes
 import Type.Type( lazyName, conInfoName )
-import Backend.Typed.Syntax
+import Lidar.Syntax
 import Backend.Typed.LidarName( toLidar )
-import Backend.Typed.Env( Env(..), Lazies(..), reuseSize, lazySides )
-import Backend.Typed.Traversal( descendAll, fvE )
+import Lidar.Env( Env(..), Lazies(..), reuseSize, lazySides )
+import Lidar.Traversal( descendAll, fvE )
 import Backend.Typed.Elab.TypeInfo( conFieldTypes )
 import Backend.Typed.Elab.Monad( E, fresh )
 

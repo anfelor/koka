@@ -12,8 +12,8 @@ module Backend.Typed.Elab.TypeMatch( TypeMatch(..) ) where
 
 import qualified Data.Map as M
 import Control.Monad( foldM )
-import Backend.Typed.Syntax
-import Backend.Typed.Types( Sub, Types(..), inst, applyA )
+import Lidar.Syntax
+import Lidar.Types( Sub, Types(..), inst, applyA )
 
 class TypeMatch t where
   match   :: [TVar] -> t -> t -> Maybe Sub

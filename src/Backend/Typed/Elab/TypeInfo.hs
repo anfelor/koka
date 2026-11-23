@@ -27,12 +27,12 @@ import Kind.Newtypes
 import Type.Type
 import Common.NamePrim( nameTpDiv )
 import Core.Core( isMonEffect )
-import Backend.Typed.Syntax
+import Lidar.Syntax
 import Backend.Typed.LidarName( toLidar )
 import qualified Lidar.Name as L
-import Backend.Typed.Types
+import Lidar.Types
 import Backend.Typed.Elab.Representation
-import Backend.Typed.Layout( CT(CBox,CUnit), layout, blockSize )
+import Lidar.Layout( CT(CBox,CUnit), layout, blockSize )
 
 type Tr a = Either String a
 

@@ -18,7 +18,7 @@ import Kind.Newtypes( Newtypes )
 import qualified Core.Core as C
 import Backend.Typed.Typed( typedFromCore )
 import Backend.Typed.Elab.Foreign( foreignOf )
-import Backend.Typed.Pretty( prettyProgram )
+import Lidar.Pretty( prettyProgram )
 import Common.Name( Name )
 import Backend.Typed.LidarName( toLidar )
 import Backend.Typed.CGen.CGen( CEnv(..), cgenModule )

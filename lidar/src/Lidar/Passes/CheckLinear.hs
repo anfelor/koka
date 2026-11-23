@@ -1,0 +1,607 @@
+-----------------------------------------------------------------------------
+-- Copyright 2026, Microsoft Research, Daan Leijen, Anton Lorenzen.
+--
+-- This is free software; you can redistribute it and/or modify it under the
+-- terms of the Apache License, Version 2.0. A copy of the License can be
+-- found in the LICENSE file at the root of this distribution.
+-----------------------------------------------------------------------------
+
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
+{- Linearity checker for programs after Perceus.
+
+  Variables of a trivial type (without pointers, also through named types: `trivialTy`) are
+  unrestricted. Every other variable is a path (see `Syntax.Path`) and has the mode of its owner, the longest variable on its path that is a
+  root (or, in the body of a join point, a variable it captures). An owned root holds one
+  reference, which must be consumed exactly once on every path; a borrowed root (a borrowed
+  parameter, or a binder of a destructuring of a value that is not a variable) holds a
+  reference that may only be inspected.
+
+  The variables one step below a variable are its children: a reference to a variable is one
+  reference to each of its children (all fields of a product, the contents and the credit of a
+  box, and the only child at any other step), so consuming a child takes it out of its parent,
+  and a parent is consumed once all of its children are. The binder of `[deref]`, `[unroll]`,
+  `[case-a]` or `[split-a]` of a boxed value is the pointer of its scrutinee, and that of
+  `[unpack]` is its scrutinee, so consuming or testing it consumes or tests the scrutinee (`key`). So does a child whose
+  siblings are of a trivial type, which is determined from the type of the parent: a `[case-open]`
+  binds only its fields, not the product around them. In an alternative whose binder of a trivial type is all of
+  the scrutinee (`Nothing`), the scrutinee needs no references. A destructuring of a variable
+  therefore needs no mode: it only reads the scrutinee, and its alternatives consume the children
+  they take over. `Unscalar` copies the trivial contents of a scalar into a root, so its mode
+  matters: an owned read consumes the scalar. The binders of a destructuring of a value that is
+  not a variable are borrowed roots, which borrow the variables of the value for the whole
+  alternative.
+
+  `dup x` gives `x` one more reference under the same name, so a variable may hold several:
+  the references are counted (`Counts`), where a reference to a variable stands for one to
+  each of its children (`refine`). After `dup z.left; drop z`, for example, `z.left` still holds
+  a reference, and so does `z.left` after a `let` that consumes the other children of `z`.
+
+  A unique variable is owned and holds the only reference to its block, so `UnboxRu` may
+  take its contents and keep its block as a credit: it splits `z` into its contents and its
+  block `z.credit`, which the body consumes as the children of `z` (`z` itself is out of
+  scope). `CopyRu` only reads the block of `z` and binds a copy of it as a new root. `Lock`
+  is checked like `UnboxRu`, but needs an owned box, and its block is a cell. A cell is
+  linear: it is owned and not trivial, so it must be consumed (as `Check` rejects a dup or a
+  drop of it, by `memoize`, a uniqueness test or a call or jump), and it must not be live
+  across an `[if-yielding]`, whose yielding branch could not consume it. A token is linear
+  too, and `[if-yielding]` consumes it. An owned variable is unique in the
+  first branch of `IsUnique`; unique parameters and a `let` whose bound
+  expression has a unique result are unique too, and so are the binders that are the pointer
+  of a unique variable (`key`). An expression has a unique result (its result mode `q`, which
+  follows the join points in scope) if it returns a unique value (a unique variable or a fresh
+  context), appends or copies a context, calls a function with a unique result, or is
+  `ret (pure null)`, in every tail position (the dummy is unique enough).
+  The body of a definition has the definition's result mode. A context is plugged or appended only
+  through a unique value. Any borrowed use of a unique variable, or of a variable on its path,
+  may duplicate the reference, after which it is only owned.
+
+  The check is bottom-up: a term gives the references it consumes (negative for those it
+  creates with `dup`), the references that must exist before it (a consumed or inspected
+  variable needs one), and the variables it borrows and consumes as unique (`Use`).
+  Sequencing (`andThen`) adds them up and rejects a unique use after a borrowed one. Branches
+  must consume the same references. A root must be consumed once in its scope (a borrowed one
+  not at all), it must never be needed when no reference is left, and only a unique one may
+  be consumed as unique (`leave`). A term whose every path ends in `unreachable` diverges: it
+  counts as consuming every reference it does not use, so it need not consume its roots.
+
+  The body of a join point is checked like the body of a function whose parameters include
+  the variables it captures, including those of the join points it jumps to: unique if the
+  body uses them as unique, borrowed if the body does not consume them (a join point is not
+  recursive and runs in the scope of its definition), and owned otherwise, with as many
+  references as the body consumes (Γ_c is a multiset). The jumps use them in the same way, so a `let` before the join point is unique if the body uses its variable as
+  unique. A recursive join point captures its variables only borrowed, as its body may run
+  any number of times. A jump is checked like a call that also passes the captured variables.
+
+  Descriptions need no check here: a root is bound only once in a definition (`CheckTypes`)
+  and the variables at its paths always denote its descendants, so a name in a description denotes
+  the same value everywhere. Only a jump binds variables again, the parameters of its join
+  point, which descriptions in their types do not name (`[join]`), and descriptions do not
+  cross definitions, as signatures of functions and closures carry none (`Query.signature`).
+
+  This checks the modes of the typing rules in `Syntax` (the types are checked by `Check`).
+  Keep it in sync with the rules: a change here must be reflected there, and vice versa.
+-}
+module Lidar.Passes.CheckLinear( checkLinear ) where
+
+import qualified Data.Map as M
+import qualified Data.Set as S
+import Control.Monad( unless, when, forM_, foldM )
+import Data.Functor.Const( Const(..) )
+import Lidar.Name
+import Lidar.Syntax
+import Lidar.Traversal( child, descendV, destructAOf, destructVOf, dsAlts, dsScrut, fieldsAt, fvA, fvE, jumpTargets, sibling, within )
+import Lidar.Types( checkDupType, prodV )
+import Lidar.Passes.Common( isRead, paramModes, prefixes, resultMode, trivialTy )
+import Lidar.Env( Env(..), envOf, M, ask, evalM, get, gets, liftE, local, modify )
+import Lidar.Query( Gamma, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
+
+-- the mode of the variables at and below each owner: the roots in scope, and in the body of a
+-- join point the variables it captures
+type Owners = M.Map Path Mode
+
+-- the children recorded where a destructuring binds a child of their parent (a path denotes the
+-- same child in the whole definition, see `Syntax.Path`): those of a trivial type, and the fields
+-- of each product
+data Children = Children{ chTrivial :: S.Set Path, chFields :: M.Map Path [Path] }
+
+-- numbers of references to variables (`key`) that do not overlap, without zeros; a reference
+-- to a variable is one to each of its children (`refine`)
+type Counts = M.Map Path Int
+
+-- How a term uses variables: the references it consumes (negative for those it creates with
+-- `dup`), the references that must exist before it (a consumed or inspected variable needs
+-- one), the variables that it borrows and that it consumes as unique, and whether every path
+-- ends in `unreachable`, which consumes all other references (`uDiverges`).
+data Use = Use{ uNet :: Counts, uPeak :: Counts, uBorrowed :: S.Set Path, uUnique :: S.Set Path, uDiverges :: Bool }
+
+type L a = M Owners Children a
+
+-- the modes of the parameters of the join points in scope, and the variables they capture
+-- with their modes
+type Joins = M.Map Name ([Mode],[(Path,Mode)])
+
+checkLinear :: Program -> [String]
+checkLinear prog
+  = [show (defName d) ++ ": " ++ err | d <- progDefs prog, Left err <- [checkDef (envOf prog) d]]
+
+checkDef :: Env -> Def -> Either String ()
+checkDef env def
+  = case def of
+      DefFun _ _ args q _ body _
+        -> run (M.fromList [(x,V t) | (x,_,t) <- args]) (params env args) q body
+      DefVal _ _ _ body -> run M.empty [] Owned body
+  where
+    run g ps q body = evalM (closed ps (checkE env g M.empty q body)) M.empty (Children S.empty M.empty)
+
+-- the parameters that are not of a trivial type
+params :: Env -> [(Path,Mode,VType)] -> [(Path,Mode)]
+params env ps = [(x,m) | (x,m,t) <- ps, not (trivialTy env (V t))]
+
+-- The product that a destructuring of `z` with binders `bs` takes apart, with its type: `z`
+-- for a projection, and `z.C`, the fields of the binders, for `[case-open]`.
+destructed :: Gamma -> Path -> [(Path,Ty)] -> Maybe (Path,VType)
+destructed g z@(Path _ zs) bs
+  = case (M.lookup z g, bs) of
+      (Just (V t), _) -> Just (z,t)
+      (_, (Path _ ss,_):_:_) | (SOpen c : _) <- drop (length zs) ss
+        -> Just (child z (SOpen c), prodV [t | (_,V t) <- bs])
+      _ -> Nothing
+
+-- references
+
+-- the other children of the parent of a variable that are not of a trivial type
+siblingsOf :: Children -> Path -> [Path]
+siblingsOf tr p@(Path x ss@(_:_))
+  = [q | q <- others, S.notMember q (chTrivial tr)]
+  where
+    parent = Path x (init ss)
+    others = case last ss of
+               SField _ _ -> [q | q <- M.findWithDefault [] parent (chFields tr), q /= p]
+               s -> [child parent t | Just t <- [sibling s]]
+siblingsOf _ _ = []
+
+-- A child without siblings (that are not of a trivial type) is all of its parent, so a use of
+-- it is a use of the parent: references are counted for the parent.
+key :: Children -> Path -> Path
+key tr p@(Path x ss)
+  | not (null ss), null (siblingsOf tr p) = key tr (Path x (init ss))
+  | otherwise = p
+
+keyOf :: Path -> L Path
+keyOf x = gets (\tr -> key tr x)
+
+-- the children of the variables on the way from `p` to a variable `q` below it, which together
+-- make up `p`
+childrenToward :: Children -> Path -> Path -> [Path]
+childrenToward tr p@(Path _ ss) (Path _ ts) = go p (drop (length ss) ts)
+  where
+    go v [] = [v]
+    go v (s:rest) = [key tr q | q <- siblingsOf tr (child v s)] ++ go (child v s) rest
+
+-- Count the references to a variable with one of the `keys` (or another variable of the
+-- counts) below it as references to its children. The variables above `q` are its prefixes,
+-- so they are looked up instead of comparing every pair.
+refine :: Children -> [Path] -> Counts -> Counts
+refine tr keys m
+  = case [(p,q) | q <- keys ++ M.keys m, p <- prefixes q, M.member p m] of
+      ((p,q):_) -> refine tr keys (M.filter (/= 0) (M.unionWith (+) (M.delete p m) (M.fromList [(r,m M.! p) | r <- childrenToward tr p q])))
+      [] -> m
+
+-- Count the references to all children of a variable as references to the variable. Like
+-- `[own-pair]` and `[own-child]` of the paper, read bottom-up, this happens only where a
+-- destructuring binds the children, so that alternatives that take a variable apart differently
+-- agree on it.
+rollUp :: Children -> Counts -> Counts
+rollUp tr m
+  = case [(p,qs,n) | (p,n) <- M.toList m, let qs = siblingsOf tr p, not (null qs), all ((== Just n) . (`M.lookup` m)) qs] of
+      ((p@(Path x ss),qs,n):_) -> rollUp tr (M.insert (key tr (Path x (init ss))) n (foldr M.delete m (p:qs)))
+      [] -> m
+
+plus :: Children -> Counts -> Counts -> Counts
+plus tr a b = M.filter (/= 0) (M.unionWith (+) (refine tr (M.keys b) a) (refine tr (M.keys a) b))
+
+minus :: Children -> Counts -> Counts -> Counts
+minus tr a b = plus tr a (M.map negate b)
+
+-- the larger number of references to each variable (a missing one is 0)
+upper :: Children -> Counts -> Counts -> Counts
+upper tr a b = M.filter (> 0) (M.unionWith max (refine tr ks a) (refine tr ks b))
+  where
+    ks = M.keys a ++ M.keys b
+
+-- uses
+
+noUse :: Use
+noUse = Use M.empty M.empty S.empty S.empty False
+
+-- `u1` is evaluated before `u2`
+andThen :: Use -> Use -> L Use
+andThen u1 u2
+  = do forM_ (S.toList (uUnique u2)) $ \p ->
+         when (any (`S.member` uBorrowed u1) (p : prefixes p))
+           (fail ("unique use of a variable after a borrowed use: " ++ show p))
+       tr <- get
+       return (Use (plus tr (uNet u1) (uNet u2)) (upper tr (uPeak u1) (plus tr (uNet u1) (uPeak u2)))
+                   (S.union (uBorrowed u1) (uBorrowed u2)) (S.union (uUnique u1) (uUnique u2))
+                   (uDiverges u1 || uDiverges u2))
+
+-- the uses of terms that are evaluated in order
+uses :: [L Use] -> L Use
+uses = foldM (\u c -> c >>= andThen u) noUse
+
+-- a term is evaluated before another
+before :: L Use -> L Use -> L Use
+before c1 c2 = uses [c1,c2]
+
+-- every branch must consume the same references, except one that diverges
+branches :: [Use] -> L Use
+branches us
+  = case filter (not . uDiverges) us of
+      (u:rest) -> do tr <- get
+                     forM_ rest $ \u' ->
+                       unless (M.null (minus tr (uNet u) (uNet u')))
+                         (fail ("branches consume different variables: " ++ show (M.toList (uNet u)) ++ " vs. " ++ show (M.toList (uNet u'))))
+                     joined (uNet u) False
+      [] -> joined M.empty (not (null us))
+  where
+    joined :: Counts -> Bool -> L Use
+    joined c d = do tr <- get
+                    return (Use c (foldr (upper tr . uPeak) M.empty us) (S.unions (map uBorrowed us)) (S.unions (map uUnique us)) d)
+
+-- Leaving the scope of owners with their mode: an owned one must be consumed once (as unique
+-- only if it is unique), unless the use diverges, and a borrowed one not at all, and neither
+-- may be needed when no reference is left. An owner given several times holds as many
+-- references.
+leave :: [(Path,Mode)] -> Use -> L Use
+leave xs u
+  = do tr <- get
+       let zs = [(key tr x,m) | (x,m) <- xs]
+           mine p = any ((p `within`) . fst) zs
+           held = M.fromListWith (+) [(z,1) | (z,_) <- zs]
+           left = refine tr (M.keys held) (minus tr (uNet u) (M.fromListWith (+) [(z,1) | (z,m) <- zs, owning m]))
+           peak = refine tr (M.keys held) (uPeak u)
+       forM_ (M.toList left) $ \(p,n) ->
+         when (mine p && (n > 0 || not (uDiverges u)))
+           (fail ((if n < 0 then "owned variable is not consumed: " else "variable is consumed more often than it is owned: ") ++ show p))
+       forM_ (M.toList peak) $ \(p,n) ->
+         when (mine p && n > M.findWithDefault 0 p (refine tr [p] held)) (fail ("use of a consumed variable: " ++ show p))
+       forM_ (S.toList (uUnique u)) $ \p -> forM_ zs $ \(z,m) ->
+         when (p `within` z && childMode tr z m p /= Unique)
+           (fail ("unique use of a variable that is not unique: " ++ show p))
+       return (Use (M.filterWithKey (\p _ -> not (mine p)) left) (M.filterWithKey (\p _ -> not (mine p)) peak)
+                   (S.filter (not . mine) (uBorrowed u)) (S.filter (not . mine) (uUnique u)) (uDiverges u))
+
+withOwners :: [(Path,Mode)] -> L a -> L a
+withOwners xs = local (M.union (M.fromList xs))
+
+-- the scope of binders that are new roots with a mode
+roots :: Env -> Mode -> [(Path,Ty)] -> L Use -> L Use
+roots env m bs check
+  = do let xs = [(x,m) | (x,t) <- bs, not (trivialTy env t)]
+       withOwners xs check >>= leave xs
+
+-- a body (of a function or closure) whose only variables are its parameters
+closed :: [(Path,Mode)] -> L Use -> L ()
+closed ps check
+  = do u <- local (const (M.fromList ps)) check
+       _ <- leave ps u
+       return ()
+
+-- variables
+
+-- The mode of a variable `x` below an owner `z` of mode `m`, as in the structural rules of the
+-- paper: a descendant that is all of `z` (`key`) has the mode of `z`, and any other is at most
+-- owned. In particular, the contents of a unique box are not unique, as they are not all of
+-- it: only the box holds the only reference to its block (the paper's `[box]`).
+childMode :: Children -> Path -> Mode -> Path -> Mode
+childMode tr z m x
+  | m == Unique && key tr x /= key tr z = Owned
+  | otherwise = m
+
+-- the mode of a variable: its mode as a descendant of the longest variable on its path that is
+-- an owner
+ownerMode :: Path -> L Mode
+ownerMode x
+  = do os <- ask
+       tr <- get
+       case [childMode tr p m x | p <- x : reverse (prefixes x), Just m <- [M.lookup p os]] of
+         (m:_) -> return m
+         [] -> fail ("unbound variable " ++ show x)
+
+trivialVar :: Env -> Gamma -> Path -> Bool
+trivialVar env g x = maybe False (trivialTy env) (M.lookup x g)
+
+-- A use of a reference that is not of a trivial type: it consumes `n` references (as unique
+-- if the mode is) and borrows the variable if `b`.
+useVar :: Env -> Gamma -> Mode -> Int -> Bool -> Path -> L Use
+useVar env g m n b x
+  | trivialVar env g x = return noUse
+  | otherwise
+  = do o <- ownerMode x
+       when (m == Unique && o == Borrowed) (fail ("unique use of a variable that is not unique: " ++ show x))
+       p <- keyOf x
+       return (Use (M.filter (/= 0) (M.singleton p n)) (M.singleton p 1) (if b then S.singleton p else S.empty)
+                   (if m == Unique then S.singleton p else S.empty) False)
+
+-- consume a reference
+consume, uniqueName :: Env -> Gamma -> Path -> L Use
+consume env g = useVar env g Owned 1 False
+uniqueName env g = useVar env g Unique 1 False
+
+-- borrow a variable, or only read it
+inspect, readVar :: Env -> Gamma -> Path -> L Use
+inspect env g = useVar env g Borrowed 0 True
+readVar env g = useVar env g Borrowed 0 False
+
+-- `dup x` borrows `x` and gives it another reference
+dupVar :: Env -> Gamma -> Path -> L Use
+dupVar env g = useVar env g Borrowed (-1) True
+
+-- values
+
+ownedV :: Env -> Gamma -> VVal -> L Use
+ownedV env g val
+  = case val of
+      Var x -> consume env g x
+      DupV _ -> liftE (inferV env g val) >> return noUse   -- a global
+      Glob _ _ -> do t <- V <$> liftE (inferV env g val)
+                     unless (trivialTy env t) (fail ("owned use of global " ++ show val))
+                     return noUse
+      UnitV -> return noUse
+      Lit _ -> return noUse
+      NoReuse _ _ -> return noUse
+      Inj _ _ _ -> children
+      Tuple _ -> children
+      Ptr _ _ -> children
+      Pack _ _ _ -> children
+      TyApp _ _ -> children
+      Up _ -> children
+      Down _ _ -> children
+      Hole -> return noUse
+      Context _ k -> ownedV env g k
+      Some v -> ownedV env g v
+      Null _ -> return noUse
+  where
+    children = uses (getConst (descendV (\a -> Const [ownedA env g a]) (\v -> Const [ownedV env g v]) val))
+
+ownedA :: Env -> Gamma -> AVal -> L Use
+ownedA env g val
+  = case val of
+      Fun _ -> do liftE (inferA env g val) >>= ownedParams
+                  return noUse
+      Lam ps _ e
+        -> do unless (all (\(_,m,_) -> m == Owned) ps) (fail ("closure with parameters that are not owned: " ++ show val))
+              let caps = S.toList (fvA val)
+              closed ([(x,Owned) | x <- caps, not (trivialVar env g x)] ++ params env ps)
+                     (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) M.empty Owned e)
+              uses (map (consume env g) caps)
+      UnitA -> return noUse
+      InjA _ _ v -> ownedA env g v
+      Roll _ v -> ownedA env g v
+      InjLazy _ _ v -> ownedA env g v
+      Box v -> ownedV env g v
+      Scalar v -> ownedV env g v
+      OpenCon _ _ vs -> uses (map (ownedV env g) vs)
+      -- the value is evaluated before the block is written
+      BoxAt r v -> uses [ownedV env g v, consume env g r]
+
+-- a unique value is a unique variable, a fresh context, or a structural value of unique values
+uniqueV :: Env -> Gamma -> VVal -> L Use
+uniqueV env g val
+  = case val of
+      Var x -> uniqueName env g x
+      UnitV -> return noUse
+      Lit _ -> do t <- V <$> liftE (inferV env g val)
+                  unless (trivialTy env t) (fail ("unique use of a shared literal: " ++ show val))
+                  return noUse
+      Inj _ _ w -> uniqueV env g w
+      Tuple vs -> uses (map (uniqueV env g) vs)
+      Pack _ _ w -> uniqueV env g w
+      Context _ k -> ownedV env g k
+      Some w -> uniqueV env g w
+      Null _ -> return noUse
+      Up w -> uniqueV env g w
+      Down _ w -> uniqueV env g w
+      _ -> fail ("unique use of a value that is not unique: " ++ show val)
+
+borrowedV :: Env -> Gamma -> VVal -> L Use
+borrowedV env g val
+  = case val of
+      Var x -> inspect env g x
+      Glob _ _ -> return noUse
+      Lit _ -> return noUse
+      UnitV -> return noUse
+      TyApp v _ -> borrowedV env g v
+      Inj _ _ w -> borrowedV env g w
+      Tuple vs -> uses (map (borrowedV env g) vs)
+      Pack _ _ w -> borrowedV env g w
+      Some w -> borrowedV env g w
+      Null _ -> return noUse
+      Up w -> borrowedV env g w
+      Down _ w -> borrowedV env g w
+      _ -> fail ("borrowed use of a value that is not structural: " ++ show val)
+
+-- closures only have owned parameters
+ownedParams :: AType -> L ()
+ownedParams a = unless (all (== Owned) (modes a)) (fail ("closure with parameters that are not owned: " ++ show a))
+  where
+    modes (AFun ps _) = map fst ps
+    modes (AForall _ t) = modes t
+    modes _ = []
+
+-- expressions
+
+checkE :: Env -> Gamma -> Joins -> Mode -> VExpr -> L Use
+-- the binder is a copy of trivial contents, and an owned read consumes the scalar
+checkE env g js q expr@(Unscalar m z x e)
+  = do t <- liftE (inferVar g z)
+       [[tx]] <- liftE (altTypes env t expr)
+       before ((if owning m then consume else readVar) env g z) (checkE env (bindAll [(x,tx)] g) js q e)
+checkE env g js q expr
+  | Just ds <- destructAOf expr = destructE (liftE (inferVar g (dsScrut ds))) (Var (dsScrut ds)) (dsAlts ds)
+  | Just ds <- destructVOf expr = destructE (V <$> liftE (inferV env g (dsScrut ds))) (dsScrut ds) (dsAlts ds)
+  where
+    destructE infer v alts
+      = do t <- infer
+           tss <- liftE (altTypes env t expr)
+           destruct env g js q (isNull expr) v [(zip xs ts, e) | ((xs,e),ts) <- zip alts tss]
+    isNull e = case e of
+                 IsNull{} -> True
+                 _ -> False
+checkE env g js q expr
+  = case expr of
+      Ret v | q == Unique -> uniqueV env g v
+            | otherwise -> ownedV env g v
+      -- the binder is unique if it is used as unique (and the expression's result is unique)
+      Let x t e1 e2 -> do u2 <- withOwners [(x,Owned)] (checkE env (M.insert x (V t) g) js q e2)
+                          let m = if S.member x (uUnique u2) then Unique else Owned
+                          u1 <- checkE env g M.empty m e1
+                          andThen u1 =<< leave [(x,m) | not (trivialTy env (V t))] u2
+      -- the test consumes the token, and each branch has a new one
+      IfYielding v (k3,e3) (k2,e2)
+        -> do notLiveAcrossYield g [e2,e3]
+              let branchE (k,e) = leave [(k,Owned)] =<< withOwners [(k,Owned)] (checkE env (M.insert k (V VToken) g) js q e)
+              us <- mapM branchE [(k3,e3),(k2,e2)]
+              u <- ownedV env g v
+              andThen u =<< branches us
+      -- control never gets here, so every reference counts as consumed
+      Unreachable _ -> return noUse{ uDiverges = True }
+      Call f _ vs -> do when (q == Unique && resultMode env f /= Unique)
+                          (fail ("unique result of a call to a function without one: " ++ show f))
+                        args [] (paramModes env f (length vs)) vs
+      Jump j _ vs -> case M.lookup j js of
+                     Just (ms,caps) -> args caps ms vs
+                     Nothing -> fail ("jump to unknown join point " ++ show j)
+      -- the captured variables that are not descendants of other captured variables, including those
+      -- of the join points that the body jumps to
+      Join j _ ps e1 e2
+                        -> do let fvs = S.toList (S.union (fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps])
+                                                           (S.fromList [x | (_,cs) <- M.elems (M.restrictKeys js (jumpTargets e1)), (x,_) <- cs]))
+                              let xs = [x | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
+                              u <- local (const (M.fromList (params env ps ++ [(x,Unique) | x <- xs])))
+                                         (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) js q e1)
+                              caps <- concat <$> mapM (captured u) xs
+                              _ <- leave (params env ps ++ caps) u
+                              checkE env g (M.insert j ([m | (_,m,_) <- ps],caps) js) q e2
+      -- bodies, like those of functions, in which only the group is in scope, and whose
+      -- captures (those of all bodies) are borrowed: every jump lends them
+      JoinRec _ ds e
+        -> do let fvs = S.toList (S.unions [S.filter (\y -> not (any (y `within`) [x | (x,_,_) <- ps])) (fvE e1) | JoinDef _ _ ps e1 <- ds])
+                  caps = [(x,Borrowed) | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
+                  group = M.fromList [(j,([m | (_,m,_) <- ps],caps)) | JoinDef j _ ps _ <- ds]
+              forM_ ds $ \(JoinDef _ _ ps e1) -> closed (params env ps ++ caps) (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) group q e1)
+              checkE env g (M.union group js) q e
+      App f vs -> do ft <- liftE (inferVar g f)
+                     case ft of
+                       A a -> ownedParams a
+                       _ -> fail "unboxed function operand"
+                     uses (consume env g f : map (ownedV env g) vs)
+      Gen _ e -> checkE env g M.empty Owned e
+      Drop x e -> before (consume env g x) (checkE env g js q e)
+      Free r e -> before (consume env g r) (checkE env g js q e)
+      Dup x e -> do liftE (inferVar g x >>= checkDupType)
+                    before (dupVar env g x) (checkE env g js q e)
+      -- the test reads the variable without borrowing it, which is unique in the first branch
+      IsUnique x e1 e2 -> do m <- ownerMode x
+                             when (m == Borrowed) (fail ("uniqueness test of a variable that is not owned: " ++ show x))
+                             z <- keyOf x
+                             u1 <- checkE env (uniqueGamma g x) js q e1
+                             u2 <- checkE env g js q e2
+                             before (readVar env g x) (branches [u1{ uUnique = S.delete z (uUnique u1) }, u2])
+      -- the test reads the credit, which is empty in the second branch: the test consumes it there
+      IfFull r e1 e2 -> do u1 <- checkE env g js q e1
+                           u2 <- before (consume env g r) (checkE env g js q e2)
+                           before (readVar env g r) (branches [u1, u2])
+      -- a unique use of `z` that splits it into its contents and its block `z.credit`, which
+      -- the body consumes as children of `z`
+      UnboxRu z e
+        -> do g' <- liftE (unboxRuGamma g z)
+              u <- uniqueName env g z
+              before (return u{ uNet = M.empty }) (checkE env g' js q e)
+      -- a copy of the block of `z`, which only reads the block `z.credit`, as a new root
+      CopyRu z r e
+        -> do g' <- liftE (copyRuGamma g z r)
+              c <- keyOf (child z SCredit)
+              before (return noUse{ uPeak = M.singleton c 1 }) (roots env Owned [(r,g' M.! r)] (checkE env g' js q e))
+      -- the same for an owned box, whose block becomes a cell
+      Lock z e
+        -> do g' <- liftE (lockGamma g z)
+              u <- consume env g z
+              before (return u{ uNet = M.empty }) (checkE env g' js q e)
+      -- appending and copying give a unique context, plugging and memoizing an owned value
+      Append c d -> uses [uniqueV env g c, uniqueV env g d]
+      CtxCopy c -> ownedV env g c
+      CastEv _ _ e -> ownedResult expr >> checkE env g M.empty Owned e
+      -- the region makes its token, which its body consumes
+      Total k e -> do ownedResult expr
+                      leave [(k,Owned)] =<< withOwners [(k,Owned)] (checkE env (M.insert k (V VToken) g) M.empty Owned e)
+      Plug c v -> ownedResult expr >> uses [uniqueV env g c, ownedV env g v]
+      Memoize c _ _ v -> ownedResult expr >> uses [ownedV env g v, ownedV env g c]
+      CaseLit v alts def -> before (borrowedV env g v) (branches =<< mapM (checkE env g js q) (def : map snd alts))
+      _ -> fail "unexpected destructuring form"
+  where
+    ownedResult e = when (q == Unique) (fail ("unique result of an expression without one: " ++ show e))
+    -- owned and unique arguments (and captured variables) first: a borrowed argument must not
+    -- be derived from one of them
+    args caps ms vs = uses ([ownedV env g v | (Owned,v) <- zip ms vs] ++
+                            [consume env g x | (x,Owned) <- caps] ++
+                            [uniqueV env g v | (Unique,v) <- zip ms vs] ++
+                            [uniqueName env g x | (x,Unique) <- caps] ++
+                            [borrowedV env g v | (Borrowed,v) <- zip ms vs] ++
+                            [inspect env g x | (x,Borrowed) <- caps])
+    -- A variable is captured unique if the body uses it as unique (the jump then uses it as
+    -- unique), borrowed if the body does not consume it, and owned otherwise, once for each
+    -- reference that the body consumes, at the children it consumes them (the body may consume
+    -- one child more often than another). (An owned variable that is captured borrowed is not
+    -- consumed by the jump, which its scope then rejects.)
+    captured :: Use -> Path -> L [(Path,Mode)]
+    captured u x
+      = do k <- keyOf x
+           tr <- get
+           let consumed = [(if k `within` p then x else p,n) | (p,n) <- M.toList (refine tr [k] (uNet u)), n > 0, p `within` k || k `within` p]
+           return (if S.member k (uUnique u) then [(x,Unique)]
+                   else if null consumed then [(x,Borrowed)]
+                   else concat [replicate n (p,Owned) | (p,n) <- consumed])
+
+-- No cell is live after a test of the yield flag in any of the expressions `es`.
+notLiveAcrossYield :: Gamma -> [VExpr] -> L ()
+notLiveAcrossYield g es
+  = case [y | y <- S.toList (S.unions (map fvE es)), Just (V VCell{}) <- [M.lookup y g]] of
+      (y:_) -> fail ("cell live across a yield: " ++ show y)
+      [] -> return ()
+
+-- The binders of a destructuring of a variable are its children, which the scrutinee only reads.
+-- The binders of a destructuring of another value are new borrowed roots. In the null branch
+-- of `[is-null]` (`nulls`, the alternative without binders), the variable is the null, which
+-- holds no references, so it is trivial there.
+destruct :: Env -> Gamma -> Joins -> Mode -> Bool -> VVal -> [([(Path,Ty)],VExpr)] -> L Use
+destruct env g js q nulls v alts
+  = case v of
+      Var z -> do zc <- keyOf z
+                  rs <- sequence [alt zc bs e | (bs,e) <- alts]
+                  tr <- get
+                  -- where `z` is trivial, it has as many references as in the other alternatives
+                  u <- case [u | (False,u) <- rs, not (uDiverges u)] of
+                         (u0:_) -> let inside = M.filterWithKey (\p _ -> p `within` zc) . refine tr [zc]
+                                       outside = M.filterWithKey (\p _ -> not (p `within` zc)) . refine tr [zc]
+                                       adopt u = u{ uNet = plus tr (outside (uNet u)) (inside (uNet u0))
+                                                  , uPeak = outside (uPeak u) }
+                                   in branches [if whole then adopt u else u | (whole,u) <- rs]
+                         [] -> branches (map snd rs)
+                  before scrutinee (return u)
+                  where
+                    scrutinee | trivialVar env g z = return noUse
+                              | otherwise = readVar env g z
+                    -- The children of a trivial type need no references. A binder of a trivial type
+                    -- that is all of `z` (see `key`) makes `z` trivial in its alternative.
+                    alt zc bs e
+                      = do let ts = [x | (x,t) <- bs, trivialTy env t]
+                               fields = [(p,fieldsAt p t) | Just (p,t) <- [destructed g z bs]]
+                           modify (\tr -> Children (S.unions [chTrivial tr, S.fromList ts, S.fromList [y | (_,fs) <- fields, (y,_,u) <- fs, trivialTy env (V u)]])
+                                                (M.union (chFields tr) (M.fromList [(p,[y | (y,_,_) <- fs]) | (p,fs@(_:_)) <- fields])))
+                           tr <- get
+                           u <- checkE env (bindAll bs g) js q e
+                           tr' <- get
+                           return (not (trivialVar env g z) && (any ((== zc) . key tr) ts || (nulls && null bs)), u{ uNet = rollUp tr' (uNet u) })
+      -- the binders borrow the variables of the scrutinee for the whole alternative
+      _ -> uses [borrowedV env g v, branches =<< sequence [roots env Borrowed bs (checkE env (bindAll bs g) js q e) | (bs,e) <- alts], borrowedV env g v]

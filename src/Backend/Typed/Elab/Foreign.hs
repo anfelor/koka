@@ -15,7 +15,7 @@ import Data.Char( isSpace )
 import Common.File( normalizeWith )
 import Common.Syntax( BuildType )
 import qualified Core.Core as C
-import Backend.Typed.Syntax
+import Lidar.Syntax
 
 foreignOf :: BuildType -> FilePath -> C.Core -> Foreign
 foreignOf buildType sourceDir core

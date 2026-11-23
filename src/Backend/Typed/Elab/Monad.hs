@@ -22,10 +22,10 @@ import qualified Data.Set as S
 import Common.Name
 import Type.Type( Type )
 import Kind.Newtypes
-import Backend.Typed.Build( K )
-import Backend.Typed.Syntax
+import Lidar.Build( K )
+import Lidar.Syntax
 import Backend.Typed.LidarName( toLidar )
-import Backend.Typed.Types( withToken )
+import Lidar.Types( withToken )
 import Backend.Typed.Elab.TypeInfo
 
 -- `envHoles`: the variables bound to the parts of a constructor context under construction:
