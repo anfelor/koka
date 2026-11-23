@@ -12,26 +12,46 @@
 module Main( main ) where
 
 import qualified Data.Map as M
+import qualified Data.Set as S
+import Control.Monad( unless )
 import System.Environment( getArgs )
 import System.Exit( exitFailure )
 import System.IO( hPutStrLn, stderr )
 import Lidar
 import Lidar.Lean.Dump
-import Lidar.Lean.Decls
+import Lidar.Lean.Elab
 
 usage :: String
 usage = unlines
-  [ "usage: lidar-lean (--print-dump | --print-ir) <dump>"
-  , "  --print-dump   read the dump and print it back"
-  , "  --print-ir     print the datatypes and signatures of the dump in lidar's IR" ]
+  [ "usage: lidar-lean (--print-dump | --print-ir | --check | --print-lowered) <dump>"
+  , "  --print-dump     read the dump and print it back"
+  , "  --print-ir       elaborate the dump and print the IR"
+  , "  --check          elaborate the dump, check it and lower it, and report the errors"
+  , "  --print-lowered  as --check, and print the lowered IR" ]
 
 main :: IO ()
 main = do
   args <- getArgs
   case args of
     ["--print-dump", file] -> readFileDump file >>= putStr . showDump
-    ["--print-ir", file] -> readFileDump file >>= putStrLn . ppr . prettyProgram . printable . program
+    ["--print-ir", file] -> do
+      (prog,errs) <- elabDump <$> readFileDump file
+      putStrLn (ppr (prettyProgram (printable prog)))
+      report [("elab",err) | err <- errs]
+    ["--check", file] -> do
+      (_,errs) <- lower <$> readFileDump file
+      report errs
+    ["--print-lowered", file] -> do
+      (prog,errs) <- lower <$> readFileDump file
+      putStrLn (ppr (prettyProgram (printable prog)))
+      report errs
     _ -> do hPutStrLn stderr usage; exitFailure
+
+-- prints the errors, labeled by the phase that produced them, and fails if there are any
+report :: [(String,String)] -> IO ()
+report errs = do
+  mapM_ (\(l,err) -> hPutStrLn stderr (l ++ ": " ++ err)) errs
+  unless (null errs) exitFailure
 
 readFileDump :: FilePath -> IO Dump
 readFileDump file = do
@@ -40,10 +60,18 @@ readFileDump file = do
     Left err -> do hPutStrLn stderr (file ++ ": " ++ err); exitFailure
     Right d  -> return d
 
-program :: Dump -> Program
-program d
-  = Program (newModuleName (dumpModule d)) (dTypes ds) (dSigs ds) M.empty (Foreign [] [] []) []
-  where ds = declsOf d
+-- The lowered program and the errors, labeled by the phase that produced them: elaboration,
+-- the check after it, and lowering. Lean has no lazy constructors, no FIP annotations and so
+-- no recursive groups to check them in.
+lower :: Dump -> (Program,[(String,String)])
+lower d
+  = (final, [("elab",err) | err <- elabErrs] ++ errs)
+  where
+    (prog,elabErrs) = elabDump d
+    opts = Options{ optReuse = True, optPeephole = True, optLazies = Lazies M.empty S.empty M.empty
+                  , optFips = M.empty, optRecGroups = [] }
+    typeErrs = [("check after elab",err) | err <- checkTypes prog]
+    (final,errs) = if null typeErrs then (\(p,es,_) -> (p,es)) (lowerProgram opts prog) else (prog,typeErrs)
 
 -- lidar prints the datatypes and signatures of the names that the module qualifies. Lean's
 -- names are not qualified by their module, so print all of them.

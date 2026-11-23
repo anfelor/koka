@@ -16,6 +16,7 @@ library
   exposed-modules:
       Lidar.Lean.Decls
       Lidar.Lean.Dump
+      Lidar.Lean.Elab
   other-modules:
       Paths_lidar_lean
   hs-source-dirs:
