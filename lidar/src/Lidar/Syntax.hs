@@ -926,6 +926,14 @@ data VExpr
   -- Writes alternative k into the block of the cell, keeping its reference count, and returns
   -- the block. A strict k is the paper's `memoize`; a thunk k replaces the thunk by another
   -- (Koka's step mode), and the indirection is the paper's `indirect`.
+  --
+  --   data T⟨ā⟩ := L ~> S ∈ Σ    (L ~> S)ₖ[B̄/ā] = Box V    Γ ⊢ v : V
+  --  ──────────────────────────────────────────────────────────── [memoize-ptr]
+  --   Γ, x : T⟨B̄⟩* | J ⊢ memoize x (d (injₖ v)) : T⟨B̄⟩*
+  --
+  -- Only in input programs, before `Passes.Lazy`: Koka's `memoize(x, v)` is the indirection
+  -- to v written over the lazy value x under evaluation. `Passes.Lazy` makes x a cell, and
+  -- `CheckLinear` (after it) rejects this rule.
   | Memoize VVal Side Int VVal
 
   --   j : Γ_c; ∀ā. (q̄ V̄) -> W ∈ J    Γᵢ ⊢ vᵢ :qᵢ Vᵢ[B̄/ā]

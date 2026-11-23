@@ -199,17 +199,19 @@ inferExpr env g js expr
                         VCtx _ _ _ -> return t
                         _ -> Left ("unsharing a non-context: " ++ ppr t)
       Memoize c d k v -> do tc <- inferV env g c
-                            case tc of
-                              VCell n a -> do (l,ss) <- lazySides env a
-                                              s <- case lookup k (case d of Whnf -> ss; Delay -> l) of
-                                                     Just (ABox s) -> return s
-                                                     _ -> Left ("memoizing alternative " ++ show k ++ " of " ++ ppr (A a) ++ ", which is not a box on its side")
-                                              checkV env g v s
-                                              noHeapCredit s
-                                              m <- reuseSize s
-                                              unless (m <= n) (Left ("memoizing " ++ show m ++ " bytes in a cell of " ++ show n ++ " bytes"))
-                                              return (VPtr a)
-                              _ -> Left ("memoizing into a non-cell: " ++ ppr tc)
+                            (a,size) <- case tc of
+                                          VCell n a -> return (a,Just n)
+                                          VPtr a -> return (a,Nothing)   -- `[memoize-ptr]`
+                                          _ -> Left ("memoizing into a non-cell: " ++ ppr tc)
+                            (l,ss) <- lazySides env a
+                            s <- case lookup k (case d of Whnf -> ss; Delay -> l) of
+                                   Just (ABox s) -> return s
+                                   _ -> Left ("memoizing alternative " ++ show k ++ " of " ++ ppr (A a) ++ ", which is not a box on its side")
+                            checkV env g v s
+                            noHeapCredit s
+                            m <- reuseSize s
+                            forM_ size (\n -> unless (m <= n) (Left ("memoizing " ++ show m ++ " bytes in a cell of " ++ show n ++ " bytes")))
+                            return (VPtr a)
       Gen tvs e -> do unbound tvs (ftvCtx g e)
                       t <- inferE env (M.filter (not . tokenTy) g) noJoins e
                       case t of

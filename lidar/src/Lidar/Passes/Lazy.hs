@@ -13,18 +13,18 @@
   value under evaluation `@lazy : T⟨B̄⟩*` around:
   - `T/lazy-eval-locked(@lazy, recurse)` matches on `@lazy` and passes it on to `T/lazy-C`
     in the branch of each lazy constructor `C` other than the indirection;
-  - `T/lazy-C(@lazy, recurse, fields)` starts with `memoize-target(@lazy, size, scan)` and
-    ends every branch in `memoize(@lazy, v)` or, where Koka's sizes allow it, in a call
+  - `T/lazy-C(@lazy, recurse, fields)` ends every branch in `memoize(@lazy, v)`, which
+    elaboration makes an indirection to v (`memoize @lazy (delay (inj_ind v))`, by
+    `[memoize-ptr]`), or, where Koka's sizes allow it, in a call
     `T/lazy-C'(@lazy, recurse, fields')`.
   Here the lazy value becomes a cell (`[lock]`): `lazy-eval-locked` locks it in the branch
   of each such constructor (on the `delay` side of its match, see `FromCore.lazyCase`), and
   every `lazy-C` takes it as a cell `cell_|V_C|⟨T⟨ā⟩⟩`. An
   expression in the scope of a cell `c : cell_n⟨T⟨B̄⟩⟩` must consume it:
-  - `memoize-target(c, …)` is deleted;
-  - `memoize(c, K(v))` writes K over the cell (`[memoize]`, on its side of the lazy sum) if K
-    is a box with `|V_K| ≤ n`,
-    and otherwise, like `memoize(c, v)` of any other value, it becomes an indirection to the
-    value (`indirect`);
+  - the indirection to `K(v)` (`memoize c (delay (inj_ind K(v)))`) writes K over the cell
+    (`[memoize]`, on its side of the lazy sum) if K is a box with `|V_K| ≤ n`, and otherwise,
+    like the indirection to any other value, frees the cell or writes the indirection over it
+    (`indirect`);
   - a call `lazy-C'(c, recurse, v̄)` passes the cell on if `|V_C'| ≤ n` (by our sizes, which
     may differ from Koka's), and otherwise becomes an indirection to a new thunk `C'(v̄)`,
     which `lazy-whnf` goes on to evaluate;
@@ -32,7 +32,7 @@
     smallest size passed (Koka inlines `lazy-C` into `lazy-eval-locked` as a join point);
   - a branch without the cell is the thunks of a match on a forced value, which are
     `unreachable` (`[unreachable]` consumes the cell).
-  Any other use of a cell, and any other use of `memoize`, is an error. The functions are
+  Any other use of a cell is an error (and `CheckLinear` rejects any other `memoize`). The functions are
   found by `Kind.Infer`'s naming (`lazyName`). `Paths` has already named the binders of a lock
   as `[lock]` requires: the box `y.roll.delay.injⱼ` of the lazy value `y`, and its contents
   `y.roll.delay.injⱼ.contents`. Elaboration has made Koka's tests of WHNF `[if-whnf]`
@@ -44,7 +44,6 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
 import Lidar.Name
-import Lidar.Prim( nameLazyMemoize, nameLazyMemoizeTarget )
 import Lidar.Syntax
 import Lidar.Build( prodVal, padFields )
 import Lidar.Passes.Common( NameSupply, freshFor, freshPathFrom, perDef, substE )
@@ -84,15 +83,12 @@ lazyDef def
          DefFun{ defName = f, defArgs = (x,m,t):ps, defBody = body }
            | Just (_,n,_) <- M.lookup f (lzCons lazies)
            -> case t of
-                VPtr a | targets x body -> (\body' -> def{ defArgs = (x,m,VCell n a):ps, defBody = body' }) <$> cellE (M.singleton x (n,a)) body
-                _ -> fail ("a lazy constructor function without a memoization target: " ++ show x)
+                VPtr a@(ACon tc _) | M.member tc (lzIndirect lazies)
+                  -> (\body' -> def{ defArgs = (x,m,VCell n a):ps, defBody = body' }) <$> cellE (M.singleton x (n,a)) body
+                _ -> fail ("a lazy constructor function whose first parameter is not a lazy value: " ++ show x)
            | S.member f (lzLocked lazies), VPtr a <- t
            -> (\body' -> def{ defBody = body' }) <$> local (\le -> le{ leLocked = Just (x,a) }) (cellE M.empty body)
          _ -> (\body -> def{ defBody = body }) <$> cellE M.empty (defBody def)
-  where
-    targets x body = case body of
-                       Let _ _ (Call g _ (Var y : _)) _ -> g == nameLazyMemoizeTarget && y == x
-                       _ -> False
 
 -- An expression that consumes the cells `cs` (see the top).
 cellE :: Cells -> VExpr -> L VExpr
@@ -118,19 +114,17 @@ cellE cs expr
                  alts' <- mapM lockAlt alts
                  def' <- traverse (\(u,e) -> (,) u <$> cellE cs e) def
                  return (Deref (Var x) y (Unroll y z (IfWhnf z (s,e1') (l,CaseA l alts' def'))))
-         Let _ _ (Call f _ (Var c : _)) e
-           | f == nameLazyMemoizeTarget, M.member c cs -> cellE cs e
-         Call f _ [Var c, v]
-           | f == nameLazyMemoize, Just (n,a) <- M.lookup c cs, M.size cs == 1, S.notMember c (fvV v)
-           -> cellV v >>= memoize c n a
+         Memoize (Var c) Delay i v
+           | Just (n,a) <- M.lookup c cs, M.size cs == 1, S.notMember c (fvV v)
+           -> do ind <- indirectOf a
+                 if i == ind then cellV v >>= memoize c n a
+                   else fail ("memoizing alternative " ++ show i ++ " of a value under evaluation, which is not the indirection")
          Call f ts (Var c : vs)
            | Just (k,m,fs) <- M.lookup f cons, Just (n,a) <- M.lookup c cs, M.size cs == 1, S.notMember c (S.unions (map fvV vs))
            -> do vs' <- mapM cellV vs
                  if m <= n then return (Call f ts (Var c : vs'))
                    else do con <- conValue a k (padFields fs (drop 1 vs'))   -- without `recurse`
                            indirect c a con
-         Call f _ _
-           | f == nameLazyMemoize || f == nameLazyMemoizeTarget -> fail "memoization of a value that is not under evaluation"
          Jump j ts vs
            -> do let passed = [(i,c) | (i,Var c) <- zip [0..] vs, M.member c cs]
                  if length passed /= M.size cs || not (S.disjoint (M.keysSet cs) (S.unions [fvV v | (i,v) <- zip [0..] vs, i `notElem` map fst passed]))
@@ -173,7 +167,7 @@ lock (x,n,a) b e
 cellV :: VVal -> L VVal
 cellV = lamsV (\_ _ -> cellE M.empty)
 
--- `memoize(c, v)`: write the constructor of `v` over the cell if it fits
+-- the indirection to `v` in the cell `c`: write the constructor of `v` over the cell if it fits
 memoize :: Path -> Int -> AType -> VVal -> L VExpr
 memoize c n a v
   = do (thunks,strict) <- sidesOf a

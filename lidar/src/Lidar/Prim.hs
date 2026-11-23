@@ -11,7 +11,6 @@
 -}
 module Lidar.Prim
   ( nameTpInt, nameTpString
-  , nameLazyMemoize, nameLazyMemoizeTarget
   ) where
 
 import Lidar.Name
@@ -25,7 +24,3 @@ coreTypesName s = qualify nameCoreTypes (newName s)
 nameTpInt, nameTpString :: Name
 nameTpInt    = coreTypesName "int"
 nameTpString = coreTypesName "string"
-
-nameLazyMemoize, nameLazyMemoizeTarget :: Name
-nameLazyMemoize       = newQualified "std/core/lazy" "memoize"
-nameLazyMemoizeTarget = newQualified "std/core/lazy" "memoize-target"

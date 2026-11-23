@@ -536,7 +536,11 @@ checkE env g js q expr
       Total k e -> do ownedResult expr
                       leave [(k,Owned)] =<< withOwners [(k,Owned)] (checkE env (M.insert k (V VToken) g) M.empty Owned e)
       Plug c v -> ownedResult expr >> uses [uniqueV env g c, ownedV env g v]
-      Memoize c _ _ v -> ownedResult expr >> uses [ownedV env g v, ownedV env g c]
+      -- after `Passes.Lazy`, only a cell is memoized (not `[memoize-ptr]`)
+      Memoize c _ _ v -> do tc <- liftE (inferV env g c)
+                            case tc of
+                              VCell{} -> ownedResult expr >> uses [ownedV env g v, ownedV env g c]
+                              _ -> fail ("memoizing into a non-cell: " ++ show c)
       CaseLit v alts def -> before (borrowedV env g v) (branches =<< mapM (checkE env g js q) (def : map snd alts))
       _ -> fail "unexpected destructuring form"
   where

@@ -23,7 +23,7 @@ import Lidar.Syntax
 import Backend.Typed.LidarName( toLidar )
 import Lidar.Env( Env(..), Lazies(..), reuseSize, lazySides )
 import Lidar.Traversal( descendAll, fvE )
-import Backend.Typed.Elab.TypeInfo( conFieldTypes )
+import Backend.Typed.Elab.TypeInfo( conFieldTypes, lazyIndirectTag )
 import Backend.Typed.Elab.Monad( E, fresh )
 
 lazyFuns :: Newtypes -> TypeDefs -> Lazies
@@ -34,7 +34,7 @@ lazyFuns nt tdefs
                        , Just (ABox s) <- [lookup tag thunks], Right n <- [reuseSize s]
                        , Right fs <- [conFieldTypes nt (map AVar tvs) con]])
            (S.fromList [funName info "eval-locked" | (info,_,_) <- infos])
-           (M.fromList [(toLidar (dataInfoName info), tag) | (info,_,_) <- infos, (tag,con) <- cons info, isLazyIndirectConName (conInfoName con)])
+           (M.fromList [(toLidar (dataInfoName info), tag) | (info,_,_) <- infos, Just tag <- [lazyIndirectTag info]])
   where
     env = Env tdefs M.empty M.empty
     cons info = zip [1..] (dataInfoConstrs info)   -- tags start at 1

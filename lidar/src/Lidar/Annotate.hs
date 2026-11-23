@@ -146,7 +146,7 @@ annE c expr w
                       _ -> unknown ("appending contexts of unknown types at " ++ ppr w) expr
       CtxCopy k -> CtxCopy <$> maybe (checkV c k w) snd (synthV c k)
       Memoize k d i v -> case synthV c k of
-                           Just (VCell _ a, mk) | Right (l,s) <- lazySides env a, Just (ABox t) <- lookup i (case d of { Whnf -> s; Delay -> l })
+                           Just (tk, mk) | Just a <- target tk, Right (l,s) <- lazySides env a, Just (ABox t) <- lookup i (case d of { Whnf -> s; Delay -> l })
                              -> Memoize <$> mk <*> pure d <*> pure i <*> checkV c v t
                            _ -> unknown ("memoizing into " ++ ppr k ++ " of an unknown type") expr
       -- destructurings, handled above
@@ -154,6 +154,11 @@ annE c expr w
   where
     env = ctxEnv c
     gamma = ctxGamma c
+    -- a cell, or a pointer (`[memoize-ptr]`)
+    target t = case t of
+                 VCell _ a -> Just a
+                 VPtr a -> Just a
+                 _ -> Nothing
     within q e = case q of
                    Right g -> annE c{ ctxGamma = g } e w
                    Left err -> unknown err () >> annE c e w

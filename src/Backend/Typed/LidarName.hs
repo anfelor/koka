@@ -28,8 +28,6 @@ namePairs :: [(Name,L.Name)]
 namePairs
   = [ (K.nameTpInt, L.nameTpInt)
     , (K.nameTpString, L.nameTpString)
-    , (K.nameLazyMemoize, L.nameLazyMemoize)
-    , (K.nameLazyMemoizeTarget, L.nameLazyMemoizeTarget)
     , (newHiddenName "x", L.newHiddenName "x")
     , (makeHiddenName "loop" (newName "f"), L.makeHiddenName "loop" (L.newName "f"))
     , (newLocallyQualified "std/core" "int" "+", L.newLocallyQualified "std/core" "int" "+")

@@ -17,7 +17,7 @@ import Control.Monad( foldM, unless )
 import Control.Monad.Reader( local )
 import Common.Name
 import Common.NamePrim( nameCoreHnd, nameFieldAddrOf, nameCCtxHoleCreate, nameCCtxCreate, nameCCtxExtend, nameCCtxApply, nameCCtxEmpty, nameCCtxCompose, nameCCtxComposeExtend
-                      , nameYielding, nameTrue, nameFalse, nameEffectOpen )
+                      , nameYielding, nameTrue, nameFalse, nameEffectOpen, nameLazyMemoize, nameLazyMemoizeTarget )
 import Common.Syntax( isDefFun, ParamInfo(..) )
 import qualified Common.Syntax as Syntax
 import Kind.Newtypes
@@ -274,6 +274,9 @@ elabJoin expr
               (_,token) <- joinToken
               (kt,tv) <- takeTokenIf (isJust token)
               return (compose ks (kt (Jump (toLidar j) tys' (vs ++ tv))))
+      -- `memoize-target(x, size, scan-size)` only informs Koka's C backend
+      C.Let (C.DefNonRec (C.Def{ C.defExpr = C.App f _ }) : dgs) body | isPrim nameLazyMemoizeTarget f
+        -> elabTail (C.Let dgs body)
       C.Let (C.DefNonRec def : dgs) body
         -> elabLet def (C.Let dgs body)
       C.Let (C.DefRec defs : _) _
@@ -535,6 +538,15 @@ elabApp f args resTp
                                          return (kc (kd (Append c' d')))) ts t args
   | any (`isPrim` f) [nameCCtxHoleCreate, nameFieldAddrOf]
   = failE "a hole outside of a context"
+  -- `memoize(x, v)` writes an indirection to `v` over the lazy value `x` under evaluation
+  -- (`[memoize-ptr]`; `Passes.Lazy` makes `x` a cell)
+  | isPrim nameLazyMemoize f, [x,v] <- args
+  = do (info,_) <- dataArgs (typeOf x)
+       ind <- maybe (failE ("memoizing a value that is not lazy: " ++ show (typeOf x))) return (lazyIndirectTag info)
+       t <- vt (typeOf x)
+       (kx,x') <- elabValAt t x
+       (kv,v') <- elabValAt t v
+       atResult resTp (kx (kv (Memoize x' Delay ind v')))
   -- extends with the hole of a context that may be shared, without copying its path
   | isPrim nameCCtxComposeExtend f
   = failE "unsupported context primitive: @cctx-compose-extend"

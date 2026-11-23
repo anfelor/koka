@@ -12,13 +12,14 @@ module Backend.Typed.Elab.TypeInfo( Tr
                                   , elabType, elabFunType, elabScheme, needsToken
                                   , isValueInfo, elabArgs
                                   , conIndex, conFieldTypes, conFieldNames, schemeFieldTypes, conCount, conShape, conExists
-                                  , isLazyInfo, refShape, refInj
+                                  , isLazyInfo, lazyIndirectTag, refShape, refInj
                                   , dataInfoOf, valueBody, valueDecl, kType
                                   , tvarStar
                                   ) where
 
 import qualified Data.Map as M
 import Data.List( elemIndex )
+import Data.Maybe( isJust )
 import Common.Name
 import Common.NamePrim
 import Common.Syntax( dataDefIsValue )
@@ -254,7 +255,11 @@ conShape nt vargs con
 
 -- a lazy datatype has an indirection among its constructors
 isLazyInfo :: DataInfo -> Bool
-isLazyInfo info = any (isLazyIndirectConName . conInfoName) (dataInfoConstrs info)
+isLazyInfo = isJust . lazyIndirectTag
+
+-- the tag of the indirection of a lazy datatype (tags start at 1)
+lazyIndirectTag :: DataInfo -> Maybe Int
+lazyIndirectTag info = lookup True [(isLazyIndirectConName (conInfoName con), tag) | (tag,con) <- zip [1..] (dataInfoConstrs info)]
 
 -- The unrolling of a reference datatype, given the shapes of its constructors: their sum by
 -- tag, or for a lazy datatype the lazy sum `L ~> S` of its thunks (the lazy constructors) and
