@@ -51,6 +51,7 @@ library
       Backend.Typed.Elab.Types
       Backend.Typed.Env
       Backend.Typed.Layout
+      Backend.Typed.LidarName
       Backend.Typed.Parse
       Backend.Typed.Passes.Anf
       Backend.Typed.Passes.CheckFip

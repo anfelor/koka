@@ -16,6 +16,9 @@ build-type:     Simple
 library
   exposed-modules:
       Lidar
+      Lidar.Name
+      Lidar.PPrint
+      Lidar.Prim
   other-modules:
       Paths_lidar
   hs-source-dirs:

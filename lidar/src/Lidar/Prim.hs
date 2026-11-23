@@ -1,0 +1,49 @@
+-----------------------------------------------------------------------------
+-- Copyright 2026, Microsoft Research, Daan Leijen, Anton Lorenzen.
+--
+-- This is free software; you can redistribute it and/or modify it under the
+-- terms of the Apache License, Version 2.0. A copy of the License can be
+-- found in the LICENSE file at the root of this distribution.
+-----------------------------------------------------------------------------
+{- The names of Koka's runtime that the typed IR and its passes recognise.
+
+  Each is defined exactly as in Koka's `Common.NamePrim`.
+-}
+module Lidar.Prim
+  ( nameCoreHnd, nameCoreDebug
+  , nameTpAny, nameTpInt, nameTpString, nameTpReuse
+  , nameYielding, nameYieldExtend, nameOpenNone
+  , namePatternMatchError
+  , nameLazyMemoize, nameLazyMemoizeTarget
+  ) where
+
+import Lidar.Name
+
+nameCoreHnd, nameCoreDebug, nameCoreTypes :: Name
+nameCoreHnd   = newModuleName "std/core/hnd"
+nameCoreDebug = newModuleName "std/core/debug"
+nameCoreTypes = newModuleName "std/core/types"
+
+coreTypesName, coreHndName :: String -> Name
+coreTypesName s = qualify nameCoreTypes (newName s)
+coreHndName s   = qualify nameCoreHnd (newName s)
+
+nameTpAny, nameTpInt, nameTpString, nameTpReuse :: Name
+nameTpAny    = coreTypesName "any"
+nameTpInt    = coreTypesName "int"
+nameTpString = coreTypesName "string"
+nameTpReuse  = coreTypesName "@reuse"
+
+nameYielding, nameYieldExtend :: Name
+nameYielding    = coreHndName "yielding"
+nameYieldExtend = coreHndName "yield-extend"
+
+nameOpenNone :: Int -> Name
+nameOpenNone i = coreHndName ("@open-none" ++ show i)
+
+namePatternMatchError :: Name
+namePatternMatchError = newQualified "std/core/exn" "error-pattern"
+
+nameLazyMemoize, nameLazyMemoizeTarget :: Name
+nameLazyMemoize       = newQualified "std/core/lazy" "memoize"
+nameLazyMemoizeTarget = newQualified "std/core/lazy" "memoize-target"

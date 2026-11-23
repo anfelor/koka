@@ -13,6 +13,7 @@ import Data.List( nubBy )
 import Data.Function( on )
 import qualified Data.Map as M
 import qualified Data.Set as S
+import Common.Failure( assertion )
 import Common.Unique
 import Common.Name
 import Common.Syntax( Fip )
@@ -20,6 +21,7 @@ import qualified Common.Syntax as Syntax
 import Kind.Newtypes
 import qualified Core.Core as C
 import Backend.Typed.Syntax
+import Backend.Typed.LidarName( lidarNamesAgree )
 import Backend.Typed.Passes.Contify( contifyProgram )
 import Backend.Typed.Elab.Match( matchCore )
 import Backend.Typed.Passes.Anf( anfProgram )
@@ -48,7 +50,8 @@ import Backend.Typed.Passes.CheckFip( checkFip )
 -- returns the lowered program, its errors and its warnings, labeled by the phase that produced them
 typedFromCore :: Bool -> Newtypes -> Foreign -> [C.Core] -> Int -> C.Core -> (Program,[(String,String)],[(String,String)])
 typedFromCore enableReuse nt ffi imports uniq core
-  = let (acore,_)              = runUnique uniq (matchCore nt core)
+  = assertion "Backend.Typed.Typed: lidar names differ from Koka's" lidarNamesAgree $
+    let (acore,_)              = runUnique uniq (matchCore nt core)
         (eprog,elabErrs,notes) = elabProgram nt ffi imports acore
         lazies                 = lazyFuns nt (progTypes eprog)
         pipeline               =
