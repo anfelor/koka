@@ -36,7 +36,7 @@
   scalars and globals are not counted. The frontend checks a function before its monadic
   translation, so the paths on which an effect yields (`[if-yielding]`) are not taken either;
   the evidence operations that open effects are `fip` externs. Neither are paths that
-  end in a pattern match failure.
+  end in `unreachable`.
 -}
 module Lidar.Passes.CheckFip( checkFip ) where
 
@@ -46,7 +46,7 @@ import Data.List( nub, intercalate )
 import Data.Functor.Const( Const(..) )
 import Control.Monad( unless, when )
 import Lidar.Name
-import Lidar.Prim( nameTpInt, namePatternMatchError )
+import Lidar.Prim( nameTpInt )
 import Lidar.Syntax
 import Lidar.Traversal( descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsScrut, canonical, within )
 import Lidar.Pretty( ppr )
@@ -329,12 +329,10 @@ fipE expr
 alivePaths :: F (VExpr -> Bool)
 alivePaths = asks (\fe -> not . fails (fFailing fe))
 
--- every path of an expression ends in a pattern match failure (or is unreachable), given the
--- join points whose bodies fail
+-- every path of an expression ends in `unreachable`, given the join points whose bodies fail
 fails :: S.Set Name -> VExpr -> Bool
 fails failing expr
   = case expr of
-      Call f _ _ -> f == namePatternMatchError
       Unreachable _ -> True
       Jump j _ _ -> S.member j failing
       Let _ _ e1 e2 -> fails failing e1 || fails failing e2

@@ -1,0 +1,3 @@
+typed fip after reuse: cgen/fip-unreachable/swap-head-partial: fip fun: dropping xs@deref@roll@Cons causes deallocation
+typed fip after reuse: cgen/fip-unreachable/swap-head-partial: fip fun: calling a non-fip function: std/core/exn/error-pattern
+typed fip after match: cgen/fip-unreachable/swap-head-partial: fip fun: dropping xs@deref@roll@hi@Cons causes deallocation

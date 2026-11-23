@@ -30,7 +30,6 @@ namePairs
     , (K.nameTpInt, L.nameTpInt)
     , (K.nameTpString, L.nameTpString)
     , (K.nameYieldExtend, L.nameYieldExtend)
-    , (K.namePatternMatchError, L.namePatternMatchError)
     , (K.nameLazyMemoize, L.nameLazyMemoize)
     , (K.nameLazyMemoizeTarget, L.nameLazyMemoizeTarget)
     , (newHiddenName "x", L.newHiddenName "x")
