@@ -33,7 +33,7 @@ module Common.NamePrim
           , nameAssert
 
           , nameUnit
-          , nameReturn, nameTrace, nameLog
+          , nameReturn, nameTrace, nameLog, nameUnreachableFun
           , nameEffectOpen
           , nameToAny
           , nameBind, nameBind2
@@ -256,6 +256,7 @@ nameTpList      = coreTypesName "list"
 nameAssert      = qualify nameCoreDebug (newName "assert")
 nameTrace       = qualify nameCoreDebug (newName "trace")
 nameLog         = qualify nameCoreDebug (newName "log")
+nameUnreachableFun = qualify nameCoreDebug (newName "unreachable")
 
 nameCoreFileFile   = qualify nameCoreDebug (newLocallyQualified "" "file" "kk-file")
 nameCoreFileLine   = qualify nameCoreDebug (newLocallyQualified "" "file" "kk-line")

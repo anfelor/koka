@@ -29,7 +29,7 @@ module Backend.Typed.Elab.Match( matchCore ) where
 import Data.List( nubBy, findIndex, partition )
 import qualified Data.Set as S
 import Common.Name
-import Common.NamePrim( nameYielding )
+import Common.NamePrim( nameYielding, nameUnreachableFun )
 import Backend.Typed.Elab.Common( nameUnreachable, isJoinName, isPrim )
 import Common.Unique
 import Kind.Newtypes( Newtypes, newtypesLookupAny )
@@ -60,6 +60,8 @@ matchExpr :: Newtypes -> Expr -> Unique Expr
 matchExpr nt expr
   = case expr of
       Lam pars eff body -> Lam pars eff <$> go body
+      -- a call of the library's `unreachable` is elaborated to the IR's `unreachable`
+      App f [] | isPrim nameUnreachableFun f -> return (unreachable (typeOf expr))
       App f args        -> App <$> go f <*> mapM go args
       TypeLam tvs e     -> TypeLam tvs <$> go e
       TypeApp e tps     -> (\e' -> TypeApp e' tps) <$> go e
