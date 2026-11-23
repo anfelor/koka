@@ -11,8 +11,9 @@
 {- C code generation from the typed IR (after Perceus).
 
   Unboxed types are represented as described in `Layout`. A boxed sum is a `kk_box_t`:
-  the alternative with index `i` of a sum has tag `i`; unit alternatives are singletons and
-  boxes are heap blocks. Externals are called with their Koka C types and their arguments are converted.
+  the alternative with index `i` of a sum has kklib's tag `kkTag i`; unit alternatives are
+  singletons and boxes are heap blocks. Externals are called with their Koka C types and their
+  arguments are converted.
 
   The C code is a `Doc`: string literals are documents, and a list of documents is a list of statements.
 -}
@@ -23,7 +24,7 @@ import qualified Data.Set as S
 import Data.List( intercalate, sortOn )
 import Data.Maybe( fromMaybe, isJust )
 import qualified Numeric
-import Control.Monad( forM )
+import Control.Monad( forM, when )
 import Lib.PPrint( Doc, text, string, int, integer, empty, isEmptyDoc, line, nest, align, vcat, hcat, hsep, punctuate, (<.>), (<+>), (<->) )
 import qualified Common.Name as K
 import Common.NamePrim( nameInt32, nameInternalInt32, nameInt64, nameSSizeT, nameInternalSSizeT, nameIntPtrT, nameByte )
@@ -79,9 +80,9 @@ emitDecl d = modify (\st -> st{ stDecls = stDecls st ++ [d], stLocal = True })
 localName :: Path -> Doc
 localName (Path x ss) = text ("x_" ++ encode (show x) ++ concat ["_p_" ++ encode (stepName s) | s <- ss])
   where
-    -- by tag, as paths compare
+    -- by index, as paths compare (a boxed alternative by kklib's tag)
     stepName s = case s of
-                   SInjA i _ -> "inj" ++ show i
+                   SInjA i _ -> "inj" ++ show (kkTag i)
                    SInjV i _ -> "inj" ++ show i
                    SField i _ -> "field" ++ show i
                    _ -> show s
@@ -352,15 +353,15 @@ holeMember cx ct v
                  _ -> return (i,Just v)
 
 -- Injections only contain construction forms, so their tag can be passed down to
--- the allocation; a box or unit outside a sum has tag 1.
+-- the allocation; a box or unit outside a sum has index 0.
 genA :: Ctx -> AVal -> G Doc
-genA cx = genAIn cx 1
+genA cx = genAIn cx 0
 
 genAIn :: Ctx -> Int -> AVal -> G Doc
 genAIn cx tag val
   = case val of
       Fun f -> staticFun f
-      UnitA -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" <.> int tag <.> "))")
+      UnitA -> return ("kk_datatype_box(kk_datatype_from_tag((kk_tag_t)" <.> int (kkTag tag) <.> "))")
       Roll _ v -> genAIn cx tag v
       InjA i (ASum _) v -> genAIn cx i v
       InjA _ _ _ -> failG "injection into a non-sum"
@@ -446,9 +447,9 @@ genBox cx tag at v
        let scan = int (scanOf ct)
            path = fromMaybe "0" cpath
            box  = "kt_box_from_block(&" <.> x <.> "->_block,_ctx)"
-           allocAt r = "kk_block_alloc_at_as(" <.> bt <.> "," <.> r <.> "," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
+           allocAt r = "kk_block_alloc_at_as(" <.> bt <.> "," <.> r <.> "," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int (kkTag tag) <.> ",_ctx)"
            allocFresh = case cpath of
-                          Nothing -> "kk_block_alloc_as(" <.> bt <.> "," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
+                          Nothing -> "kk_block_alloc_as(" <.> bt <.> "," <.> scan <.> ",(kk_tag_t)" <.> int (kkTag tag) <.> ",_ctx)"
                           Just _ -> allocAt "kk_reuse_null"
            setPath = maybe empty (\i -> x <.> "->_block.header._field_idx =" <+> i <.> ";") cpath
            store = do y <- fresh "p"
@@ -467,7 +468,7 @@ genBox cx tag at v
                                    writes matches = [x <.> "->p" <.> field i <+> "=" <+> y <.> field i <.> ";"
                                                     | (i,same) <- zip [0..] matches, not same]
                                    setTag k | k == Just tag = empty
-                                            | otherwise = x <.> "->_block.header.tag = (kk_tag_t)" <.> int tag <.> ";"
+                                            | otherwise = x <.> "->_block.header.tag = (kk_tag_t)" <.> int (kkTag tag) <.> ";"
                                    setScan oldScan | oldScan == scanOf ct = empty
                                                    | otherwise = x <.> "->_block.header.scan_fsize =" <+> int (scanOf ct) <.> ";"
                                    -- A described credit is a unique block of its described payload,
@@ -475,7 +476,7 @@ genBox cx tag at v
                                    -- and only the fields that change are stored. Dups still run, in `y`.
                                    update = case keptLeaves rt t v of
                                               Just (k,oldScan,matches) -> [setTag k, setScan oldScan, setPath] ++ writes matches
-                                              Nothing -> ("kk_block_init(&" <.> x <.> "->_block,sizeof(" <.> bt <.> ")," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int tag <.> ");")
+                                              Nothing -> ("kk_block_init(&" <.> x <.> "->_block,sizeof(" <.> bt <.> ")," <.> scan <.> "," <.> path <.> ",(kk_tag_t)" <.> int (kkTag tag) <.> ");")
                                                          : storeFrom ct x y
                                return (stmtExpr ([check, cty ct <+> y <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> localName r <.> ";"]
                                                  ++ update) box)
@@ -484,7 +485,7 @@ genBox cx tag at v
                                return (stmtExpr ([check, bt <.> "*" <+> x <+> "=" <+> allocAt (localName r) <.> ";"] ++ s) box)
          In y  -> do v <- fresh "v"
                      ye <- genV cx y
-                     let clear = "kt_block_clear(kt_box_as_ptr(" <.> ye <.> ",_ctx)," <.> scan <.> ",(kk_tag_t)" <.> int tag <.> ",_ctx)"
+                     let clear = "kt_block_clear(kt_box_as_ptr(" <.> ye <.> ",_ctx)," <.> scan <.> ",(kk_tag_t)" <.> int (kkTag tag) <.> ",_ctx)"
                      return (stmtExpr ([cty ct <+> v <+> "=" <+> e <.> ";", bt <.> "*" <+> x <+> "= (" <.> bt <.> "*)" <.> clear <.> ";",
                                         setPath] ++ storeFrom ct x v) box)
 
@@ -572,7 +573,7 @@ genCopyRu cx dest z r e
        x <- fresh "copy"
        s <- genE cx{ cxGamma = g' } dest e
        let old = "((" <.> bt <.> "*)kt_box_as_ptr(" <.> localName z <.> ",_ctx))"
-       return ([bt <.> "*" <+> x <+> "= kk_block_alloc_as(" <.> bt <.> "," <.> int (scanOf ct) <.> ",(kk_tag_t)" <.> int (boxTag z) <.> ",_ctx);",
+       return ([bt <.> "*" <+> x <+> "= kk_block_alloc_as(" <.> bt <.> "," <.> int (scanOf ct) <.> ",(kk_tag_t)" <.> int (kkTag (boxTag z)) <.> ",_ctx);",
                 copyPayload ct x old,
                 declare "kk_reuse_t" r ("&" <.> x <.> "->_block")] ++ s)
   where
@@ -943,14 +944,18 @@ genE cx dest expr
       _ | Just (tests,failure) <- conjunction expr
         -> genConjunction cx dest tests failure
       SplitA{} -> failG "a split is a conjunction"
-      -- the strict tags come before the thunks, and only strict alternatives are immediate
+      -- kklib's test needs the strict alternatives before the thunks, and only strict
+      -- alternatives are immediate
       IfWhnf v (x,e1) (y,e2)
         -> do t <- tyOfName cx v
               [[ts@(A (ASum ss))],[tl@(A (ASum ls))]] <- liftC (altTypes (cxEnv cx) t expr)
               let ve = localName v
                   immediate = or [True | (_,AUnit) <- ss]
+                  firstThunk = minimum (map fst ls)
                   test = (if immediate then "kk_datatype_is_whnf" else "kk_datatype_ptr_is_whnf")
-                         <.> "(kk_datatype_unbox(" <.> ve <.> ")," <.> int (minimum (map fst ls)) <.> ",_ctx)"
+                         <.> "(kk_datatype_unbox(" <.> ve <.> ")," <.> int (kkTag firstThunk) <.> ",_ctx)"
+              when (maximum (map fst ss) > firstThunk)
+                (failG ("the strict alternatives of a lazy sum must come before its thunks: " ++ show v))
               s1 <- genSumBranch cx dest v x ts e1
               s2 <- genSumBranch cx dest v y tl e2
               return [ifChain [("kk_likely(" <.> test <.> ")",s1)] s2]
@@ -961,7 +966,7 @@ genE cx dest expr
               brs <- forM (zip alts tss) $ \((i,x,e),ts) -> do
                 [ti] <- return ts
                 body <- genSumBranch cx dest v x ti e
-                return ([i],body)
+                return ([kkTag i],body)
               fallback <- case (def, drop (length alts) tss) of
                             (Just (x,e), [[td]]) -> Just <$> genSumBranch cx dest v x td e
                             _ -> return Nothing
@@ -1116,7 +1121,7 @@ twoWay cx expr
         -> do t <- tyOfName cx v
               [[tl@(A ls)],[tr@(A rs)]] <- liftC (altTypes (cxEnv cx) t expr)
               let ve = localName v
-              return (fromMaybe (tagRead t ve <+> "<" <+> int k) (pointerTest ve ls rs), alias v x tl, alias v y tr)
+              return (fromMaybe (tagRead t ve <+> "<" <+> int (kkTag k)) (pointerTest ve ls rs), alias v x tl, alias v y tr)
       CaseA v [(i,x,_)] (Just (y,_)) -> tagged v i x y
       CaseA v [(i,x,_),(_,y,_)] Nothing -> tagged v i x y
       CaseV v@(Var _) [(i,x,_),(j,y,_)]
@@ -1138,7 +1143,7 @@ twoWay cx expr
     alias v x t = (x,t,declare "kk_box_t" x (localName v))
     tagged v i x y = do t <- tyOfName cx v
                         [[ti],[to]] <- liftC (altTypes (cxEnv cx) t expr)
-                        return (tagRead t (localName v) <+> "==" <+> int i,alias v x ti,alias v y to)
+                        return (tagRead t (localName v) <+> "==" <+> int (kkTag i),alias v x ti,alias v y to)
 
 -- The final arm of an exhaustive boxed case is the default, so that the switch
 -- needs no unreachable case (without emitting its body twice).

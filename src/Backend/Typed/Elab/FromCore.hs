@@ -542,7 +542,7 @@ elabApp f args resTp
   -- (`[memoize-ptr]`; `Passes.Lazy` makes `x` a cell)
   | isPrim nameLazyMemoize f, [x,v] <- args
   = do (info,_) <- dataArgs (typeOf x)
-       ind <- maybe (failE ("memoizing a value that is not lazy: " ++ show (typeOf x))) return (lazyIndirectTag info)
+       ind <- maybe (failE ("memoizing a value that is not lazy: " ++ show (typeOf x))) return (lazyIndirectIndex info)
        t <- vt (typeOf x)
        (kx,x') <- elabValAt t x
        (kv,v') <- elabValAt t v
@@ -1084,7 +1084,7 @@ elabBoxedCase :: DataInfo -> [AType] -> VVal -> [C.Branch] -> E VExpr
 elabBoxedCase info vargs v brs
   = do p <- fresh "d"
        z <- fresh "z"
-       let cons = zip [1..] (dataInfoConstrs info)   -- by tag
+       let cons = zip [0..] (dataInfoConstrs info)   -- by position
        body <- case cons of
                  [(_,con)] -> conBranch vargs con (Left z) (findBranch con brs)
                  _ | isLazyInfo info -> lazyCase vargs brs z cons

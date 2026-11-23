@@ -842,7 +842,7 @@ bodyP = (sym "(" >> (lazy <|> sumP)) <|> (BOne <$> altP')
 conOf :: Name -> String -> Name
 conOf tname s = let c = localName s in newLocallyQualified (nameModule tname) (nameLocalQual c) (nameStem c)
 
--- The tags of the alternatives of a datatype follow the order of its constructors, where the
+-- The indices of the alternatives of a datatype are the positions of its constructors, where the
 -- strict alternatives S of a lazy sum `L ~> S` come first. Alternatives without a constructor
 -- print their tags.
 numberBody :: Name -> Body -> (AType,[ConLabel])
@@ -852,7 +852,7 @@ numberBody tname body = (shape, [ConLabel (conOf tname c) fs [] | (_,Right c,_,f
                  BSum as -> as
                  BOne a -> [a]
                  BLazy l s -> altsOf s ++ altsOf l
-    tagged = [(either id (const k) lbl, lbl, t, fs) | (k,(lbl,t,fs)) <- zip [1..] (altsOf body)]
+    tagged = [(either id (const k) lbl, lbl, t, fs) | (k,(lbl,t,fs)) <- zip [0..] (altsOf body)]
     sumOf ts = ASum [(i,t) | (i,_,t,_) <- ts]
     shape = case body of
               BOne (_,t,_) -> t

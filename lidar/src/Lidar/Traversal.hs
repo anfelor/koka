@@ -160,12 +160,12 @@ child :: Path -> Step -> Path
 child (Path x ss) s = Path x (ss ++ [s])
 
 -- tag(z): the tag of the block of a box `z`, the alternative of a sum that it was reached
--- through (`[case-a]`), or 1 if it is the only one
+-- through (`[case-a]`), or 0 if it is the only one
 boxTag :: Path -> Int
 boxTag (Path _ ss)
   = case reverse ss of
       (SInjA i _ : _) -> i
-      _ -> 1
+      _ -> 0
 
 -- the step to the alternative i of a `[case]` from its binder x, which names its constructor if
 -- it is a path to that alternative (`FromCore.valueAlt`): not if the scrutinee is not a variable

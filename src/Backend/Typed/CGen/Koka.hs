@@ -8,8 +8,8 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- Koka's C conventions: names, and the C types of extern calls.
-module Backend.Typed.CGen.Koka( kokaName, kokaTypeName, kokaLocal
+-- Koka's C conventions: names, tags, and the C types of extern calls.
+module Backend.Typed.CGen.Koka( kokaName, kokaTypeName, kokaLocal, kkTag
                               , kokaKType, kokaPrimType, kokaPrimTypes
                               , toKoka, fromKoka, cIdents, isComment, substFormat
                               , externCType
@@ -24,6 +24,11 @@ import Backend.Typed.LidarName( toLidar, fromLidar )
 import Lidar.Syntax
 import Lidar.Layout( CT(..) )
 import Backend.Typed.CGen.Layout( ctName )
+
+-- kklib's tag of the alternative with index i of a boxed sum: kklib reserves tag 0 for
+-- `KK_TAG_INVALID`
+kkTag :: Int -> Int
+kkTag i = i+1
 
 -- Koka's C names (see Backend.C.FromCore)
 kokaName :: Name -> String

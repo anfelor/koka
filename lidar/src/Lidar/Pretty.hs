@@ -402,9 +402,9 @@ prettyTypeDef (TypeDef n vs body labels)
       = case b of
           ASum ts   -> parens (hsep (punctuate " +" [alt i t | (i,t) <- ts]))
           ALazy l s -> parens (labelledBody l <+> "~>" <+> labelledBody s)
-          _         -> alt 1 b
+          _         -> alt 0 b
     alt i t
-      = case drop (i-1) labels of
+      = case drop i labels of
           ConLabel c fs _ : _ -> nm (unqualify c) <> colon <+> shape fs t
           [] -> pretty i <> colon <+> atomA fullPath t
     shape [f] (ABox v) = "Box" <> parens (pretty (escape (show f)) <> colon <+> prettyV fullPath v)

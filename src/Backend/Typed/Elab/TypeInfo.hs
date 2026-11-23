@@ -12,13 +12,13 @@ module Backend.Typed.Elab.TypeInfo( Tr
                                   , elabType, elabFunType, elabScheme, needsToken
                                   , isValueInfo, elabArgs
                                   , conIndex, conFieldTypes, conFieldNames, schemeFieldTypes, conCount, conShape, conExists
-                                  , isLazyInfo, lazyIndirectTag, refShape, refInj
+                                  , isLazyInfo, lazyIndirectIndex, refShape, refInj
                                   , dataInfoOf, valueBody, valueDecl, kType, primType
                                   , tvarStar
                                   ) where
 
 import qualified Data.Map as M
-import Data.List( elemIndex )
+import Data.List( elemIndex, findIndex )
 import Data.Maybe( isJust )
 import Common.Name
 import Common.NamePrim
@@ -264,29 +264,29 @@ conShape nt vargs con
 
 -- a lazy datatype has an indirection among its constructors
 isLazyInfo :: DataInfo -> Bool
-isLazyInfo = isJust . lazyIndirectTag
+isLazyInfo = isJust . lazyIndirectIndex
 
--- the tag of the indirection of a lazy datatype (tags start at 1)
-lazyIndirectTag :: DataInfo -> Maybe Int
-lazyIndirectTag info = lookup True [(isLazyIndirectConName (conInfoName con), tag) | (tag,con) <- zip [1..] (dataInfoConstrs info)]
+-- the index of the indirection of a lazy datatype
+lazyIndirectIndex :: DataInfo -> Maybe Int
+lazyIndirectIndex info = findIndex (isLazyIndirectConName . conInfoName) (dataInfoConstrs info)
 
 -- The unrolling of a reference datatype, given the shapes of its constructors: their sum by
--- tag, or for a lazy datatype the lazy sum `L ~> S` of its thunks (the lazy constructors) and
+-- position, or for a lazy datatype the lazy sum `L ~> S` of its thunks (the lazy constructors) and
 -- its strict alternatives.
 refShape :: DataInfo -> [AType] -> AType
 refShape info shapes
   | isLazyInfo info = ALazy (ASum (side True)) (ASum (side False))
   | otherwise = sumOf shapes
   where
-    side lz = [(tag,s) | (tag,con,s) <- zip3 [1..] (dataInfoConstrs info) shapes, conInfoIsLazy con == lz]   -- tags start at 1
+    side lz = [(tag,s) | (tag,con,s) <- zip3 [0..] (dataInfoConstrs info) shapes, conInfoIsLazy con == lz]
 
 -- the injection of the constructor with index i into the unrolling of its reference datatype
 refInj :: DataInfo -> [AType] -> Int -> AVal -> AVal
 refInj info shapes i v
   = case refShape info shapes of
-      t@(ALazy l s) | conInfoIsLazy (dataInfoConstrs info !! i) -> InjLazy Delay t (InjA (i+1) l v)
-                    | otherwise -> InjLazy Whnf t (InjA (i+1) s v)
-      t@(ASum _) -> InjA (i+1) t v
+      t@(ALazy l s) | conInfoIsLazy (dataInfoConstrs info !! i) -> InjLazy Delay t (InjA i l v)
+                    | otherwise -> InjLazy Whnf t (InjA i s v)
+      t@(ASum _) -> InjA i t v
       _ -> v
 
 conCount :: DataInfo -> Int

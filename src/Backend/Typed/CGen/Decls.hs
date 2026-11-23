@@ -29,7 +29,7 @@ import Lidar.Name
 import Lidar.Syntax
 import Lidar.Layout
 import Backend.Typed.CGen.Layout( cName, ctName, structDefs, blockName, blockDef, dupFun, dropFun, primBox )
-import Backend.Typed.CGen.Koka( kokaName, kokaTypeName, kokaLocal, kokaKType, kokaPrimType, kokaPrimTypes, fromKoka )
+import Backend.Typed.CGen.Koka( kkTag, kokaName, kokaTypeName, kokaLocal, kokaKType, kokaPrimType, kokaPrimTypes, fromKoka )
 
 -- The payload of the block of an open constructor: the tag string of the constructor (the `_tag`
 -- of Koka's base struct), followed by the fields.
@@ -84,7 +84,7 @@ refConDecls d
     refAlts a = case a of
                   ASum ts -> Just ts
                   ALazy _ _ -> Nothing
-                  _ -> Just [(1,a)]
+                  _ -> Just [(0,a)]
     isBox (ABox _) = True
     isBox _ = False
 
@@ -98,7 +98,7 @@ refCon tn single allHeap (tag,shape) lbl
       _ -> []
   where
     c = lblCon lbl
-    ktag = "(kk_tag_t)" ++ show tag
+    ktag = "(kk_tag_t)" ++ show (kkTag tag)
     sname = "struct " ++ kokaName c
     test | single    = "true"
          | allHeap   = "kk_datatype_ptr_has_tag(x," ++ ktag ++ ",_ctx)"

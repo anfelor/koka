@@ -415,7 +415,7 @@ checkReuseTy ty = case ty of
     VReuse _ n p -> do when (n < 0) (Left "negative reuse size")
                        case p of
                          Nothing -> return ()
-                         Just (Contents k v s) -> do when (maybe False (< 1) k) (Left "reuse contents with an invalid tag")
+                         Just (Contents k v s) -> do when (maybe False (< 0) k) (Left "reuse contents with an invalid tag")
                                                      structural v
                                                      noHeapCredit s
                                                      m <- reuseSize s
@@ -477,16 +477,14 @@ inferAVar g x
 checkShape :: AType -> Q ()
 checkShape a = unless (isShape a) (Left ("sum alternatives must be shapes: " ++ ppr a))
 
--- A lazy sum `L ~> S` consists of two sums, of thunks and of strict alternatives, whose tags
--- are separated by the smallest tag of L.
+-- A lazy sum `L ~> S` consists of two sums, of thunks and of strict alternatives.
 checkLazy :: AType -> Q ()
 checkLazy a
   = case a of
-      ALazy l@(ASum ls) s@(ASum ss)
+      ALazy l@(ASum ls) s@(ASum _)
         -> do checkShape l
               checkShape s
               unless (all (isBox . snd) ls) (Left ("the thunks of a lazy sum must be boxes: " ++ ppr a))
-              unless (maximum (map fst ss) < minimum (map fst ls)) (Left ("the strict tags of a lazy sum must come before its thunks: " ++ ppr a))
       _ -> Left ("ill-formed lazy sum: " ++ ppr a)
   where
     isBox t = case t of

@@ -206,12 +206,12 @@ primBox r
       RInt8    -> "kk_int8"
       RUInt8   -> "kk_uint8"
 
--- The small free path requires a fixed allocation of at most 128 words,
--- excluding runtime objects such as strings, vectors and arbitrary opaque boxes.
+-- The small free path requires a fixed allocation of at most 128 words and a kklib tag (`kkTag`)
+-- of at most 0xFFC0, excluding runtime objects such as strings, vectors and arbitrary opaque boxes.
 -- Like the rest of the layout calculations, sizes here use 64-bit words.
 shapeIsSmall :: AType -> Bool
 shapeIsSmall a = case a of
   AUnit -> True
   ABox v -> blockSize (layout v) <= 128 * 8
-  ASum ts -> not (null ts) && all (\(i,b) -> i > 0 && i <= 0xFFC0 && shapeIsSmall b) ts
+  ASum ts -> not (null ts) && all (\(i,b) -> i >= 0 && i < 0xFFC0 && shapeIsSmall b) ts
   _ -> False

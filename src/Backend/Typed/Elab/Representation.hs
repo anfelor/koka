@@ -21,10 +21,10 @@ import Lidar.Traversal( child )
 varV :: TVar -> VType
 varV v = VPtr (AVar v)
 
--- The index of an alternative is its runtime tag (Koka's tags start at 1), not its position
--- in the list. Filtering alternatives therefore preserves their tags.
+-- The index of an alternative is its position among the constructors. Filtering alternatives
+-- preserves their indices.
 sumAlts :: [AType] -> [(Int,AType)]
-sumAlts ts = zip [1..] ts
+sumAlts ts = zip [0..] ts
 
 sumOf :: [AType] -> AType
 sumOf [a] = a
@@ -86,7 +86,7 @@ scalarField t
       (_, [s]) | isEnum s -> Just s
       _                -> Nothing
 
--- the shape of a boxed value: a flat sum of its leaves, which have tags
+-- the shape of a boxed value: a flat sum of its leaves, by position
 shapeA :: VType -> AType
 shapeA t = sumOf (shapeLeaves t)
 

@@ -33,7 +33,7 @@
     and a jump has the mode of the body of its join point. A unique result can be used as an
     owned one.
 
-    The tag of a box z, tag(z), is i if z is the binder of alternative i of a `[case-a]`, and 1
+    The tag of a box z, tag(z), is i if z is the binder of alternative i of a `[case-a]`, and 0
     otherwise (`Traversal.boxTag`).
 
   Structural rules
@@ -143,7 +143,8 @@ owning m
 -- - `Box V`, `1` and `⊕ᵢ Aᵢ` are *shapes*: their tags are known, so they can be destructured.
 --   A `Box V` is always a heap block with a header, even for `𝟙`. Sums are flat: their
 --   alternatives are `Box V` or `1` (so `a + 1` or `T⟨B̄⟩ + 1` is not a shape), indexed by their
---   runtime tags, which start at 1 as in Koka. A sub-sum keeps the tags of its alternatives.
+--   positions among the constructors of their datatype, from 0. A sub-sum keeps the indices of
+--   its alternatives. The IR knows no runtime's tags: a C generator maps the indices to them.
 -- - `Scalar raw` is Koka's `box` of a raw value: an immediate value, or a block allocated by
 --   the runtime (such as a large `float64`). It has no tag, and it is never reused or tested
 --   for uniqueness. `boxA` uses it for raw values and for products of one raw field
@@ -156,14 +157,14 @@ owning m
 --   `[memoize]` relate `T⟨B̄⟩` to `A[B̄/ā]` (iso-recursive types). Queries on layout and
 --   triviality may look at the definition (`Env.dataBody`).
 -- - A lazy sum `L ~> S` is one flat sum at run time, split into the thunks L and the strict
---   alternatives S. Both are nonempty sums, and the tags of S are smaller than those of L. A
+--   alternatives S. Both are nonempty sums, with the indices of the datatype's constructors. A
 --   lazy datatype has the indirection `Box(τ*)` among its thunks. Elaboration pads every thunk
 --   to at least the size of the indirection (`Elab.TypeInfo.conFieldTypes`), so that any
 --   thunk can be overwritten by one; `[memoize]` checks the size.
 data AType = ABox VType                 -- Box V
            | AScalar Raw                -- Scalar raw
            | AUnit                      -- 1
-           | ASum [(Int,AType)]         -- ⊕ᵢ Aᵢ, indexed by tags
+           | ASum [(Int,AType)]         -- ⊕ᵢ Aᵢ, indexed by constructor positions
            | ALazy AType AType          -- L ~> S, a lazy sum of the thunks L and the strict alternatives S
            | AFun [(Mode,VType)] VType  -- (q̄ V̄) -> W, for top-level functions and closures alike
            | AForall [TVar] AType       -- ∀ā. A
@@ -265,7 +266,7 @@ data TypeBody = BodyRef AType   -- a reference datatype, `T⟨ā⟩ := A`
               deriving (Show)
 
 -- The label of a constructor: its name and the names of its fields (as in `conFieldNames`). A
--- datatype has the labels of its constructors in the order of their tags, which start at 1.
+-- datatype has the labels of its constructors in the order of their indices, which start at 0.
 -- Printed paths name an alternative of a value of the datatype by its constructor, and a field
 -- of the alternative by the name of the field. The declared type of each field is the value
 -- datatype that the source names for it, if any (metadata, see `TypeDef`).

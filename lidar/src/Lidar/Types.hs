@@ -309,7 +309,7 @@ checkDupType t
 -- their tags are increasing.
 isShape :: AType -> Bool
 isShape a = case a of
-  ASum ts -> not (null ts) && all (\(i,t) -> i >= 1 && isAlt t) ts
+  ASum ts -> not (null ts) && all (\(i,t) -> i >= 0 && isAlt t) ts
              && and [i < j | ((i,_),(j,_)) <- zip ts (drop 1 ts)]
   _ -> isAlt a
   where

@@ -74,4 +74,4 @@ lazyDef nt info
               ABox s | Right _ <- reuseSize s -> return ()
               _ -> Left ("the lazy constructor " ++ show (conInfoName con) ++ " has no fields")
   where
-    cons = zip [1 :: Int ..] (dataInfoConstrs info)   -- tags start at 1
+    cons = zip [0 :: Int ..] (dataInfoConstrs info)
