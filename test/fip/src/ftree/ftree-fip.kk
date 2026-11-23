@@ -55,9 +55,11 @@ fip fun cons(x : a, u3 : reuse3, s : seq<a>, b : buffer) : exn (seq<a>, buffer)
     More(Pair(y, z, _), q, u) ->
       (More(Triple(x, y, z), q, u), BCons(b, Pad, Pad))
     More(Triple(y, z, w), q, u) ->
-      val BCons(b', _, _) = b
-      val (q', b'') = cons(Pair(z, w, Pad), u3, q, b')
-      (More(Pair(x, y, Pad), q', u), b'')
+      match b
+        BCons(b', _, _) ->
+          val (q', b'') = cons(Pair(z, w, Pad), u3, q, b')
+          (More(Pair(x, y, Pad), q', u), b'')
+        _ -> unreachable()
 
 fip fun buncons(bs : bseq<a>) : exn (a, reuse3, bseq<a>)
   val BSeq(s, b) = bs
@@ -69,13 +71,16 @@ fip fun uncons(s : seq<a>, b : buffer) : exn tuple4<a, reuse3, seq<a>, buffer>
     Unit(x, _, _) ->
       Tup4(x, Reuse3(Pad,Pad,Pad), Empty, b)
     More(Triple(x, y, z), q, u) ->
-      val BCons(b', _, _) = b
-      Tup4(x, Reuse3(Pad,Pad,Pad), More(Pair(y, z, Pad), q, u), b')
+      match b
+        BCons(b', _, _) ->
+          Tup4(x, Reuse3(Pad,Pad,Pad), More(Pair(y, z, Pad), q, u), b')
+        _ -> unreachable()
     More(Pair(x, y, _), q, u) ->
       Tup4(x, Reuse3(Pad,Pad,Pad), More0(y, q, u), b)
     More0(x, q, u) ->
       val (q', b') = more0(q, u, b)
       Tup4(x, Reuse3(Pad,Pad,Pad), q', b')
+    _ -> unreachable()
 
 fip fun more0(q : seq<tuple<a>>, u : afew<a>, b : buffer) : exn (seq<a>, buffer)
   match q
@@ -83,38 +88,50 @@ fip fun more0(q : seq<tuple<a>>, u : afew<a>, b : buffer) : exn (seq<a>, buffer)
       match u
         One(x, y, z) -> (Unit(x, y, z), b)
         Two(y, z, _) ->
-          val BCons(b', _, _) = b
-          (More0(y, Empty, One(z, Pad, Pad)), b')
+          match b
+            BCons(b', _, _) ->
+              (More0(y, Empty, One(z, Pad, Pad)), b')
+            _ -> unreachable()
         Three(y, z, w) ->
-          val BCons(b', _, _) = b
-          (More0(y, Empty, Two(z, w, Pad)), b')
+          match b
+            BCons(b', _, _) ->
+              (More0(y, Empty, Two(z, w, Pad)), b')
+            _ -> unreachable()
     Unit(p, _, _) ->
       match p
         Pair(x, y, _)   -> (More(Pair(x, y, Pad), Empty, u), b)
         Triple(x, y, z) ->
-          val BCons(b', _, _) = b
-          (More0(x, Unit(Pair(y,z,Pad),Pad,Pad), u), b')
+          match b
+            BCons(b', _, _) ->
+              (More0(x, Unit(Pair(y,z,Pad),Pad,Pad), u), b')
+            _ -> unreachable()
     More0(p, q1, u1) ->
       match p
         Pair(x, y) ->
           val (q1', b') = more0(q1, u1, b)
           (More(Pair(x, y, Pad), q1', u), b')
         Triple(x, y, z) ->
-          val BCons(b', _, _) = b
-          (More0(x, More0(Pair(y,z,Pad), q1, u1), u), b')
+          match b
+            BCons(b', _, _) ->
+              (More0(x, More0(Pair(y,z,Pad), q1, u1), u), b')
+            _ -> unreachable()
     More(Pair(p, y1), q1, u1) ->
       match p
         Pair(x, y)      -> (More(Pair(x, y, Pad), More0(y1, q1, u1), u), b)
         Triple(x, y, z) ->
-          val BCons(b', _, _) = b
-          (More0(x, More(Pair(Pair(y,z,Pad), y1, Pad), q1, u1), u), b')
+          match b
+            BCons(b', _, _) ->
+              (More0(x, More(Pair(Pair(y,z,Pad), y1, Pad), q1, u1), u), b')
+            _ -> unreachable()
     More(Triple(p, y1, z1), q1, u1) ->
-      val BCons(b', _, _) = b
-      match p
-        Pair(x, y) ->
-          (More(Pair(x, y, Pad), More(Pair(y1, z1, Pad), q1, u1), u), b')
-        Triple(x, y, z) ->
-          (More0(x, More(Triple(Pair(y,z,Pad), y1, z1), q1, u1), u), b')
+      match b
+        BCons(b', _, _) ->
+          match p
+            Pair(x, y) ->
+              (More(Pair(x, y, Pad), More(Pair(y1, z1, Pad), q1, u1), u), b')
+            Triple(x, y, z) ->
+              (More0(x, More(Triple(Pair(y,z,Pad), y1, z1), q1, u1), u), b')
+        _ -> unreachable()
 
 fip fun bsnoc(bs : bseq<a>, u3 : reuse3, x : a) : exn bseq<a>
   val BSeq(s, b) = bs
@@ -130,13 +147,17 @@ fip fun snoc(s : seq<a>, b : buffer, u3 : reuse3, x : a) : exn (seq<a>, buffer)
     More0(u, q, Two(y, z, _)) -> (More0(u, q, Three(y, z, x)), BCons(b, Pad, Pad))
     More (u, q, Two(y, z, _)) -> (More (u, q, Three(y, z, x)), BCons(b, Pad, Pad))
     More0(u, q, Three(y, z, w)) ->
-      val BCons(b', _, _) = b
-      val (q', b'') = snoc(q, b', u3, Pair(y, z, Pad))
-      (More0(u, q', Two(w, x, Pad)), b'')
+      match b
+        BCons(b', _, _) ->
+          val (q', b'') = snoc(q, b', u3, Pair(y, z, Pad))
+          (More0(u, q', Two(w, x, Pad)), b'')
+        _ -> unreachable()
     More(u, q, Three(y, z, w)) ->
-      val BCons(b', _, _) = b
-      val (q', b'') = snoc(q, b', u3, Pair(y, z, Pad))
-      (More(u, q', Two(w, x, Pad)), b'')
+      match b
+        BCons(b', _, _) ->
+          val (q', b'') = snoc(q, b', u3, Pair(y, z, Pad))
+          (More(u, q', Two(w, x, Pad)), b'')
+        _ -> unreachable()
 
 // append
 
@@ -195,20 +216,24 @@ fip fun afew-to-list(u : afew<a>, b : buffer) : exn (list3<a>, buffer)
     Two(x,y) ->
       match b
         BCons(b', _, _) -> (Cons3(x, Cons3(y, Nil3, Pad), Pad), b')
+        _ -> unreachable()
     Three(x,y,z) ->
       match b
         BCons(BCons(b', _, _), _, _) ->
           (Cons3(x, Cons3(y, Cons3(z, Nil3, Pad), Pad), Pad), b')
+        _ -> unreachable()
 
 fip fun tuple-to-list(u : tuple<a>, b : buffer) : exn (list3<a>, buffer)
   match u
     Pair(x,y) ->
      match b
         BCons(b', _, _) -> (Cons3(x, Cons3(y, Nil3, Pad), Pad), b')
+        _ -> unreachable()
     Triple(x,y,z) ->
       match b
         BCons(BCons(b', _, _), _, _) ->
           (Cons3(x, Cons3(y, Cons3(z, Nil3, Pad), Pad), Pad), b')
+        _ -> unreachable()
 
 fip fun to-tuples(xs : list3<a>, b : buffer) : (list3<tuple<a>>, buffer)
   match xs
@@ -257,6 +282,7 @@ fip fun glue(q1 : seq<a>, b1 : buffer, xs : list3<a>, bs0 : buffer, q2 : seq<a>,
       val (ts, bs3) = to-tuples(v1' ++ xs ++ u2', bs2)
       val (q, b) = glue(q1, b1, ts, bs3, q2, b2)
       (More0(u1, q, v2), b)
+    _ -> unreachable()
 
 // benchmark
 

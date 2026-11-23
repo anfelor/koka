@@ -38,7 +38,7 @@ import qualified Core.Core as Core
 import Core.Pretty
 import Core.CoreVar
 import Core.Borrowed ( Borrowed, borrowedLookup, borrowedLookupFip )
-import Common.NamePrim (nameEffectEmpty, nameTpDiv, nameEffectOpen, namePatternMatchError, nameTpException, nameTpPartial, nameTrue,
+import Common.NamePrim (nameEffectEmpty, nameTpDiv, nameEffectOpen, nameUnreachableFun, nameTpException, nameTpPartial, nameTrue,
                         nameCCtxSetCtxPath, nameFieldAddrOf, nameTpInt,
                         nameLazyMemoizeTarget,nameLazyLeave,nameLazyEnter,nameLazyMemoize, nameCoreDebug)
 import Data.Ratio
@@ -147,13 +147,13 @@ chkModCons args
 chkBranches :: [Expr] -> [Branch] -> Chk ()
 chkBranches scrutinees branches
   = do whichBorrowed <- mapM isBorrowedScrutinee scrutinees
-       let branches' = filter (not . isPatternMatchError) branches
+       let branches' = filter (not . isUnreachableBranch) branches
        let stypes = map typeOf scrutinees
        outs <- mapM (extractOutput . chkBranch whichBorrowed stypes) branches'
        gamma2 <- joinContexts (map branchPatterns branches') outs
        writeOutput gamma2
        withBorrowed (S.map getName $ M.keysSet $ gammaNm gamma2) $
-         withTailModProduct branches' $ -- also filter out pattern match errors
+         withTailModProduct branches' $ -- also filter out unreachable branches
            mapM_ chkScrutinee $ zip whichBorrowed scrutinees
 
 isBorrowedScrutinee :: Expr -> Chk ParamInfo
@@ -181,12 +181,20 @@ chkGuard (Guard test expr)
          withNonTail $ chkExpr test
        writeOutput out
 
--- | We ignore default branches that create a pattern match error
-isPatternMatchError :: Branch -> Bool
-isPatternMatchError (Branch pats [Guard (Con gname _) (App (App _ [TypeApp (Var (TName fnname _) _) _]) _)])
-  | all isPatWild pats && getName gname == nameTrue && fnname == namePatternMatchError = True
-  where isPatWild PatWild = True; isPatWild _ = False
-isPatternMatchError b = False
+-- | We ignore branches that call `std/core/debug/unreachable` (possibly through `open`), whatever
+-- their patterns: the match compiler may have replaced a `_` by the remaining constructors.
+-- An incomplete match is checked like any other: its `error-pattern` call is not `fip`.
+isUnreachableBranch :: Branch -> Bool
+isUnreachableBranch (Branch _ [Guard (Con gname _) body])
+  = getName gname == nameTrue && isUnreachableCall body
+isUnreachableBranch b = False
+
+isUnreachableCall :: Expr -> Bool
+isUnreachableCall expr
+  = case expr of
+      App (TypeApp (Var (TName fnname _) _) _) [] -> fnname == nameUnreachableFun
+      App (App (TypeApp (Var open _) _) [f]) [] | getName open == nameEffectOpen -> isUnreachableCall (App f [])
+      _ -> False
 
 bindPattern :: (Pattern, Type) -> Output -> Chk Output
 bindPattern (PatCon cname pats crepr types _ _ _ _, tp) out
