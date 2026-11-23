@@ -15,3 +15,18 @@ fip fun swap-head-partial( xs : list<int> ) : exn list<int>
 pub fun main()
   println(swap-head([1,2,3]).show)
   println(swap-head-partial([4,5]).show)
+  println(nested([7], BCons(BNil, Pad, Pad)).show)
+
+// a nested match completed by `unreachable()` in a branch that becomes a join point: the typed
+// backend once passed `unreachable` to the join as an argument (and so evaluated it)
+type buffer
+  BNil
+  BCons(next : buffer, b : pad, c : pad)
+
+fun nested( xs : list<int>, b : buffer ) : int
+  match xs
+    Nil -> 0
+    Cons(x, _) ->
+      match b
+        BCons(_, _, _) -> x + 100
+        _ -> unreachable()

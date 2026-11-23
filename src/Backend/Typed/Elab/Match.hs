@@ -153,12 +153,13 @@ joinGuard exists (Guard test body)
                  TypeApp e' _ -> isAtom e'
                  _           -> False
 
--- abstracts over the existentials `exists` that are free in the body
+-- abstracts over the existentials `exists` that are free in the body; the marker `unreachable`
+-- is not a variable: passing it as an argument would evaluate it before the jump
 closeJoin :: [TypeVar] -> Expr -> Unique (DefGroup,Expr)
 closeJoin exists body
   = do j  <- uniqueName "join"
        let tvs = filter (`tvsMember` ftv body) exists
-           xs  = filter (not . isJoinName . getName) (tnamesList (freeLocals body))
+           xs  = filter (\x -> not (isJoinName (getName x)) && getName x /= nameUnreachable) (tnamesList (freeLocals body))
        ps <- mapM (freshVar . typeOf) xs
        let lam = addTypeLambdas tvs (Lam ps typeTotal ([(x,Var p InfoNone) | (x,p) <- zip xs ps] |~> body))
        return (DefNonRec (makeDef j lam), App (makeTypeApp (Var (TName j (typeOf lam)) InfoNone) (map TVar tvs)) [Var x InfoNone | x <- xs])
