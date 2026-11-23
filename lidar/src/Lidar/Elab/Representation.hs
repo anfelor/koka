@@ -13,10 +13,11 @@ module Lidar.Elab.Representation( rep, boxrep, boxA, shapeLeaves, leafCons
                                 , scalarField, varV, atAny, sumOf
                                 , tapp, injA, caseSum
                                 , withField, leafField, leafStarts, boxLeaf, isMultiSum
-                                , ptrA, funPair, knownFun ) where
+                                , ptrA, funPair, knownFun, conValue ) where
 
+import qualified Data.Map as M
 import Lidar.Name( Name )
-import Lidar.Types( atAny, underNull, withToken, unToken, isToken, inst, tokenParam )
+import Lidar.Types( Sub, atAny, underNull, withToken, unToken, isToken, inst, tokenParam )
 import Lidar.Syntax
 import Lidar.Layout( leaves, isEnum )
 import Lidar.Traversal( child )
@@ -205,3 +206,37 @@ knownFun v tys
       Ptr (AForall tvs _) (Fun f) | length tvs == length tys -> Just (f,tys)
       Ptr (AFun _ _) (Fun f)      | null tys                 -> Just (f,tys)
       _                                                      -> Nothing
+
+-- The value of the constructor with index i of the datatype `T⟨B̄⟩`, given its fields `v` (a
+-- value of its field types, padded) and the types of their existentials: an injection into
+-- a value sum, or a pointer to the rolled injection of its shape (`Box`, or `1` without
+-- fields) into the unrolling of `T⟨B̄⟩`, also of a lazy one.
+conValue :: MonadFail m => TypeDefs -> Name -> [AType] -> Int -> Sub -> VVal -> m VVal
+conValue tdefs tname args i exSub v
+  = case M.lookup tname tdefs of
+      Just d@TypeDef{ tdefParams = tvs } | length tvs == length args
+        -> case tdefBody d of
+             BodyValue b -> case inst tvs args b of
+                              t@(VSum ts) | length (tdefLabels d) > 1, (_,s):_ <- drop i ts
+                                -> return (Inj i t (pack s))
+                              t -> return (pack t)
+             BodyRef b -> do let t = ACon tname args
+                             w <- inj (inst tvs args b)
+                             return (Ptr t (Roll t w))
+             _ -> fail ("constructing a value of the datatype " ++ show tname ++ ", which has no constructors")
+      _ -> fail ("unknown datatype " ++ show tname)
+  where
+    pack t@(VExists tvs _) = Pack t [M.findWithDefault atAny tv exSub | tv <- tvs] v
+    pack _ = v
+    shapeVal a = case a of
+                   ABox t -> return (Box (pack t))
+                   AUnit -> return UnitA
+                   _ -> fail ("the alternative " ++ show i ++ " of " ++ show tname ++ " is not a shape")
+    inj a = case a of
+              ALazy l@(ASum ls) s@(ASum ss)
+                | Just b <- lookup i ls -> InjLazy Delay a . InjA i l <$> shapeVal b
+                | Just b <- lookup i ss -> InjLazy Whnf a . InjA i s <$> shapeVal b
+              ASum ts | Just b <- lookup i ts -> InjA i a <$> shapeVal b
+              ASum _ -> fail ("no alternative " ++ show i ++ " in " ++ show tname)
+              ALazy _ _ -> fail ("no alternative " ++ show i ++ " in " ++ show tname)
+              _ -> shapeVal a

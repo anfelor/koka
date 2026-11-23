@@ -36,9 +36,10 @@ import Backend.Typed.Elab.TypeInfo
 -- `envBinders`: the types of the binders of locals, whose uses may have other effects, and
 -- which may be `V?` where the Koka type is `V` (a result that may be the dummy of a yield).
 -- `envSigs`: the signatures of the globals, by their Koka names.
+-- `envTypes`: the datatypes of the program and its imports.
 -- `envExterns`: the externals in scope. `envTrusted`: whether a `V?` is used as a `V` without a
 -- test for null (`Coerce.extractNull`).
-data Env = Env{ envNT :: Newtypes, envLocals :: S.Set Name, envTVars :: S.Set TVar, envSigs :: M.Map Name Sig
+data Env = Env{ envNT :: Newtypes, envTypes :: TypeDefs, envLocals :: S.Set Name, envTVars :: S.Set TVar, envSigs :: M.Map Name Sig
               , envHoles :: M.Map Name (Maybe VVal), envCaptured :: S.Set Name
               , envFields :: M.Map Name (K,VVal), envResult :: VType, envBinders :: M.Map Name VType
               , envExterns :: S.Set Name, envTrusted :: Bool }

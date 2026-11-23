@@ -21,6 +21,7 @@ import Type.Type( ConInfo, typevarId, conInfoName, conInfoParams, conInfoIsLazy,
 import Lidar.Syntax
 import Backend.Typed.LidarName( toLidar )
 import Lidar.Env( reuseSize )
+import Lidar.Elab.Representation( sumOf )
 import Backend.Typed.Elab.TypeInfo
 
 -- The body of a datatype. Only that of a reference datatype is part of the typing rules; the
@@ -31,6 +32,16 @@ typeBody nt info
   | dataDefIsOpen (dataInfoDef info) = Right BodyOpen
   | null (dataInfoConstrs info) = Right BodyAbstract
   | otherwise = BodyRef . refShape info <$> mapM (conShape nt (paramArgs info)) (dataInfoConstrs info)
+
+-- The unrolling of a reference datatype, given the shapes of its constructors: their sum by
+-- position, or for a lazy datatype the lazy sum `L ~> S` of its thunks (the lazy constructors) and
+-- its strict alternatives.
+refShape :: DataInfo -> [AType] -> AType
+refShape info shapes
+  | isLazyInfo info = ALazy (ASum (side True)) (ASum (side False))
+  | otherwise = sumOf shapes
+  where
+    side lz = [(tag,s) | (tag,con,s) <- zip3 [0..] (dataInfoConstrs info) shapes, conInfoIsLazy con == lz]
 
 paramArgs :: DataInfo -> [AType]
 paramArgs info = map (AVar . typevarId) (filter tvarStar (dataInfoParams info))

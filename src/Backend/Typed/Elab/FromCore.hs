@@ -51,8 +51,8 @@ elabProgram nt ffi imports core
         externs = externsOf (core:imports)
         exts    = M.keysSet externs
         isigs   = M.fromList [(n,withModes modes sig) | (n,(tp,isFun,modes)) <- M.toList (importSigs (core:imports)), Right sig <- [typeSig nt (S.member n exts) n tp isFun]]
-        env0    = Env nt S.empty S.empty isigs M.empty S.empty M.empty VUnit M.empty exts False
         (tdefs,tdefErrs) = typeDefs nt
+        env0    = Env nt tdefs S.empty S.empty isigs M.empty S.empty M.empty VUnit M.empty exts False
         run (sigs,ds,errs,notes) def
           = let label msg = show (C.defName def) ++ ": " ++ msg
             in case runE (elabDef (inlineOf def) def) env0{ envTrusted = C.defName def `elem` trustedNulls } (St 0 sigs [] Nothing) of
@@ -894,7 +894,8 @@ elabConWith info vargs con args
        argTys <- mapM (vt . typeOf) args
        exSub <- tr (existsSub (conExists con) fields argTys)
        (ks,vs) <- unzip <$> mapM (\(t,arg) -> elabValAt t arg) (zip (map (subst exSub) fields) args)
-       v <- conValue info vargs idx exSub (prodVal (padFields fields vs))
+       e <- env
+       v <- conValue (envTypes e) (toLidar (dataInfoName info)) vargs idx exSub (prodVal (padFields fields vs))
        return (compose ks, v)
 
 elabOpenCon :: DataInfo -> [AType] -> Name -> Type -> [C.Expr] -> E (K,VVal)
@@ -953,33 +954,6 @@ fieldTypes :: [AType] -> ConInfo -> E [VType]
 fieldTypes vargs con
   = do e <- env
        tr (conFieldTypes (envNT e) vargs con)
-
-conValue :: DataInfo -> [AType] -> Int -> Sub -> VVal -> E VVal
-conValue info vargs idx exSub v
-  | isValueInfo info = do t <- dataType info vargs
-                          let packed = packV (conTypes t) v
-                          return (if conCount info > 1 then Inj idx t packed else packed)
-  | otherwise = do shapes <- conShapes info vargs
-                   let t = ACon (toLidar (dataInfoName info)) vargs
-                   return (Ptr t (Roll t (refInj info shapes idx (shapeVal (shapes !! idx)))))
-  where
-    shapeVal (ABox t) = Box (packV t v)
-    shapeVal _ = UnitA
-    conTypes (VSum ts) | conCount info > 1 = snd (ts !! idx)
-    conTypes t = t
-    packV t@(VExists tvs _) w = Pack t (exTypes tvs) w
-    packV _ w = w
-    exTypes tvs = [M.findWithDefault atAny tv exSub | tv <- tvs]
-
-dataType :: DataInfo -> [AType] -> E VType
-dataType info vargs
-  = do e <- env
-       tr (valueBody (envNT e) info vargs)
-
-conShapes :: DataInfo -> [AType] -> E [AType]
-conShapes info vargs
-  = do e <- env
-       mapM (tr . conShape (envNT e) vargs) (dataInfoConstrs info)
 
 -- constructor contexts
 
