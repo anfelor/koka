@@ -1,4 +1,4 @@
-packages: .
+packages: . lidar
 
 -- Forked lsp package with optional websockets support
 -- (websockets depends on network which can't build on WASI)

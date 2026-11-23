@@ -193,6 +193,7 @@ library
     , containers
     , directory
     , hashable >=1.4
+    , lidar
     , mtl
     , parsec
     , process

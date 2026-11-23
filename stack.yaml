@@ -28,6 +28,7 @@ resolver: lts-24.43             # ghc 9.10.3
 
 packages:
 - '.'
+- lidar
 
 extra-deps:
 - json-0.11                     # only needed for koka-test

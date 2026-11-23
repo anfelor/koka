@@ -38,6 +38,8 @@ dependencies:
   - process
 
 library:
+  dependencies:
+    - lidar
   other-extensions:
     - CPP
     - OverloadedStrings
