@@ -26,6 +26,7 @@ module Lidar.Lean.CGen( cgenModule ) where
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Bits( shiftR, (.&.) )
+import Data.Functor.Const( Const(..) )
 import Data.Char( ord, isAlphaNum, isAscii, isPrint )
 import Data.List( intercalate )
 import Data.Maybe( fromMaybe, mapMaybe )
@@ -36,7 +37,7 @@ import Prettyprinter.Render.String( renderString )
 import Lidar
 import Lidar.Env( Env(..), envOf, dataBody, boxContents, M, runM, liftE, state, modify, get, put )
 import Lidar.Query( Gamma, inferV, inferVar, altTypes, unboxRuGamma, copyRuGamma, uniqueGamma )
-import Lidar.Traversal( child, boxTag, fvA )
+import Lidar.Traversal( child, boxTag, fvA, descendA, descendV, descendE )
 import Lidar.Layout( leaves, shapeIsHeap )
 import qualified Lidar.Lean.Dump as D
 import Lidar.Lean.Decls( leanName, rawOfNat )
@@ -736,6 +737,37 @@ initFns inits valueInits = concatMap initFn inits
                ++ ["return lean_io_result_mk_ok(lean_box(0));"]) ]
       where flag = "_G_" ++ D.initPhase i ++ "_initialized"
 
+-- The module's values in an order in which each comes after the values that it reads, also
+-- through the functions that it calls (as Lean initializes them in the order of declaration).
+initOrder :: [Def] -> [Name]
+initOrder defs = reverse (snd (foldl visit (S.empty,[]) (map defName defs)))
+  where
+    uses = M.fromList [(defName d, namesE (defBody d)) | d <- defs]
+    values = S.fromList [defName d | d@DefVal{} <- defs]
+    visit (seen,acc) x
+      | S.member x seen = (seen,acc)
+      | otherwise = let (seen',acc') = foldl visit (S.insert x seen,acc) (S.toList (M.findWithDefault S.empty x uses))
+                    in (seen', if S.member x values then x : acc' else acc')
+
+-- the top-level functions and values that an expression uses
+namesE :: VExpr -> S.Set Name
+namesE e = here <> getConst (descendE (const (Const S.empty)) (Const . namesV) (\_ e' -> Const (namesE e')) e)
+  where here = case e of
+                 Call f _ _ -> S.singleton f
+                 _ -> S.empty
+
+namesV :: VVal -> S.Set Name
+namesV v = here <> getConst (descendV (Const . namesA) (Const . namesV) v)
+  where here = case v of
+                 Glob x _ -> S.singleton x
+                 _ -> S.empty
+
+namesA :: AVal -> S.Set Name
+namesA a = case a of
+             Fun f -> S.singleton f
+             Lam _ _ e -> namesE e
+             _ -> getConst (descendA (const (Const S.empty)) (Const . namesA) (Const . namesV) a)
+
 -- the C `main` of a module with `main`, as Lean's `emitMainFn` writes it
 mainFn :: D.Dump -> String -> D.Main -> [C]
 mainFn d leanMain (D.Main n exitCode)
@@ -800,6 +832,7 @@ cgenModule d prog
         | errs@(_:_) <- [e | Left e <- rs] -> Left errs
         | otherwise ->
             let ok = [x | Right x <- rs]
+                inits = M.fromList [(defName def, i) | (def,Right (_,_,i)) <- zip (progDefs prog) rs]
                 leanMain = maybe "_lean_main" tgtName (M.lookup (leanName "main") tgts)
                 doc = vsep ([ text ("// Lean compiler output (lidar-lean)")
                             , text ("// Module: " ++ D.dumpModule d)
@@ -823,7 +856,7 @@ cgenModule d prog
                             ++ [p | (p,_,_) <- ok]
                             ++ stLams st
                             ++ [c | (_,c,_) <- ok]
-                            ++ initFns (D.dumpInits d) (concat [i | (_,_,i) <- ok])
+                            ++ initFns (D.dumpInits d) (concat [inits M.! x | x <- initOrder (progDefs prog), M.member x inits])
                             ++ maybe [] (mainFn d leanMain) (D.dumpMain d)
                             ++ ["#ifdef __cplusplus", "}", "#endif"])
             in Right (renderString (layoutPretty (LayoutOptions Unbounded) doc) ++ "\n")
