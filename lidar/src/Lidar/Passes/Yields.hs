@@ -40,9 +40,6 @@
 
     and likewise for `x : V? ⊗ KCtx`, results `(some v, k)`, and the null test of `x.0`.
 
-  - `yield-extend` and `yield-cont` return while the effect still yields, so the continuation
-    of their test is dead: `unreachable`.
-
   - A value that is unboxed only to be boxed again is the boxed value itself. Where the boxed
     value is the untested result of a call (that elaboration only tested because of the
     unboxing, as in the inlined `local-var`, whose `prompt-local-var` tests the flag itself),
@@ -56,8 +53,6 @@ module Lidar.Passes.Yields( yieldsProgram ) where
 
 import Data.Functor.Identity( Identity(..) )
 import Data.Maybe( isJust )
-import Lidar.Name
-import Lidar.Prim( nameYieldExtend, nameCoreHnd )
 import Lidar.Syntax
 import Lidar.Build( isYielded )
 import Lidar.Traversal( descendE, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fvE, lamsV, mapA, mapV, subexprs, within )
@@ -111,7 +106,6 @@ yV = runIdentity . lamsV (\_ r e -> Identity (yE r e))
 -- a test whose subexpressions are done
 test :: VType -> Test -> VExpr
 test w t
-  | stillYields (tExpr t) = fromTest t{ tCont = (k2, Unreachable w) }
   | cannotYield (tExpr t) = nonNull (withFields t (renamePath k2 (tToken t) e2))
   | Just (inner,c) <- coerced t, cannotYield c
   = let (j2,_) = tCont inner
@@ -239,13 +233,3 @@ reboxed r u x c body
         replaceA a = case a of
                        Lam ps t b -> Lam ps t (replaceE b)
                        _ -> mapA id replaceA replaceV a
-
--- a call to `yield-extend` or `yield-cont`, which return while the effect still yields
-stillYields :: VExpr -> Bool
-stillYields expr
-  = case expr of
-      Call f _ _ -> f == nameYieldExtend || f == nameYieldCont
-      Let _ _ _ b -> stillYields b
-      _ -> False
-  where
-    nameYieldCont = qualify nameCoreHnd (newName "yield-cont")

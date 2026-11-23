@@ -7,7 +7,7 @@
 -----------------------------------------------------------------------------
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Elab.Coerce( coerce, coerceInst, coerceExpr, genVal, genPtr, applyFun ) where
+module Backend.Typed.Elab.Coerce( coerce, coerceInst, coerceExpr, coerceYielded, genVal, genPtr, applyFun ) where
 
 import qualified Data.Map as M
 import Data.Maybe( isJust )
@@ -280,7 +280,16 @@ isNull t = case t of
 -- a token calls a function that takes one in a `[total]` region (`region`), whose result
 -- has a token.
 coerceExpr :: VType -> VType -> VExpr -> E VExpr
-coerceExpr from to e
+coerceExpr = coerceResult False
+
+-- `coerceExpr` of a call that always yields (a yield primitive of `std/core/hnd`, which
+-- returns the dummy with the flag set): if its result is tested for a yield, the branch that
+-- does not yield is `unreachable`.
+coerceYielded :: VType -> VType -> VExpr -> E VExpr
+coerceYielded = coerceResult True
+
+coerceResult :: Bool -> VType -> VType -> VExpr -> E VExpr
+coerceResult always from to e
   | alphaEq from to = return e
   | Just to0 <- unToken to, Nothing <- unToken from
   = do (kt,k) <- takeToken
@@ -290,7 +299,7 @@ coerceExpr from to e
   | castable from to && (yields from || not (yields to)) && not (wrapped from to)
   = return (CastEv from to e)
   | Just from0 <- unToken from, Just to0 <- unToken to
-  = tested from0 to0 to e
+  = tested always from0 to0 to e
   | otherwise
   = coerceTo from to e Ret
 
@@ -321,8 +330,9 @@ coerceTo from to e ret
        return (Let r from e (k (ret v)))
 
 -- `e : from₀ ⊗ KCtx` at `to₀ ⊗ KCtx` (`to`), tested for a yield if `from₀` may be the dummy
-tested :: VType -> VType -> VType -> VExpr -> E VExpr
-tested from0 to0 to e
+-- (whose branch that does not yield is `unreachable` if `e` always yields)
+tested :: Bool -> VType -> VType -> VType -> VExpr -> E VExpr
+tested always from0 to0 to e
   = do r <- fresh "r"
        r0 <- fresh "r"
        k <- fresh "k"
@@ -332,7 +342,7 @@ tested from0 to0 to e
        test <- if yields from0
                  then do k3 <- fresh "k"
                          k2' <- fresh "k"
-                         return (IfYielding (Var k) (k3, yieldedWith to (Var k3)) (k2', value k2'))
+                         return (IfYielding (Var k) (k3, yieldedWith to (Var k3)) (k2', if always then Unreachable to else value k2'))
                  else return (value k)
        return (Let r (withToken from0) e (Proj (Var r) 0 r0 (Proj (Var r) 1 k test)))
 

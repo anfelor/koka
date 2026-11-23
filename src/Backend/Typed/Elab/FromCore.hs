@@ -199,7 +199,7 @@ funTypeOf nt isExt n tp = adjust <$> elabFunType nt tp
 isFlagTest :: Name -> Bool
 isFlagTest n = n `elem` [nameYielding, nameYieldingNonFinal]
 
--- the externals that may return the dummy of a yield
+-- the externals that return the dummy of a yield: they always yield
 yieldPrims :: [Name]
 yieldPrims = map hndName ["yield-extend", "yield-cont", "keep-yielding-final", "yield-to-prim", "yield-to-final", "unsafe-reyield-prim"]
 
@@ -525,14 +525,14 @@ elabApp f args resTp
                   VCtx _ a b -> return (a,b)
                   _ -> failE ("plugging a non-context: " ++ ppr t)
        let shared = not (isLinearContextPrim f)
-       callWith False (\[c,v] -> do (k,c') <- ctxCopy shared t c
-                                    return (k (Plug c' v))) [t, VPtr b] (VPtr a) args
+       callWith coerceExpr (\[c,v] -> do (k,c') <- ctxCopy shared t c
+                                         return (k (Plug c' v))) [t, VPtr b] (VPtr a) args
   | isPrim nameCCtxCompose f
   = do t <- vt resTp
        ts@[tc,td] <- mapM (vt . typeOf) args
-       callWith False (\[c,d] -> do (kc,c') <- ctxCopy True tc c
-                                    (kd,d') <- ctxCopy True td d
-                                    return (kc (kd (Append c' d')))) ts t args
+       callWith coerceExpr (\[c,d] -> do (kc,c') <- ctxCopy True tc c
+                                         (kd,d') <- ctxCopy True td d
+                                         return (kc (kd (Append c' d')))) ts t args
   | any (`isPrim` f) [nameCCtxHoleCreate, nameFieldAddrOf]
   = failE "a hole outside of a context"
   -- extends with the hole of a context that may be shared, without copying its path
@@ -545,12 +545,12 @@ elabApp f args resTp
            -> do (tysD,params,res) <- instFun g sig gtp tys
                  e <- env
                  let copies = [m == Unique && captured e arg | ((m,_),arg) <- zip ps args] ++ repeat False
-                 callWith (g == hndName "yield-to-final")
+                 callWith (coerceCall g)
                           (\vs -> do (ks,vs') <- unzip <$> sequence (zipWith3 ctxCopy copies params vs)
                                      return (compose ks (Call (toLidar g) tysD vs'))) params res args
          _ -> do (k1,fv) <- elabVal f
                  (params,res) <- funType f
-                 body <- callWith False (applyFun (AFun params res) fv) (map snd params) res args
+                 body <- callWith coerceExpr (applyFun (AFun params res) fv) (map snd params) res args
                  return (k1 body)
 
 globalOf :: C.Expr -> E (Maybe (Name,Sig,Type,[Type]))
@@ -618,20 +618,30 @@ funType f = do t <- vt (typeOf f)
                  _ -> failE ("expecting a function value: " ++ ppr t)
 
 -- A call of the arguments `args` at the types `params`, whose result of type `res` is
--- coerced to the type `result` (`coerceExpr`, which tests a result that may be the dummy of a
--- yield where Koka does not). The result of a final yield (`trusted`) is always the dummy: where
--- Koka types it at a total type (`prompt` resumes with `{ yield-to-final(m, …) }`), it is cast.
+-- coerced to the type `result` by `coerceRes` (usually `coerceExpr`, which tests a result that
+-- may be the dummy of a yield where Koka does not; see `coerceCall`).
 -- In code without a token, a call that takes one is a `[total]` region.
-callWith :: Bool -> ([VVal] -> E VExpr) -> [VType] -> VType -> [C.Expr] -> E VExpr
-callWith trusted call params res args
+callWith :: (VType -> VType -> VExpr -> E VExpr) -> ([VVal] -> E VExpr) -> [VType] -> VType -> [C.Expr] -> E VExpr
+callWith coerceRes call params res args
   = (if token then region else id) $
     do (ks,vs) <- unzip <$> mapM (\(p,arg) -> elabValAt p arg) (zip (map snd params0) args)
        (kt,tv) <- takeTokenIf token
        expect <- result
        app <- call (vs ++ tv)
-       compose ks . kt <$> local (\e -> e{ envTrusted = envTrusted e || trusted }) (coerceExpr res expect app)
+       compose ks . kt <$> coerceRes res expect app
   where
     (params0,token) = tokenParam [((),p) | p <- params]
+
+-- The coercion of the result of a call of the global `g`. A yield primitive always yields, so
+-- a test of its result does not continue (`coerceYielded`). The result of a final yield is
+-- always the dummy: where Koka types it at a total type (`prompt` resumes with
+-- `{ yield-to-final(m, …) }`), it is cast (`trusting`).
+coerceCall :: Name -> VType -> VType -> VExpr -> E VExpr
+coerceCall g = (if g == hndName "yield-to-final" then trusting else id) (if g `elem` yieldPrims then coerceYielded else coerceExpr)
+
+-- a coercion that trusts Koka's typing (`envTrusted`)
+trusting :: (VType -> VType -> VExpr -> E VExpr) -> VType -> VType -> VExpr -> E VExpr
+trusting c from to e = local (\en -> en{ envTrusted = True }) (c from to e)
 
 splitTypeApp :: C.Expr -> (Maybe (TName,C.VarInfo),[Type])
 splitTypeApp expr

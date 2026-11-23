@@ -26,10 +26,8 @@ fromLidar name = newLocallyQualified (L.nameModule name) (L.nameLocalQual name) 
 -- | Pairs of names that Koka and lidar each construct themselves.
 namePairs :: [(Name,L.Name)]
 namePairs
-  = [ (K.nameCoreHnd, L.nameCoreHnd)
-    , (K.nameTpInt, L.nameTpInt)
+  = [ (K.nameTpInt, L.nameTpInt)
     , (K.nameTpString, L.nameTpString)
-    , (K.nameYieldExtend, L.nameYieldExtend)
     , (K.nameLazyMemoize, L.nameLazyMemoize)
     , (K.nameLazyMemoizeTarget, L.nameLazyMemoizeTarget)
     , (newHiddenName "x", L.newHiddenName "x")
