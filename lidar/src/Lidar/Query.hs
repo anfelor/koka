@@ -446,6 +446,7 @@ checkReuseTy ty = case ty of
     AVar _ -> return ()
     AUnit -> return ()
     AAny -> return ()
+    APrim _ -> return ()
   where
     -- a cell only occurs on its own
     inner t = case t of

@@ -94,6 +94,7 @@ matchAWith tvs sub pat t
       AVar _    -> if pat == t then Just sub else Nothing
       AUnit     -> if pat == t then Just sub else Nothing
       AAny      -> if pat == t then Just sub else Nothing
+      APrim _   -> if pat == t then Just sub else Nothing
   where
     bind v s = case M.lookup v sub of
                  Nothing -> Just (M.insert v s sub)

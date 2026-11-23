@@ -16,7 +16,6 @@ module Lidar.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContent
 
 import Data.Functor.Identity( Identity(..) )
 import qualified Data.Map as M
-import Lidar.Prim( nameTpInt, nameTpString )
 import Lidar.Syntax
 
 type Sub = M.Map TVar AType
@@ -81,6 +80,7 @@ traverseReuseContents f = goV
       ALazy l b -> ALazy <$> goA l <*> goA b
       AUnit -> pure a
       AAny -> pure a
+      APrim _ -> pure a
       AVar _ -> pure a
 
 forallA :: [TVar] -> AType -> AType
@@ -102,8 +102,8 @@ atAny :: AType
 atAny = AAny
 
 vtInt, vtString, vtChar, vtFloat :: VType
-vtInt    = VPtr (ACon nameTpInt [])
-vtString = VPtr (ACon nameTpString [])
+vtInt    = VPtr (APrim PInt)
+vtString = VPtr (APrim PString)
 vtChar   = VRaw RChar
 vtFloat  = VRaw RFloat64
 
@@ -129,6 +129,7 @@ substA sub a
       AApp v ts     -> applyA (M.findWithDefault (AVar v) v sub) (map (substA sub) ts)
       ACon n ts     -> ACon n (map (substA sub) ts)
       AAny          -> a
+      APrim _       -> a
       ABox t        -> ABox (substV sub t)
       AScalar _     -> a
       ASum ts       -> ASum [(i,substA sub t) | (i,t) <- ts]
@@ -172,6 +173,7 @@ ftvA a
       AApp v ts     -> v : concatMap ftvA ts
       ACon _ ts     -> concatMap ftvA ts
       AAny          -> []
+      APrim _       -> []
       ABox t        -> ftvV t
       AScalar _     -> []
       ASum ts       -> concatMap (ftvA . snd) ts
@@ -346,6 +348,7 @@ containsLinear = go
        AFun _ _ -> False
        AUnit -> False
        AAny -> False
+       APrim _ -> False
 
 -- `V?` contains no credits or cells, and no heap block contains a `V?` (see "Nullable values"
 -- in `Syntax`)
@@ -380,6 +383,7 @@ wellNull ty
       AVar _ -> True
       AUnit -> True
       AAny -> True
+      APrim _ -> True
     -- the unboxed parts of the contents of a block
     noNull v = case v of
       VOrNull _ -> False
@@ -442,6 +446,7 @@ eraseEv t
       AUnit -> a
       AVar _ -> a
       AAny -> a
+      APrim _ -> a
 
 -- the effect token
 isToken :: VType -> Bool

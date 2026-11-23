@@ -10,7 +10,7 @@
 
 -- Koka's C conventions: names, and the C types of extern calls.
 module Backend.Typed.CGen.Koka( kokaName, kokaTypeName, kokaLocal
-                              , kokaKType, kokaPrimTypes
+                              , kokaKType, kokaPrimType, kokaPrimTypes
                               , toKoka, fromKoka, cIdents, isComment, substFormat
                               , externCType
                               ) where
@@ -60,6 +60,13 @@ kokaPrimTypes
       ,(nameTpInt8,"int8_t"),(nameTpInt16,"int16_t"),(nameTpInt32,"int32_t"),(nameTpMarker,"int32_t")
       ,(nameTpFloat32,"float"),(nameTpFloat16,"float"),(nameTpRef,"kk_ref_t"),(nameTpLocalVar,"kk_ref_t")
       ,(nameTpBox,"kk_box_t"),(nameTpAny,"kk_box_t"),(nameTpReuse,"kk_reuse_t"),(nameTpFieldAddr,"kk_field_addr_t")]
+
+-- Koka's C type of a builtin IR type
+kokaPrimType :: Prim -> String
+kokaPrimType p
+  = case p of
+      PInt    -> "kk_integer_t"
+      PString -> "kk_string_t"
 
 toKoka :: CT -> String -> Doc -> Doc
 toKoka ct kt e

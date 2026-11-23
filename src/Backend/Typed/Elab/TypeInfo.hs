@@ -13,7 +13,7 @@ module Backend.Typed.Elab.TypeInfo( Tr
                                   , isValueInfo, elabArgs
                                   , conIndex, conFieldTypes, conFieldNames, schemeFieldTypes, conCount, conShape, conExists
                                   , isLazyInfo, lazyIndirectTag, refShape, refInj
-                                  , dataInfoOf, valueBody, valueDecl, kType
+                                  , dataInfoOf, valueBody, valueDecl, kType, primType
                                   , tvarStar
                                   ) where
 
@@ -116,11 +116,20 @@ elabCon nt name [a,b] | name == nameTpCCtxx
   = VCtx MaybeEmpty <$> elabArg nt kindStar a <*> elabArg nt kindStar b
 elabCon _ name [] | name == nameTpAny
   = Right (VPtr AAny)
+elabCon _ name [] | Just p <- primType name
+  = Right (VPtr (APrim p))
 elabCon nt name args
   = do info  <- dataInfoOf nt name
        vargs <- elabArgs nt (dataInfoParams info) args
        if isValueInfo info then valueBody nt info vargs
                            else Right (VPtr (ACon (toLidar name) vargs))
+
+-- the datatypes that are builtin IR types
+primType :: Name -> Maybe Prim
+primType name
+  | name == nameTpInt    = Just PInt
+  | name == nameTpString = Just PString
+  | otherwise            = Nothing
 
 -- a partially applied value type is a type lambda over the boxed representation of its body
 elabConHigher :: Newtypes -> Name -> [Type] -> Tr AType

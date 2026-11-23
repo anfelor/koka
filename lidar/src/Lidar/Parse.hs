@@ -371,6 +371,8 @@ baseTyP
       , do n <- numbered "cell"; V . VCell n <$> anglesP aP
       , do v <- tvarP; mts <- optionMaybe (anglesP (commaSep aP)); return (A (maybe (AVar v) (AApp v) mts))
       , A AAny <$ kw "any"
+      , A (APrim PInt) <$ kw "int"
+      , A (APrim PString) <$ kw "string"
       , do n <- nameP; ts <- option [] (anglesP (commaSep aP)); return (A (ACon (globalName n) ts))
       , sym "(" >> parenTyP ]
 

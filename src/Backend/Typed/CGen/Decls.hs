@@ -26,16 +26,15 @@ import Data.List( intercalate )
 import Data.Maybe( catMaybes, isNothing )
 import Lib.PPrint( text )
 import Lidar.Name
-import Lidar.Prim( nameTpString )
 import Lidar.Syntax
 import Lidar.Layout
 import Backend.Typed.CGen.Layout( cName, ctName, structDefs, blockName, blockDef, dupFun, dropFun, primBox )
-import Backend.Typed.CGen.Koka( kokaName, kokaTypeName, kokaLocal, kokaKType, kokaPrimTypes, fromKoka )
+import Backend.Typed.CGen.Koka( kokaName, kokaTypeName, kokaLocal, kokaKType, kokaPrimType, kokaPrimTypes, fromKoka )
 
 -- The payload of the block of an open constructor: the tag string of the constructor (the `_tag`
 -- of Koka's base struct), followed by the fields.
 openPayload :: [VType] -> VType
-openPayload fs = VProd ((posField 0, VPtr (ACon nameTpString [])) : [(posField i, f) | (i,f) <- zip [1..] fs])
+openPayload fs = VProd ((posField 0, VPtr (APrim PString)) : [(posField i, f) | (i,f) <- zip [1..] fs])
 
 -- the top-level string that tags the blocks of an open constructor
 openTagName :: Name -> Name
@@ -271,6 +270,7 @@ kokaFieldType decl t
   where
     ptrType a = case a of
                   ACon n _ -> kokaKType (KCon n)
+                  APrim p -> kokaPrimType p
                   AFun _ _ -> kokaKType KFun
                   AForall _ b -> ptrType b
                   _ -> kokaKType KBox

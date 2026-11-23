@@ -14,6 +14,7 @@ import qualified Data.Map as M
 import qualified Common.NameMap as NM
 import Control.Monad( forM_, unless, when )
 import Data.List( partition )
+import Data.Maybe( isNothing )
 import Common.Syntax( dataDefIsOpen )
 import Kind.Newtypes
 import Type.Type( ConInfo, typevarId, conInfoName, conInfoParams, conInfoIsLazy, dataInfoIsLazy )
@@ -40,7 +41,7 @@ typeDefs nt
   = (M.fromList [(tdefName d, d) | (_,Right d) <- defs],
      [show (dataInfoName info) ++ ": " ++ err | (info,Left err) <- defs, dataInfoIsLazy info])
   where
-    defs = [(info, typeDef nt info) | (_,info) <- NM.toList (newtypesTypeDefs nt)]
+    defs = [(info, typeDef nt info) | (_,info) <- NM.toList (newtypesTypeDefs nt), isNothing (primType (dataInfoName info))]
 
 typeDef :: Newtypes -> DataInfo -> Tr TypeDef
 typeDef nt info

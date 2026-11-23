@@ -171,8 +171,13 @@ data AType = ABox VType                 -- Box V
            | AApp TVar [AType]          -- a⟨B̄⟩, an applied higher-kinded variable
            | ACon Name [AType]          -- T⟨B̄⟩, a named type
            | AAny                       -- any, the top type of `[up]` and `[down]`
+           | APrim Prim                 -- int, string: the builtin abstract reference types
            | ALam [TVar] AType          -- λā. A, a partially applied type
            deriving (Eq,Show)
+
+-- the builtin abstract reference types, the types of literals (`Lit`)
+data Prim = PInt | PString
+          deriving (Eq,Ord,Show)
 
 -- the sides of a lazy sum `L ~> S`: its strict alternatives S (`whnf`) and its thunks L (`delay`)
 data Side = Whnf | Delay
@@ -256,7 +261,7 @@ data TypeDef = TypeDef{ tdefName :: Name, tdefParams :: [TVar], tdefBody :: Type
 data TypeBody = BodyRef AType   -- a reference datatype, `T⟨ā⟩ := A`
               | BodyValue VType -- a value datatype: the type its uses inline (`VRaw` for `int32`, `marker`, ...)
               | BodyOpen        -- an extensible datatype, whose constructors are `SigCon`s
-              | BodyAbstract    -- a reference datatype without constructors (`int`, `string`, `evv`, ...)
+              | BodyAbstract    -- a reference datatype without constructors (`evv`, `ref`, ...)
               deriving (Show)
 
 -- The label of a constructor: its name and the names of its fields (as in `conFieldNames`). A
@@ -269,8 +274,8 @@ data ConLabel = ConLabel{ lblCon :: Name, lblFields :: [Field], lblDecls :: [May
 
 type TypeDefs = M.Map Name TypeDef
 
--- the type of a literal, `type(l)` (`Query.litType`): `int*` and `string*` (abstract named
--- types), and raw `char` and `float64`
+-- the type of a literal, `type(l)` (`Query.litType`): `int*` and `string*` (builtin
+-- abstract types, `APrim`), and raw `char` and `float64`
 data Lit = LitInt Integer
          | LitFloat Double
          | LitChar Char

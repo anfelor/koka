@@ -146,6 +146,8 @@ prettyA pp a
       ACon n []     -> nm n
       ACon n ts     -> nm n <> angles (commaSep (map (prettyA pp) ts))
       AAny          -> "any"
+      APrim PInt    -> "int"
+      APrim PString -> "string"
       ALam vs b     -> parens ("\\" <> hsep (map tv vs) <> "." <+> prettyA pp b)
       ALazy l b     -> parens (atomA pp l <+> "~>" <+> atomA pp b)
 
@@ -168,6 +170,7 @@ prettyV pp t
       VPtr a@(AVar _)   -> prettyA pp a <> "*"
       VPtr a@(ACon _ _) -> prettyA pp a <> "*"
       VPtr AAny  -> "any*"
+      VPtr a@(APrim _) -> prettyA pp a <> "*"
       VPtr a     -> parens (prettyA pp a) <> "*"
       VReuse f n contents -> pretty ("reuse" ++ (if f == Full then "!" else "") ++ show n) <> prettyContents pp contents
       VUnit      -> "I"

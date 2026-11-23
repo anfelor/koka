@@ -46,7 +46,6 @@ import Data.List( nub, intercalate )
 import Data.Functor.Const( Const(..) )
 import Control.Monad( unless, when )
 import Lidar.Name
-import Lidar.Prim( nameTpInt )
 import Lidar.Syntax
 import Lidar.Traversal( descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsScrut, canonical, within )
 import Lidar.Pretty( ppr )
@@ -191,8 +190,7 @@ untracked t
     isInt (A a) = isIntA a
     isInt (V (VPtr a)) = isIntA a
     isInt _ = False
-    isIntA (ACon n []) = n == nameTpInt
-    isIntA _ = False
+    isIntA a = a == APrim PInt
 
 -- `x` is an immediate value on this path: one of its binders that is all of it (`canonical`)
 -- is of a trivial type
