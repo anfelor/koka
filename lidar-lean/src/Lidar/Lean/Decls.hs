@@ -29,7 +29,7 @@ Mono types become IR types as follows.
 -}
 module Lidar.Lean.Decls
   ( Decls(..), Kind(..), CtorInfo(..)
-  , declsOf, leanName, irType, typeKind, anyT, resultType, rawOfNat
+  , declsOf, leanName, irType, typeKind, anyT, resultType, rawOfNat, isBuiltinType
   ) where
 
 import qualified Data.Map as M
@@ -81,6 +81,17 @@ rawTypes = [ ("UInt8",RUInt8), ("UInt16",RInt16), ("UInt32",RInt32), ("UInt64",R
 builtinTypes :: [(D.Name,Kind)]
 builtinTypes = [ ("Nat",KPrim vtInt), ("String",KPrim vtString) ]
                ++ [ (n,KAbstract) | n <- ["Int","Array","ByteArray","FloatArray","Thunk","Task"] ]
+
+-- | Whether the runtime implements the type itself: its constructors (such as @Int.ofNat@) are
+-- functions of the runtime, not constructor values.
+isBuiltinType :: D.Name -> Bool
+isBuiltinType n = n `elem` map fst rawTypes || n `elem` map fst builtinTypes
+
+-- the constructors of builtin types that mono code applies, as functions of the runtime
+-- (@lean_nat_to_int@ and @lean_int_neg_succ_of_nat@ consume their argument)
+builtinCtorSigs :: [(D.Name,Sig)]
+builtinCtorSigs = [ (c, SigFun [] [(Owned,vtInt)] Owned (VPtr (ACon (leanName "Int") [])))
+                  | c <- ["Int.ofNat","Int.negSucc"] ]
 
 -- the unsigned integer types, whose literals are converted from Nat
 uintTypes :: [(D.Name,Raw)]
@@ -208,3 +219,4 @@ declsOf d
     sigs = M.fromList ([(leanName (D.declName x), signature inds (D.declLink x) (D.declParams x) (D.declType x)) | x <- D.dumpDecls d]
                        ++ [(leanName (D.constName c), signature inds (D.constLink c) ps t) | c <- D.dumpConsts d, Just (D.MonoSig ps t) <- [D.constMono c]])
            `M.union` M.fromList [(leanName (n ++ ".ofNat"), SigFun [] [(Borrowed,vtInt)] Owned (VRaw r)) | (n,r) <- uintTypes]
+           `M.union` M.fromList [(leanName c, sig) | (c,sig) <- builtinCtorSigs]

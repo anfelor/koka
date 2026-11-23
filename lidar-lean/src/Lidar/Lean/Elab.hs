@@ -202,17 +202,12 @@ elabCode res code
       -- Perceus expects closed join points: the locals that the body captures become
       -- parameters (before those of the join point), which every jump passes on
       D.Jp f k ->
-        do ls <- asks cLocals
-           let own = [(D.paramVar p, D.paramName p, D.paramType p) | p <- D.funParams f]
-               captured = [(y,t) | y <- S.toList (freeVars (D.funBody f)), y `notElem` [x | (x,_,_) <- own], Just (_,t) <- [M.lookup y ls]]
+        do let own = [(D.paramVar p, D.paramName p, D.paramType p) | p <- D.funParams f]
            ts <- mapM (\(_,_,t) -> irT t) own
-           cs <- mapM (const (fresh "capture")) captured
-           let ps = [varPath x n | (x,n,_) <- own]
-               params = zip cs (map snd captured) ++ zip ps ts
-           body <- withLocals (zip (map fst captured ++ [x | (x,_,_) <- own]) params) (elabCode res (D.funBody f))
+           (captured,params,body) <- closedJoin res [(varPath x n, (x,t)) | ((x,n,_),t) <- zip own ts] (D.funBody f)
            let j = varName (D.funVar f) (D.funName f)
-           cont <- local (\c -> c{ cJoins = M.insert (D.funVar f) (j,map fst captured,ts) (cJoins c) }) (elabCode res k)
-           return (Join j [] [(p,Owned,t) | (p,t) <- params] body cont)
+           cont <- local (\c -> c{ cJoins = M.insert (D.funVar f) (j,captured,ts) (cJoins c) }) (elabCode res k)
+           return (Join j [] params body cont)
       D.Jmp j as ->
         do js <- asks cJoins
            case M.lookup j js of
@@ -275,7 +270,7 @@ elabConst :: D.Name -> [D.Arg] -> E (K,VExpr,VType)
 elabConst c as
   = do ds <- asks cDecls
        case (M.lookup c (dCtors ds), M.lookup (leanName c) (dSigs ds)) of
-         (Just ci, _) -> elabCon ci (drop (ciNumParams ci) as)
+         (Just ci, _) | not (isBuiltinType (ciType ci)) -> elabCon ci (drop (ciNumParams ci) as)
          (_, Just (SigFun _ ps _ r))
            | length as == length ps -> do (k,vs) <- args as (map snd ps)
                                           return (k, Call (leanName c) [] vs, r)
@@ -473,10 +468,28 @@ defaultBranch :: VType -> Int -> [D.Code] -> E (K,E VExpr)
 defaultBranch res n dflt
   = case dflt of
       code:_ | n > 1 -> do j <- freshName "default"
-                           e <- elabCode res code
-                           return (Join j [] [] e, return (Jump j [] []))
+                           (captured,params,e) <- closedJoin res [] code
+                           let jump = do (k,vs) <- args (map D.AVar captured) =<< mapM localType captured
+                                         return (k (Jump j [] vs))
+                           return (Join j [] params e, jump)
              | otherwise -> return (id, elabCode res code)
       [] -> return (id, return (Unreachable res))
+
+-- The parameters and body of a join point with the given parameters (paths, and the locals
+-- they bind). Join points are closed, as Perceus requires: the locals that the body uses
+-- (also through the join points it jumps to) become parameters in front of its own, and
+-- jumps pass them (first in the returned list).
+closedJoin :: VType -> [(Path,(D.Var,VType))] -> D.Code -> E ([D.Var],[(Path,Mode,VType)],VExpr)
+closedJoin res own code
+  = do ls <- asks cLocals
+       js <- asks cJoins
+       let fvs = freeVars code
+           used = S.union fvs (S.fromList [y | j <- S.toList fvs, Just (_,ys,_) <- [M.lookup j js], y <- ys])
+           captured = [(y,t) | y <- S.toList used, y `notElem` map (fst . snd) own, Just (_,t) <- [M.lookup y ls]]
+       cs <- mapM (const (fresh "capture")) captured
+       let params = zip cs (map snd captured) ++ [(p,t) | (p,(_,t)) <- own]
+       body <- withLocals (zip (map fst captured ++ map (fst . snd) own) params) (elabCode res code)
+       return (map fst captured, [(p,Owned,t) | (p,t) <- params], body)
 
 -- the free locals of code (and the join points it jumps to)
 freeVars :: D.Code -> S.Set D.Var
