@@ -1,0 +1,18 @@
+1
+ 
+lazy/nullary-call/stream/Indirect: (stream) -> stream
+lazy/nullary-call/stream/lazy-Copy: (stream, bool, xs : list<int>) -> div stream
+lazy/nullary-call/stream/lazy-eval: (stream, bool) -> div stream
+lazy/nullary-call/stream/lazy-eval-locked: (stream, bool) -> div stream
+lazy/nullary-call/stream/lazy-force: (stream) -> div stream
+lazy/nullary-call/stream/lazy-step: (stream) -> div stream
+lazy/nullary-call/stream/lazy-tag: int32
+lazy/nullary-call/stream/lazy-whnf: (stream) -> div stream
+lazy/nullary-call/Copy: (xs : list<int>) -> stream
+lazy/nullary-call/SCons: (i : int, rest : stream) -> stream
+lazy/nullary-call/SNil: stream
+lazy/nullary-call/head: (s : stream) -> div int
+lazy/nullary-call/main: () -> div int
+lazy/nullary-call/stuck: forall<a> () -> div a
+test/lazy/nullary-call@kk(10,21): kind warning: Cannot update the lazy constructor Copy in-place as the result constructor is larger (8 vs 16 bytes) -- using an indirection instead
+test/lazy/nullary-call@kk(11,21): kind warning: Cannot update the lazy constructor Copy in-place as the result constructor is not statically known -- using an indirection instead
