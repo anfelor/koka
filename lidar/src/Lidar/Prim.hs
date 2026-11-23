@@ -10,7 +10,7 @@
   Each is defined exactly as in Koka's `Common.NamePrim`.
 -}
 module Lidar.Prim
-  ( nameCoreHnd, nameCoreDebug
+  ( nameCoreHnd
   , nameTpInt, nameTpString
   , nameYieldExtend
   , namePatternMatchError
@@ -19,9 +19,8 @@ module Lidar.Prim
 
 import Lidar.Name
 
-nameCoreHnd, nameCoreDebug, nameCoreTypes :: Name
+nameCoreHnd, nameCoreTypes :: Name
 nameCoreHnd   = newModuleName "std/core/hnd"
-nameCoreDebug = newModuleName "std/core/debug"
 nameCoreTypes = newModuleName "std/core/types"
 
 coreTypesName, coreHndName :: String -> Name

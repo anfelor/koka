@@ -27,7 +27,6 @@ fromLidar name = newLocallyQualified (L.nameModule name) (L.nameLocalQual name) 
 namePairs :: [(Name,L.Name)]
 namePairs
   = [ (K.nameCoreHnd, L.nameCoreHnd)
-    , (K.nameCoreDebug, L.nameCoreDebug)
     , (K.nameTpInt, L.nameTpInt)
     , (K.nameTpString, L.nameTpString)
     , (K.nameYieldExtend, L.nameYieldExtend)

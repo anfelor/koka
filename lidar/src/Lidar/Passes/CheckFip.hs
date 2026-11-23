@@ -36,8 +36,7 @@
   scalars and globals are not counted. The frontend checks a function before its monadic
   translation, so the paths on which an effect yields (`[if-yielding]`) are not taken either;
   the evidence operations that open effects are `fip` externs. Neither are paths that
-  end in a pattern match failure. The frontend does not report on
-  `std/core/debug`, and neither does this check.
+  end in a pattern match failure.
 -}
 module Lidar.Passes.CheckFip( checkFip ) where
 
@@ -47,7 +46,7 @@ import Data.List( nub, intercalate )
 import Data.Functor.Const( Const(..) )
 import Control.Monad( unless, when )
 import Lidar.Name
-import Lidar.Prim( nameTpInt, nameCoreDebug, namePatternMatchError )
+import Lidar.Prim( nameTpInt, namePatternMatchError )
 import Lidar.Syntax
 import Lidar.Traversal( descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsScrut, canonical, within )
 import Lidar.Pretty( ppr )
@@ -98,8 +97,7 @@ type F a = M FEnv FS a
 -- the recursive group of each definition
 checkFip :: M.Map Name Fip -> M.Map Name (S.Set Name) -> Program -> [String]
 checkFip fips groups prog
-  = concat [checkDef d fip | d@DefFun{} <- progDefs prog, qualifier (defName d) /= nameCoreDebug
-                            , Just fip <- [M.lookup (defName d) fips], not (isFipTop fip)]
+  = concat [checkDef d fip | d@DefFun{} <- progDefs prog, Just fip <- [M.lookup (defName d) fips], not (isFipTop fip)]
   where
     checkDef d fip
       = let info = Info fip (M.findWithDefault S.empty (defName d) groups) fips [x | (x,Borrowed,_) <- defArgs d]

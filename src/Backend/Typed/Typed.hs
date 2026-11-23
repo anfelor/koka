@@ -11,8 +11,10 @@ module Backend.Typed.Typed( typedFromCore ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
+import Data.List( isPrefixOf )
 import Common.Failure( assertion )
 import Common.Unique
+import Common.NamePrim( nameCoreDebug )
 import qualified Common.Syntax as Syntax
 import Kind.Newtypes
 import qualified Core.Core as C
@@ -36,9 +38,11 @@ typedFromCore enableReuse nt ffi imports uniq core
         -- Elaboration does not name paths (Paths does), so only its types are checked.
         typeErrs               = label "check after elab" (checkTypes eprog)
         (final,errs,warnings)  = if null typeErrs then lowerProgram opts eprog else (eprog,typeErrs,[])
-    in (final, label "elab" elabErrs ++ errs, warnings ++ label "note" notes)
+    in (final, label "elab" elabErrs ++ errs, filter (not . trusted) warnings ++ label "note" notes)
   where
     label l msgs = [(l,msg) | msg <- msgs]
+    -- as in Koka's own checker, the FIP annotations of `std/core/debug` are trusted
+    trusted (l,_) = C.coreProgName core == nameCoreDebug && "fip " `isPrefixOf` l
 
 -- the FIP annotations of the functions
 fipsOf :: [C.Core] -> M.Map Name Fip
