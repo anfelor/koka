@@ -637,9 +637,9 @@ lazyConDefCall info conInfo parNames recurseArg memoTarget topExpr
           Parens expr name pre range -> do expr' <- memoizeExpr expr
                                            return $ Parens expr' name pre range
           App con@(Var cname _ _) nargs range
-            -> memoizeCon cname con nargs range
+            -> memoizeCon cname expr con nargs range
           Var cname _ range
-            -> memoizeCon cname expr [] range
+            -> memoizeCon cname expr expr [] range
           _ -> memoizeUnknown expr
 
     memoizeBranch (Branch pattern guards)
@@ -657,7 +657,8 @@ lazyConDefCall info conInfo parNames recurseArg memoTarget topExpr
            addWarning rng $ text "Cannot update the lazy constructor" <+> showConName (conInfoName conInfo) <+> fdoc showConName
 
 
-    memoizeCon cname con nargs range
+    -- `expr` is the call `con(nargs)` itself, kept as is when `con` is not a constructor
+    memoizeCon cname expr con nargs range
       = case lookupCon cname whnfConstrs of
           -- strict constructor result
           Just whnfCon -> do memoizeCheckCanFit range whnfCon
@@ -665,7 +666,7 @@ lazyConDefCall info conInfo parNames recurseArg memoTarget topExpr
           -- lazy constructor
           Nothing -> case lookupCon cname lazyConstrs of
                        -- unknown constructor
-                       Nothing     -> memoizeUnknown (makeApp con nargs range)
+                       Nothing     -> memoizeUnknown expr
                        -- known lazy constructor
                        Just cinfo  -> do platform <- getPlatform
                                          let (targetSize,targetScan) = Core.conReprAllocSizeScan platform (Core.getConRepr info conInfo)
