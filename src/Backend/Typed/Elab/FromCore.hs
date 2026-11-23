@@ -35,8 +35,8 @@ import Lidar.Traversal( child )
 import Backend.Typed.Elab.Types( typeDefs )
 import Backend.Typed.Elab.TypeInfo
 import Lidar.Types
-import Backend.Typed.Elab.TypeMatch( match )
-import Backend.Typed.Elab.Representation
+import Lidar.Elab.TypeMatch( match )
+import Lidar.Elab.Representation
 import Backend.Typed.Elab.Monad
 import Backend.Typed.Elab.Coerce
 import Backend.Typed.Elab.Lazy( whnfTests )

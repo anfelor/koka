@@ -11,14 +11,12 @@ module Backend.Typed.Elab.Coerce( coerce, coerceInst, coerceExpr, coerceYielded,
 
 import qualified Data.Map as M
 import Data.Maybe( isJust )
-import Lidar.Name( Name )
 import Lidar.Syntax
 import Lidar.Build( K, compose, yieldedWith )
 import Lidar.Traversal( child, hasRegion )
 import Lidar.Types
-import Lidar.Layout( leaves )
-import Backend.Typed.Elab.TypeMatch( match )
-import Backend.Typed.Elab.Representation
+import Lidar.Elab.TypeMatch( match )
+import Lidar.Elab.Representation
 import Backend.Typed.Elab.Monad
 import Control.Monad.Reader( asks )
 import Lidar.Pretty( ppr )
@@ -87,24 +85,6 @@ fieldOf t v
                           return (Unpack v tvs x . k, w)
       _ -> return (id, v)
 
--- the value of type `t` whose only field (`scalarField`) is `w`; the existentials of `t` do not
--- occur in its fields, which are units apart from `w`
-withField :: VType -> VVal -> VVal
-withField t w
-  = case t of
-      VProd fs -> Tuple [if j == leafField fs then withField s w else unitOf s | (j,(_,s)) <- zip [0..] fs]
-      VExists tvs b -> Pack t (map (const atAny) tvs) (withField b w)
-      _ -> w
-  where
-    unitOf s = case s of
-                 VProd fs -> Tuple (map (unitOf . snd) fs)
-                 VExists tvs b -> Pack s (map (const atAny) tvs) (unitOf b)
-                 _ -> UnitV
-
--- the field of a product that holds its only leaf (`scalarField`)
-leafField :: [(Field,VType)] -> Int
-leafField = length . takeWhile (null . leaves . snd)
-
 -- the boxed leaf of `v : t` and its position in `shapeLeaves(t)`, given to the continuation in
 -- every alternative
 leafAV :: VType -> VVal -> (Int -> AVal -> E VExpr) -> E VExpr
@@ -117,30 +97,6 @@ leafAV t v k
                                      _     -> fresh "y"
                               body <- leafAV ti (Var y) (k . (+ start))
                               return (i, y, body)
-
--- the position of the first leaf of each alternative
-leafStarts :: [(Con,VType)] -> [Int]
-leafStarts ts = scanl (+) 0 (map (length . shapeLeaves . snd) ts)
-
--- the shape of a type that is not a sum of several alternatives
-boxLeaf :: VType -> VVal -> AVal
-boxLeaf t v
-  = case t of
-      VUnit       -> UnitA
-      VSum _      -> Box v
-      VPtr _      -> Box v
-      VProd _     -> Box v
-      VRaw _      -> Box v
-      VExists _ _ -> Box v
-      VReuse _ _ _  -> Box v
-      VCtx _ _ _  -> Box v
-      VCell _ _   -> Box v
-      VOrNull _   -> Box v
-      VToken      -> Box v
-
-isMultiSum :: VType -> Bool
-isMultiSum (VSum ts) = length ts > 1
-isMultiSum _         = False
 
 unboxV :: VType -> VVal -> E (K,VVal)
 unboxV t v
@@ -355,27 +311,9 @@ extract u r full
                       return (\body -> IsNull (Var r) (Unreachable full) (y,body), Var y)
       _ -> return (id, Var r)
 
-ptrA :: VType -> AType
-ptrA (VPtr a) = a
-ptrA t        = boxA t
-
 instPoly :: [TVar] -> AType -> Sub -> VVal -> VType -> E (K,VVal)
 instPoly tvs a sub v to
   = coerce (VPtr (subst sub a)) to (TyApp v [M.findWithDefault atAny tv sub | tv <- tvs])
-
--- functions with the same number of parameters, apart from their tokens
-funPair :: AType -> AType -> Maybe ([TVar],[TVar],[(Mode,VType)],VType,[(Mode,VType)],VType)
-funPair a b
-  = case (a,b) of
-      (AFun ps r, AFun qs s) | arity ps == arity qs -> Just ([],[],ps,r,qs,s)
-      (AFun ps r, AForall bs (AFun qs s)) | arity ps == arity qs -> Just (bs,[],ps,r,qs,s)
-      (AForall as (AFun ps r), AForall bs b') | length as == length bs
-        -> case inst bs (map AVar as) b' of
-             AFun qs s | arity ps == arity qs -> Just (as,as,ps,r,qs,s)
-             _ -> Nothing
-      _ -> Nothing
-  where
-    arity = length . fst . tokenParam
 
 -- A function `v` with the parameters `ps` as one with the parameters `qs`. The token of the
 -- wrapper is that of `v`; without one, the result of `v` gets the token of the wrapper, or
@@ -424,12 +362,3 @@ applyClosure a fv args
   = do s <- fresh "f"
        let g = child s SDeref
        return (Let s (VPtr a) (Ret fv) (Deref (Var s) g (App g args)))
-
--- a top-level function applied to all its type arguments; as a closure its parameters are owned
-knownFun :: VVal -> [AType] -> Maybe (Name,[AType])
-knownFun v tys
-  = case v of
-      TyApp w tys'                                           -> knownFun w (tys' ++ tys)
-      Ptr (AForall tvs _) (Fun f) | length tvs == length tys -> Just (f,tys)
-      Ptr (AFun _ _) (Fun f)      | null tys                 -> Just (f,tys)
-      _                                                      -> Nothing

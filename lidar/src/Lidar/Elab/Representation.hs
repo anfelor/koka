@@ -7,12 +7,16 @@
 -----------------------------------------------------------------------------
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
--- Koka boxing representations and builders used by Core-to-typed-IR elaboration.
-module Backend.Typed.Elab.Representation( rep, boxrep, boxA, shapeLeaves, leafCons
-                                        , scalarField, varV, atAny, sumOf
-                                        , tapp, injA, caseSum ) where
+-- Boxing representations and builders shared by the elaborations into the IR. A raw value is
+-- boxed by itself and any other value as a shape, and closures take and return boxed values.
+module Lidar.Elab.Representation( rep, boxrep, boxA, shapeLeaves, leafCons
+                                , scalarField, varV, atAny, sumOf
+                                , tapp, injA, caseSum
+                                , withField, leafField, leafStarts, boxLeaf, isMultiSum
+                                , ptrA, funPair, knownFun ) where
 
-import Lidar.Types( atAny, underNull, withToken, unToken, isToken )
+import Lidar.Name( Name )
+import Lidar.Types( atAny, underNull, withToken, unToken, isToken, inst, tokenParam )
 import Lidar.Syntax
 import Lidar.Layout( leaves, isEnum )
 import Lidar.Traversal( child )
@@ -132,3 +136,72 @@ caseSum cons shapes a branch
                                      e <- branch i y
                                      return (tag,y,e)) [0 .. length shapes - 1]
               return (CaseA a alts Nothing)
+
+-- the value of type `t` whose only field (`scalarField`) is `w`; the existentials of `t` do not
+-- occur in its fields, which are units apart from `w`
+withField :: VType -> VVal -> VVal
+withField t w
+  = case t of
+      VProd fs -> Tuple [if j == leafField fs then withField s w else unitOf s | (j,(_,s)) <- zip [0..] fs]
+      VExists tvs b -> Pack t (map (const atAny) tvs) (withField b w)
+      _ -> w
+  where
+    unitOf s = case s of
+                 VProd fs -> Tuple (map (unitOf . snd) fs)
+                 VExists tvs b -> Pack s (map (const atAny) tvs) (unitOf b)
+                 _ -> UnitV
+
+-- the field of a product that holds its only leaf (`scalarField`)
+leafField :: [(Field,VType)] -> Int
+leafField = length . takeWhile (null . leaves . snd)
+
+-- the position of the first leaf of each alternative
+leafStarts :: [(Con,VType)] -> [Int]
+leafStarts ts = scanl (+) 0 (map (length . shapeLeaves . snd) ts)
+
+-- the shape of a type that is not a sum of several alternatives
+boxLeaf :: VType -> VVal -> AVal
+boxLeaf t v
+  = case t of
+      VUnit       -> UnitA
+      VSum _      -> Box v
+      VPtr _      -> Box v
+      VProd _     -> Box v
+      VRaw _      -> Box v
+      VExists _ _ -> Box v
+      VReuse _ _ _  -> Box v
+      VCtx _ _ _  -> Box v
+      VCell _ _   -> Box v
+      VOrNull _   -> Box v
+      VToken      -> Box v
+
+isMultiSum :: VType -> Bool
+isMultiSum (VSum ts) = length ts > 1
+isMultiSum _         = False
+
+ptrA :: VType -> AType
+ptrA (VPtr a) = a
+ptrA t        = boxA t
+
+-- functions with the same number of parameters, apart from their tokens
+funPair :: AType -> AType -> Maybe ([TVar],[TVar],[(Mode,VType)],VType,[(Mode,VType)],VType)
+funPair a b
+  = case (a,b) of
+      (AFun ps r, AFun qs s) | arity ps == arity qs -> Just ([],[],ps,r,qs,s)
+      (AFun ps r, AForall bs (AFun qs s)) | arity ps == arity qs -> Just (bs,[],ps,r,qs,s)
+      (AForall as (AFun ps r), AForall bs b') | length as == length bs
+        -> case inst bs (map AVar as) b' of
+             AFun qs s | arity ps == arity qs -> Just (as,as,ps,r,qs,s)
+             _ -> Nothing
+      _ -> Nothing
+  where
+    arity = length . fst . tokenParam
+
+-- a top-level function applied to all its type arguments; as a closure its parameters are owned
+knownFun :: VVal -> [AType] -> Maybe (Name,[AType])
+knownFun v tys
+  = case v of
+      TyApp w tys'                                           -> knownFun w (tys' ++ tys)
+      Ptr (AForall tvs _) (Fun f) | length tvs == length tys -> Just (f,tys)
+      Ptr (AFun _ _) (Fun f)      | null tys                 -> Just (f,tys)
+      _                                                      -> Nothing

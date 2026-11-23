@@ -32,7 +32,7 @@ import Lidar.Syntax
 import Backend.Typed.LidarName( toLidar )
 import qualified Lidar.Name as L
 import Lidar.Types
-import Backend.Typed.Elab.Representation
+import Lidar.Elab.Representation
 import Lidar.Layout( CT(CBox,CUnit), layout, blockSize )
 
 type Tr a = Either String a

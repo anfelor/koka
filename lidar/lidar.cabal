@@ -18,6 +18,8 @@ library
       Lidar
       Lidar.Annotate
       Lidar.Build
+      Lidar.Elab.Representation
+      Lidar.Elab.TypeMatch
       Lidar.Env
       Lidar.Layout
       Lidar.Name

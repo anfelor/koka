@@ -8,7 +8,7 @@
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- Type matching for instantiation and coercion during elaboration.
-module Backend.Typed.Elab.TypeMatch( TypeMatch(..) ) where
+module Lidar.Elab.TypeMatch( TypeMatch(..) ) where
 
 import qualified Data.Map as M
 import Control.Monad( foldM )
