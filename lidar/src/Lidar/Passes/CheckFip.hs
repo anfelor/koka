@@ -34,8 +34,8 @@
 
   As in the frontend, `int` is assumed small (it is neither shared nor freed), and literals,
   scalars and globals are not counted. The frontend checks a function before its monadic
-  translation, so the paths on which an effect yields (`[if-yielding]`) are not taken either,
-  and the evidence operations (`evv-*`) that open effects are free. Neither are paths that
+  translation, so the paths on which an effect yields (`[if-yielding]`) are not taken either;
+  the evidence operations that open effects are `fip` externs. Neither are paths that
   end in a pattern match failure. The frontend does not report on
   `std/core/debug`, and neither does this check.
 -}
@@ -43,11 +43,11 @@ module Lidar.Passes.CheckFip( checkFip ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Data.List( nub, intercalate, isPrefixOf )
+import Data.List( nub, intercalate )
 import Data.Functor.Const( Const(..) )
 import Control.Monad( unless, when )
 import Lidar.Name
-import Lidar.Prim( nameTpInt, nameYielding, nameCoreDebug, nameCoreHnd, namePatternMatchError )
+import Lidar.Prim( nameTpInt, nameCoreDebug, namePatternMatchError )
 import Lidar.Syntax
 import Lidar.Traversal( descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsScrut, canonical, within )
 import Lidar.Pretty( ppr )
@@ -350,7 +350,7 @@ modProduct :: S.Set Name -> VExpr -> Bool
 modProduct joins expr
   = case expr of
       Ret _ -> True
-      Call f _ _ -> isEvidence f
+      Call{} -> False
       App _ _ -> False
       CaseLit{} -> False
       Jump j _ _ -> S.member j joins
@@ -368,10 +368,6 @@ modProduct joins expr
 -- the subexpressions of an expression
 subexprs :: VExpr -> [VExpr]
 subexprs = getConst . descendE (const (Const [])) (const (Const [])) (\_ e -> Const [e])
-
--- an operation on the evidence vector that opens an effect
-isEvidence :: Name -> Bool
-isEvidence f = qualifier f == nameCoreHnd && "evv-" `isPrefixOf` nameLocal f
 
 branches :: [F (Cost,Bool)] -> F (Cost,Bool)
 branches fs
@@ -402,13 +398,12 @@ call f
        tl <- asks fTail
        let self = S.member f (iGroup info)
        when (self && not tl) (require mayRecurse ("non-tail call to a (mutually) recursive function: " ++ show f))
-       if f == nameYielding || isEvidence f then return mempty
-       else case M.lookup f (iFips info) of
-              Nothing -> do warn ("no fip information for the function " ++ show f)
-                            return mempty
-              Just fip | callable fip (iFip info) -> return (credits fip){ cSelf = self }
-                       | otherwise -> do warn ("calling a non-fip function: " ++ show f)
-                                         return mempty
+       case M.lookup f (iFips info) of
+         Nothing -> do warn ("no fip information for the function " ++ show f)
+                       return mempty
+         Just fip | callable fip (iFip info) -> return (credits fip){ cSelf = self }
+                  | otherwise -> do warn ("calling a non-fip function: " ++ show f)
+                                    return mempty
   where
     credits fip = case fip of
                     Fip n    -> mempty{ cAlloc = n }

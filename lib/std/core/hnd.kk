@@ -209,12 +209,12 @@ pub inline extern @evv-index-mask( i : ev-index, mask-level : ev-index ) : e ev-
   inline "#1+#2"
 
 // Get the current evidence vector.
-extern evv-get() : e evv<e>
+fip extern evv-get() : e evv<e>
   c  "kk_evv_get"
   js "$std_core_hnd._evv_get"
 
 // Set the current evidence vector.
-inline extern evv-set<e1,e>( w : evv<e1> ) : e ()
+inline fip extern evv-set<e1,e>( w : evv<e1> ) : e ()
   c  "kk_evv_set"
   js "$std_core_hnd._evv_set"
 
@@ -243,31 +243,31 @@ pub extern @evv-is-affine() : bool
 // -----------------------------------------------------------------------------------
 
 // Swap the current evidence vector with `w`
-inline extern evv-swap<e1,e2>( w : evv<e1> ) : e evv<e2>
+inline fip extern evv-swap<e1,e2>( w : evv<e1> ) : e evv<e2>
   c  "kk_evv_swap"
   js "$std_core_hnd._evv_swap"
 
 // Remove evidence at index `i` of the current evidence vector, and return the old one.
 // (used by `mask`)
-extern evv-swap-delete( i : ev-index, behind : bool ) : e1 evv<e>
+fbip extern evv-swap-delete( i : ev-index, behind : bool ) : e1 evv<e>
   c  "kk_evv_swap_delete"
   js "_evv_swap_delete"
 
 // Swap the current evidence vector with an empty vector.
 // (this is used in open calls to switch to a total context)
-inline extern evv-swap-create0() : e evv<e>  //not quite the right effect type but avoids unbound effect types
+inline fip extern evv-swap-create0() : e evv<e>  //not quite the right effect type but avoids unbound effect types
   c  "kk_evv_swap_create0"
   js "$std_core_hnd._evv_swap_create0"
 
 // Swap the current evidence vector with a singleton vector (with the evidence at current index `i`).
 // (this is common in open calls to switch to a singleton effect context when calling operations)
-inline extern evv-swap-create1( i : ev-index ) : e evv<e>  //not quite the right effect type but avoids unbound effect types
+inline fip extern evv-swap-create1( i : ev-index ) : e evv<e>  //not quite the right effect type but avoids unbound effect types
   c  "kk_evv_swap_create1"
   js "$std_core_hnd._evv_swap_create1"
 
 // Swap the current evidence vector with a new vector consisting of evidence
 // at indices `indices` in the current vector.
-extern evv-swap-create( indices : vector<ev-index> ) : e evv<e>  //not quite the right effect type but avoids unbound effect types
+fbip extern evv-swap-create( indices : vector<ev-index> ) : e evv<e>  //not quite the right effect type but avoids unbound effect types
   c  "kk_evv_swap_create"
   js "_evv_swap_create"
 
@@ -277,11 +277,11 @@ extern evv-swap-create( indices : vector<ev-index> ) : e evv<e>  //not quite the
 // Internal multi-prompt delimited control
 // -------------------------------------------
 
-pub inline extern yielding() : bool
+pub inline fip extern yielding() : bool
   c  "kk_yielding"
   js "$std_core_hnd._yielding"
 
-pub inline extern yielding-non-final() : bool
+pub inline fip extern yielding-non-final() : bool
   c  "kk_yielding_non_final"
   js "$std_core_hnd._yielding_non_final"
 

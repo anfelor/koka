@@ -30,7 +30,6 @@ namePairs
     , (K.nameCoreDebug, L.nameCoreDebug)
     , (K.nameTpInt, L.nameTpInt)
     , (K.nameTpString, L.nameTpString)
-    , (K.nameYielding, L.nameYielding)
     , (K.nameYieldExtend, L.nameYieldExtend)
     , (K.namePatternMatchError, L.namePatternMatchError)
     , (K.nameLazyMemoize, L.nameLazyMemoize)
