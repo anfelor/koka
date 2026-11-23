@@ -14,8 +14,7 @@ An unboxed value is a list of /leaves/ (@Lidar.Layout.leaves@), each held in a C
 product has one per leaf, @𝟙@ and the effect token have none. A credit is the block it holds,
 or @NULL@ if it is empty.
 
-Lean's scalars are unsigned. Until lidar has unsigned raw types, its signed raw types stand for
-the unsigned types of the same size (see "Lidar.Lean.Decls"), so @int32@ is @uint32_t@. An
+Lean's scalars are unsigned (a @char@ is a @uint32_t@); Lean has no signed raw types. An
 enumeration is a scalar of the size Lean gives it.
 
 A box @Box V@ with tag i is a constructor object with tag i (Lean's @cidx@), whose fields are the
@@ -29,6 +28,7 @@ module Lidar.Lean.CGen.Layout
   ) where
 
 import qualified Data.Map as M
+import Data.Maybe( isJust )
 import Lidar.Syntax
 import Lidar.Layout( isEnum )
 
@@ -44,7 +44,7 @@ leafOf t
   = case t of
       VPtr _ -> Right LObj
       VCell _ _ -> Right LObj
-      VRaw r -> Right (LScalar r)
+      VRaw r | isJust (leanScalar r) -> Right (LScalar r)
       VReuse{} -> Right LCredit
       VSum ts | isEnum t -> Right (LScalar (enumRaw (length ts)))
       _ -> Left ("no representation in Lean's runtime for a leaf of type " ++ show t)
@@ -53,55 +53,40 @@ leafOf t
 enumRaw :: Int -> Raw
 enumRaw n
   | n < 256   = RUInt8
-  | n < 65536 = RInt16
-  | otherwise = RInt32
+  | n < 65536 = RUInt16
+  | otherwise = RUInt32
+
+-- Lean's scalar of a raw type: its C type, its size as a field of a constructor (Nothing for a
+-- `usize` field), and the suffix of its accessors (`lean_ctor_get_uint32`)
+leanScalar :: Raw -> Maybe (String, Maybe Int, String)
+leanScalar r
+  = case r of
+      RUInt8   -> Just ("uint8_t", Just 1, "uint8")
+      RUInt16  -> Just ("uint16_t", Just 2, "uint16")
+      RUInt32  -> Just ("uint32_t", Just 4, "uint32")
+      RChar    -> Just ("uint32_t", Just 4, "uint32")
+      RUInt64  -> Just ("uint64_t", Just 8, "uint64")
+      RUSize   -> Just ("size_t", Nothing, "usize")
+      RFloat64 -> Just ("double", Just 8, "float")
+      RFloat32 -> Just ("float", Just 4, "float32")
+      _        -> Nothing
+
+-- the scalar of a leaf, which `leafOf` only gives for Lean's scalars
+scalarOf :: Raw -> (String, Maybe Int, String)
+scalarOf r = maybe (error ("Lidar.Lean.CGen.Layout: no scalar in Lean's runtime for " ++ show r)) id (leanScalar r)
 
 cType :: Leaf -> String
 cType l
   = case l of
       LObj -> "lean_object*"
       LCredit -> "lean_object*"
-      LScalar r -> case r of
-                     RUInt8   -> "uint8_t"
-                     RInt8    -> "uint8_t"
-                     RInt16   -> "uint16_t"
-                     RInt32   -> "uint32_t"
-                     RChar    -> "uint32_t"
-                     RInt64   -> "uint64_t"
-                     RSSize   -> "size_t"
-                     RIntPtr  -> "size_t"
-                     RFloat64 -> "double"
-                     RFloat32 -> "float"
+      LScalar r -> let (c,_,_) = scalarOf r in c
 
--- the size of a scalar field of a constructor, or Nothing for a `usize` field
 scalarSize :: Raw -> Maybe Int
-scalarSize r
-  = case r of
-      RUInt8   -> Just 1
-      RInt8    -> Just 1
-      RInt16   -> Just 2
-      RInt32   -> Just 4
-      RChar    -> Just 4
-      RFloat32 -> Just 4
-      RInt64   -> Just 8
-      RFloat64 -> Just 8
-      RSSize   -> Nothing
-      RIntPtr  -> Nothing
+scalarSize r = let (_,n,_) = scalarOf r in n
 
--- the suffix of the accessors of a scalar field (`lean_ctor_get_uint32`)
 accessor :: Raw -> String
-accessor r
-  = case r of
-      RUInt8   -> "uint8"
-      RInt8    -> "uint8"
-      RInt16   -> "uint16"
-      RInt32   -> "uint32"
-      RChar    -> "uint32"
-      RInt64   -> "uint64"
-      RFloat64 -> "float"
-      RFloat32 -> "float32"
-      RSSize   -> "usize"
-      RIntPtr  -> "usize"
+accessor r = let (_,_,a) = scalarOf r in a
 
 -- | Where a leaf of a payload is: an object field, a @usize@ field (by index among them), or a
 -- scalar field at a byte offset after the objects and @usize@ fields.

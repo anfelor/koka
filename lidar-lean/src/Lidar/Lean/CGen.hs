@@ -92,10 +92,10 @@ impureLeaf t
   = case t of
       D.TConst "lcVoid" -> Nothing
       D.TConst "UInt8" -> Just (LScalar RUInt8)
-      D.TConst "UInt16" -> Just (LScalar RInt16)
-      D.TConst "UInt32" -> Just (LScalar RInt32)
-      D.TConst "UInt64" -> Just (LScalar RInt64)
-      D.TConst "USize" -> Just (LScalar RSSize)
+      D.TConst "UInt16" -> Just (LScalar RUInt16)
+      D.TConst "UInt32" -> Just (LScalar RUInt32)
+      D.TConst "UInt64" -> Just (LScalar RUInt64)
+      D.TConst "USize" -> Just (LScalar RUSize)
       D.TConst "Float" -> Just (LScalar RFloat64)
       D.TConst "Float32" -> Just (LScalar RFloat32)
       _ -> Just LObj

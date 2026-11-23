@@ -251,10 +251,10 @@ elabValue t v
   where
     rawLit l = case l of
                  D.LU8 n -> Just (n,RUInt8)
-                 D.LU16 n -> Just (n,RInt16)
-                 D.LU32 n -> Just (n,RInt32)
-                 D.LU64 n -> Just (n,RInt64)
-                 D.LUSize n -> Just (n,RSSize)
+                 D.LU16 n -> Just (n,RUInt16)
+                 D.LU32 n -> Just (n,RUInt32)
+                 D.LU64 n -> Just (n,RUInt64)
+                 D.LUSize n -> Just (n,RUSize)
                  D.LNat _ -> Nothing
                  D.LStr _ -> Nothing
 

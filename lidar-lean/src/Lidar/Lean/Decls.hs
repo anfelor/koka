@@ -16,9 +16,8 @@ Mono types become IR types as follows.
   applied (as @lean_apply_n@ checks the arity at run time).
 * @lcVoid@, the state of @IO@, is @𝟙@.
 * @Nat@ and @String@ are the builtin types @int*@ and @string*@ of literals. The unsigned
-  scalars, @USize@ and the floats are raw types; until lidar has unsigned raw types, they are
-  the signed raw types of the same size. The other types that Lean's runtime implements itself
-  (@Int@, @Array@, ...) are abstract.
+  scalars, @USize@ and the floats are raw types. The other types that Lean's runtime implements
+  itself (@Int@, @Array@, ...) are abstract.
 * A trivial structure is its relevant field, as in Lean's IR. As the C code follows Lean's impure
   types, these are the trivial structures of the impure level, where @lcVoid@ fields are
   irrelevant too (so @ST.Out@, a value and the state, is its value).
@@ -76,8 +75,8 @@ anyT = VPtr AAny
 
 -- the scalars of Lean's runtime, by the name of their type
 rawTypes :: [(D.Name,Raw)]
-rawTypes = [ ("UInt8",RUInt8), ("UInt16",RInt16), ("UInt32",RInt32), ("UInt64",RInt64)
-           , ("USize",RSSize), ("Float",RFloat64), ("Float32",RFloat32) ]
+rawTypes = [ ("UInt8",RUInt8), ("UInt16",RUInt16), ("UInt32",RUInt32), ("UInt64",RUInt64)
+           , ("USize",RUSize), ("Float",RFloat64), ("Float32",RFloat32) ]
 
 -- the types that Lean's runtime implements itself (`isRuntimeBultinType`), apart from scalars
 builtinTypes :: [(D.Name,Kind)]
