@@ -17,8 +17,8 @@ module Backend.Typed.Query( Gamma, noJoins, bindAll, checkE, inferE, inferA, inf
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad( zipWithM_, unless, when, forM_ )
-import Common.Name
-import Lib.PPrint( Pretty )
+import Lidar.Name
+import Lidar.PPrint( Pretty )
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( bindersE, boxTag, child, destructAOf, destructVOf, dsAlts, dsScrut, fvA, fvE, fvV, holes, isGlob, jumpTargets, within )
 import Backend.Typed.Types

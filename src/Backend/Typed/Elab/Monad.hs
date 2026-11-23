@@ -11,7 +11,7 @@
 module Backend.Typed.Elab.Monad( Env(..), St(..), E
                               , runE, failE, tr, env, withLocals, withTypedLocals, withFields, withTVars, withHole, inClosure
                               , withResult, result
-                              , fresh, freshName, recordSig, note, vt
+                              , rootOf, fresh, freshName, recordSig, note, vt
                               , currentToken, setToken, takeToken, takeTokenIf, tokenIn, region, branch
                               ) where
 
@@ -24,6 +24,7 @@ import Type.Type( Type )
 import Kind.Newtypes
 import Backend.Typed.Build( K )
 import Backend.Typed.Syntax
+import Backend.Typed.LidarName( toLidar )
 import Backend.Typed.Types( withToken )
 import Backend.Typed.Elab.TypeInfo
 
@@ -34,9 +35,10 @@ import Backend.Typed.Elab.TypeInfo
 -- `envResult`: the type at which an expression in tail position is elaborated (`withResult`).
 -- `envBinders`: the types of the binders of locals, whose uses may have other effects, and
 -- which may be `V?` where the Koka type is `V` (a result that may be the dummy of a yield).
+-- `envSigs`: the signatures of the globals, by their Koka names.
 -- `envExterns`: the externals in scope. `envTrusted`: whether a `V?` is used as a `V` without a
 -- test for null (`Coerce.extractNull`).
-data Env = Env{ envNT :: Newtypes, envLocals :: S.Set Name, envTVars :: S.Set TVar, envSigs :: Sigs
+data Env = Env{ envNT :: Newtypes, envLocals :: S.Set Name, envTVars :: S.Set TVar, envSigs :: M.Map Name Sig
               , envHoles :: M.Map Name (Maybe VVal), envCaptured :: S.Set Name
               , envFields :: M.Map Name (K,VVal), envResult :: VType, envBinders :: M.Map Name VType
               , envExterns :: S.Set Name, envTrusted :: Bool }
@@ -44,7 +46,8 @@ data Env = Env{ envNT :: Newtypes, envLocals :: S.Set Name, envTVars :: S.Set TV
 -- `stToken`: the current effect token, if the expression is token-threaded (see "The effect
 -- token" in `Syntax`). Elaboration follows the order of evaluation: a call takes the token,
 -- and a binder of the result of a call sets the next one.
-data St = St{ stUniq :: Int, stSigs :: Sigs, stNotes :: [String], stToken :: Maybe Path }
+-- `stSigs`: the signatures of the globals used so far, by their Koka names.
+data St = St{ stUniq :: Int, stSigs :: M.Map Name Sig, stNotes :: [String], stToken :: Maybe Path }
 
 -- Elaboration owns its environment, state and failure independently of IR passes.
 newtype E a = E (ReaderT Env (StateT St (Either String)) a)
@@ -99,8 +102,12 @@ withTVars tvs = local (\e -> e{ envTVars = foldr S.insert (envTVars e) tvs })
 freshName :: String -> E Name
 freshName s = state (\st -> (newHiddenName (s ++ show (stUniq st)), st{ stUniq = stUniq st + 1 }))
 
+-- the IR variable of a Koka local
+rootOf :: Name -> Path
+rootOf = root . toLidar
+
 fresh :: String -> E Path
-fresh s = root <$> freshName s
+fresh s = rootOf <$> freshName s
 
 recordSig :: Name -> Sig -> E ()
 recordSig name sig = modify (\st -> st{ stSigs = M.insertWith (\_ old -> old) name sig (stSigs st) })

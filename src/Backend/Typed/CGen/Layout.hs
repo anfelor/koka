@@ -19,7 +19,7 @@ import Data.Bits( xor )
 import Data.Word( Word64 )
 import Data.List( intercalate, foldl', sortOn )
 import qualified Numeric
-import Common.Name( Name )
+import Lidar.Name( Name )
 import Backend.Typed.Syntax
 import Backend.Typed.Layout
 

@@ -32,8 +32,7 @@ import Data.Char( isAlpha, isAlphaNum, isDigit, isSpace )
 import Data.List( intercalate, isSuffixOf, stripPrefix )
 import Text.Parsec hiding ( label, labels )
 import Text.Parsec.Pos( newPos )
-import Common.Name
-import Common.Syntax( DefInline(..) )
+import Lidar.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Pretty( ppr, reserved )
 import Backend.Typed.Traversal( child )

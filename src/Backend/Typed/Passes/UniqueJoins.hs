@@ -43,7 +43,7 @@ import qualified Data.Set as S
 import Control.Monad( foldM, zipWithM )
 import Control.Monad.State( State, evalState, state )
 import Data.Functor.Const( Const(..) )
-import Common.Name( Name )
+import Lidar.Name( Name )
 import Backend.Typed.Syntax
 import Backend.Typed.Env( Env, envOf )
 import Backend.Typed.Traversal( canonical, descendE, fvE, fvV, jumpArgs, lamsV, subexprs )

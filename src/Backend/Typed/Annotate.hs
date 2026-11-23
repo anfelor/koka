@@ -26,7 +26,7 @@ import Control.Monad( zipWithM )
 import Control.Monad.Writer( Writer, runWriter, tell )
 import Data.Functor.Const( Const(..) )
 import Data.Monoid( Any(..) )
-import Common.Name
+import Lidar.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Types( inst, forallA, orNull, withToken, atAny, vtInt, vtString, vtChar, vtFloat, traverseReuseContents )
 import Backend.Typed.Traversal( Destruct(..), descendV, destructAOf, destructVOf )

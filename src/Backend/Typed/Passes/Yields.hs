@@ -56,8 +56,8 @@ module Backend.Typed.Passes.Yields( yieldsProgram ) where
 
 import Data.Functor.Identity( Identity(..) )
 import Data.Maybe( isJust )
-import Common.Name
-import Common.NamePrim( nameYieldExtend, nameCoreHnd )
+import Lidar.Name
+import Lidar.Prim( nameYieldExtend, nameCoreHnd )
 import Backend.Typed.Syntax
 import Backend.Typed.Build( isYielded )
 import Backend.Typed.Traversal( descendE, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fvE, lamsV, mapA, mapV, subexprs, within )

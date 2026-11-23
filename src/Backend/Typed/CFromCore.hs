@@ -12,20 +12,23 @@
 module Backend.Typed.CFromCore( typedCFromCore, cgenMain ) where
 
 import Data.List( intercalate )
-import Lib.PPrint( Doc, (<.>), linebreak )
+import Lib.PPrint( Doc, (<.>), linebreak, string )
 import Common.Syntax( BuildType )
 import Kind.Newtypes( Newtypes )
 import qualified Core.Core as C
 import Backend.Typed.Typed( typedFromCore )
 import Backend.Typed.Elab.Foreign( foreignOf )
 import Backend.Typed.Pretty( prettyProgram )
-import Backend.Typed.CGen.CGen( CEnv(..), cgenModule, cgenMain )
+import Common.Name( Name )
+import Backend.Typed.LidarName( toLidar )
+import Backend.Typed.CGen.CGen( CEnv(..), cgenModule )
+import qualified Backend.Typed.CGen.CGen as CGen
 
 -- Returns the final IR (for debugging), the diagnostics, and either an error or the header
 -- and source.
 typedCFromCore :: BuildType -> FilePath -> Bool -> Newtypes -> [C.Core] -> C.Core -> (Doc,[String],Either String (String,String))
 typedCFromCore buildType sourceDir enableReuse newtypes imports core
-  = (prettyProgram tprog <.> linebreak, map diagnostic (errors ++ warnings), result)
+  = (string (show (prettyProgram tprog)) <.> linebreak, map diagnostic (errors ++ warnings), result)
   where
     modName                 = C.coreProgName core
     (tprog,errors,warnings) = typedFromCore enableReuse newtypes (foreignOf buildType sourceDir core) imports 1000000 core
@@ -39,4 +42,9 @@ typedCFromCore buildType sourceDir enableReuse newtypes imports core
       | otherwise         = Right (hdr,csrc)
     (hdr,csrc,errs) = cgenModule cenv tprog
 
-    cenv    = CEnv modName (map C.coreProgName imports)
+    cenv    = CEnv (toLidar modName) (map (toLidar . C.coreProgName) imports)
+
+-- the entry point of a typed program (`CGen.cgenMain`)
+cgenMain :: String -> Int -> Name -> Name -> String
+cgenMain mainName stackSize progName entryName
+  = CGen.cgenMain mainName stackSize (toLidar progName) (toLidar entryName)

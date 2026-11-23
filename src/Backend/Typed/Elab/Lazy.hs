@@ -20,6 +20,7 @@ import Common.NamePrim( nameLazyIsWhnf, nameLazyPtrIsWhnf )
 import Kind.Newtypes
 import Type.Type( lazyName, conInfoName )
 import Backend.Typed.Syntax
+import Backend.Typed.LidarName( toLidar )
 import Backend.Typed.Env( Env(..), Lazies(..), reuseSize, lazySides )
 import Backend.Typed.Traversal( descendAll, fvE )
 import Backend.Typed.Elab.TypeInfo( conFieldTypes )
@@ -33,14 +34,14 @@ lazyFuns nt tdefs
                        , Just (ABox s) <- [lookup tag thunks], Right n <- [reuseSize s]
                        , Right fs <- [conFieldTypes nt (map AVar tvs) con]])
            (S.fromList [funName info "eval-locked" | (info,_,_) <- infos])
-           (M.fromList [(dataInfoName info, tag) | (info,_,_) <- infos, (tag,con) <- cons info, isLazyIndirectConName (conInfoName con)])
+           (M.fromList [(toLidar (dataInfoName info), tag) | (info,_,_) <- infos, (tag,con) <- cons info, isLazyIndirectConName (conInfoName con)])
   where
     env = Env tdefs M.empty M.empty
     cons info = zip [1..] (dataInfoConstrs info)   -- tags start at 1
     infos = [(info,tvs,thunks) | (_,info) <- NM.toList (newtypesTypeDefs nt)
-                               , Just TypeDef{ tdefParams = tvs } <- [M.lookup (dataInfoName info) tdefs]
-                               , Right (thunks,_) <- [lazySides env (ACon (dataInfoName info) (map AVar tvs))]]
-    funName info stem = qualify (qualifier (dataInfoName info)) (lazyName info stem)
+                               , Just TypeDef{ tdefParams = tvs } <- [M.lookup (toLidar (dataInfoName info)) tdefs]
+                               , Right (thunks,_) <- [lazySides env (ACon (toLidar (dataInfoName info)) (map AVar tvs))]]
+    funName info stem = toLidar (qualify (qualifier (dataInfoName info)) (lazyName info stem))
 
 -- Tests of WHNF (`[if-whnf]`). Koka tests a lazy value `x` with `datatype-(ptr-)is-whnf(x, tag)`,
 -- after the lets of its tag argument, and a case on the result, with the join points of its
@@ -68,7 +69,7 @@ whnfTests expr
     -- the test of `x`, after the lets of its tag argument
     whnfTest e
       = case e of
-          Call f [_] [Var x, _] | f == nameLazyIsWhnf || f == nameLazyPtrIsWhnf -> Just (x,id)
+          Call f [_] [Var x, _] | f `elem` map toLidar [nameLazyIsWhnf, nameLazyPtrIsWhnf] -> Just (x,id)
           Let y t e1 e2 -> (\(x,pre) -> (x,Let y t e1 . pre)) <$> whnfTest e2
           _ -> Nothing
     -- the join points before the case on the result of the test

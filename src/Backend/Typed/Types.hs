@@ -16,7 +16,7 @@ module Backend.Typed.Types( Sub, Types(..), inst, mapReuseContents, traverseReus
 
 import Data.Functor.Identity( Identity(..) )
 import qualified Data.Map as M
-import Common.NamePrim( nameTpAny, nameTpInt, nameTpString )
+import Lidar.Prim( nameTpAny, nameTpInt, nameTpString )
 import Backend.Typed.Syntax
 
 type Sub = M.Map TVar AType

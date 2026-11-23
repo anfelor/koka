@@ -46,9 +46,8 @@ import qualified Data.Set as S
 import Data.List( nub, intercalate, isPrefixOf )
 import Data.Functor.Const( Const(..) )
 import Control.Monad( unless, when )
-import Common.Name
-import Common.NamePrim( nameTpInt, nameYielding, nameCoreDebug, nameCoreHnd, namePatternMatchError )
-import Common.Syntax( Fip(..), FipAlloc(..), fipAlloc, isFipTop )
+import Lidar.Name
+import Lidar.Prim( nameTpInt, nameYielding, nameCoreDebug, nameCoreHnd, namePatternMatchError )
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsScrut, canonical, within )
 import Backend.Typed.Pretty( ppr )

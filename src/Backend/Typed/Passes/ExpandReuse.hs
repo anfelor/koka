@@ -54,7 +54,7 @@ import Control.Applicative( (<|>) )
 import Control.Monad( when )
 import Control.Monad.State
 import Data.Functor.Identity( Identity(..) )
-import Common.Name
+import Lidar.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( child, descendA, descendE, descendV, holes, lamsV, mapA, mapV )
 import Backend.Typed.Passes.Common( NameSupply, cloneE, freshFor, freshNameFrom, replaceA, replaceV )

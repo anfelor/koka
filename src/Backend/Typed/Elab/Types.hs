@@ -18,6 +18,7 @@ import Common.Syntax( dataDefIsOpen )
 import Kind.Newtypes
 import Type.Type( ConInfo, typevarId, conInfoName, conInfoParams, conInfoIsLazy, dataInfoIsLazy )
 import Backend.Typed.Syntax
+import Backend.Typed.LidarName( toLidar )
 import Backend.Typed.Env( reuseSize )
 import Backend.Typed.Elab.TypeInfo
 
@@ -50,13 +51,13 @@ typeDef nt info
        labels <- case body of
                    BodyOpen -> return []
                    _ -> mapM (conLabel nt (paramArgs info)) (dataInfoConstrs info)
-       return (TypeDef (dataInfoName info) params body labels)
+       return (TypeDef (toLidar (dataInfoName info)) params body labels)
 
 conLabel :: Newtypes -> [AType] -> ConInfo -> Tr ConLabel
 conLabel nt vargs con
   = do fields <- if null (conInfoParams con) then return [] else conFieldTypes nt vargs con
        let decls = map (valueDecl nt . snd) (conInfoParams con) ++ repeat Nothing   -- no padding is declared
-       return (ConLabel (conInfoName con) (take (length fields) (conFieldNames con)) (take (length fields) decls))
+       return (ConLabel (toLidar (conInfoName con)) (take (length fields) (conFieldNames con)) (take (length fields) decls))
 
 -- A lazy type `L ~> S` has strict constructors, which come before its lazy ones (the thunks,
 -- among them the indirection), and every thunk is a box with a block, which evaluation locks.

@@ -20,7 +20,7 @@ import Control.Monad.State
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad( when )
-import Common.Name
+import Lidar.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Types
 import Backend.Typed.Pretty( ppr )

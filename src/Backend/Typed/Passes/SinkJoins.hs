@@ -32,7 +32,7 @@ module Backend.Typed.Passes.SinkJoins( sinkJoinsProgram ) where
 import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
 import Data.Functor.Identity( Identity(..) )
-import Common.Name
+import Lidar.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Passes.Common( mapAll )
 import Backend.Typed.Traversal( descendE, fvE, jumpArgs )

@@ -26,7 +26,7 @@ module Backend.Typed.Passes.Reuse( reuseProgram ) where
 import qualified Data.Map as M
 import Data.List( nub, (\\) )
 import Data.Maybe( fromMaybe )
-import Common.Name
+import Lidar.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( boxTag, child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut )
 import Backend.Typed.Passes.Common( trivialTy, defGamma, NameSupply, dropValue, freshFor, freshPathFrom, perBody, reuseChildren, scopeOf )

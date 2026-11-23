@@ -25,9 +25,10 @@ import Data.Maybe( fromMaybe, isJust )
 import qualified Numeric
 import Control.Monad( forM )
 import Lib.PPrint( Doc, text, string, int, integer, empty, isEmptyDoc, line, nest, align, vcat, hcat, hsep, punctuate, (<.>), (<+>), (<->) )
-import Common.Name
-import Common.NamePrim
-import Common.Syntax( DefInline(..) )
+import qualified Common.Name as K
+import Common.NamePrim( nameInt32, nameInternalInt32, nameInt64, nameSSizeT, nameInternalSSizeT, nameIntPtrT, nameByte )
+import Lidar.Name
+import Backend.Typed.LidarName( fromLidar )
 import Platform.Runtime( showHFloat )
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( child, TestSide(..), boxTag, canonical, failingTo, fvA, fvE, fvV, holes, testSides, within )
@@ -90,6 +91,10 @@ ktInitName modName = cName modName ++ "__init"
 
 ktDoneName :: Name -> String
 ktDoneName modName = cName modName ++ "__done"
+
+-- the path of a module's C files, without the extension (as Koka's)
+modulePath :: Name -> FilePath
+modulePath = K.moduleNameToPath . fromLidar
 
 -- C syntax
 
@@ -1193,7 +1198,7 @@ parallelAssign params args
 -- (as in `Backend.C.FromCore.genAppSpecial`); `ssize_t` and `intptr_t` stay within 32 bits
 -- so that they fit on every platform.
 fixedWidthLit :: Name -> Integer -> Maybe (String,Doc)
-fixedWidthLit f i
+fixedWidthLit name i
   | f `elem` [nameInt32,nameInternalInt32] && within 31 = Just ("int32_t", "KK_I32(" <.> integer i <.> ")")
   | f == nameInt64 && within 63                         = Just ("int64_t", "KK_I64(" <.> integer i <.> ")")
   | f `elem` [nameSSizeT,nameInternalSSizeT] && within 31 = Just ("kk_ssize_t", "KK_IZ(" <.> integer i <.> ")")
@@ -1201,6 +1206,7 @@ fixedWidthLit f i
   | f == nameByte && i >= 0 && i <= 255                 = Just ("uint8_t", "((uint8_t)" <.> integer i <.> ")")
   | otherwise = Nothing
   where
+    f = fromLidar name
     within bits = abs i < 2^bits   -- excludes the minimum, which is not a valid C literal
 
 callSig :: Ctx -> Name -> [AType] -> G ([VType],VType)
@@ -1307,7 +1313,7 @@ cgenModule cenv prog
                   hook h = ["#if defined(" <.> h <.> ")", "  " <.> h <.> "(_ctx);", "#endif"]
                   once flag = ["static bool" <+> flag <+> "= false;", "if (" <.> flag <.> ") return;", flag <+> "= true;"]
                   hdr   = vcat (["#ifndef" <+> guardN, "#define" <+> guardN, "#include <kklib.h>", runtimeHeader]
-                                ++ [include (moduleNameToPath m ++ ".h") | m <- ceImports cenv]
+                                ++ [include (modulePath m ++ ".h") | m <- ceImports cenv]
                                 ++ map string (forHeader ffi)
                                 ++ map string (typeDecls modName prog)
                                 ++ [layoutDef (stStructs st M.! n) | n <- stOrder st]
@@ -1315,7 +1321,7 @@ cgenModule cenv prog
                                 ++ [h | (_,h,_,_) <- ok]
                                 ++ map string (forHeaderEnd ffi)
                                 ++ [initf <.> ";", donef <.> ";", "#endif"])
-                  csrc  = vcat ([include (moduleNameToPath modName ++ ".h")]
+                  csrc  = vcat ([include (modulePath modName ++ ".h")]
                                 ++ map string (forSource ffi)
                                 ++ map fst wdefs
                                 ++ stDecls st
@@ -1335,7 +1341,7 @@ cgenModule cenv prog
 -- `mainName`, which initializes the modules (each initializes its imports) and runs `entryName`.
 cgenMain :: String -> Int -> Name -> Name -> String
 cgenMain mainName stackSize progName entryName
-  = unlines (["#include \"" ++ moduleNameToPath progName ++ ".c\""]
+  = unlines (["#include \"" ++ modulePath progName ++ ".c\""]
              ++ ["#include <execinfo.h>"
                 ,"#include <stdlib.h>"
                 ,"#include <unistd.h>"

@@ -43,8 +43,8 @@ module Backend.Typed.Passes.Lazy( lazyProgram ) where
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
-import Common.Name
-import Common.NamePrim( nameLazyMemoize, nameLazyMemoizeTarget )
+import Lidar.Name
+import Lidar.Prim( nameLazyMemoize, nameLazyMemoizeTarget )
 import Backend.Typed.Syntax
 import Backend.Typed.Build( prodVal, padFields )
 import Backend.Typed.Passes.Common( NameSupply, freshFor, freshPathFrom, perDef, substE )

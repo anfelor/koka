@@ -15,7 +15,7 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
 import Data.Monoid( Any(..) )
-import Common.Name
+import Lidar.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( descendA, descendB, descendE, descendV, pathOf, scrutVar )
 import Backend.Typed.Types( Types(..) )

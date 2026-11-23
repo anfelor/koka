@@ -29,9 +29,8 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Char( isDigit )
 import Data.List( intercalate, isPrefixOf )
-import Lib.PPrint
-import Common.Name
-import Common.Syntax( DefInline(..) )
+import Lidar.PPrint
+import Lidar.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( bindersE, child )
 

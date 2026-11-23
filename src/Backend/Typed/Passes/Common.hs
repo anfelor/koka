@@ -24,8 +24,8 @@ import Backend.Typed.Traversal
 import Backend.Typed.Env( Env(..), M, dataBody, ask, local )
 import Backend.Typed.Query( Gamma, bindAll, inferVar, inferV, altTypes, lamGamma, tokenTy, uniqueGamma, unboxRuGamma, copyRuGamma, lockGamma )
 import Backend.Typed.Pretty( ppr )
-import Common.Name( Name, newHiddenName )
-import Common.NamePrim( nameTpReuse )
+import Lidar.Name( Name, newHiddenName )
+import Lidar.Prim( nameTpReuse )
 
 -- the modes of the parameters of a call with n arguments
 paramModes :: Env -> Name -> Int -> [Mode]

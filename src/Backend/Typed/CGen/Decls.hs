@@ -25,8 +25,8 @@ import Data.Graph( stronglyConnComp, flattenSCCs )
 import Data.List( intercalate )
 import Data.Maybe( catMaybes, isNothing )
 import Lib.PPrint( text )
-import Common.Name
-import Common.NamePrim( nameTpString )
+import Lidar.Name
+import Lidar.Prim( nameTpString )
 import Backend.Typed.Syntax
 import Backend.Typed.Layout
 import Backend.Typed.CGen.Layout( cName, ctName, structDefs, blockName, blockDef, dupFun, dropFun, primBox )

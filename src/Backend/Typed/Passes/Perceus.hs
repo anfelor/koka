@@ -59,7 +59,7 @@ import qualified Data.Set as S
 import Control.Monad( foldM, unless )
 import Data.Functor.Const( Const(..) )
 import Data.Maybe( isNothing, listToMaybe )
-import Common.Name
+import Lidar.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Build( K, compose )
 import Backend.Typed.Traversal( Destruct(..), child, descendA, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fieldsAt, fvA, fvE, fvV, scrutVar, stepsFrom, takesContents, within )

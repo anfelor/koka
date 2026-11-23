@@ -11,7 +11,7 @@ module Backend.Typed.Elab.Coerce( coerce, coerceInst, coerceExpr, genVal, genPtr
 
 import qualified Data.Map as M
 import Data.Maybe( isJust )
-import Common.Name
+import Lidar.Name( Name )
 import Backend.Typed.Syntax
 import Backend.Typed.Build( K, compose, yieldedWith )
 import Backend.Typed.Traversal( child, hasRegion )

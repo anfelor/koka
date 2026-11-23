@@ -17,26 +17,31 @@ module Backend.Typed.CGen.Koka( kokaName, kokaTypeName, kokaLocal
 
 import Data.Char( isAlphaNum, isDigit )
 import Lib.PPrint( Doc, text, empty, (<.>) )
-import Common.Name
+import qualified Common.Name as K
 import Common.NamePrim
+import Lidar.Name
+import Backend.Typed.LidarName( toLidar, fromLidar )
 import Backend.Typed.Syntax
 import Backend.Typed.Layout( CT(..) )
 import Backend.Typed.CGen.Layout( ctName )
 
 -- Koka's C names (see Backend.C.FromCore)
 kokaName :: Name -> String
-kokaName name
-  | isQualified name = "kk_" ++ kokaEncode True (show (qualifier name)) ++ "_" ++ asciiEncode False (show (unqualify name))
-  | otherwise        = kokaEncode False (show name)
+kokaName = kName . fromLidar
+
+kName :: K.Name -> String
+kName name
+  | K.isQualified name = "kk_" ++ kokaEncode True (show (K.qualifier name)) ++ "_" ++ K.asciiEncode False (show (K.unqualify name))
+  | otherwise          = kokaEncode False (show name)
   where
-    kokaEncode isModule s = asciiEncode isModule s
+    kokaEncode isModule s = K.asciiEncode isModule s
 
 kokaTypeName :: Name -> String
-kokaTypeName name = kokaName (prependRaw "@" name)
+kokaTypeName name = kName (K.prependRaw "@" (fromLidar name))
 
 kokaLocal :: Name -> String
 kokaLocal n
-  = let s = asciiEncode False (show n)
+  = let s = K.asciiEncode False (show n)
     in if take 3 s == "kk_" || null s || isDigit (head s) || s `elem` cReserved then "kkloc_" ++ s else s
 
 cReserved :: [String]
@@ -46,12 +51,15 @@ cReserved = ["bool","toString","arguments","eval","char","int","intptr_t","long"
 
 kokaPrimTypes :: [(Name,String)]
 kokaPrimTypes
-  = [(nameTpInt,"kk_integer_t"),(nameTpString,"kk_string_t"),(nameTpBytes,"kk_bytes_t"),(nameTpVector,"kk_vector_t")
-    ,(nameTpEvv,"kk_evv_t"),(nameTpChar,"kk_char_t"),(nameTpSSizeT,"kk_ssize_t"),(nameTpIntPtrT,"intptr_t")
-    ,(nameTpFloat,"double"),(nameTpBool,"bool"),(nameTpUnit,"kk_unit_t"),(nameTpInt64,"int64_t"),(nameTpByte,"uint8_t")
-    ,(nameTpInt8,"int8_t"),(nameTpInt16,"int16_t"),(nameTpInt32,"int32_t"),(nameTpMarker,"int32_t")
-    ,(nameTpFloat32,"float"),(nameTpFloat16,"float"),(nameTpRef,"kk_ref_t"),(nameTpLocalVar,"kk_ref_t")
-    ,(nameTpBox,"kk_box_t"),(nameTpAny,"kk_box_t"),(nameTpReuse,"kk_reuse_t"),(nameTpFieldAddr,"kk_field_addr_t")]
+  = [(toLidar n,t) | (n,t) <- prims]
+  where
+    prims
+      = [(nameTpInt,"kk_integer_t"),(nameTpString,"kk_string_t"),(nameTpBytes,"kk_bytes_t"),(nameTpVector,"kk_vector_t")
+      ,(nameTpEvv,"kk_evv_t"),(nameTpChar,"kk_char_t"),(nameTpSSizeT,"kk_ssize_t"),(nameTpIntPtrT,"intptr_t")
+      ,(nameTpFloat,"double"),(nameTpBool,"bool"),(nameTpUnit,"kk_unit_t"),(nameTpInt64,"int64_t"),(nameTpByte,"uint8_t")
+      ,(nameTpInt8,"int8_t"),(nameTpInt16,"int16_t"),(nameTpInt32,"int32_t"),(nameTpMarker,"int32_t")
+      ,(nameTpFloat32,"float"),(nameTpFloat16,"float"),(nameTpRef,"kk_ref_t"),(nameTpLocalVar,"kk_ref_t")
+      ,(nameTpBox,"kk_box_t"),(nameTpAny,"kk_box_t"),(nameTpReuse,"kk_reuse_t"),(nameTpFieldAddr,"kk_field_addr_t")]
 
 toKoka :: CT -> String -> Doc -> Doc
 toKoka ct kt e
@@ -87,7 +95,8 @@ kokaKType kt
 
 unboxedInternals :: [Name]
 unboxedInternals
-  = [nameLazyEnter, nameLazyLeave, nameLazyIsWhnf, nameLazyPtrIsWhnf
+  = map toLidar
+    [nameLazyEnter, nameLazyLeave, nameLazyIsWhnf, nameLazyPtrIsWhnf
     ,nameDataTypePtrIsThreadShared, nameDataTypePtrIsUnique, nameLazyIndirectCompress]
 
 -- the identifiers in a piece of C code

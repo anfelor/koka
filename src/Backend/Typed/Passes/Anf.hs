@@ -38,7 +38,7 @@ import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
 import Data.Maybe( fromMaybe )
 import Data.Monoid( Sum(..) )
-import Common.Name
+import Lidar.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( descendE, fvE, subexprs, within )
 import Backend.Typed.Passes.Common( defGamma, descendTyped, lamsTyped, NameSupply, freshFor, freshNameFrom, perBody, renameE, substJump )

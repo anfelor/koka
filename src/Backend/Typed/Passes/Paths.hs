@@ -33,7 +33,7 @@ import Control.Monad.State
 import Control.Monad( when )
 import Data.Maybe( listToMaybe )
 import Data.Functor.Const( Const(..) )
-import Common.Name
+import Lidar.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( child, descendA, descendB, descendV, pathOf, scrutVar )
 import Backend.Typed.Passes.Common( replaceAType, replaceContents, replaceVType )

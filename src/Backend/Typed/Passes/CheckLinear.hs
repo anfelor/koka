@@ -87,7 +87,7 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad( unless, when, forM_, foldM )
 import Data.Functor.Const( Const(..) )
-import Common.Name
+import Lidar.Name
 import Backend.Typed.Syntax
 import Backend.Typed.Traversal( child, descendV, destructAOf, destructVOf, dsAlts, dsScrut, fieldsAt, fvA, fvE, jumpTargets, sibling, within )
 import Backend.Typed.Types( checkDupType, prodV )

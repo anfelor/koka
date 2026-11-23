@@ -118,8 +118,8 @@
 module Backend.Typed.Syntax where
 
 import qualified Data.Map as M
-import Common.Name
-import Common.Syntax( DefInline(..) )
+import Data.List( intercalate )
+import Lidar.Name
 
 -- Types. Type variables range over boxed types: a value at type `a` has the unboxed type `a*`.
 -- Elaboration instantiates a Koka type argument V with `rep(V)`: `A` if `V = A*`, and otherwise
@@ -954,6 +954,69 @@ data Def
   -- A top-level value, initialized when the module is loaded. It may be polymorphic.
   | DefVal{ defName :: Name, defParams :: [TVar], defType :: VType, defBody :: VExpr }
   deriving (Show)
+
+-- Koka's inlining annotation of a definition (as `Common.Syntax.DefInline`)
+data DefInline = InlineNever | InlineAlways | InlineAuto
+               deriving (Eq,Ord)
+
+instance Show DefInline where
+  show di = case di of
+              InlineNever  -> "noinline"
+              InlineAlways -> "inline"
+              InlineAuto   -> "autoinline"
+
+-- Koka's `fip` annotation of a function (as `Common.Syntax.Fip`), which `Passes.CheckFip` checks
+data Fip = Fip   { fipAlloc_ :: !FipAlloc }
+         | Fbip  { fipAlloc_ :: !FipAlloc, fipTail :: !Bool }
+         | NoFip { fipTail :: !Bool }
+         deriving (Eq)
+
+-- how much a `fip` function may allocate
+data FipAlloc = AllocAtMost !Int | AllocFinitely | AllocUnlimited
+              deriving (Eq)
+
+instance Ord FipAlloc where
+  compare a1 a2
+    = case (a1, a2) of
+        (AllocAtMost n, AllocAtMost m)   -> compare n m
+        (_, AllocAtMost _)               -> GT
+        (AllocAtMost _, AllocFinitely)   -> LT
+        (AllocFinitely, AllocFinitely)   -> EQ
+        (AllocUnlimited, AllocFinitely)  -> GT
+        (AllocUnlimited, AllocUnlimited) -> EQ
+        (_, AllocUnlimited)              -> LT
+
+instance Semigroup FipAlloc where
+  AllocAtMost n <> AllocAtMost m = AllocAtMost (n + m)
+  _ <> _ = AllocFinitely
+
+instance Monoid FipAlloc where
+  mempty = AllocAtMost 0
+
+instance Show Fip where
+  show fip = case fip of
+               Fip n    -> "fip" ++ showN n
+               Fbip n t -> unwords' [showTail t, "fbip" ++ showN n]
+               NoFip t  -> showTail t
+    where
+      showN (AllocAtMost 0) = ""
+      showN (AllocAtMost n) = "(" ++ show n ++ ")"
+      showN AllocFinitely   = "(n)"
+      showN AllocUnlimited  = ""
+      showTail t = if t then "tail" else ""
+      unwords' = intercalate " " . filter (not . null)
+
+fipAlloc :: Fip -> FipAlloc
+fipAlloc fip
+  = case fip of
+      Fip n    -> n
+      Fbip n _ -> n
+      NoFip _  -> AllocUnlimited
+
+-- no annotation
+isFipTop :: Fip -> Bool
+isFipTop (NoFip False) = True
+isFipTop _             = False
 
 -- signatures Σ
 data Sig = SigFun [TVar] [(Mode,VType)] Mode VType  -- f : ∀ā. (q̄ V̄) -> q W

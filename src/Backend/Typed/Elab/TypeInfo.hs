@@ -28,6 +28,8 @@ import Type.Type
 import Common.NamePrim( nameTpDiv )
 import Core.Core( isMonEffect )
 import Backend.Typed.Syntax
+import Backend.Typed.LidarName( toLidar )
+import qualified Lidar.Name as L
 import Backend.Typed.Types
 import Backend.Typed.Elab.Representation
 import Backend.Typed.Layout( CT(CBox,CUnit), layout, blockSize )
@@ -115,7 +117,7 @@ elabCon nt name args
   = do info  <- dataInfoOf nt name
        vargs <- elabArgs nt (dataInfoParams info) args
        if isValueInfo info then valueBody nt info vargs
-                           else Right (VPtr (ACon name vargs))
+                           else Right (VPtr (ACon (toLidar name) vargs))
 
 -- a partially applied value type is a type lambda over the boxed representation of its body
 elabConHigher :: Newtypes -> Name -> [Type] -> Tr AType
@@ -123,7 +125,7 @@ elabConHigher nt name args
   = do info  <- dataInfoOf nt name
        vargs <- elabArgs nt (dataInfoParams info) args
        let rest = drop (length vargs) (map tvarId (filter tvarStar (dataInfoParams info)))
-       if not (isValueInfo info) then Right (ACon name vargs)
+       if not (isValueInfo info) then Right (ACon (toLidar name) vargs)
        else ALam rest . rep <$> valueBody nt info (vargs ++ map AVar rest)
 
 elabArgs :: Newtypes -> [TypeVar] -> [Type] -> Tr [AType]
@@ -145,7 +147,7 @@ valueBody nt info vargs
   = case dataInfoConstrs info of
       []    -> VRaw <$> rawType (dataInfoName info)
       [con] -> conValueFields nt vargs con
-      cons  -> VSum <$> mapM (\con -> (,) (Con (conInfoName con)) <$> conValueFields nt vargs con) cons
+      cons  -> VSum <$> mapM (\con -> (,) (Con (toLidar (conInfoName con))) <$> conValueFields nt vargs con) cons
 
 -- Koka's C type of a Koka type (as `Backend.C.FromCore` declares externals)
 kType :: Type -> KType
@@ -156,15 +158,15 @@ kType tp
       TApp t _      -> kType t
       TVar _        -> KBox
       TSyn _ _ t    -> kType t
-      TCon tc       -> KCon (typeConName tc)
+      TCon tc       -> KCon (toLidar (typeConName tc))
 
 -- the value datatype that a Koka type names, if any (`lblDecls`)
-valueDecl :: Newtypes -> Type -> Maybe Name
+valueDecl :: Newtypes -> Type -> Maybe L.Name
 valueDecl nt tp
   = case tp of
       TSyn _ _ t -> valueDecl nt t
       TApp t _   -> valueDecl nt t
-      TCon tc | Just info <- newtypesLookupAny (typeconName tc) nt, isValueInfo info -> Just (typeconName tc)
+      TCon tc | Just info <- newtypesLookupAny (typeconName tc) nt, isValueInfo info -> Just (toLidar (typeconName tc))
       _          -> Nothing
 
 -- the primitive value types, which have no constructors; a `marker` is an `int32` (as in Koka)
@@ -209,7 +211,7 @@ conFieldTypes nt vargs con = pad <$> schemeFieldTypes nt vargs (conInfoType con)
 -- `conFieldTypes`)
 conFieldNames :: ConInfo -> [Field]
 conFieldNames con
-  = [if nameIsNil n then posField i else Field n | (i,(n,_)) <- zip [0..] (conInfoParams con)] ++ [Field (newName "padding")]
+  = [if nameIsNil n then posField i else Field (toLidar n) | (i,(n,_)) <- zip [0..] (conInfoParams con)] ++ [Field (L.newName "padding")]
 
 schemeFieldTypes :: Newtypes -> [AType] -> Type -> Tr [VType]
 schemeFieldTypes nt vargs scheme

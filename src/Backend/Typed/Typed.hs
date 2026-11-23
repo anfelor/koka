@@ -15,13 +15,12 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Common.Failure( assertion )
 import Common.Unique
-import Common.Name
-import Common.Syntax( Fip )
 import qualified Common.Syntax as Syntax
+import Lidar.Name( Name )
 import Kind.Newtypes
 import qualified Core.Core as C
 import Backend.Typed.Syntax
-import Backend.Typed.LidarName( lidarNamesAgree )
+import Backend.Typed.LidarName( toLidar, lidarNamesAgree )
 import Backend.Typed.Passes.Contify( contifyProgram )
 import Backend.Typed.Elab.Match( matchCore )
 import Backend.Typed.Passes.Anf( anfProgram )
@@ -94,16 +93,28 @@ typedFromCore enableReuse nt ffi imports uniq core
 -- the FIP annotations of the functions and their tail-recursive workers
 fipsOf :: [C.Core] -> M.Map Name Fip
 fipsOf cores
-  = withWorkers $ M.fromList ([(C.defName d, fip) | c <- cores, d <- C.flattenDefGroups (C.coreProgDefs c), Syntax.DefFun _ fip <- [C.defSort d]]
-                ++ [(C.externalName x, C.externalFip x) | c <- cores, x@(C.External{}) <- C.coreProgExternals c])
+  = withWorkers $ M.fromList ([(toLidar (C.defName d), elabFip fip) | c <- cores, d <- C.flattenDefGroups (C.coreProgDefs c), Syntax.DefFun _ fip <- [C.defSort d]]
+                ++ [(toLidar (C.externalName x), elabFip (C.externalFip x)) | c <- cores, x@(C.External{}) <- C.coreProgExternals c])
   where
     withWorkers fips = M.union fips (M.mapKeys loopWorkerName fips)
+
+elabFip :: Syntax.Fip -> Fip
+elabFip fip
+  = case fip of
+      Syntax.Fip n    -> Fip (alloc n)
+      Syntax.Fbip n t -> Fbip (alloc n) t
+      Syntax.NoFip t  -> NoFip t
+  where
+    alloc n = case n of
+                Syntax.AllocAtMost i  -> AllocAtMost i
+                Syntax.AllocFinitely  -> AllocFinitely
+                Syntax.AllocUnlimited -> AllocUnlimited
 
 -- the recursive group of each recursive definition
 groupsOf :: C.Core -> M.Map Name (S.Set Name)
 groupsOf core
-  = M.fromList [(n, names) | C.DefRec ds <- C.coreProgDefs core, let names = S.fromList (map C.defName ds), d <- ds
-                            , n <- [C.defName d, loopWorkerName (C.defName d)]]
+  = M.fromList [(n, names) | C.DefRec ds <- C.coreProgDefs core, let names = S.fromList (map (toLidar . C.defName) ds), d <- ds
+                            , let f = toLidar (C.defName d), n <- [f, loopWorkerName f]]
 
 type Checker = Program -> [String]
 

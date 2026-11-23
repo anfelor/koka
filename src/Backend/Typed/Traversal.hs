@@ -16,7 +16,7 @@ import Data.Functor.Identity( Identity(..) )
 import Data.List( isPrefixOf )
 import Data.Maybe( isJust )
 import Data.Monoid( Sum(..) )
-import Common.Name( Name )
+import Lidar.Name( Name )
 import Backend.Typed.Syntax
 
 -- the steps from the scrutinee of a `[case-open]` alternative for `c` to its binders: the

@@ -16,8 +16,8 @@ import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
 import Data.Monoid( All(..) )
 import Data.Functor.Identity( Identity(..) )
-import Common.Name
-import Common.NamePrim( nameOpenNone )
+import Lidar.Name
+import Lidar.Prim( nameOpenNone )
 import Backend.Typed.Syntax
 import Backend.Typed.Passes.Common( defGamma, descendTyped, lamsTyped, NameSupply, freshFor, freshNameFrom, perBody, renameE )
 import Backend.Typed.Traversal( bindersE, descendE, fvA, fvE, fvV, hasRegion )

@@ -18,7 +18,7 @@ import Control.Monad.Reader( local )
 import Common.Name
 import Common.NamePrim( nameCoreHnd, nameFieldAddrOf, nameCCtxHoleCreate, nameCCtxCreate, nameCCtxExtend, nameCCtxApply, nameCCtxEmpty, nameCCtxCompose, nameCCtxComposeExtend
                       , nameYielding, nameTrue, nameFalse, nameEffectOpen )
-import Common.Syntax( isDefFun, ParamInfo(..), DefInline(..) )
+import Common.Syntax( isDefFun, ParamInfo(..) )
 import qualified Common.Syntax as Syntax
 import Kind.Newtypes
 import Type.Type
@@ -28,6 +28,8 @@ import qualified Core.CoreVar as CV
 import Core.Pretty()
 import qualified Type.TypeVar as TV
 import Backend.Typed.Syntax
+import Backend.Typed.LidarName( toLidar )
+import qualified Lidar.Name as L
 import Backend.Typed.Build( K, compose, prodVal, padFields )
 import Backend.Typed.Traversal( child )
 import Backend.Typed.Elab.Types( typeDefs )
@@ -60,9 +62,16 @@ elabProgram nt ffi imports core
         -- Koka's annotation, with the small functions `inline`: as the C backend, which defines
         -- them in the header (`Backend.C.FromCore.genTopGroup`)
         small = S.fromList [C.defName d | C.DefNonRec d <- C.coreProgDefs core, C.isInlineable 5 d]
-        inlineOf d | C.defInline d == InlineAuto && S.member (C.defName d) small = InlineAlways
-                   | otherwise = C.defInline d
-    in (Program (C.coreProgName core) tdefs sigs externs ffi ds, errs, notes)
+        inlineOf d | C.defInline d == Syntax.InlineAuto && S.member (C.defName d) small = InlineAlways
+                   | otherwise = elabInline (C.defInline d)
+    in (Program (toLidar (C.coreProgName core)) tdefs (M.mapKeys toLidar sigs) (M.mapKeys toLidar externs) ffi ds, errs, notes)
+
+elabInline :: Syntax.DefInline -> DefInline
+elabInline inl
+  = case inl of
+      Syntax.InlineNever  -> InlineNever
+      Syntax.InlineAlways -> InlineAlways
+      Syntax.InlineAuto   -> InlineAuto
 
 -- The definitions that use a dummy as a value: `protect-prompt` puts its result `res`, which
 -- is a dummy after `yield-capture` cleared the flag of a final yield, into `Finalize(res)` to
@@ -74,9 +83,9 @@ hndName :: String -> Name
 hndName s = qualify nameCoreHnd (newName s)
 
 -- the externals of a module and its imports
-externsOf :: [C.Core] -> Externs
+externsOf :: [C.Core] -> M.Map Name Extern
 externsOf cores
-  = M.fromList [(C.externalName x, Extern (C.externalFormat x) [(n,kType t) | (n,t) <- ps] (kType r))
+  = M.fromList [(C.externalName x, Extern (C.externalFormat x) [(toLidar n,kType t) | (n,t) <- ps] (kType r))
                | c <- cores, x@(C.External{}) <- C.coreProgExternals c, let (ps,r) = kokaFunType (C.externalType x)]
   where
     kokaFunType tp = case tp of
@@ -112,8 +121,8 @@ elabFunDef inl def pars body
        (k,token) <- tokenBinder args
        body' <- withTVars tvs (withTypedLocals [(getName p,t) | (p,(_,t)) <- zip pars args] (tokenIn token (elabExprAt res body)))
        let params = withParamModes (defModes def) args
-           args' = [(root (getName p),m,t) | (p,(m,t)) <- zip pars params] ++ k
-       return (DefFun (C.defName def) tvs args' Owned res body' inl, SigFun tvs params Owned res)
+           args' = [(rootOf (getName p),m,t) | (p,(m,t)) <- zip pars params] ++ k
+       return (DefFun (toLidar (C.defName def)) tvs args' Owned res body' inl, SigFun tvs params Owned res)
 
 -- the token parameter of a function with the parameters `ps`, if it has one, and the token in
 -- its body
@@ -128,7 +137,7 @@ elabValDef def
   = do e <- env
        (tvs,t) <- tr (elabScheme (envNT e) (typeOf (C.defExpr def)))
        body <- withTVars tvs (tokenIn Nothing (elabExprAt t (stripTypeLam (C.defExpr def))))
-       return (DefVal (C.defName def) tvs t body, SigVal tvs t)
+       return (DefVal (toLidar (C.defName def)) tvs t body, SigVal tvs t)
 
 importSigs :: [C.Core] -> M.Map Name (Type,Bool,[Mode])
 importSigs cores
@@ -255,16 +264,16 @@ elabJoin expr
                   tvs'   = [typevarId tv | tv <- tvs, tvarStar tv]
               (k,token) <- joinToken
               (ps,e1') <- withTVars tvs' $
-                          do ps <- mapM (\p -> (\t -> (root (getName p),paramMode Own (S.member (getName p) linear),t)) <$> vt (tnameType p)) pars
+                          do ps <- mapM (\p -> (\t -> (rootOf (getName p),paramMode Own (S.member (getName p) linear),t)) <$> vt (tnameType p)) pars
                              (,) (ps ++ k) <$> withTypedLocals [(getName p,t) | (p,(_,_,t)) <- zip pars ps] (tokenIn token (elabTail e1))
-              Join j tvs' ps e1' <$> elabTail (C.Let dgs body)
+              Join (toLidar j) tvs' ps e1' <$> elabTail (C.Let dgs body)
       C.App f args | (Just (TName j tp,_),tys) <- splitTypeApp f, isJoinName j, Just (pars,_,_) <- splitFunType (typeOf f)
         -> do tys' <- instArgs tp tys
               (ks,vs) <- unzip <$> mapM (\((_,ptp),arg) -> do t <- vt ptp
                                                               elabValAt t arg) (zip pars args)
               (_,token) <- joinToken
               (kt,tv) <- takeTokenIf (isJust token)
-              return (compose ks (kt (Jump j tys' (vs ++ tv))))
+              return (compose ks (kt (Jump (toLidar j) tys' (vs ++ tv))))
       C.Let (C.DefNonRec def : dgs) body
         -> elabLet def (C.Let dgs body)
       C.Let (C.DefRec defs : _) _
@@ -342,7 +351,7 @@ elabLet def body
                  case yieldTest body of
                    Just (e2,e3) | dummy, not (S.member x (S.map getName (CV.fv e3)))
                      -> region (letYield def t e2 e3)
-                   _ -> do (k,t') <- bindExpr (root x) t (C.defExpr def)
+                   _ -> do (k,t') <- bindExpr (rootOf x) t (C.defExpr def)
                            k <$> withTypedLocals [(x,t')] (elabTail body)
   where
     fieldAlias en (C.Var (TName y _) _) = M.member y (envFields en)
@@ -361,7 +370,7 @@ letYield def t e2 e3
        k <- fresh "k"
        w <- result
        test <- testYield (Var k) (elabTail e3)
-                 (IsNull (Var r0) (Unreachable w) . (,) (root x) <$> withTypedLocals [(x,t)] (elabTail e2))
+                 (IsNull (Var r0) (Unreachable w) . (,) (rootOf x) <$> withTypedLocals [(x,t)] (elabTail e2))
        return (Let r u e1' (Proj (Var r) 0 r0 (Proj (Var r) 1 k test)))
 
 -- `[if-yielding]` on the token `k`, with the yielding branch `m3` and the other branch `m2`,
@@ -538,7 +547,7 @@ elabApp f args resTp
                  let copies = [m == Unique && captured e arg | ((m,_),arg) <- zip ps args] ++ repeat False
                  callWith (g == hndName "yield-to-final")
                           (\vs -> do (ks,vs') <- unzip <$> sequence (zipWith3 ctxCopy copies params vs)
-                                     return (compose ks (Call g tysD vs'))) params res args
+                                     return (compose ks (Call (toLidar g) tysD vs'))) params res args
          _ -> do (k1,fv) <- elabVal f
                  (params,res) <- funType f
                  body <- callWith False (applyFun (AFun params res) fv) (map snd params) res args
@@ -670,7 +679,7 @@ elabValT expr
        e <- env
        case elabValOf expr of
          _ | C.Var (TName x _) _ <- expr, Just bt <- M.lookup x (envBinders e), yields bt
-           -> do (k,v) <- coerceInst bt (orNull t) (Var (root x))
+           -> do (k,v) <- coerceInst bt (orNull t) (Var (rootOf x))
                  return (k,v,orNull t)
          Just m -> do (k,v) <- m
                       return (k,v,t)
@@ -766,10 +775,10 @@ elabLam t _ _ = failE ("expecting a function type for a lambda: " ++ ppr t)
 lamParam :: (TName,(Mode,VType)) -> E ((Path,Mode,VType),K)
 lamParam (p,(m,q))
   = do t <- vt (tnameType p)
-       if alphaEq q t then return ((root (getName p),m,q),id)
+       if alphaEq q t then return ((rootOf (getName p),m,q),id)
          else do y <- fresh "a"
                  (k,v) <- coerce q t (Var y)
-                 return ((y,m,q), k . Let (root (getName p)) t (Ret v))
+                 return ((y,m,q), k . Let (rootOf (getName p)) t (Ret v))
 
 stripForallV :: VType -> VType
 stripForallV (VPtr (AForall _ a)) = VPtr a
@@ -796,7 +805,7 @@ elabNamed e x tp info tys
   = do expect <- vt (typeOf (mkTypeApp (C.Var (TName x tp) info) tys))
        if S.member x (envLocals e)
          then do tys' <- instArgs tp tys
-                 let (k,v) = M.findWithDefault (id,Var (root x)) x (envFields e)
+                 let (k,v) = M.findWithDefault (id,Var (rootOf x)) x (envFields e)
                  (ki,w) <- case (tys', M.lookup x (envBinders e)) of
                              -- a use at other effects than its binder (`() -> int` as `() -> console int`)
                              ([],Just bt) -> coerceInst bt expect v
@@ -807,17 +816,17 @@ elabNamed e x tp info tys
                    SigFun tvs ps _ r -> do (tysD,params,res) <- instFun x sig tp tys
                                            let a = AFun [(Owned,p) | p <- params] res
                                            f <- if any ((/= Owned) . fst) ps then Ptr a <$> etaOwned x tysD params res
-                                                                             else return (tapp (Ptr (forallA tvs (AFun ps r)) (Fun x)) tysD)
+                                                                             else return (tapp (Ptr (forallA tvs (AFun ps r)) (Fun (toLidar x))) tysD)
                                            coerceInst (VPtr a) expect f
                    SigVal _ _     -> do (tysD,t) <- instVal x sig tp tys
-                                        coerceInst t expect (Glob x tysD)
+                                        coerceInst t expect (Glob (toLidar x) tysD)
                    SigCon _ _ _   -> failE ("constructor used as a variable: " ++ show x)
 
 -- closures only have owned parameters ([fun]): wrap a function that borrows (or takes a unique argument)
 etaOwned :: Name -> [AType] -> [VType] -> VType -> E AVal
 etaOwned x tysD params res
   = do ys <- mapM (const (fresh "e")) params
-       return (Lam [(y,Owned,p) | (y,p) <- zip ys params] res (Call x tysD (map Var ys)))
+       return (Lam [(y,Owned,p) | (y,p) <- zip ys params] res (Call (toLidar x) tysD (map Var ys)))
 
 instLocal :: VVal -> Type -> [AType] -> VType -> E (K,VVal)
 instLocal v _ [] _ = return (id,v)
@@ -871,13 +880,13 @@ elabOpenCon info vargs cname scheme args
   = do recordOpenSig info cname scheme
        fields <- schemeFields vargs scheme
        (ks,vs) <- unzip <$> mapM (\(t,arg) -> elabValAt t arg) (zip fields args)
-       return (compose ks, Ptr (ACon (dataInfoName info) vargs) (OpenCon cname vargs vs))
+       return (compose ks, Ptr (ACon (toLidar (dataInfoName info)) vargs) (OpenCon (toLidar cname) vargs vs))
 
 recordOpenSig :: DataInfo -> Name -> Type -> E ()
 recordOpenSig info cname scheme
   = do let tvs = [typevarId tv | tv <- dataInfoParams info, tvarStar tv]
        fields <- schemeFields (map AVar tvs) scheme
-       recordSig cname (SigCon tvs fields (dataInfoName info))
+       recordSig cname (SigCon tvs fields (toLidar (dataInfoName info)))
 
 schemeFields :: [AType] -> Type -> E [VType]
 schemeFields vargs scheme
@@ -929,7 +938,7 @@ conValue info vargs idx exSub v
                           let packed = packV (conTypes t) v
                           return (if conCount info > 1 then Inj idx t packed else packed)
   | otherwise = do shapes <- conShapes info vargs
-                   let t = ACon (dataInfoName info) vargs
+                   let t = ACon (toLidar (dataInfoName info)) vargs
                    return (Ptr t (Roll t (refInj info shapes idx (shapeVal (shapes !! idx)))))
   where
     shapeVal (ABox t) = Box (packV t v)
@@ -1104,7 +1113,7 @@ matches con br
 -- The binder is the path to the alternative, which names its constructor (`Traversal.injAStep`).
 boxedAlt :: [AType] -> [C.Branch] -> Path -> (Int,ConInfo) -> E (Int,Path,VExpr)
 boxedAlt vargs brs z (i,con)
-  = do let y = child z (SInjA i (Con (conInfoName con)))
+  = do let y = child z (SInjA i (Con (toLidar (conInfoName con))))
        e <- conBranch vargs con (Left y) (findBranch con brs)
        return (i,y,e)
 
@@ -1120,7 +1129,7 @@ elabValueCase info vargs v brs
 valueAlt :: [AType] -> [C.Branch] -> VVal -> (Int,ConInfo) -> E (Int,(Int,Path,VExpr))
 valueAlt vargs brs v (i,con)
   = do y <- case v of
-              Var z -> return (child z (SInjV i (Con (conInfoName con))))
+              Var z -> return (child z (SInjV i (Con (toLidar (conInfoName con)))))
               _     -> fresh "y"
        b <- conBranch vargs con (Right (Var y)) (findBranch con brs)
        return (branchIndex con brs, (i,y,b))
@@ -1136,17 +1145,17 @@ elabOpenCase info vargs v brs
 
 -- one binder for each field of the scrutinee `d`: its path, which names the field
 -- (`Traversal.openSteps`)
-openAlt :: DataInfo -> [AType] -> Path -> (ConInfo,C.Branch) -> E (Name,[Path],VExpr)
+openAlt :: DataInfo -> [AType] -> Path -> (ConInfo,C.Branch) -> E (L.Name,[Path],VExpr)
 openAlt info vargs d (con,br@(C.Branch [pat] _))
   = do recordOpenSig info (conInfoName con) (conInfoType con)
        fields <- fieldTypes vargs con
-       let c = child d (SOpen (conInfoName con))
+       let c = child d (SOpen (toLidar (conInfoName con)))
            xs = case fields of
                   [_] -> [c]
                   _   -> [child c (SField i f) | (i,f) <- zip [0..] (take (length fields) (conFieldNames con))]
        getters <- concat <$> sequence [bindField (subBinder p) s (id,Var x) | (p,s,x) <- zip3 (C.patConPatterns pat) fields xs]
        body <- withFields getters (branchBody br)
-       return (conInfoName con, xs, body)
+       return (toLidar (conInfoName con), xs, body)
 openAlt _ _ _ _ = failE "unexpected open branch after matching"
 
 -- the position of the branch that `findBranch` selects, after all branches if there is none

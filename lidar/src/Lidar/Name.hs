@@ -16,7 +16,7 @@ module Lidar.Name
   ( Name(..)
   , newName, newModuleName, newQualified, newLocallyQualified
   , readQualifiedName
-  , qualify, unqualify, unqualifyFull, qualifier, nameLocal
+  , qualify, unqualify, unqualifyFull, qualifier, isQualified, nameLocal
   , newHiddenName, makeHiddenName
   ) where
 
@@ -175,6 +175,9 @@ unqualifyFull (Name _ _ _ _ n hn) = Name "" 0 "" 0 n hn
 
 qualifier :: Name -> Name
 qualifier (Name m hm _ _ _ _) = Name m hm "" 0 "" 0
+
+isQualified :: Name -> Bool
+isQualified name = not (null (nameModule name))
 
 qualifyLocally :: Name -> Name -> Name
 qualifyLocally (Name loc _ _ 0 _ 0) (Name m _ l _ n _)
