@@ -61,7 +61,7 @@ import Lidar.Prim( nameYieldExtend, nameCoreHnd )
 import Lidar.Syntax
 import Lidar.Build( isYielded )
 import Lidar.Traversal( descendE, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fvE, lamsV, mapA, mapV, subexprs, within )
-import Lidar.Types( Types(..), alphaEq, inst, unNull, unToken, withToken, yields )
+import Lidar.Types( Types(..), alphaEq, inst, withToken, yields )
 import Lidar.Passes.Common( renamePath )
 
 yieldsProgram :: Program -> Program

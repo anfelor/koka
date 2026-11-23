@@ -14,7 +14,6 @@ module Lidar.Passes.CheckTypes( checkProgram, checkTypes ) where
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
-import Data.Monoid( Any(..) )
 import Lidar.Name
 import Lidar.Syntax
 import Lidar.Traversal( descendA, descendB, descendE, descendV, pathOf, scrutVar )

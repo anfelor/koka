@@ -57,7 +57,7 @@ import Data.Functor.Identity( Identity(..) )
 import Lidar.Name
 import Lidar.Syntax
 import Lidar.Traversal( child, descendA, descendE, descendV, holes, lamsV, mapA, mapV )
-import Lidar.Passes.Common( NameSupply, cloneE, freshFor, freshNameFrom, replaceA, replaceV )
+import Lidar.Passes.Common( NameSupply, cloneE, freshFor, freshNameFrom )
 
 -- the credits in scope that are full
 type Full = S.Set Path

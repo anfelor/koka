@@ -55,7 +55,7 @@ library
       Paths_lidar
   hs-source-dirs:
       src
-  ghc-options: -O2 -Wall
+  ghc-options: -O2 -Wall -Wno-x-partial -Wno-name-shadowing -Wno-orphans
   build-depends:
       base >=4.9
     , containers

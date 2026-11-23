@@ -1,0 +1,7 @@
+# Build output
+.stack-work/
+dist-newstyle/
+
+# Local plans and agent notes
+/Plan/
+/AGENTS.md

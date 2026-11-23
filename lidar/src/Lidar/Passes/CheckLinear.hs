@@ -91,9 +91,9 @@ import Lidar.Name
 import Lidar.Syntax
 import Lidar.Traversal( child, descendV, destructAOf, destructVOf, dsAlts, dsScrut, fieldsAt, fvA, fvE, jumpTargets, sibling, within )
 import Lidar.Types( checkDupType, prodV )
-import Lidar.Passes.Common( isRead, paramModes, prefixes, resultMode, trivialTy )
+import Lidar.Passes.Common( paramModes, prefixes, resultMode, trivialTy )
 import Lidar.Env( Env(..), envOf, M, ask, evalM, get, gets, liftE, local, modify )
-import Lidar.Query( Gamma, bindAll, inferV, inferA, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
+import Lidar.Query( Gamma, bindAll, inferV, inferA, inferVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 
 -- the mode of the variables at and below each owner: the roots in scope, and in the body of a
 -- join point the variables it captures

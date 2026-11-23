@@ -64,7 +64,7 @@ import Lidar.Syntax
 import Lidar.Build( K, compose )
 import Lidar.Traversal( Destruct(..), child, descendA, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fieldsAt, fvA, fvE, fvV, scrutVar, stepsFrom, takesContents, within )
 import Lidar.Passes.Common( isRead, paramModes, prefixes, trivialTy, NameSupply, dropValue, freshFor, perDef, freshPathFrom, nameChildren, projectAll, scopeOf )
-import Lidar.Env( Env(..), envOf, M, evalM, get, gets, lift, liftE, put, state, StateT, runStateT )
+import Lidar.Env( Env(..), envOf, M, evalM, get, lift, liftE, put, state, StateT, runStateT )
 import Lidar.Query( Gamma, bindAll, inferV, altTypes, lockGamma, uniqueGamma )
 import Lidar.Types( inst, isPtr )
 

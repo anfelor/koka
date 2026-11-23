@@ -363,14 +363,14 @@ uniqueGamma g x
       _ -> g
 
 branches :: Env -> [Q VType] -> Q VType
-branches env cs = do ts <- sequence cs
-                     case ts of
-                       []     -> Left "case without branches"
-                       (t:rest)
-                         | all (alphaEq t) rest -> return t
-                         | all (alphaEq (weaken t) . weaken) rest -> return (weaken t)
-                         | otherwise -> do mapM_ (expect (erase t) . erase) rest
-                                           return (erase t)
+branches _ cs = do ts <- sequence cs
+                   case ts of
+                     []     -> Left "case without branches"
+                     (t:rest)
+                       | all (alphaEq t) rest -> return t
+                       | all (alphaEq (weaken t) . weaken) rest -> return (weaken t)
+                       | otherwise -> do mapM_ (expect (erase t) . erase) rest
+                                         return (erase t)
   where
     -- disagreeing branches forget credits and contexts
     weaken = mapCredits (const MaybeEmpty) id

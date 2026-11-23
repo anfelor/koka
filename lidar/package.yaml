@@ -17,3 +17,6 @@ library:
   ghc-options:
     - -O2
     - -Wall
+    - -Wno-x-partial      # as in koka
+    - -Wno-name-shadowing
+    - -Wno-orphans        # Pretty instances of the IR live in Lidar.Pretty

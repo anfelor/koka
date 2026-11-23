@@ -161,7 +161,7 @@ dropValue trivial fresh scope x t e
   = case t of
       A _ -> return (Drop x e)
       V v -> case v of
-        VPtr a -> do let y = child x SDeref
+        VPtr _ -> do let y = child x SDeref
                      return (reuseChildren scope (Deref (Var x) y (Drop y e)))
         VProd{} -> do let fields = [f | f@(_,_,s) <- fieldsAt x v, not (trivial (V s))]
                           inner = M.union (scopeOf [y | (y,_,_) <- fields]) scope

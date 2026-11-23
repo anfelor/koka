@@ -40,10 +40,9 @@ module Lidar.Passes.Simplify( simplifyProgram ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Data.Functor.Const( Const(..) )
 import Control.Monad.State( State, evalState, state )
 import Lidar.Syntax
-import Lidar.Traversal( descendA, descendAll, descendV, fvE, fvV, hasRegion, jumpArgs, stepsFrom, within )
+import Lidar.Traversal( descendAll, fvE, fvV, hasRegion, jumpArgs, stepsFrom, within )
 import Lidar.Passes.Common( mapAll, NameSupply, SubstExpr, cloneE, defScope, freshFor, freshNameFrom, project, substJump, substJumpM, substName, substStep, substTypesE, valueAt )
 import Lidar.Types( Types(..) )
 
@@ -127,7 +126,7 @@ shadow xs sub = foldr M.delete sub xs
 freshE :: VExpr -> VExpr
 freshE expr
   = case expr of
-      Let x t (Ret k@(Context _ _)) e
+      Let x _ (Ret k@(Context _ _)) e
         | Just e' <- appendFresh x k e -> freshE e'
       _ -> mapAll (const freshE) expr
 
