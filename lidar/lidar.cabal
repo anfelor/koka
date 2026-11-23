@@ -47,7 +47,6 @@ library
       Lidar.Passes.UniqueJoins
       Lidar.Passes.Yields
       Lidar.Pretty
-      Lidar.Prim
       Lidar.Query
       Lidar.Syntax
       Lidar.Traversal

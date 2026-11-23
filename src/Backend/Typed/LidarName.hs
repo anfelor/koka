@@ -8,14 +8,12 @@
 {- Conversion between Koka's names and the names of the lidar IR.
 
   Both have the same fields and hash, so conversion preserves equality and order.
-  `lidarNamesAgree` checks this on lidar's primitive names and its name functions.
+  `lidarNamesAgree` checks this on names built with each side's name functions.
 -}
 module Backend.Typed.LidarName( toLidar, fromLidar, lidarNamesAgree ) where
 
 import Common.Name
-import qualified Common.NamePrim as K
 import qualified Lidar.Name as L
-import qualified Lidar.Prim as L
 
 toLidar :: Name -> L.Name
 toLidar name = L.newLocallyQualified (nameModule name) (nameLocalQual name) (nameStem name)
@@ -26,8 +24,8 @@ fromLidar name = newLocallyQualified (L.nameModule name) (L.nameLocalQual name) 
 -- | Pairs of names that Koka and lidar each construct themselves.
 namePairs :: [(Name,L.Name)]
 namePairs
-  = [ (K.nameTpInt, L.nameTpInt)
-    , (K.nameTpString, L.nameTpString)
+  = [ (qualify (newModuleName "std/core/types") (newName "int"), L.qualify (L.newModuleName "std/core/types") (L.newName "int"))
+    , (newQualified "std/core/types" "string", L.newQualified "std/core/types" "string")
     , (newHiddenName "x", L.newHiddenName "x")
     , (makeHiddenName "loop" (newName "f"), L.makeHiddenName "loop" (L.newName "f"))
     , (newLocallyQualified "std/core" "int" "+", L.newLocallyQualified "std/core" "int" "+")
