@@ -24,7 +24,8 @@
   `[unpack]` is its scrutinee, so consuming or testing it consumes or tests the scrutinee (`key`). So does a child whose
   siblings are of a trivial type, which is determined from the type of the parent: a `[case-open]`
   binds only its fields, not the product around them. In an alternative whose binder of a trivial type is all of
-  the scrutinee (`Nothing`), the scrutinee needs no references. A destructuring of a variable
+  the scrutinee (`Nothing`), the scrutinee needs no references: it counts as consuming as many
+  as the other alternatives, or as it holds if they all diverge. A destructuring of a variable
   therefore needs no mode: it only reads the scrutinee, and its alternatives consume the children
   they take over. `Unscalar` copies the trivial contents of a scalar into a root, so its mode
   matters: an owned read consumes the scalar. The binders of a destructuring of a value that is
@@ -584,14 +585,18 @@ destruct env g js q nulls v alts
       Var z -> do zc <- keyOf z
                   rs <- sequence [alt zc bs e | (bs,e) <- alts]
                   tr <- get
-                  -- where `z` is trivial, it has as many references as in the other alternatives
+                  -- where `z` is trivial, it has as many references as in the other alternatives,
+                  -- or, if those all diverge, as many as it holds (one if it is owned)
+                  let inside = M.filterWithKey (\p _ -> p `within` zc) . refine tr [zc]
+                      outside = M.filterWithKey (\p _ -> not (p `within` zc)) . refine tr [zc]
+                      adopt c u = u{ uNet = plus tr (outside (uNet u)) c, uPeak = outside (uPeak u) }
+                      held m = M.fromList [(zc,1) | owning m]
                   u <- case [u | (False,u) <- rs, not (uDiverges u)] of
-                         (u0:_) -> let inside = M.filterWithKey (\p _ -> p `within` zc) . refine tr [zc]
-                                       outside = M.filterWithKey (\p _ -> not (p `within` zc)) . refine tr [zc]
-                                       adopt u = u{ uNet = plus tr (outside (uNet u)) (inside (uNet u0))
-                                                  , uPeak = outside (uPeak u) }
-                                   in branches [if whole then adopt u else u | (whole,u) <- rs]
-                         [] -> branches (map snd rs)
+                         (u0:_) -> branches [if whole then adopt (inside (uNet u0)) u else u | (whole,u) <- rs]
+                         [] | any fst rs && any (uDiverges . snd) rs
+                            -> do m <- ownerMode z
+                                  branches [if whole then adopt (held m) u else u | (whole,u) <- rs]
+                         _ -> branches (map snd rs)
                   before scrutinee (return u)
                   where
                     scrutinee | trivialVar env g z = return noUse
