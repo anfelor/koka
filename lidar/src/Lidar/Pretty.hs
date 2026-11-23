@@ -6,6 +6,7 @@
 -- found in the LICENSE file at the root of this distribution.
 -----------------------------------------------------------------------------
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 {- Printing.
 
@@ -28,14 +29,15 @@ module Lidar.Pretty( ppr, prettyProgram, reserved ) where
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Char( isDigit )
-import Data.List( intercalate, isPrefixOf )
-import Lidar.PPrint
+import Data.List( intercalate, intersperse, isPrefixOf )
+import Prettyprinter
+import Prettyprinter.Render.String( renderString )
 import Lidar.Name
 import Lidar.Syntax
 import Lidar.Traversal( bindersE, child )
 
 -- how a definition prints its paths
-type PP = Path -> Doc
+type PP ann = Path -> Doc ann
 
 instance Pretty AType   where pretty = prettyA fullPath
 instance Pretty VType   where pretty = prettyV fullPath
@@ -46,16 +48,16 @@ instance Pretty VExpr   where pretty = prettyExpr fullPath
 instance Pretty Def     where pretty = prettyDef fullPath
 instance Pretty Program where pretty = prettyProgram
 
--- for messages
+-- renders a document; the printer chooses no layouts, so the width does not matter
 ppr :: Pretty a => a -> String
-ppr x = show (pretty x)
+ppr x = renderString (layoutPretty (LayoutOptions Unbounded) (pretty x))
 
 --------------------------------------------------------------------------
 -- Names and paths
 --------------------------------------------------------------------------
 
-nm :: Name -> Doc
-nm n = text (escape (show n))
+nm :: Name -> Doc ann
+nm n = pretty (escape (show n))
 
 -- a name in backquotes if it could be read as a keyword or another token (an operator in
 -- parentheses could be read as that of a sum or product)
@@ -73,8 +75,11 @@ reserved s = null s || "(" `isPrefixOf` s || s `elem` keywords || "box@" `isPref
                       ++ " char ssize_t intptr_t float64 float32 int64 int32 int16 int8 uint8")
 
 -- a path with all its steps
-fullPath :: PP
-fullPath (Path x ss) = text (intercalate "." (escape (show x) : map show ss))
+fullPath :: PP ann
+fullPath = pretty . showPath
+
+showPath :: Path -> String
+showPath (Path x ss) = intercalate "." (escape (show x) : map show ss)
 
 -- the fields of each constructor of a reference datatype (paths into values name no
 -- constructors of value datatypes, whose names may clash with those of reference datatypes)
@@ -106,15 +111,15 @@ shortSteps fields = go []
 -- The paths of a definition: shortened, unless another binder of the definition would print the
 -- same, shortened or with all its steps. Steps compare by tag and index, so a path prints with
 -- the constructors and fields of its binder.
-defPaths :: Fields -> Def -> PP
+defPaths :: Fields -> Def -> PP ann
 defPaths fields def = pathDoc . asBound
   where
     asBound x = M.findWithDefault x x bound
     bound = M.fromList [(y,y) | y <- xs]
     pathDoc x = let s = short x
-                in if all (== x) (M.findWithDefault [] s binders) then text s else fullPath x
+                in if all (== x) (M.findWithDefault [] s binders) then pretty s else fullPath x
     short (Path r ss) = intercalate "." (escape (show r) : shortSteps fields ss)
-    binders = M.fromListWith (++) ([(short x,[x]) | x <- xs] ++ [(show (fullPath x),[x]) | x <- xs])
+    binders = M.fromListWith (++) ([(short x,[x]) | x <- xs] ++ [(showPath x,[x]) | x <- xs])
     xs = params ++ bindersE (defBody def)
     params = case def of
                DefFun{ defArgs = ps } -> [x | (x,_,_) <- ps]
@@ -124,156 +129,156 @@ defPaths fields def = pathDoc . asBound
 -- Types
 --------------------------------------------------------------------------
 
-tv :: TVar -> Doc
-tv v = text ("v" ++ show v)
+tv :: TVar -> Doc ann
+tv v = pretty ("v" ++ show v)
 
-prettyA :: PP -> AType -> Doc
+prettyA :: PP ann -> AType -> Doc ann
 prettyA pp a
   = case a of
-      ABox t        -> text "Box" <.> parens (prettyV pp t)
-      AScalar r     -> text "Scalar" <.> parens (prettyRaw r)
-      AUnit         -> text "1"
-      ASum ts       -> parens (hsep (punctuate (text " +") [int i <.> text ":" <.> atomA pp t | (i,t) <- ts]))
-      AFun ps r     -> parens (commaSep [mode m <.> prettyV pp p | (m,p) <- ps]) <+> text "->" <+> prettyV pp r
-      AForall vs b  -> text "forall" <+> hsep (map tv vs) <.> text "." <+> prettyA pp b
+      ABox t        -> "Box" <> parens (prettyV pp t)
+      AScalar r     -> "Scalar" <> parens (prettyRaw r)
+      AUnit         -> "1"
+      ASum ts       -> parens (hsep (punctuate " +" [pretty i <> ":" <> atomA pp t | (i,t) <- ts]))
+      AFun ps r     -> parens (commaSep [mode m <> prettyV pp p | (m,p) <- ps]) <+> "->" <+> prettyV pp r
+      AForall vs b  -> "forall" <+> hsep (map tv vs) <> "." <+> prettyA pp b
       AVar v        -> tv v
-      AApp v ts     -> tv v <.> angles (commaSep (map (prettyA pp) ts))
+      AApp v ts     -> tv v <> angles (commaSep (map (prettyA pp) ts))
       ACon n []     -> nm n
-      ACon n ts     -> nm n <.> angles (commaSep (map (prettyA pp) ts))
-      ALam vs b     -> parens (text "\\" <.> hsep (map tv vs) <.> text "." <+> prettyA pp b)
-      ALazy l b     -> parens (atomA pp l <+> text "~>" <+> atomA pp b)
+      ACon n ts     -> nm n <> angles (commaSep (map (prettyA pp) ts))
+      ALam vs b     -> parens ("\\" <> hsep (map tv vs) <> "." <+> prettyA pp b)
+      ALazy l b     -> parens (atomA pp l <+> "~>" <+> atomA pp b)
 
 -- a type that extends to the right in parentheses
-atomA :: PP -> AType -> Doc
+atomA :: PP ann -> AType -> Doc ann
 atomA pp a
   = case a of
       AFun _ _    -> parens (prettyA pp a)
       AForall _ _ -> parens (prettyA pp a)
       _           -> prettyA pp a
 
-mode :: Mode -> Doc
-mode Owned    = empty
-mode Unique   = text "!"
-mode Borrowed = text "^"
+mode :: Mode -> Doc ann
+mode Owned    = emptyDoc
+mode Unique   = "!"
+mode Borrowed = "^"
 
-prettyV :: PP -> VType -> Doc
+prettyV :: PP ann -> VType -> Doc ann
 prettyV pp t
   = case t of
-      VPtr a@(AVar _)   -> prettyA pp a <.> text "*"
-      VPtr a@(ACon _ _) -> prettyA pp a <.> text "*"
-      VPtr a     -> parens (prettyA pp a) <.> text "*"
-      VReuse f n contents -> text ("reuse" ++ (if f == Full then "!" else "") ++ show n) <.> prettyContents pp contents
-      VUnit      -> text "I"
+      VPtr a@(AVar _)   -> prettyA pp a <> "*"
+      VPtr a@(ACon _ _) -> prettyA pp a <> "*"
+      VPtr a     -> parens (prettyA pp a) <> "*"
+      VReuse f n contents -> pretty ("reuse" ++ (if f == Full then "!" else "") ++ show n) <> prettyContents pp contents
+      VUnit      -> "I"
       VSum ts    -> infixes "(+)" [labelled (show c) ("inj" ++ show i) (prettyV pp s) | (i,(c,s)) <- zip [0 :: Int ..] ts]
       VProd fs   -> infixes "(x)" [labelled (show f) ("field" ++ show i) (prettyV pp s) | (i,(f,s)) <- zip [0 :: Int ..] fs]
       VRaw r     -> prettyRaw r
-      VExists vs b -> parens (text "exists" <+> hsep (map tv vs) <.> text "." <+> prettyV pp b)
-      VCtx f a b -> text ("ctx" ++ (if f == Full then "+" else "")) <.> angles (commaSep [prettyA pp a, prettyA pp b])
-      VCell n a -> text ("cell" ++ show n) <.> angles (prettyA pp a)
-      VOrNull b -> prettyV pp b <.> text "?"
-      VToken    -> text "KCtx"
+      VExists vs b -> parens ("exists" <+> hsep (map tv vs) <> "." <+> prettyV pp b)
+      VCtx f a b -> pretty ("ctx" ++ (if f == Full then "+" else "")) <> angles (commaSep [prettyA pp a, prettyA pp b])
+      VCell n a -> pretty ("cell" ++ show n) <> angles (prettyA pp a)
+      VOrNull b -> prettyV pp b <> "?"
+      VToken    -> "KCtx"
 
 -- a component of a sum or product with its label, unless that is the default one for its
 -- position (`tagCon`, `posField`)
-labelled :: String -> String -> Doc -> Doc
-labelled l def d = if l == def then d else text (escape l) <.> colon <+> d
+labelled :: String -> String -> Doc ann -> Doc ann
+labelled l def d = if l == def then d else pretty (escape l) <> colon <+> d
 
 -- an n-ary sum or product; one with a single component ends with the operator
-infixes :: String -> [Doc] -> Doc
-infixes op [d] = parens (d <+> text op)
-infixes op ds  = parens (hsep (punctuate (text (" " ++ op)) ds))
+infixes :: String -> [Doc ann] -> Doc ann
+infixes op [d] = parens (d <+> pretty op)
+infixes op ds  = parens (hsep (punctuate (pretty (" " ++ op)) ds))
 
-prettyRaw :: Raw -> Doc
+prettyRaw :: Raw -> Doc ann
 prettyRaw r
-  = text (case r of
-            RChar    -> "char"
-            RSSize   -> "ssize_t"
-            RIntPtr  -> "intptr_t"
-            RFloat64 -> "float64"
-            RFloat32 -> "float32"
-            RInt64   -> "int64"
-            RInt32   -> "int32"
-            RInt16   -> "int16"
-            RInt8    -> "int8"
-            RUInt8   -> "uint8")
+  = case r of
+      RChar    -> "char"
+      RSSize   -> "ssize_t"
+      RIntPtr  -> "intptr_t"
+      RFloat64 -> "float64"
+      RFloat32 -> "float32"
+      RInt64   -> "int64"
+      RInt32   -> "int32"
+      RInt16   -> "int16"
+      RInt8    -> "int8"
+      RUInt8   -> "uint8"
 
-prettyT :: PP -> Ty -> Doc
+prettyT :: PP ann -> Ty -> Doc ann
 prettyT pp (A a) = prettyA pp a
 prettyT pp (V t) = prettyV pp t
 
-prettyContents :: PP -> Maybe Contents -> Doc
-prettyContents pp = maybe empty (\(Contents k p t) -> brackets (text (maybe "_" show k) <.> semi <+> prettyVal pp p <+> text ":" <+> prettyV pp t))
+prettyContents :: PP ann -> Maybe Contents -> Doc ann
+prettyContents pp = maybe emptyDoc (\(Contents k p t) -> brackets (pretty (maybe "_" show k) <> semi <+> prettyVal pp p <+> ":" <+> prettyV pp t))
 
-commaSep :: [Doc] -> Doc
-commaSep ds = hcat (punctuate (text ", ") ds)
+commaSep :: [Doc ann] -> Doc ann
+commaSep ds = hcat (punctuate ", " ds)
 
-tyArgs :: PP -> [AType] -> Doc
+tyArgs :: PP ann -> [AType] -> Doc ann
 tyArgs pp ts = brackets (commaSep (map (prettyA pp) ts))
 
-tyParams :: [TVar] -> Doc
-tyParams [] = empty
+tyParams :: [TVar] -> Doc ann
+tyParams [] = emptyDoc
 tyParams vs = angles (commaSep (map tv vs))
 
-params :: PP -> [(Path,Mode,VType)] -> Doc
-params pp ps = parens (commaSep [mode m <.> pp x <+> colon <+> prettyV pp t | (x,m,t) <- ps])
+params :: PP ann -> [(Path,Mode,VType)] -> Doc ann
+params pp ps = parens (commaSep [mode m <> pp x <+> colon <+> prettyV pp t | (x,m,t) <- ps])
 
-side :: Side -> Doc
-side Whnf  = text "whnf"
-side Delay = text "delay"
+side :: Side -> Doc ann
+side Whnf  = "whnf"
+side Delay = "delay"
 
 --------------------------------------------------------------------------
 -- Values
 --------------------------------------------------------------------------
 
-prettyAVal :: PP -> AVal -> Doc
+prettyAVal :: PP ann -> AVal -> Doc ann
 prettyAVal pp val
   = case val of
       Fun f      -> nm f
-      UnitA      -> text "()"
-      InjA i _ v -> text "inj-a" <.> int i <+> atomAVal pp v
-      Roll _ v   -> text "roll" <+> atomAVal pp v
+      UnitA      -> "()"
+      InjA i _ v -> "inj-a" <> pretty i <+> atomAVal pp v
+      Roll _ v   -> "roll" <+> atomAVal pp v
       InjLazy d _ v -> side d <+> atomAVal pp v
-      Box v      -> text "box" <+> atomVal pp v
-      Scalar v   -> text "scalar" <+> atomVal pp v
-      OpenCon c ts vs -> nm c <.> tyArgs pp ts <.> args pp vs
-      Lam ps r e -> text "fn" <.> params pp ps <+> colon <+> prettyV pp r <+> text "->" <-> indent 2 (prettyExpr pp e)
-      BoxAt r v  -> text "box@" <.> pp r <+> atomVal pp v
+      Box v      -> "box" <+> atomVal pp v
+      Scalar v   -> "scalar" <+> atomVal pp v
+      OpenCon c ts vs -> nm c <> tyArgs pp ts <> args pp vs
+      Lam ps r e -> "fn" <> params pp ps <+> colon <+> prettyV pp r <+> "->" <> line <> indent 2 (prettyExpr pp e)
+      BoxAt r v  -> "box@" <> pp r <+> atomVal pp v
 
-prettyVal :: PP -> VVal -> Doc
+prettyVal :: PP ann -> VVal -> Doc ann
 prettyVal pp val
   = case val of
       Var x      -> pp x
       Glob x []  -> nm x
-      Glob x ts  -> nm x <.> tyArgs pp ts
-      UnitV      -> text "()"
+      Glob x ts  -> nm x <> tyArgs pp ts
+      UnitV      -> "()"
       Lit l      -> prettyLit l
-      Inj i _ v  -> text "inj" <.> int i <+> atomVal pp v
-      Tuple [v]  -> parens (prettyVal pp v <.> comma)   -- not a value in parentheses
+      Inj i _ v  -> "inj" <> pretty i <+> atomVal pp v
+      Tuple [v]  -> parens (prettyVal pp v <> comma)   -- not a value in parentheses
       Tuple vs   -> parens (commaSep (map (prettyVal pp) vs))
-      Ptr _ v    -> text "ptr" <+> atomAVal pp v
-      Pack _ ts v -> text "pack" <.> tyArgs pp ts <+> atomVal pp v
-      TyApp v@(Glob _ _) ts -> parens (prettyVal pp v) <.> tyArgs pp ts   -- not `Glob x ts`
-      TyApp v ts  -> atomVal pp v <.> tyArgs pp ts
-      Up v        -> text "up" <+> atomVal pp v
-      Down b v    -> text "down" <.> tyArgs pp [b] <+> atomVal pp v
-      DupV v      -> text "dup" <+> atomVal pp v
-      NoReuse n p -> text "no-reuse" <.> int n <.> prettyContents pp p
-      Hole        -> text "hole"
-      Context _ v -> text "ctx" <+> atomVal pp v
-      Some v      -> text "some" <+> atomVal pp v
-      Null _      -> text "null"
+      Ptr _ v    -> "ptr" <+> atomAVal pp v
+      Pack _ ts v -> "pack" <> tyArgs pp ts <+> atomVal pp v
+      TyApp v@(Glob _ _) ts -> parens (prettyVal pp v) <> tyArgs pp ts   -- not `Glob x ts`
+      TyApp v ts  -> atomVal pp v <> tyArgs pp ts
+      Up v        -> "up" <+> atomVal pp v
+      Down b v    -> "down" <> tyArgs pp [b] <+> atomVal pp v
+      DupV v      -> "dup" <+> atomVal pp v
+      NoReuse n p -> "no-reuse" <> pretty n <> prettyContents pp p
+      Hole        -> "hole"
+      Context _ v -> "ctx" <+> atomVal pp v
+      Some v      -> "some" <+> atomVal pp v
+      Null _      -> "null"
 
-args :: PP -> [VVal] -> Doc
+args :: PP ann -> [VVal] -> Doc ann
 args pp vs = parens (commaSep (map (prettyVal pp) vs))
 
-atomAVal :: PP -> AVal -> Doc
+atomAVal :: PP ann -> AVal -> Doc ann
 atomAVal pp v
   = case v of
       Fun _ -> prettyAVal pp v
       UnitA -> prettyAVal pp v
       _     -> parens (prettyAVal pp v)
 
-atomVal :: PP -> VVal -> Doc
+atomVal :: PP ann -> VVal -> Doc ann
 atomVal pp v
   = case v of
       Inj _ _ _   -> parens (prettyVal pp v)
@@ -286,84 +291,89 @@ atomVal pp v
       Down _ _    -> parens (prettyVal pp v)
       _           -> prettyVal pp v
 
-prettyLit :: Lit -> Doc
+prettyLit :: Lit -> Doc ann
 prettyLit lit
   = case lit of
-      LitInt i    -> text (show i)
-      LitFloat d  -> text (show d)
-      LitChar c   -> text (show c)
-      LitString s -> text (show s)
+      LitInt i    -> viaShow i
+      LitFloat d  -> viaShow d
+      LitChar c   -> viaShow c
+      LitString s -> viaShow s
 
 --------------------------------------------------------------------------
 -- Expressions
 --------------------------------------------------------------------------
 
-prettyExpr :: PP -> VExpr -> Doc
+prettyExpr :: PP ann -> VExpr -> Doc ann
 prettyExpr pp expr
   = case expr of
-      Ret v -> text "ret" <+> atomVal pp v
-      Let x t e1 e2 -> letIn empty (pp x <+> colon <+> prettyV pp t) (align (prettyExpr pp e1)) e2
-      Unreachable _ -> text "unreachable"
-      Call f [] vs -> nm f <.> args pp vs
-      Call f ts vs -> nm f <.> tyArgs pp ts <.> args pp vs
-      App f vs -> pp f <.> args pp vs
-      Proj v i x e -> letIn empty (pp x) (atomVal pp v <.> text "." <.> int i) e
-      CaseV v alts -> caseOf (text "case") (prettyVal pp v) [(text "inj" <.> int i <+> pp x, e) | (i,x,e) <- alts]
-      SplitA v k (x,e1) (y,e2) -> caseOf (text "split") (pp v <+> text "at" <+> int k) [(pp x, e1), (pp y, e2)]
-      IfWhnf v (x,e1) (y,e2) -> caseOf (text "if-whnf") (pp v) [(side Whnf <+> pp x, e1), (side Delay <+> pp y, e2)]
-      CaseA v alts def -> caseOf (text "case") (pp v)
-                              ([(text "inj-a" <.> int i <+> pp x, e) | (i,x,e) <- alts] ++ [(text "_" <+> pp x, e) | Just (x,e) <- [def]])
-      Deref v x e -> letIn empty (text "ptr" <+> pp x) (prettyVal pp v) e
-      Unroll v x e -> letIn empty (text "roll" <+> pp x) (pp v) e
-      Unbox v x e -> letIn empty (text "box" <+> pp x) (pp v) e
-      Unscalar m v x e -> letIn (mode m) (text "scalar" <+> pp x) (pp v) e
-      IsNull v n (x,e) -> caseOf (text "is-null") (prettyVal pp v) [(text "null", n), (pp x, e)]
-      IfYielding v (k3,e3) (k2,e2) -> caseOf (text "if-yielding") (prettyVal pp v) [(text "yield" <+> pp k3, e3), (pp k2, e2)]
-      Unpack v vs x e -> letIn empty (text "pack" <.> brackets (commaSep (map tv vs)) <+> pp x) (prettyVal pp v) e
-      CaseLit v alts def -> caseOf (text "case") (prettyVal pp v) ([(prettyLit l, e) | (l,e) <- alts] ++ [(text "_", def)])
-      Dup x e -> text "dup" <+> pp x <.> semi <-> prettyExpr pp e
-      Drop x e -> text "drop" <+> pp x <.> semi <-> prettyExpr pp e
-      Free r e -> text "free" <+> pp r <.> semi <-> prettyExpr pp e
-      IsUnique x e1 e2 -> ifThen (text "if-unique" <+> pp x) e1 e2
-      IfFull r e1 e2 -> ifThen (text "if-full" <+> pp r) e1 e2
-      UnboxRu z e -> letIn empty (text "@" <+> pp (child z SCredit)) (pp z) e
-      CopyRu z r e -> letIn empty (text "@copy" <+> pp r) (pp z) e
-      Lock z e -> letIn empty (text "lock" <+> pp (child z SCredit)) (pp z) e
-      Join j tvs ps e1 e2 -> text "join" <+> nm j <.> tyParams tvs <.> params pp ps <+> text "="
-                         <-> indent 2 (prettyExpr pp e1) <-> text "in" <+> align (prettyExpr pp e2)
-      JoinRec t ds e -> foldr (<->) (text "in" <+> align (prettyExpr pp e))
-                          [text kw <+> nm j <.> tyParams tvs <.> params pp ps <+> res <-> indent 2 (prettyExpr pp e1)
-                          | (kw,res,JoinDef j tvs ps e1) <- zip3 ("join rec" : repeat "and") (colon <+> prettyV pp t <+> text "=" : repeat (text "=")) ds]
-      Jump j [] vs -> text "jump" <+> nm j <.> args pp vs
-      Jump j ts vs -> text "jump" <+> nm j <.> tyArgs pp ts <.> args pp vs
-      Plug c v -> atomVal pp c <.> brackets (prettyVal pp v)
-      Append c d -> atomVal pp c <+> text "++" <+> atomVal pp d
-      CtxCopy c -> text "ctx-copy" <+> atomVal pp c
-      CastEv u t e -> text "cast-ev" <.> brackets (prettyV pp u <.> comma <+> prettyV pp t) <+> align (prettyExpr pp e)
-      Memoize c d k v -> text "memoize" <+> atomVal pp c <+> parens (side d <+> parens (text "inj" <.> int k <+> atomVal pp v))
-      Gen vs e -> text "gen" <+> hsep (map tv vs) <.> text "." <+> align (prettyExpr pp e)
-      Total k e -> text "total" <+> pp k <.> text "." <+> align (prettyExpr pp e)
-      CaseOpen v alts def -> caseOf (text "case") (pp v) ([(nm c <.> parens (commaSep (map pp xs)), e) | (c,xs,e) <- alts] ++ [(text "_", def)])
+      Ret v -> "ret" <+> atomVal pp v
+      Let x t e1 e2 -> letIn emptyDoc (pp x <+> colon <+> prettyV pp t) (align (prettyExpr pp e1)) e2
+      Unreachable _ -> "unreachable"
+      Call f [] vs -> nm f <> args pp vs
+      Call f ts vs -> nm f <> tyArgs pp ts <> args pp vs
+      App f vs -> pp f <> args pp vs
+      Proj v i x e -> letIn emptyDoc (pp x) (atomVal pp v <> "." <> pretty i) e
+      CaseV v alts -> caseOf "case" (prettyVal pp v) [("inj" <> pretty i <+> pp x, e) | (i,x,e) <- alts]
+      SplitA v k (x,e1) (y,e2) -> caseOf "split" (pp v <+> "at" <+> pretty k) [(pp x, e1), (pp y, e2)]
+      IfWhnf v (x,e1) (y,e2) -> caseOf "if-whnf" (pp v) [(side Whnf <+> pp x, e1), (side Delay <+> pp y, e2)]
+      CaseA v alts def -> caseOf "case" (pp v)
+                              ([("inj-a" <> pretty i <+> pp x, e) | (i,x,e) <- alts] ++ [("_" <+> pp x, e) | Just (x,e) <- [def]])
+      Deref v x e -> letIn emptyDoc ("ptr" <+> pp x) (prettyVal pp v) e
+      Unroll v x e -> letIn emptyDoc ("roll" <+> pp x) (pp v) e
+      Unbox v x e -> letIn emptyDoc ("box" <+> pp x) (pp v) e
+      Unscalar m v x e -> letIn (mode m) ("scalar" <+> pp x) (pp v) e
+      IsNull v n (x,e) -> caseOf "is-null" (prettyVal pp v) [("null", n), (pp x, e)]
+      IfYielding v (k3,e3) (k2,e2) -> caseOf "if-yielding" (prettyVal pp v) [("yield" <+> pp k3, e3), (pp k2, e2)]
+      Unpack v vs x e -> letIn emptyDoc ("pack" <> brackets (commaSep (map tv vs)) <+> pp x) (prettyVal pp v) e
+      CaseLit v alts def -> caseOf "case" (prettyVal pp v) ([(prettyLit l, e) | (l,e) <- alts] ++ [("_", def)])
+      Dup x e -> stmt ("dup" <+> pp x) e
+      Drop x e -> stmt ("drop" <+> pp x) e
+      Free r e -> stmt ("free" <+> pp r) e
+      IsUnique x e1 e2 -> ifThen ("if-unique" <+> pp x) e1 e2
+      IfFull r e1 e2 -> ifThen ("if-full" <+> pp r) e1 e2
+      UnboxRu z e -> letIn emptyDoc ("@" <+> pp (child z SCredit)) (pp z) e
+      CopyRu z r e -> letIn emptyDoc ("@copy" <+> pp r) (pp z) e
+      Lock z e -> letIn emptyDoc ("lock" <+> pp (child z SCredit)) (pp z) e
+      Join j tvs ps e1 e2 -> vsep [ "join" <+> nm j <> tyParams tvs <> params pp ps <+> "="
+                                  , indent 2 (prettyExpr pp e1)
+                                  , "in" <+> align (prettyExpr pp e2) ]
+      JoinRec t ds e -> vsep ([vsep [kw <+> nm j <> tyParams tvs <> params pp ps <+> res, indent 2 (prettyExpr pp e1)]
+                              | (kw,res,JoinDef j tvs ps e1) <- zip3 ("join rec" : repeat "and") (colon <+> prettyV pp t <+> "=" : repeat "=") ds]
+                              ++ ["in" <+> align (prettyExpr pp e)])
+      Jump j [] vs -> "jump" <+> nm j <> args pp vs
+      Jump j ts vs -> "jump" <+> nm j <> tyArgs pp ts <> args pp vs
+      Plug c v -> atomVal pp c <> brackets (prettyVal pp v)
+      Append c d -> atomVal pp c <+> "++" <+> atomVal pp d
+      CtxCopy c -> "ctx-copy" <+> atomVal pp c
+      CastEv u t e -> "cast-ev" <> brackets (prettyV pp u <> comma <+> prettyV pp t) <+> align (prettyExpr pp e)
+      Memoize c d k v -> "memoize" <+> atomVal pp c <+> parens (side d <+> parens ("inj" <> pretty k <+> atomVal pp v))
+      Gen vs e -> "gen" <+> hsep (map tv vs) <> "." <+> align (prettyExpr pp e)
+      Total k e -> "total" <+> pp k <> "." <+> align (prettyExpr pp e)
+      CaseOpen v alts def -> caseOf "case" (pp v) ([(nm c <> parens (commaSep (map pp xs)), e) | (c,xs,e) <- alts] ++ [("_", def)])
   where
     -- `let` with a mode, followed by the body on the next line
-    letIn m lhs rhs body = text "let" <.> m <+> lhs <+> text "=" <+> rhs <+> text "in" <-> prettyExpr pp body
+    letIn m lhs rhs body = vsep ["let" <> m <+> lhs <+> "=" <+> rhs <+> "in", prettyExpr pp body]
+    -- a statement followed by the rest on the next line
+    stmt s body = vsep [s <> semi, prettyExpr pp body]
     -- a case-like expression with one alternative per line
-    caseOf kw scrut alts = kw <+> scrut <+> text "of" <-> indent 2 (vcat [pat <+> text "->" <+> align (prettyExpr pp e) | (pat,e) <- alts])
-    ifThen test e1 e2 = test <-> indent 2 (vcat [text "then" <+> align (prettyExpr pp e1), text "else" <+> align (prettyExpr pp e2)])
+    caseOf kw scrut alts = vsep [kw <+> scrut <+> "of", indent 2 (vsep [pat <+> "->" <+> align (prettyExpr pp e) | (pat,e) <- alts])]
+    ifThen test e1 e2 = vsep [test, indent 2 (vsep ["then" <+> align (prettyExpr pp e1), "else" <+> align (prettyExpr pp e2)])]
 
 --------------------------------------------------------------------------
 -- Programs
 --------------------------------------------------------------------------
 
-inline :: DefInline -> Doc
-inline InlineAuto = empty
-inline inl        = text (show inl) <.> space   -- `inline` or `noinline`
+inline :: DefInline -> Doc ann
+inline InlineAuto = emptyDoc
+inline inl        = viaShow inl <> space   -- `inline` or `noinline`
 
-prettyDef :: PP -> Def -> Doc
+prettyDef :: PP ann -> Def -> Doc ann
 prettyDef pp def
   = case def of
-      DefFun f vs ps q r e inl -> inline inl <.> text "fun" <+> nm f <.> tyParams vs <.> params pp ps <+> colon <+> mode q <.> prettyV pp r <+> text "=" <-> indent 2 (prettyExpr pp e)
-      DefVal x vs t e          -> text "val" <+> nm x <.> tyParams vs <+> colon <+> prettyV pp t <+> text "=" <-> indent 2 (prettyExpr pp e)
+      DefFun f vs ps q r e inl -> inline inl <> "fun" <+> nm f <> tyParams vs <> params pp ps <+> colon <+> mode q <> prettyV pp r <+> "=" `body` e
+      DefVal x vs t e          -> "val" <+> nm x <> tyParams vs <+> colon <+> prettyV pp t <+> "=" `body` e
+  where
+    hd `body` e = vsep [hd, indent 2 (prettyExpr pp e)]
 
 -- The declaration of a datatype, whose alternatives are labelled by their constructors instead
 -- of their tags: the tags are those of the labels, in order (and in a lazy sum `L ~> S`, those of
@@ -371,71 +381,71 @@ prettyDef pp def
 -- box, as it is no product. The body of a value datatype (`value :=`) labels the fields of each
 -- constructor as a product, even a single one. The declared types of the fields of a constructor
 -- follow (`decl C(T, _)`), if any.
-prettyTypeDef :: TypeDef -> Doc
+prettyTypeDef :: TypeDef -> Doc ann
 prettyTypeDef (TypeDef n vs body labels)
-  = text "data" <+> nm n <.> tyParams vs <.> bodyDoc
-    <.> hcat [text " decl" <+> nm (unqualify c) <.> parens (commaSep (map (maybe (text "_") nm) ds))
+  = "data" <+> nm n <> tyParams vs <> bodyDoc
+    <> hcat [" decl" <+> nm (unqualify c) <> parens (commaSep (map (maybe "_" nm) ds))
              | ConLabel c _ ds <- labels, any (/= Nothing) ds]
   where
     bodyDoc
       = case body of
-          BodyRef b    -> text " :=" <+> labelledBody b
-          BodyValue v  -> text " value :=" <+> labelledValue v
-          BodyOpen     -> text " open"
-          BodyAbstract -> empty
+          BodyRef b    -> " :=" <+> labelledBody b
+          BodyValue v  -> " value :=" <+> labelledValue v
+          BodyOpen     -> " open"
+          BodyAbstract -> emptyDoc
     labelledBody b
       = case b of
-          ASum ts   -> parens (hsep (punctuate (text " +") [alt i t | (i,t) <- ts]))
-          ALazy l s -> parens (labelledBody l <+> text "~>" <+> labelledBody s)
+          ASum ts   -> parens (hsep (punctuate " +" [alt i t | (i,t) <- ts]))
+          ALazy l s -> parens (labelledBody l <+> "~>" <+> labelledBody s)
           _         -> alt 1 b
     alt i t
       = case drop (i-1) labels of
-          ConLabel c fs _ : _ -> nm (unqualify c) <.> colon <+> shape fs t
-          [] -> int i <.> colon <+> atomA fullPath t
-    shape [f] (ABox v) = text "Box" <.> parens (text (escape (show f)) <.> colon <+> prettyV fullPath v)
+          ConLabel c fs _ : _ -> nm (unqualify c) <> colon <+> shape fs t
+          [] -> pretty i <> colon <+> atomA fullPath t
+    shape [f] (ABox v) = "Box" <> parens (pretty (escape (show f)) <> colon <+> prettyV fullPath v)
     shape _ t = atomA fullPath t
     labelledValue v
       = case (labels,v) of
           ([],_)     -> prettyV fullPath v
           ([l],_)    -> valt l v
-          (_,VSum ts) -> parens (hsep (punctuate (text " +") [valt l t | (l,(_,t)) <- zip labels ts]))
+          (_,VSum ts) -> parens (hsep (punctuate " +" [valt l t | (l,(_,t)) <- zip labels ts]))
           _          -> prettyV fullPath v
-    valt (ConLabel c fs _) t = nm (unqualify c) <.> colon <+> prettyV fullPath (fields fs t)
+    valt (ConLabel c fs _) t = nm (unqualify c) <> colon <+> prettyV fullPath (fields fs t)
     fields [f] (VExists ws t) = VExists ws (fields [f] t)
     fields [f] t = VProd [(f,t)]
     fields _ t = t
 
 -- a signature without a definition: an external function or value, or a constructor of an open
 -- datatype
-prettySig :: Name -> Sig -> Doc
+prettySig :: Name -> Sig -> Doc ann
 prettySig n sig
   = case sig of
-      SigFun vs ps q r -> text "fun" <+> nm n <.> tyParams vs <.> parens (commaSep [mode m <.> prettyV fullPath t | (m,t) <- ps])
-                          <+> colon <+> mode q <.> prettyV fullPath r
-      SigVal vs t      -> text "val" <+> nm n <.> tyParams vs <+> colon <+> prettyV fullPath t
-      SigCon vs ts t   -> text "con" <+> nm n <.> tyParams vs <.> parens (commaSep (map (prettyV fullPath) ts))
-                          <+> colon <+> nm t <.> tyParams vs
+      SigFun vs ps q r -> "fun" <+> nm n <> tyParams vs <> parens (commaSep [mode m <> prettyV fullPath t | (m,t) <- ps])
+                          <+> colon <+> mode q <> prettyV fullPath r
+      SigVal vs t      -> "val" <+> nm n <> tyParams vs <+> colon <+> prettyV fullPath t
+      SigCon vs ts t   -> "con" <+> nm n <> tyParams vs <> parens (commaSep (map (prettyV fullPath) ts))
+                          <+> colon <+> nm t <> tyParams vs
 
 -- Koka's C types of an external, and its format
-prettyExtern :: Name -> Extern -> Doc
+prettyExtern :: Name -> Extern -> Doc ann
 prettyExtern n (Extern fmt ps r)
-  = text "extern" <+> nm n <.> parens (commaSep [nm x <.> colon <+> ktype t | (x,t) <- ps]) <+> colon <+> ktype r
-    <+> text "=" <+> text (show fmt)
+  = "extern" <+> nm n <> parens (commaSep [nm x <> colon <+> ktype t | (x,t) <- ps]) <+> colon <+> ktype r
+    <+> "=" <+> viaShow fmt
   where
     ktype t = case t of
                 KCon c -> nm c
-                KBox -> text "box"
-                KFun -> text "fun"
+                KBox -> "box"
+                KFun -> "fun"
 
-prettyForeign :: Foreign -> [Doc]
+prettyForeign :: Foreign -> [Doc ann]
 prettyForeign (Foreign hs es ss)
-  = [text "foreign" <+> text k <+> text (show c) | (k,cs) <- [("header",hs),("end",es),("source",ss)], c <- cs]
+  = ["foreign" <+> k <+> viaShow c | (k,cs) <- [("header",hs),("end",es),("source",ss)], c <- cs]
 
-prettyProgram :: Program -> Doc
+prettyProgram :: Program -> Doc ann
 prettyProgram prog
-  = vcat (punctuate linebreak (map vcat (filter (not . null) sections)))
+  = vsep (intersperse emptyDoc (map vsep (filter (not . null) sections)))
   where
-    sections = [ [text "module" <+> nm (progName prog)]
+    sections = [ ["module" <+> nm (progName prog)]
                , prettyForeign (progForeign prog)
                , [prettyTypeDef d | d <- M.elems (progTypes prog), local (tdefName d)]
                , [prettySig n s | (n,s) <- M.toList (progSigs prog), local n, not (S.member n defined)]

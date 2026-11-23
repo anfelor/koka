@@ -21,7 +21,7 @@ module Lidar.Name
   ) where
 
 import Data.Char( toLower, isAlpha, isAlphaNum, isDigit )
-import Lidar.PPrint( Pretty(pretty), text )
+import Prettyprinter( Pretty(pretty) )
 
 -- | A name, as in Koka. The hashes of the three parts speed up comparisons:
 -- `h1 > h2` implies `name1 > name2`. Hashes and comparisons are case-insensitive.
@@ -57,7 +57,7 @@ instance Show Name where
                                    else m ++ (if null l then "/" else "/#") ++ ln
 
 instance Pretty Name where
-  pretty name = text (show name)
+  pretty name = pretty (show name)
 
 lowerCompare :: Name -> Name -> Ordering
 lowerCompare (Name m1 _ l1 _ n1 _) (Name m2 _ l2 _ n2 _)

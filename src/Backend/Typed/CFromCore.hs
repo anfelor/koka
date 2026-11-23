@@ -18,7 +18,7 @@ import Kind.Newtypes( Newtypes )
 import qualified Core.Core as C
 import Backend.Typed.Typed( typedFromCore )
 import Backend.Typed.Elab.Foreign( foreignOf )
-import Lidar.Pretty( prettyProgram )
+import Lidar.Pretty( ppr )
 import Common.Name( Name )
 import Backend.Typed.LidarName( toLidar )
 import Backend.Typed.CGen.CGen( CEnv(..), cgenModule )
@@ -28,7 +28,7 @@ import qualified Backend.Typed.CGen.CGen as CGen
 -- and source.
 typedCFromCore :: BuildType -> FilePath -> Bool -> Newtypes -> [C.Core] -> C.Core -> (Doc,[String],Either String (String,String))
 typedCFromCore buildType sourceDir enableReuse newtypes imports core
-  = (string (show (prettyProgram tprog)) <.> linebreak, map diagnostic (errors ++ warnings), result)
+  = (string (ppr tprog) <.> linebreak, map diagnostic (errors ++ warnings), result)
   where
     modName                 = C.coreProgName core
     (tprog,errors,warnings) = typedFromCore enableReuse newtypes (foreignOf buildType sourceDir core) imports 1000000 core

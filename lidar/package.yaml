@@ -10,6 +10,7 @@ dependencies:
   - containers
   - mtl
   - parsec
+  - prettyprinter
 
 library:
   source-dirs:

@@ -18,7 +18,7 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad( zipWithM_, unless, when, forM_ )
 import Lidar.Name
-import Lidar.PPrint( Pretty )
+import Prettyprinter( Pretty )
 import Lidar.Syntax
 import Lidar.Traversal( bindersE, boxTag, child, destructAOf, destructVOf, dsAlts, dsScrut, fvA, fvE, fvV, holes, isGlob, jumpTargets, within )
 import Lidar.Types

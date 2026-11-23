@@ -44,7 +44,6 @@ library
       Lidar.Passes.TailRec
       Lidar.Passes.UniqueJoins
       Lidar.Passes.Yields
-      Lidar.PPrint
       Lidar.Pretty
       Lidar.Prim
       Lidar.Query
@@ -61,4 +60,5 @@ library
     , containers
     , mtl
     , parsec
+    , prettyprinter
   default-language: Haskell2010
