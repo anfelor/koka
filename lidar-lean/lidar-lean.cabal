@@ -1,0 +1,47 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.37.0.
+--
+-- see: https://github.com/sol/hpack
+
+name:           lidar-lean
+version:        0.1.0
+description:    Lean's client of lidar, the typed intermediate representation of Koka's typed backend.
+author:         Anton Lorenzen
+maintainer:     Anton Lorenzen
+license:        Apache-2.0
+build-type:     Simple
+
+library
+  exposed-modules:
+      Lidar.Lean.Dump
+  other-modules:
+      Paths_lidar_lean
+  hs-source-dirs:
+      src
+  ghc-options: -O2 -Wall -Wno-x-partial -Wno-name-shadowing
+  build-depends:
+      base >=4.9
+    , containers
+    , lidar
+    , mtl
+    , parsec
+    , prettyprinter
+  default-language: Haskell2010
+
+executable lidar-lean
+  main-is: Main.hs
+  other-modules:
+      Paths_lidar_lean
+  hs-source-dirs:
+      app
+  ghc-options: -O2 -Wall -rtsopts
+  build-depends:
+      base >=4.9
+    , containers
+    , lidar
+    , lidar-lean
+    , mtl
+    , parsec
+    , prettyprinter
+  default-language: Haskell2010

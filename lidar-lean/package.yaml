@@ -1,0 +1,34 @@
+name:       lidar-lean
+version:    0.1.0
+license:    Apache-2.0
+author:     Anton Lorenzen
+
+description: Lean's client of lidar, the typed intermediate representation of Koka's typed backend.
+
+dependencies:
+  - base >= 4.9
+  - containers
+  - mtl
+  - parsec
+  - prettyprinter
+  - lidar
+
+library:
+  source-dirs:
+    - src
+  ghc-options:
+    - -O2
+    - -Wall
+    - -Wno-x-partial      # as in koka
+    - -Wno-name-shadowing
+
+executables:
+  lidar-lean:
+    main:        Main.hs
+    source-dirs: app
+    dependencies:
+      - lidar-lean
+    ghc-options:
+      - -O2
+      - -Wall
+      - -rtsopts
