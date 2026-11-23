@@ -7,7 +7,8 @@
 -----------------------------------------------------------------------------
 {-|
 @lidar-lean@: Lean's client of lidar. It reads the dumps that Lean's @leanir@ writes (see
-"Lidar.Lean.Dump") and elaborates their declarations into lidar's IR.
+"Lidar.Lean.Dump"), elaborates their declarations into lidar's IR, lowers it, and writes C
+against Lean's runtime (see "Lidar.Lean.CGen").
 -}
 module Main( main ) where
 
@@ -20,14 +21,17 @@ import System.IO( hPutStrLn, stderr )
 import Lidar
 import Lidar.Lean.Dump
 import Lidar.Lean.Elab
+import Lidar.Lean.CGen
 
 usage :: String
 usage = unlines
   [ "usage: lidar-lean (--print-dump | --print-ir | --check | --print-lowered) <dump>"
+  , "       lidar-lean --emit-c <dump> -o <out.c>"
   , "  --print-dump     read the dump and print it back"
   , "  --print-ir       elaborate the dump and print the IR"
   , "  --check          elaborate the dump, check it and lower it, and report the errors"
-  , "  --print-lowered  as --check, and print the lowered IR" ]
+  , "  --print-lowered  as --check, and print the lowered IR"
+  , "  --emit-c         as --check, and write the C file against Lean's runtime" ]
 
 main :: IO ()
 main = do
@@ -45,6 +49,13 @@ main = do
       (prog,errs) <- lower <$> readFileDump file
       putStrLn (ppr (prettyProgram (printable prog)))
       report errs
+    ["--emit-c", file, "-o", out] -> do
+      d <- readFileDump file
+      let (prog,errs) = lower d
+      report errs
+      case cgenModule d prog of
+        Left cerrs -> report [("cgen",err) | err <- cerrs]
+        Right c -> writeFile out c
     _ -> do hPutStrLn stderr usage; exitFailure
 
 -- prints the errors, labeled by the phase that produced them, and fails if there are any

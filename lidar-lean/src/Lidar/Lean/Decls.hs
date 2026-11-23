@@ -19,7 +19,9 @@ Mono types become IR types as follows.
   scalars, @USize@ and the floats are raw types; until lidar has unsigned raw types, they are
   the signed raw types of the same size. The other types that Lean's runtime implements itself
   (@Int@, @Array@, ...) are abstract.
-* A trivial structure is its relevant field, as in Lean's IR.
+* A trivial structure is its relevant field, as in Lean's IR. As the C code follows Lean's impure
+  types, these are the trivial structures of the impure level, where @lcVoid@ fields are
+  irrelevant too (so @ST.Out@, a value and the state, is its value).
 * An enumeration (an inductive type whose values are scalars and whose constructors have no
   fields) is a value sum of units, @uint8@ to @uint32@ as in Lean.
 * Any other inductive type @T@ is a reference datatype @T*@, without parameters: mono types

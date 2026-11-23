@@ -17,7 +17,7 @@ prints it back in the same format.
 module Lidar.Lean.Dump
   ( Dump(..), Name, Var
   , Type(..), Param(..), Lit(..), Arg(..), LetValue(..), Code(..), FunDecl(..), Alt(..)
-  , Link(..), Init(..), ExternEntry(..), Decl(..), DeclValue(..)
+  , ModInit(..), Link(..), Init(..), ExternEntry(..), Decl(..), DeclValue(..)
   , CtorRef(..), Const(..), ConstMono(..), Inductive(..), Ctor(..), Layout(..), Field(..), Main(..)
   , readDump, showDump
   , SExp(..), parseSExps, showSExp
@@ -42,6 +42,7 @@ data Dump = Dump
   { dumpModule     :: Name
   , dumpIsModule   :: Bool
   , dumpImports    :: [Name]
+  , dumpInits      :: [ModInit]     -- ^ the module's initializers
   , dumpDecls      :: [Decl]        -- ^ the module's mono declarations, by name
   , dumpCtors      :: [CtorRef]     -- ^ constructors used by the declarations
   , dumpConsts     :: [Const]       -- ^ other constants used by the declarations
@@ -94,6 +95,12 @@ data FunDecl = FunDecl { funVar :: Var, funName :: Name, funParams :: [Param], f
   deriving (Eq, Show)
 
 data Alt = Alt Name [Param] Code | Default Code | AltUnsupported
+  deriving (Eq, Show)
+
+-- | A module initializer as Lean's @emitInitFn@ writes it: its phase (@runtime@, @comptime@,
+-- @all@, or @legacy@ for the initializer of all phases of a module of the module system), its C
+-- name, the runtime initializer it calls first (or @""@) and the initializers of the imports.
+data ModInit = ModInit { initPhase :: String, initName :: String, initLean :: String, initImports :: [String] }
   deriving (Eq, Show)
 
 -- | How a constant is linked: its C name, @\@[export]@ name, impure signature (parameters with
@@ -221,14 +228,17 @@ bad what e = Left ("expected " ++ what ++ ", got: " ++ take 200 (showSExp e))
 readDump :: FilePath -> String -> R Dump
 readDump file src = do
   es <- parseSExps file src
-  foldl (\d e -> d >>= item e) (Right (Dump "" False [] [] [] [] [] Nothing)) es
+  foldl (\d e -> d >>= item e) (Right (Dump "" False [] [] [] [] [] [] Nothing)) es
     >>= \d -> pure d { dumpDecls = reverse (dumpDecls d), dumpCtors = reverse (dumpCtors d)
-                     , dumpConsts = reverse (dumpConsts d), dumpInductives = reverse (dumpInductives d) }
+                     , dumpConsts = reverse (dumpConsts d), dumpInductives = reverse (dumpInductives d)
+                     , dumpInits = reverse (dumpInits d) }
   where
     item e d = case e of
       SList [SSym "module", SStr m, SList [SSym "is-module", b]] -> do
         b' <- rBool b; pure d { dumpModule = m, dumpIsModule = b' }
       SList (SSym "imports" : ms) -> do ms' <- mapM rStr ms; pure d { dumpImports = ms' }
+      SList [SSym "mod-init", SSym p, SStr n, SStr l, SList (SSym "imports" : is)] -> do
+        is' <- mapM rStr is; pure d { dumpInits = ModInit p n l is' : dumpInits d }
       SList (SSym "decl" : _) -> do x <- rDecl e; pure d { dumpDecls = x : dumpDecls d }
       SList [SSym "ctor", SStr c, SStr t, SInt i] -> pure d { dumpCtors = CtorRef c t i : dumpCtors d }
       SList (SSym "const" : _) -> do x <- rConst e; pure d { dumpConsts = x : dumpConsts d }
@@ -404,6 +414,8 @@ showDump d = unlines (map showSExp items)
   where
     items = [ SList [SSym "module", SStr (dumpModule d), SList [SSym "is-module", sBool (dumpIsModule d)]]
             , SList (SSym "imports" : map SStr (dumpImports d)) ]
+         ++ [ SList [SSym "mod-init", SSym p, SStr n, SStr l, SList (SSym "imports" : map SStr is)]
+            | ModInit p n l is <- dumpInits d ]
          ++ map sDecl (dumpDecls d)
          ++ [ SList [SSym "ctor", SStr c, SStr t, SInt i] | CtorRef c t i <- dumpCtors d ]
          ++ map sConst (dumpConsts d)

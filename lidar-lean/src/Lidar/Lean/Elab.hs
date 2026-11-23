@@ -13,6 +13,10 @@ form to the IR: @let@ to @let@, @cases@ to a case on an enumeration or on the al
 datatype, @proj@ to destructuring, @jp@/@jmp@ to joins and jumps, constants to calls and
 constructor values, and the application of a local to the application of a closure.
 
+A trivial structure is its relevant field: its constructor is the field, a @cases@ on it binds
+the field to the scrutinee (and the other fields to erased values), and projecting the field is
+the value itself.
+
 Where the type of a value and the type it is used at differ, elaboration converts through
 @any*@: @up@ and @down@ for pointers, @Scalar@ boxes for raw values, and boxed sums for
 enumerations, as Lean boxes them. Closures take and return @any*@; a partial application of a
@@ -318,11 +322,29 @@ elabLam (D.FunDecl _ _ ps t b)
        return (Up (Ptr ft (Lam [(x,Owned,anyT) | x <- xs] anyT
                              (compose (map fst cs ++ binds) (Let y r body (kr (Ret w)))))))
 
--- a constructor applied to its fields (without its parameters)
+-- a constructor applied to its fields (without its parameters); that of a trivial structure
+-- is its relevant field
 elabCon :: CtorInfo -> [D.Arg] -> E (K,VExpr,VType)
 elabCon ci as
   | length as /= length (ciFields ci) = fail ("partial application of a constructor of " ++ ciType ci)
   | otherwise
+  = do t <- irT (D.TConst (ciType ci))
+       triv <- trivialField (ciType ci)
+       case triv of
+         Just f -> do (k,v) <- argVal (as !! f) t
+                      return (k, Ret v, t)
+         Nothing -> elabConValue ci as
+
+-- the relevant field of a trivial structure
+trivialField :: D.Name -> E (Maybe Int)
+trivialField tname
+  = do is <- inds
+       return $ case (typeKind is tname, M.lookup tname is) of
+                  (KTrivial _, Just ind) | Just (_,_,f) <- D.indTrivial ind -> Just (fromInteger f)
+                  _ -> Nothing
+
+elabConValue :: CtorInfo -> [D.Arg] -> E (K,VExpr,VType)
+elabConValue ci as
   = do let stored = [(a,ft) | (a,Just ft) <- zip as (ciFields ci)]
        (k,vs) <- args (map fst stored) (map snd stored)
        tdefs <- asks (dTypes . cDecls)
@@ -403,6 +425,17 @@ structCtor tname
 -- `proj[i] x` of the structure type `tname`
 elabProj :: D.Name -> Int -> D.Var -> E (K,VExpr,VType)
 elabProj tname i x
+  = do triv <- trivialField tname
+       case triv of
+         Just f | f == i -> do t <- irT (D.TConst tname)
+                               (k,v) <- localVal x t
+                               return (k, Ret v, t)
+                | otherwise -> do (k,w) <- erased anyT
+                                  return (k, Ret w, anyT)
+         Nothing -> elabStructProj tname i x
+
+elabStructProj :: D.Name -> Int -> D.Var -> E (K,VExpr,VType)
+elabStructProj tname i x
   = do ci <- structCtor tname
        (body,_) <- refAlts tname
        case (drop i (ciFields ci), body) of
@@ -423,11 +456,19 @@ elabCases :: VType -> D.Name -> D.Var -> [D.Alt] -> E VExpr
 elabCases res tname x alts
   = do is <- inds
        ds <- asks cDecls
+       trivial <- trivialField tname
        let explicit = [(ciIndex ci, (c,ci,ps,body)) | D.Alt c ps body <- alts, Just ci <- [M.lookup c (dCtors ds)]]
            dflt = [body | D.Default body <- alts]
            covered i = i `elem` map fst explicit
        if length explicit + length dflt /= length alts then fail ("an alternative of a case on " ++ tname) else
          case typeKind is tname of
+           -- the alternative of a trivial structure binds its relevant field to the scrutinee
+           KTrivial _ | [(_,(_,_,ps,code))] <- explicit, Just f <- trivial ->
+             do let bind (j,p) k = do tp <- irT (D.paramType p)
+                                      (kv,w) <- if j == f then localVal x tp else erased tp
+                                      bindLocal (D.paramVar p) (D.paramName p) tp $ \v ->
+                                        kv . Let v tp (Ret w) <$> k
+                foldr bind (elabCode res code) (zip [0..] ps)
            KEnum cs ->
              do t <- irT (D.TConst tname)
                 (k,v) <- localVal x t
