@@ -212,9 +212,11 @@ resultType ls = case ls of
 -- Literals
 ------------------------------------------------------------------------------
 
+-- as Lean's `emitLit`: `lean_cstr_to_nat` parses its string on every call
 natLit :: Integer -> String
 natLit n
   | n < 2^(32::Int) = "lean_unsigned_to_nat(" ++ show n ++ "u)"
+  | n < 2^(64::Int) = "lean_uint64_to_nat(" ++ show n ++ "ULL)"
   | otherwise = "lean_cstr_to_nat(\"" ++ show n ++ "\")"
 
 -- `lean_mk_string_unchecked` with the C literal of the UTF-8 bytes, their number and the
