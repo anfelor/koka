@@ -337,8 +337,10 @@ substAWith renameRoot recur scope sub val
       Lam ps r e -> let xs = [x | (x,_,_) <- ps]
                         ys = map renameRoot xs
                         sub' = bindSub (zip xs ys) sub
+                        -- only the captures are in scope in the body (`[lam]`)
+                        captures = M.restrictKeys scope (M.keysSet (scopeFor sub' (fvE e)))
                     in Lam [(y,m,substVType sub' t) | (y,(_,m,t)) <- zip ys ps]
-                         (substVType sub' r) (recur (M.union (scopeOf ys) scope) sub' e)
+                         (substVType sub' r) (recur (M.union (scopeOf ys) captures) sub' e)
       InjA i a v -> InjA i (substAType sub a) (goA v)
       Roll a v -> Roll (substAType sub a) (goA v)
       InjLazy d a v -> InjLazy d (substAType sub a) (goA v)
@@ -565,7 +567,7 @@ descendTyped env g fv fe expr
 
 -- the lambdas in a value, with their bodies under their contexts
 lamsTyped :: Applicative m => Gamma -> (Gamma -> VExpr -> m VExpr) -> VVal -> m VVal
-lamsTyped g fe = lamsV (\ps _ e -> fe (lamGamma ps g) e)
+lamsTyped g fe = lamsV (\ps _ e -> fe (lamGamma ps e g) e)
 
 -- `descendTyped` for a pass that keeps the context in its environment, also into lambdas
 typedChildren :: (VExpr -> M (Env,Gamma) s VExpr) -> VExpr -> M (Env,Gamma) s VExpr

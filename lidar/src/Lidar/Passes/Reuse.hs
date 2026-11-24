@@ -31,7 +31,7 @@ import Lidar.Syntax
 import Lidar.Traversal( boxTag, child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut )
 import Lidar.Passes.Common( trivialTy, defGamma, NameSupply, dropValue, freshFor, freshPathFrom, perBody, reuseChildren, scopeOf )
 import Lidar.Env( Env, envOf, boxContents, reuseSize, dataBody, M, ask, asks, evalM, get, gets, liftE, local, modify, put, state )
-import Lidar.Query( Gamma, bindAll, inferV, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, inferE, noJoins )
+import Lidar.Query( Gamma, bindAll, inferV, lamGamma, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, inferE, noJoins )
 
 -- credits with the size of their block
 type Credits = [(Path,Int)]
@@ -286,7 +286,8 @@ ruV v = descendV ruA ruV v
 ruA :: AVal -> R AVal
 ruA val
   = case val of
-      Lam ps r e -> Lam ps r . fst <$> scope Nothing (bind [(x,V t) | (x,_,t) <- ps] (ruE e))
+      Lam ps r e -> do g <- asks reGamma
+                       Lam ps r . fst <$> scope Nothing (withGamma (lamGamma ps e g) (ruE e))
       Box w -> do tw <- typeOfV w
                   w' <- ruV w
                   case reuseSize tw of

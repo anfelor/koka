@@ -298,7 +298,7 @@ synthA c val
       Lam ps r e -> Just (AFun [(m,t) | (_,m,t) <- ps] r, lam)
         where
           lam = do ps' <- annParams c ps
-                   Lam ps' r <$> annE c{ ctxGamma = lamGamma ps' (ctxGamma c), ctxJoins = M.empty } e r
+                   Lam ps' r <$> annE c{ ctxGamma = lamGamma ps' e (ctxGamma c), ctxJoins = M.empty } e r
       InjA{} -> Nothing
       Roll{} -> Nothing
       InjLazy{} -> Nothing

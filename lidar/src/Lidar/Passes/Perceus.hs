@@ -72,7 +72,7 @@ import Lidar.Build( K, compose )
 import Lidar.Traversal( Destruct(..), child, descendA, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fieldsAt, fvA, fvV, scrutVar, stepsFrom, takesContents, usedIn, within )
 import Lidar.Passes.Common( paramModes, prefixes, trivialTy, NameSupply, defGamma, descendTyped, dropValue, freshFor, perDef, freshPathFrom, lamsTyped, nameChildren, projectAll, scopeOf )
 import Lidar.Env( Env(..), envOf, M, evalM, get, lift, liftE, put, state, StateT, runStateT )
-import Lidar.Query( Gamma, bindAll, inferV, altTypes, lockGamma, uniqueGamma )
+import Lidar.Query( Gamma, bindAll, inferV, altTypes, lamGamma, lockGamma, uniqueGamma )
 import Lidar.Types( inst, isPtr )
 
 type VarSet = S.Set Path
@@ -562,13 +562,14 @@ useVal pe moving Owned i val
 
 -- A closure captures its free variables, and its body holds references to them and to its
 -- parameters. A capture below another one holds a reference that the body does not need, as
--- it is borrowed from the other one there (see the top): it is dropped first.
+-- it is borrowed from the other one there (see the top): it is dropped first. Only the captures
+-- are in scope in the body (`lamGamma`), so that its drops do not name aliases bound outside it.
 useA :: PEnv -> M.Map Path Int -> Int -> AVal -> P (K,Int,AVal)
 useA pe moving i val
   = case val of
       Lam ps r e
         -> do let caps = S.toList (fvA val)
-                  inner = PEnv (peEnv pe) (M.union (M.fromList [(x,V t) | (x,_,t) <- ps]) (peGamma pe)) M.empty S.empty
+                  inner = PEnv (peEnv pe) (lamGamma ps e (peGamma pe)) M.empty S.empty
                   own = [x | x <- caps, not (trivialVar pe x)]
                   extra = [x | x <- own, any (`elem` own) (prefixes x)]
               ys <- dupsOf pe [x | (x,j) <- zip caps [i..], M.lookup x moving /= Just j]

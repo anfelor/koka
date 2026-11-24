@@ -132,7 +132,7 @@ reuseA val
                       return (BoxAt r (case t of
                         V (VReuse _ _ (Just (Contents _ old _))) -> restore g facts old v'
                         _ -> v'))
-      Lam ps r e -> Lam ps r <$> local (\(env,g,_) -> (env,lamGamma ps g,M.empty)) (reuseE e)
+      Lam ps r e -> Lam ps r <$> local (\(env,g,_) -> (env,lamGamma ps e g,M.empty)) (reuseE e)
       _ -> descendA pure reuseA reuseV val
 
 -- Prefer the old field's variable only where the branch proves it equals the new constant.

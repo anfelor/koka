@@ -310,9 +310,10 @@ isCtxValue k
                 Tuple ws -> any field [w | w <- ws, holes w == 1]
                 _ -> path v
 
--- the context of the body of a lambda with parameters `ps`, which captures no token
-lamGamma :: [(Path,Mode,VType)] -> Gamma -> Gamma
-lamGamma ps g = bindAll [(x,V t) | (x,_,t) <- ps] (M.filter (not . tokenTy) (M.delete nameHole g))
+-- the context of the body `e` of a lambda with parameters `ps`: its captures, which hold no
+-- token, and its parameters (`[lam]`)
+lamGamma :: [(Path,Mode,VType)] -> VExpr -> Gamma -> Gamma
+lamGamma ps e g = bindAll [(x,V t) | (x,_,t) <- ps] (M.filter (not . tokenTy) (M.delete nameHole (M.restrictKeys g (fvE e))))
 
 -- a type that holds a token
 tokenTy :: Ty -> Bool
@@ -527,7 +528,7 @@ inferA env g val
       Lam ps r e -> do when (any containsLinear [t | x <- S.toList (fvA val), Just t <- [M.lookup x g]])
                          (Left "cannot capture reuse credits, cells or tokens in a closure")
                        signature [t | (_,_,t) <- ps] r
-                       checkE env (lamGamma ps g) noJoins e r
+                       checkE env (lamGamma ps e g) noJoins e r
                        return (AFun [(m,t) | (_,m,t) <- ps] r)
       BoxAt r v -> do tr <- inferV env g (Var r)
                       checkReuseTy (V tr)

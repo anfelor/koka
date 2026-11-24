@@ -16,7 +16,7 @@ import qualified Data.Set as S
 import Data.Functor.Const( Const(..) )
 import Lidar.Name
 import Lidar.Syntax
-import Lidar.Traversal( descendA, descendB, descendE, descendV, pathOf, scrutVar )
+import Lidar.Traversal( descendA, descendB, descendE, descendV, fvA, pathOf, scrutVar )
 import Lidar.Types( Types(..) )
 import Lidar.Pretty( ppr )
 import Lidar.Env( Env, envOf )
@@ -151,7 +151,10 @@ scopeV bound = getConst . descendV (Const . scopeA bound) (Const . scopeV bound)
 scopeA :: S.Set Path -> AVal -> [Path]
 scopeA bound val
   = case val of
-      Lam ps _ e -> let xs = [x | (x,_,_) <- ps] in filter (`S.member` bound) xs ++ scopeE (S.union bound (S.fromList xs)) e
+      -- the body is in the scope of its captures only (`[lam]`)
+      Lam ps _ e -> let xs = [x | (x,_,_) <- ps]
+                        caps = S.intersection bound (fvA val)
+                    in filter (`S.member` bound) xs ++ scopeE (S.union caps (S.fromList xs)) e
       _ -> getConst (descendA (const (Const [])) (Const . scopeA bound) (Const . scopeV bound) val)
 
 -- each binder: its root name, or an error if it is not named by its path

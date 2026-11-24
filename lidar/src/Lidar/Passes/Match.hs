@@ -110,7 +110,8 @@ reuseEstablished scope e
   | otherwise = runIdentity (descendE Identity (Identity . value) branch e)
   where
     branch xs b = Identity (reuseEstablished (bindScope e xs scope) b)
-    value = mapLams (\ps _ b -> reuseEstablished (Map.union (scopeOf [x | (x,_,_) <- ps]) scope) b)
+    -- only the captures of a closure are in scope in its body
+    value = mapLams (\ps _ b -> reuseEstablished (Map.union (scopeOf [x | (x,_,_) <- ps]) (Map.restrictKeys scope (fvE b))) b)
 
 -- test levels
 
