@@ -69,9 +69,10 @@ lowerCompare (Name m1 _ l1 _ n1 _) (Name m2 _ l2 _ n2 _)
 
 lowerCompareS :: String -> String -> Ordering
 lowerCompareS (c:cs) (d:ds)
-  = case compare (toLower c) (toLower d) of
-      EQ -> lowerCompareS cs ds
-      lg -> lg
+  | c == d    = lowerCompareS cs ds
+  | otherwise = case compare (toLower c) (toLower d) of
+                  EQ -> lowerCompareS cs ds
+                  lg -> lg
 lowerCompareS (_:_) [] = GT
 lowerCompareS [] (_:_) = LT
 lowerCompareS [] []    = EQ
