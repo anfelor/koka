@@ -749,7 +749,11 @@ lamFree ps e = fvA (Lam ps VUnit e)
 -- The parameters of a function or closure in C: the effect token has no representation (see
 -- "The effect token" in `Syntax`), so it is left out, and the body declares it as a local.
 erased :: [(Path,VType)] -> ([(Path,VType)],[Doc])
-erased ps = ([p | p@(_,t) <- ps, not (isToken t)], ["kk_unit_t" <+> localName x <+> "= kk_Unit;" | (x,t) <- ps, isToken t])
+erased ps = ([p | p@(_,t) <- ps, not (isToken t)], [tokenLocal x | (x,t) <- ps, isToken t])
+
+-- the local of a token, which is a unit in C
+tokenLocal :: Path -> Doc
+tokenLocal k = "kk_unit_t" <+> localName k <+> "= kk_Unit;"
 
 -- the arguments for the parameters of the types `ts` that C passes (`erased`)
 passed :: [VType] -> [a] -> [a]
@@ -824,8 +828,7 @@ genE cx dest expr
       IfYielding _ (k3,e3) (k2,e2)
         -> do s3 <- genE (bindVar cx k3 (V VToken)) dest e3
               s2 <- genE (bindVar cx k2 (V VToken)) dest e2
-              let token k = "kk_unit_t" <+> localName k <+> "= kk_Unit;"
-              return [ifChain [("kk_yielding(_ctx)",token k3 : s3)] (token k2 : s2)]
+              return [ifChain [("kk_yielding(_ctx)",tokenLocal k3 : s3)] (tokenLocal k2 : s2)]
       Unreachable _ -> return ["kt_unreachable();"]
       Drop x e
         | S.member x (cxShared cx)   -- like Koka's C backend: a shared block only needs a decrement
@@ -887,8 +890,8 @@ genE cx dest expr
       Gen _ e -> genE cx dest e
       -- a no-op, as `?` and tokens have no representation of their own
       CastEv _ _ e -> genE cx dest e
-      -- the token has no representation, so the result of e has the layout of the result
-      Total k e -> genE (bindVar cx k (V VToken)) dest e
+      -- the token is a unit (`erased`), so the result of e has the layout of the result
+      Total k e -> (tokenLocal k :) <$> genE (bindVar cx k (V VToken)) dest e
       Join j _ ps e1 e2 -> genJoins cx dest [(j,ps,e1)] False e2
       -- the bodies of recursive join points are a loop, which only sees the group itself
       JoinRec _ ds e -> genJoins cx dest [(j,ps,e1) | JoinDef j _ ps e1 <- ds] True e
