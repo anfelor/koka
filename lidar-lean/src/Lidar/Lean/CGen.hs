@@ -25,13 +25,12 @@ module Lidar.Lean.CGen( cgenModule ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Data.Bits( shiftR, (.&.) )
 import Data.Functor.Const( Const(..) )
-import Data.Char( ord, isAlphaNum, isAscii, isPrint )
+import Data.Char( ord, isAlphaNum, isAscii )
 import Data.List( intercalate )
 import Data.Maybe( fromMaybe, mapMaybe )
 import Control.Monad( forM, zipWithM )
-import Numeric( showHex, showOct )
+import Numeric( showHex )
 import Prettyprinter( Doc, pretty, vsep, hsep, nest, hardline, (<+>), layoutPretty, LayoutOptions(..), PageWidth(..) )
 import Prettyprinter.Render.String( renderString )
 import Lidar
@@ -42,6 +41,7 @@ import Lidar.Layout( leaves, shapeIsHeap )
 import qualified Lidar.Lean.Dump as D
 import Lidar.Lean.Decls( leanName, rawOfNat )
 import Lidar.Lean.CGen.Layout
+import Lidar.Lean.CGen.Ground( groundDecls, cString )
 
 type C = Doc ()
 
@@ -222,24 +222,7 @@ natLit n
 -- `lean_mk_string_unchecked` with the C literal of the UTF-8 bytes, their number and the
 -- number of characters
 strLit :: String -> String
-strLit s = call "lean_mk_string_unchecked" ["\"" ++ concatMap esc bytes ++ "\"", show (length bytes), show (length s)]
-  where
-    bytes = concatMap utf8 s
-    esc b | b == ord '"' || b == ord '\\' = ['\\', toEnum b]
-          | b == ord '?' = "\\?"   -- no trigraphs
-          | b < 128 && isPrint (toEnum b) = [toEnum b]
-          | otherwise = "\\" ++ pad (showOct b "")   -- octal escapes take at most three digits
-    pad o = replicate (3 - length o) '0' ++ o
-
-utf8 :: Char -> [Int]
-utf8 c
-  | n < 0x80 = [n]
-  | n < 0x800 = [0xC0 + shiftR n 6, cont 0]
-  | n < 0x10000 = [0xE0 + shiftR n 12, cont 6, cont 0]
-  | otherwise = [0xF0 + shiftR n 18, cont 12, cont 6, cont 0]
-  where
-    n = ord c
-    cont k = 0x80 + (shiftR n k .&. 0x3F)
+strLit s = let (lit,size,len) = cString s in call "lean_mk_string_unchecked" [lit, show size, show len]
 
 genLit :: Lit -> G String
 genLit lit
@@ -936,6 +919,7 @@ cgenModule d prog
                             ++ prelude
                             ++ prototypes d
                             ++ [p | (p,_,_) <- ok]
+                            ++ map text gdecls
                             ++ stLams st
                             ++ [c | (_,c,_) <- ok]
                             ++ concatMap boxedFn [x | x <- D.dumpDecls d, defined x]
@@ -948,6 +932,8 @@ cgenModule d prog
     tgts = targetsOf d
     declInits = [(x, declInitCode tgts x) | x <- D.dumpDecls d]
     cnames = M.fromList [(leanName (D.declName x), D.linkCName (D.declLink x)) | x <- D.dumpDecls d]
+    -- the static objects of the values written as static data, and their prototypes and definitions
+    (gdecls,gvals) = groundDecls env (fmap tgtName . (`M.lookup` tgts)) cnames prog
     -- the declarations that have a C function: the externs, and the functions that lowering kept
     funs = S.fromList [f | DefFun{ defName = f } <- progDefs prog]
     defined x = case D.declValue x of
@@ -955,6 +941,7 @@ cgenModule d prog
                   D.Body _ -> S.member (leanName (D.declName x)) funs
     -- a definition that fails leaves the state as it was
     genOne :: Def -> G (Either String (C,C,[C]))
+    genOne def | Just (p,c) <- M.lookup (defName def) gvals = return (Right (text p, text c, []))
     genOne def = do st <- get
                     case runM (genDef env tgts cnames def) () st of
                       Left err -> return (Left (show (defName def) ++ ": " ++ err))

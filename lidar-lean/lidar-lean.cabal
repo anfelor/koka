@@ -15,6 +15,7 @@ build-type:     Simple
 library
   exposed-modules:
       Lidar.Lean.CGen
+      Lidar.Lean.CGen.Ground
       Lidar.Lean.CGen.Layout
       Lidar.Lean.Decls
       Lidar.Lean.Dump

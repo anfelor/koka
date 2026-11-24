@@ -23,8 +23,8 @@ the @usize@ fields, then the other scalars by decreasing size, each group in the
 -}
 module Lidar.Lean.CGen.Layout
   ( Leaf(..), leafOf, cType
-  , Slot, Payload(..), payload, allocCtor, readSlot, writeSlot
-  , boxScalar, unboxScalar
+  , Slot(..), Payload(..), payload, allocCtor, readSlot, writeSlot
+  , boxScalar, unboxScalar, scalarSize
   ) where
 
 import qualified Data.Map as M
