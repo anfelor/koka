@@ -206,6 +206,20 @@ signature inds link ps t
                 _ -> map D.paramBorrow ps
     mode b = if b then Borrowed else Owned
 
+-- The parameters and mono type of a constant: from its mono declaration, or for a constant
+-- without one (an extern constructor such as @Thunk.mk@), the parameters of its impure signature
+-- at the argument types of its mono type.
+constSig :: D.Const -> Maybe ([D.Param], D.Type)
+constSig c
+  = case (D.constMono c, D.linkImpure (D.constLink c)) of
+      (Just (D.MonoSig ps t), _) -> Just (ps, t)
+      (Just (D.MonoType t), Just (ips,_)) | length (arrows t) >= length ips
+        -> Just ([ip{ D.paramType = a } | (ip,a) <- zip ips (arrows t)], t)
+      _ -> Nothing
+  where
+    arrows (D.TArrow a b) = a : arrows b
+    arrows _ = []
+
 declsOf :: D.Dump -> Decls
 declsOf d
   = Decls types sigs inds ctors
@@ -218,6 +232,6 @@ declsOf d
               KEnum cs -> Just (enumDef (D.indName i) cs)
               _ -> Nothing
     sigs = M.fromList ([(leanName (D.declName x), signature inds (D.declLink x) (D.declParams x) (D.declType x)) | x <- D.dumpDecls d]
-                       ++ [(leanName (D.constName c), signature inds (D.constLink c) ps t) | c <- D.dumpConsts d, Just (D.MonoSig ps t) <- [D.constMono c]])
+                       ++ [(leanName (D.constName c), signature inds (D.constLink c) ps t) | c <- D.dumpConsts d, Just (ps,t) <- [constSig c]])
            `M.union` M.fromList [(leanName (n ++ ".ofNat"), SigFun [] [(Borrowed,vtInt)] Owned (VRaw r)) | (n,r) <- uintTypes]
            `M.union` M.fromList [(leanName c, sig) | (c,sig) <- builtinCtorSigs]
