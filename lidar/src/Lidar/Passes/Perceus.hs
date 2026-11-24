@@ -9,34 +9,41 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 {- Perceus: insert dup and drop instructions.
 
-  Each expression is processed with the set of owned variables it must consume
-  exactly once and a set of borrowed variables it may only inspect. Owned
-  variables that are not free in an expression are dropped at its start.
-  In `let x = e1 in e2`, the owned variables that are still needed in `e2` are
-  borrowed in `e1`. `[if-yielding]` moves its token, and each branch owns its new token.
+  The pass works bottom-up: each expression is processed with the set of variables that are
+  used after it (`Live`), and returns the variables that it uses besides those. Both sets are
+  closed under `needs`: an alias of `z` (its pointer at a boxed type, from `[deref]`,
+  `[unroll]`, `[case-a]` or `[split-a]`) is `z` at run time, so a use of it needs `z`.
 
-  Destructuring a dead owned variable moves its ownership to the binders, which the
-  alternatives consume. Otherwise the binders are borrowed from the scrutinee. A borrowed
-  variable whose path passes through an owned variable `z` (the longest such, its *owner*: see
-  `Syntax.Path`) is only duplicated where `z` is given up while it is still needed:
-  - where `z` is consumed (passed on, or moved by a `let` or a destructuring), it is
-    duplicated before. A use of an alias of `z` (see below) needs `z` itself (`needs`), so `z`
-    stays owned and the consumer gets another reference to `z` instead;
-  - where `z` is dead and not a pointer, its children that are bound take over its ownership
-    (`z.fst` and `z.snd` once `z` is destructured);
-  - where `z` is a dead pointer, a live alias of `z` (its pointer at a boxed type, from
-    `[deref]`, `[unroll]`, `[case-a]` or `[split-a]`) takes over its ownership. Otherwise the
-    variables are duplicated and `z` is dropped. Where a variable is in the contents of a box `y`
-    on the way to it (an alias of `z` or `z` itself), `y` is dropped instead, which drop
-    specialization turns into a move of the duplicated descendants (and `y` into a reuse credit) if `y`
-    is unique.
-  So a test such as `is-red(r)` does not duplicate `r`, and a nested pattern reuses the
-  inner block where the outer value is dead. Reading the contents of a box is always
-  borrowed, while reading a dead owned scalar consumes it (`[unscalar]`).
+  At each point, the topmost variables that are still used hold the references (`held`), and
+  the variables below them (the paths that pass through them: see `Syntax.Path`) are borrowed
+  from them. Borrowed parameters, the binders of destructurings of globals and variables of a
+  trivial type hold no references. So a variable gives up its reference at one of three places:
+  - where it is consumed and not used later, its last owned occurrence moves the reference
+    (`consume`). The live descendants of a variable that moves are duplicated before, and any
+    other owned occurrence is duplicated;
+  - where it is used last, by a borrowed operand of a call, the reference ends after the call;
+  - where it is not used at the start of a scope (`enter`): after a binding, at the start of a
+    branch that does not use it, or of a function or join point body. A dead variable is
+    dropped; one with live descendants hands its reference over to them (`settle`). A product
+    hands it over to its fields, another non-pointer to its bound children (`z.fst` and `z.snd`
+    once `z` is destructured), and a pointer duplicates its topmost live descendants and is
+    dropped. Where these are in the contents of a box `y` on the way to them (an alias of `z`
+    or `z` itself), `y` is dropped instead, which drop specialization turns into a move of the
+    duplicated descendants (and `y` into a reuse credit) if `y` is unique.
+  So a test such as `is-red(r)` does not duplicate `r`, and a nested pattern reuses the inner
+  block where the outer value is dead.
+
+  A destructuring of a variable `x` that only reads it (`Body`) takes over the references that
+  end at its start, and ends them in its branches instead: those of the owners of `x`, so
+  that a branch that does not use the descendants of `x` that another branch uses drops the
+  owner instead of duplicating them, and all of them after a leading read such as `[proj]`.
+  Reading the contents of a box is always borrowed, while reading a dead owned scalar consumes
+  it (`[unscalar]`).
 
   Variables are duplicated in place (`[dup]`): a duplicated variable keeps its name and gains
   an owned reference, so the paths always show where a variable comes from. A variable at a
-  boxed type is duplicated through its pointer.
+  boxed type is duplicated through its pointer, and a pointer is dropped through its longest
+  bound alias.
 
   A variable of a trivial type needs no references, also in the contents of a box, which
   code generation copies out of the block at `[bunbox]`.
@@ -45,12 +52,13 @@
   and its cell is a new owned root. So `lazy-eval-locked` takes the fields of
   the lazy value under evaluation without duplicating them, as Koka's Parc does. A cell is linear: it is never copied, and a
   dead cell is an error (it must be filled by `memoize`, or freed in the unique branch of a
-  test, where it is a credit). So is a token, which is never duplicated or dropped. The
-  branches of `if-unique` own the same variables.
+  test, where it is a credit). So is a token, which is never duplicated or dropped.
+  `[if-yielding]` moves its token, and each branch owns its new token.
 
-  The body of a join point is closed and processed like the body of a function; a jump
-  is like a call, but nothing follows it, so owned variables are only dropped before it.
-  Nothing is dropped before `unreachable`, which consumes everything.
+  A closure captures its free variables, and its body is closed: it holds references to its
+  captures and owned parameters, and nothing is used after it. The body of a join point is
+  closed as well; a jump is like a call, but nothing follows it. Nothing is dropped before
+  `unreachable`, which consumes everything.
 -}
 module Lidar.Passes.Perceus( perceusProgram ) where
 
@@ -58,20 +66,23 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad( foldM, unless )
 import Data.Functor.Const( Const(..) )
-import Data.Maybe( isNothing, listToMaybe )
 import Lidar.Name
 import Lidar.Syntax
 import Lidar.Build( K, compose )
-import Lidar.Traversal( Destruct(..), child, descendA, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fieldsAt, fvA, fvE, fvV, scrutVar, stepsFrom, takesContents, within )
-import Lidar.Passes.Common( isRead, paramModes, prefixes, trivialTy, NameSupply, defGamma, descendTyped, dropValue, freshFor, perDef, freshPathFrom, lamsTyped, nameChildren, projectAll, scopeOf )
+import Lidar.Traversal( Destruct(..), child, descendA, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fieldsAt, fvA, fvV, scrutVar, stepsFrom, takesContents, usedIn, within )
+import Lidar.Passes.Common( paramModes, prefixes, trivialTy, NameSupply, defGamma, descendTyped, dropValue, freshFor, perDef, freshPathFrom, lamsTyped, nameChildren, projectAll, scopeOf )
 import Lidar.Env( Env(..), envOf, M, evalM, get, lift, liftE, put, state, StateT, runStateT )
 import Lidar.Query( Gamma, bindAll, inferV, altTypes, lockGamma, uniqueGamma )
 import Lidar.Types( inst, isPtr )
 
 type VarSet = S.Set Path
 
--- `peJoins`: the parameter modes of the join points in scope
-data PEnv = PEnv{ peEnv :: Env, peGamma :: Gamma, peJoins :: M.Map Name [Mode] }
+-- The variables used after a point of the program, closed under `needs`.
+type Live = VarSet
+
+-- `peJoins`: the parameter modes of the join points in scope; `peBorrowed`: the borrowed roots
+-- (borrowed parameters, and the binders of destructurings of globals)
+data PEnv = PEnv{ peEnv :: Env, peGamma :: Gamma, peJoins :: M.Map Name [Mode], peBorrowed :: S.Set Name }
 
 type P a = M () NameSupply a
 
@@ -88,9 +99,9 @@ perceusDef env def
   = do body <- prepare env (defGamma def) (defBody def)
        case def of
          DefFun{ defArgs = args }
-           -> (\b -> def{ defBody = b }) <$> percE (paramEnv env args M.empty) (ownedParams env args) body
+           -> (\b -> def{ defBody = b }) <$> closed (paramEnv env args M.empty) (ownedParams env args) body
          DefVal x tvs t _
-           -> DefVal x tvs t <$> percE (PEnv env M.empty M.empty) S.empty body
+           -> DefVal x tvs t <$> closed (PEnv env M.empty M.empty S.empty) [] body
 
 -- Bind what the pass would otherwise rewrite and process again: a non-atomic borrowed
 -- argument of a call and the scrutinee of a value destructuring that is not a variable or
@@ -113,49 +124,47 @@ prepare env g expr
                             s <- fresh prefix
                             prepare env g (Let s t (Ret v) (k s))
 
+
 -- the environment of the body of a function or join point
 paramEnv :: Env -> [(Path,Mode,VType)] -> M.Map Name [Mode] -> PEnv
-paramEnv env ps js = PEnv env (M.fromList [(x,V t) | (x,_,t) <- ps]) js
+paramEnv env ps js = PEnv env (M.fromList [(x,V t) | (x,_,t) <- ps]) js (S.fromList [r | (Path r _,Borrowed,_) <- ps])
 
-ownedParams :: Env -> [(Path,Mode,VType)] -> VarSet
-ownedParams env ps = S.fromList [x | (x,m,t) <- ps, owning m, not (trivialTy env (V t))]
+ownedParams :: Env -> [(Path,Mode,VType)] -> [Path]
+ownedParams env ps = [x | (x,m,t) <- ps, owning m, not (trivialTy env (V t))]
 
 typeOfV :: PEnv -> VVal -> P VType
 typeOfV pe v = liftE (inferV (peEnv pe) (peGamma pe) v)
 
--- Discard variables using their types, expanding unboxed aggregates into moves. An
--- aggregate whose children are bound is discarded by discarding its children. A product
--- may have only one projection in scope, so expand its drop to cover all fields.
-dropNames :: PEnv -> [Path] -> VExpr -> P VExpr
-dropNames pe xs e = foldM step e (reverse xs)
-  where
-    step body x = do t <- tyOfVar pe x
-                     case t of
-                       V (VCell _ _) -> fail ("a cell that is not filled: " ++ show x)
-                       _ -> return ()
-                     let discard = dropValue (trivialTy (peEnv pe)) (fresh "d") (scopeOf (M.keys (peGamma pe))) x t body
-                     case (t,childrenOf pe x) of
-                       (V VProd{},_) -> discard
-                       (_,ps@(_:_)) | not (pointer t) -> dropNames pe ps body
-                       _ -> discard
+tyOfVar :: PEnv -> Path -> P Ty
+tyOfVar pe x = maybe (fail ("unknown variable " ++ show x)) return (M.lookup x (peGamma pe))
 
--- the children of a variable that are bound and not of a trivial type
-childrenOf :: PEnv -> Path -> [Path]
-childrenOf pe z
-  = [x | (x,t) <- takeWhile ((`within` z) . fst) (M.toAscList (M.dropWhileAntitone (<= z) (peGamma pe)))
-       , length (stepsFrom z x) == 1, not (trivialTy (peEnv pe) t)]
+-- ownership
 
--- the owner of a borrowed variable (see the top)
-ownerOf :: PEnv -> VarSet -> Path -> Maybe Path
-ownerOf pe owned x
-  | S.member x owned || maybe True (trivialTy (peEnv pe)) (M.lookup x (peGamma pe)) = Nothing
-  | otherwise = listToMaybe [z | z <- reverse (prefixes x), S.member z owned]
+-- A variable needs references unless its type is trivial, and it can hold one unless its root
+-- is borrowed.
+ownable :: PEnv -> Path -> Bool
+ownable pe x@(Path r _) = S.notMember r (peBorrowed pe) && not (trivialVar pe x)
 
-pointer :: Ty -> Bool
-pointer t
-  = case t of
-      V v -> isPtr v
-      A _ -> True
+trivialVar :: PEnv -> Path -> Bool
+trivialVar pe x = maybe False (trivialTy (peEnv pe)) (M.lookup x (peGamma pe))
+
+-- Where the live set is `live`, the topmost ownable variables in it hold the references (see
+-- the top), and the variables below them are borrowed from them.
+held :: PEnv -> Live -> Path -> Bool
+held pe live x = ownable pe x && not (any (`S.member` live) (prefixes x))
+
+-- the variables that a use of `xs` needs (without those of a trivial type)
+usesOf :: PEnv -> [Path] -> VarSet
+usesOf pe xs = needs (S.fromList [x | x <- xs, not (trivialVar pe x)])
+
+-- An alias is its pointer at run time (`keepsPtr`), so a use of it needs the variables that it
+-- is an alias of.
+needs :: VarSet -> VarSet
+needs xs = S.union xs (S.fromList [Path r (take k ss) | Path r ss <- S.toList xs, k <- [0 .. length ss - 1], all keepsPtr (drop k ss)])
+
+-- the topmost alias of a variable: the variable whose reference a use of it takes
+aliased :: Path -> Path
+aliased (Path r ss) = Path r (reverse (dropWhile keepsPtr (reverse ss)))
 
 -- the steps that keep the pointer of a boxed value (the binder is an alias)
 keepsPtr :: Step -> Bool
@@ -171,205 +180,306 @@ keepsPtr s
       SDelay -> True
       _ -> False
 
--- expressions
+-- a set without `x` and its descendants (which follow it in `Ord Path`)
+removeWithin :: Path -> VarSet -> VarSet
+removeWithin x s = s `S.difference` S.takeWhileAntitone (`within` x) (S.dropWhileAntitone (< x) s)
 
-percE :: PEnv -> VarSet -> VExpr -> P VExpr
--- control never gets here, so nothing needs to be dropped
-percE _ _ expr@Unreachable{}
-  = return expr
--- Materialize a scheduled projection before settling its owner. The
--- selected binding can then survive the transfer, rather than being read back
--- from a backing snapshot afterward. A scalar read similarly copies trivial
--- contents into an independent root before its owner is settled, and a read of the
--- contents of a box binds them, so that they are copied instead of the box. Only leading
--- reads are handled here; none is moved across calls or guards.
-percE pe owned expr@Unscalar{}
-  = percE' pe owned expr
-percE pe owned expr@Unbox{}
-  = percE' pe owned expr
-percE pe owned expr@(Deref (Var _) x (Unscalar _ z _ _))
-  | x == z
-  = percE' pe owned expr
-percE pe owned expr
-  | Just ds <- destructVOf expr, productProjection expr
-  , Var _ <- dsScrut ds
-  = percE' pe owned expr
-percE pe owned expr
-  = do let live = fvE expr
-           deps = [(x,z) | x <- S.toList live, Just z <- [ownerOf pe owned x]]
-           -- Release unrelated dead owners before settling the live borrowed descendants:
-           -- dropping one can make another box unique when its fields are taken.
-           dead = owned `S.difference` (live `S.union` S.fromList (map snd deps))
-           retained = owned `S.difference` dead
-       body <- case [z | (_,z) <- deps, not (S.member z live)] of
-         -- each branch of a destructuring of a descendant of `z` settles `z` with what it uses (a
-         -- lock has no branches)
-         (z:_) | Just x <- scrutVar expr, isNothing (takesContents expr), x /= z, x `within` z -> percE' pe retained expr
-               | otherwise -> settle pe retained expr z [x | (x,z') <- deps, z' == z]
-         [] -> case [x | (x,z) <- deps, consumedWith expr z x] of
-                 xs@(_:_) -> withDups pe retained xs return expr
-                 [] -> percE' pe retained expr
-       dropNames pe (S.toList dead) body
-
--- does `expr` consume the live owned `z` while `x`, borrowed from it, is still needed? (The
--- function of `[app]` is duplicated by `[app]`.)
-consumedWith :: VExpr -> Path -> Path -> Bool
-consumedWith expr z x
-  = case expr of
-      Proj{}     -> False
-      Ret _      -> True
-      Call _ _ _ -> True
-      Append{}   -> True
-      Plug{}     -> True
-      CtxCopy{}  -> True
-      Memoize{}  -> True
-      App f _    -> x /= f
-      Jump{}     -> True
-      Let _ _ _ e2 -> not (S.member z (needs (fvE e2))) && S.member x (fvE e2)
-      _ | Just ds <- destructAOf expr
-        -> dsScrut ds == z && not (isRead expr) && not (any (S.member z . uncurry neededAlt) (dsAlts ds))
-      _ | Just ds <- destructVOf expr
-        -> case dsScrut ds of
-             Var y -> y == z && not (isRead expr) && not (any (S.member z . uncurry neededAlt) (dsAlts ds))
-             _     -> False
-      _ -> False
-
--- An alias is its pointer at run time (`keepsPtr`), so a use of it needs the variables that it
--- is an alias of.
-needs :: VarSet -> VarSet
-needs xs = S.union xs (S.fromList [Path r (take k ss) | Path r ss <- S.toList xs, k <- [0 .. length ss - 1], all keepsPtr (drop k ss)])
-
--- the variables that an alternative needs from before its destructuring
-neededAlt :: [Path] -> VExpr -> VarSet
-neededAlt xs e = needs (S.filter (\y -> not (any (y `within`) xs)) (fvE e))
-
--- The owned `z` is dead but the variables `xs` borrowed from it are still needed (see the
--- top): its bound children, its shortest live alias or the contents of a box take over its
--- ownership, and the other variables are duplicated.
-settle :: PEnv -> VarSet -> VExpr -> Path -> [Path] -> P VExpr
-settle pe owned expr z xs
-  = do t <- tyOfVar pe z
-       let owned' = S.delete z owned
-       case [x | x <- xs, all keepsPtr (stepsFrom z x)] of
-         _ | V v@VProd{} <- t -> do
-               let fields = [f | f@(_,_,s) <- fieldsAt z v, not (trivialTy (peEnv pe) (V s))]
-                   missing = [f | f@(y,_,_) <- fields, M.notMember y (peGamma pe)]
-               if null missing
-                 then percE pe (S.union owned' (S.fromList [y | (y,_,_) <- fields])) expr
-                 else percE pe owned (projectAll M.empty z missing expr)
-           | not (pointer t) -> percE pe (S.union owned' (S.fromList (childrenOf pe z))) expr
-         (y:ys) -> percE pe (S.insert (foldr shorter y ys) owned') expr
-         [] -> let discard = case [p | x <- xs, Just p <- [contentsOn x]] of
-                               (Path r ss:_) -> return . Drop (Path r (init ss))
-                               [] -> dropNames pe [z]
-               in withDups pe owned' xs discard expr
+-- the topmost proper descendants of `z` in a set
+topBelow :: Path -> VarSet -> [Path]
+topBelow z s = tops (S.toAscList (S.takeWhileAntitone (`within` z) (S.dropWhileAntitone (<= z) s)))
   where
-    shorter a b = if length (stepsFrom z a) <= length (stepsFrom z b) then a else b
-    -- the contents of an alias of `z` (or of `z`) on the way to `x`
+    tops (x:xs) = x : tops (dropWhile (`within` x) xs)
+    tops [] = []
+
+pointer :: Ty -> Bool
+pointer t
+  = case t of
+      V v -> isPtr v
+      A _ -> True
+
+-- the children of a variable that are bound and not of a trivial type
+childrenOf :: PEnv -> Path -> [Path]
+childrenOf pe z
+  = [x | (x,t) <- takeWhile ((`within` z) . fst) (M.toAscList (M.dropWhileAntitone (<= z) (peGamma pe)))
+       , length (stepsFrom z x) == 1, not (trivialTy (peEnv pe) t)]
+
+-- scope starts
+
+-- A body that nothing follows, which holds the variables `es` at its start.
+closed :: PEnv -> [Path] -> VExpr -> P VExpr
+closed pe es e
+  = do (u,b) <- percB pe S.empty e
+       enter pe u es b
+
+-- The start of a scope with the live set `live`, where the variables `es` hold references.
+-- A live variable keeps its reference, one with live descendants hands it over to them
+-- (`settle`), and the others are dropped. The drops come first: dropping one can make another
+-- box unique when its fields are taken. Control never reaches `unreachable`, so nothing is
+-- dropped before it (also where it is bound by a `let`).
+--
+-- A read defers these to its branches (see `Body`): a leading read all of them, so that they
+-- come after the read; any other destructuring of a variable `x` the dead owners of `x`,
+-- so that a branch that does not use the descendants of `x` that are live in another one drops
+-- the owner instead of duplicating them first (in a nested match, for example).
+enter :: PEnv -> Live -> [Path] -> Body -> P VExpr
+enter pe live es body
+  = do expr <- build body deferred
+       if unreachable expr then return expr
+         else do expr' <- foldM (\e z -> settle pe live z e) expr (reverse [z | z <- now, usedIn z live])
+                 dropNames pe [z | z <- now, not (usedIn z live)] expr'
+  where
+    unreachable e = case e of
+                      Unreachable{} -> True
+                      Let _ _ e1 _ -> unreachable e1
+                      _ -> False
+    zs = [z | z <- S.toList (S.fromList es), S.notMember z live]
+    deferred = case body of
+                 Read x leading _ -> [z | z <- zs, leading || x `within` z]
+                 Done _ -> []
+    now = filter (`notElem` deferred) zs
+
+-- The variable `z` is dead, but some of its descendants are live (an alias of `z` would make
+-- `z` live, see `needs`). A product hands its reference over to its fields (projecting those
+-- that are not bound), another non-pointer to its bound children. Otherwise its topmost live
+-- descendants are duplicated and `z` is dropped; or, if they are in the contents of a box on
+-- the way to them (an alias of `z` or `z` itself), the box is dropped instead, which drop
+-- specialization turns into a move of the duplicated descendants if the box is unique.
+settle :: PEnv -> Live -> Path -> VExpr -> P VExpr
+settle pe live z body
+  = do t <- tyOfVar pe z
+       case t of
+         V v@VProd{} -> do
+           let fields = [f | f@(_,_,s) <- fieldsAt z v, not (trivialTy (peEnv pe) (V s))]
+               missing = [f | f@(y,_,_) <- fields, M.notMember y (peGamma pe)]
+           projectAll M.empty z missing <$> enter (bind pe [(y,V s) | (y,_,s) <- missing]) live [y | (y,_,_) <- fields] (Done body)
+         _ | not (pointer t) -> enter pe live (childrenOf pe z) (Done body)
+         _ -> do let xs = topBelow z live
+                 ys <- dupsOf pe xs
+                 body' <- case [p | x <- xs, Just p <- [contentsOn x]] of
+                            (Path r ss:_) -> return (Drop (Path r (init ss)) body)
+                            [] -> dropNames pe [z] body
+                 return (compose (map Dup ys) body')
+  where
     contentsOn x = case break (not . keepsPtr) (stepsFrom z x) of
                      (as,SContents:_) -> Just (foldl child z (as ++ [SContents]))
                      _ -> Nothing
 
-tyOfVar :: PEnv -> Path -> P Ty
-tyOfVar pe x = maybe (fail ("unknown variable " ++ show x)) return (M.lookup x (peGamma pe))
+-- Discard variables using their types, expanding unboxed aggregates into moves. An
+-- aggregate whose children are bound is discarded by discarding its children. A product
+-- may have only one projection in scope, so expand its drop to cover all fields. A pointer
+-- is discarded through its longest bound alias that is not trivial, whose type shows the most
+-- of it.
+dropNames :: PEnv -> [Path] -> VExpr -> P VExpr
+dropNames pe xs e = foldM (\body x -> step body (longestAlias x)) e (reverse xs)
+  where
+    longestAlias x = last (x : [y | (y,_) <- takeWhile ((`within` x) . fst) (M.toAscList (M.dropWhileAntitone (<= x) (peGamma pe)))
+                                  , all keepsPtr (stepsFrom x y), not (trivialVar pe y)])
+    step body x = do t <- tyOfVar pe x
+                     case t of
+                       V (VCell _ _) -> fail ("a cell that is not filled: " ++ show x)
+                       _ -> return ()
+                     let discard = dropValue (trivialTy (peEnv pe)) (fresh "d") (scopeOf (M.keys (peGamma pe))) x t body
+                     case (t,childrenOf pe x) of
+                       (V VProd{},_) -> discard
+                       (_,ps@(_:_)) | not (pointer t) -> dropNames pe ps body
+                       _ -> discard
 
-percE' :: PEnv -> VarSet -> VExpr -> P VExpr
--- the binder is a copy of trivial contents, so a dead owned scalar is consumed by the read
-percE' pe owned expr@(Unscalar _ z x e)
-  = do t <- tyOfVar pe z
-       [[tx]] <- liftE (altTypes (peEnv pe) t expr)
-       let move = S.member z owned && S.notMember z (fvE e)
-           owned' = if move then S.delete z owned else owned
-       Unscalar (if move then Owned else Borrowed) z x <$> percE (bind pe [(x,tx)]) owned' e
-percE' pe owned expr
-  | Just ds <- destructAOf expr
-  = do let z = dsScrut ds
-       t <- tyOfVar pe z
-       tss <- liftE (altTypes (peEnv pe) t expr)
-       dsBuild ds z <$> destruct pe owned (Just z) expr [zip xs ts | ((xs,_),ts) <- zip (dsAlts ds) tss] (map snd (dsAlts ds))
-percE' pe owned expr
-  | Just ds <- destructVOf expr
-  = do let z = dsScrut ds
-       t <- typeOfV pe z
-       tss <- liftE (altTypes (peEnv pe) (V t) expr)
-       dsBuild ds z <$> destruct pe owned (valName z) expr [zip xs ts | ((xs,_),ts) <- zip (dsAlts ds) tss] (map snd (dsAlts ds))
-percE' pe owned expr
+-- expressions
+
+-- An expression with duplications and drops, or a read: a destructuring of a variable, which
+-- can still take owners whose references end at its start, to end them in its branches
+-- instead (`enter`). `Read x leading build`: the scrutinee `x`, whether the read is a leading
+-- one (it only binds part of `x` for its body), and the expression with the deferred owners.
+data Body = Done VExpr | Read Path Bool ([Path] -> P VExpr)
+
+build :: Body -> [Path] -> P VExpr
+build (Done e) _ = return e
+build (Read _ _ k) d = k d
+
+-- `percB pe live e` inserts duplications and drops into `e`, after which the variables `live`
+-- are used. It returns the variables that `e` uses besides those, closed under `needs`.
+percB :: PEnv -> Live -> VExpr -> P (VarSet,Body)
+percB pe live expr
+  = case readOf expr of
+      Just x -> percRead pe live x expr
+      Nothing -> fmap Done <$> percExpr pe live expr
+
+percE :: PEnv -> Live -> VExpr -> P (VarSet,VExpr)
+percE pe live expr
+  = do (u,b) <- percB pe live expr
+       (,) u <$> build b []
+
+-- the scrutinee of a destructuring of a variable that only reads it
+readOf :: VExpr -> Maybe Path
+readOf expr
+  = case takesContents expr of
+      Just _ -> Nothing
+      Nothing -> scrutVar expr
+
+-- reads of part of a variable for the body (`[proj]`, `[bunbox]`, `[unscalar]`, and `[deref]`
+-- for an `[unscalar]`)
+leadingRead :: VExpr -> Bool
+leadingRead expr
   = case expr of
-      Ret v -> do (k,[v']) <- useVals pe owned [(Owned,v)]
-                  return (k (Ret v'))
+      Proj (Var _) _ _ _ -> True
+      Unbox{} -> True
+      Unscalar{} -> True
+      Deref (Var _) x (Unscalar _ z _ _) -> x == z
+      _ -> False
+
+percExpr :: PEnv -> Live -> VExpr -> P (VarSet,VExpr)
+percExpr pe live expr
+  = case expr of
+      Unreachable _ -> return (S.empty,expr)
+      Ret v -> operation pe live [(Owned,v)] (\[v'] -> Ret v')
+      -- the duplications at the start of `e1` come before the `let`, so that it binds a value
+      -- where it can (such as a unique one)
       Let x t e1 e2
-        -> do let live2 = needs (fvE e2)
-                  own2  = owned `S.intersection` live2
-                  own1  = owned `S.difference` live2
-              e1' <- percE pe own1 e1
-              e2' <- percE (bind pe [(x,V t)]) (own2 `S.union` ownedOf pe [(x,V t)]) e2
-              return (hoistdupAll (\e1'' -> Let x t e1'' e2') e1')
-      -- the token moves into the test, and each branch owns its new token
-      IfYielding v (k3,e3) (k2,e2)
-        -> do let own = owned `S.difference` fvV v
-                  branch k e = (,) k <$> percE (bind pe [(k,V VToken)]) (S.insert k own) e
-              IfYielding v <$> branch k3 e3 <*> branch k2 e2
-      Unreachable _ -> return expr
+        -> do let pe2 = bind pe [(x,V t)]
+              (u2,e2') <- percB pe2 live e2
+              e2'' <- enter pe2 (S.union live u2) (ownedOf pe [(x,V t)]) e2'
+              let u2' = removeWithin x u2
+              (u1,e1') <- percE pe (S.union live u2') e1
+              return (S.union u1 u2', hoistDups (\e1'' -> Let x t e1'' e2'') e1')
       Call f tys vs
-        -> do let ms = paramModes (peEnv pe) f (length vs)
-              (k,vs') <- useVals pe owned (zip ms vs)
-              postCall pe owned (zip ms vs) k (Call f tys vs') (resultOfCall pe f tys)
+        -> do (u,k,vs',ending) <- consume pe live (zip (paramModes (peEnv pe) f (length vs)) vs)
+              let call = Call f tys vs'
+              if null ending then return (u,k call)
+                else do r <- fresh "r"
+                        t <- resultOfCall pe f tys
+                        (,) u . k . Let r t call <$> enter pe live ending (Done (Ret (Var r)))
       Jump j ts vs
         -> do ms <- maybe (fail ("unknown join point " ++ show j)) return (M.lookup j (peJoins pe))
-              (k,vs') <- useVals pe owned (zip ms vs)
-              return (k (Jump j ts vs'))
+              operation pe live (zip ms vs) (Jump j ts)
+      App f vs -> operation pe live ((Owned,Var f) : [(Owned,v) | v <- vs]) (App f . drop 1)
+      Append c d -> operation pe live [(Unique,c),(Unique,d)] (\[c',d'] -> Append c' d')
+      Plug c v -> operation pe live [(Unique,c),(Owned,v)] (\[c',v'] -> Plug c' v')
+      CtxCopy c -> operation pe live [(Owned,c)] (\[c'] -> CtxCopy c')
+      Memoize c d i v -> operation pe live [(Owned,c),(Owned,v)] (\[c',v'] -> Memoize c' d i v')
       Join j tvs ps e1 e2
-        -> do e1' <- percE (paramEnv (peEnv pe) ps (peJoins pe)) (ownedParams (peEnv pe) ps) e1
-              e2' <- percE' pe{ peJoins = M.insert j [m | (_,m,_) <- ps] (peJoins pe) } owned e2
-              return (Join j tvs ps e1' e2')
+        -> do e1' <- closed (paramEnv (peEnv pe) ps (peJoins pe)) (ownedParams (peEnv pe) ps) e1
+              fmap (Join j tvs ps e1') <$> percE pe{ peJoins = M.insert j [m | (_,m,_) <- ps] (peJoins pe) } live e2
       -- closed bodies, in which only the group is in scope
       JoinRec t ds e
         -> do let group = M.fromList [(j,[m | (_,m,_) <- ps]) | JoinDef j _ ps _ <- ds]
-              ds' <- mapM (\d -> (\b -> d{ joinBody = b }) <$> percE (paramEnv (peEnv pe) (joinParams d) group) (ownedParams (peEnv pe) (joinParams d)) (joinBody d)) ds
-              JoinRec t ds' <$> percE' pe{ peJoins = M.union group (peJoins pe) } owned e
-      App f vs
-        -> do let move = S.member f owned && all (S.notMember f . fvV) vs
-              (k,vs') <- useVals pe (if move then S.delete f owned else owned) [(Owned,v) | v <- vs]
-              return ((if move then id else Dup f) (k (App f vs')))
-      Gen tvs e -> Gen tvs <$> percE' pe owned e
-      CastEv u t e -> CastEv u t <$> percE pe owned e
-      Total k e -> Total k <$> percE (bind pe [(k,V VToken)]) (S.insert k owned) e
-      Drop x e -> Drop x <$> percE' pe owned e
-      Free r e -> Free r <$> percE' pe owned e
-      IsUnique x e1 e2 -> IsUnique x <$> percE pe{ peGamma = uniqueGamma (peGamma pe) x } owned e1 <*> percE pe owned e2
-      -- the box splits into its contents and its cell, which are owned in its place
-      Lock z e
-        -> do unless (S.member z owned) (fail ("lock of a box that is not owned: " ++ show z))
-              g' <- liftE (lockGamma (peGamma pe) z)
-              let children = [b | b@(x,_) <- M.toList g', x `elem` [child z SContents, child z SCredit]]
-                  owned' = S.delete z owned `S.union` ownedOf pe children
-              Lock z <$> percE pe{ peGamma = g' } owned' e
-      Dup x e -> Dup x <$> percE pe (S.insert x owned) e
+              ds' <- mapM (\d -> (\b -> d{ joinBody = b }) <$> closed (paramEnv (peEnv pe) (joinParams d) group) (ownedParams (peEnv pe) (joinParams d)) (joinBody d)) ds
+              fmap (JoinRec t ds') <$> percE pe{ peJoins = M.union group (peJoins pe) } live e
+      Gen tvs e -> fmap (Gen tvs) <$> percE pe live e
+      CastEv u t e -> fmap (CastEv u t) <$> percE pe live e
+      Total k e
+        -> do let pe' = bind pe [(k,V VToken)]
+              (u,e') <- percB pe' live e
+              (,) (removeWithin k u) . Total k <$> enter pe' (S.union live u) [k] e'
+      -- the token moves into the test, and each branch owns its new token
+      IfYielding v (k3,e3) (k2,e2)
+        -> do let token k e = Branch (bind pe [(k,V VToken)]) [k] [k] e
+              (u,[e3',e2']) <- branches pe live (usesOf pe (S.toList (fvV v))) [token k3 e3, token k2 e2] []
+              return (u,IfYielding v (k3,e3') (k2,e2'))
       CaseLit v alts def
-        -> do alts' <- mapM (\(l,e) -> (,) l <$> percE pe owned e) alts
-              def'  <- percE pe owned def
-              return (CaseLit v alts' def')
-      Append c d -> operation [(Unique,c),(Unique,d)] (\[c',d'] -> Append c' d')
-      Plug c v -> operation [(Unique,c),(Owned,v)] (\[c',v'] -> Plug c' v')
-      CtxCopy c -> operation [(Owned,c)] (\[c'] -> CtxCopy c')
-      Memoize c d i v -> operation [(Owned,c),(Owned,v)] (\[c',v'] -> Memoize c' d i v')
+        -> do (u,es) <- branches pe live (usesOf pe (S.toList (fvV v))) [Branch pe [] [] e | e <- map snd alts ++ [def]] []
+              return (u,CaseLit v (zip (map fst alts) es) (last es))
+      -- `Lazy` frees a unique cell: the cell becomes a credit, which `free` consumes
+      IsUnique x e1 e2
+        -> do (u,[e1',e2']) <- branches pe live (usesOf pe [x]) [Branch pe{ peGamma = uniqueGamma (peGamma pe) x } [] [] e1, Branch pe [] [] e2] []
+              return (u,IsUnique x e1' e2')
+      Free r e
+        -> do (u,e') <- percE pe live e
+              return (S.union u (usesOf pe [r] `S.difference` live), Free r e')
+      -- the box splits into its contents and its cell, which hold references in its place
+      Lock z e
+        -> do g' <- liftE (lockGamma (peGamma pe) z)
+              let pe' = pe{ peGamma = g' }
+                  children = [x | x <- [child z SContents, child z SCredit], M.member x g']
+              (u,e') <- percB pe' live e
+              let uses = S.union (removeWithin z u) (usesOf pe [z] `S.difference` live)
+              unless (held pe (S.union live uses) (aliased z) && not (usedIn (aliased z) live))
+                (fail ("lock of a box that is not owned: " ++ show z))
+              (,) uses . Lock z <$> enter pe' (S.union live u) (ownedOf pe' [(x,t) | x <- children, Just t <- [M.lookup x g']]) e'
+      -- the binders of a destructuring of a global are roots that borrow it
+      _ | Just ds <- destructVOf expr
+        -> do let v = dsScrut ds
+              t <- typeOfV pe v
+              tss <- liftE (altTypes (peEnv pe) (V t) expr)
+              let branch (xs,e) ts = Branch (bind pe{ peBorrowed = S.union (S.fromList [r | Path r _ <- xs]) (peBorrowed pe) } (zip xs ts)) xs [] e
+              (u,es) <- branches pe live (usesOf pe (S.toList (fvV v))) (zipWith branch (dsAlts ds) tss) []
+              return (u,dsBuild ds v es)
+      -- only Perceus inserts these
+      Dup{} -> unexpected
+      Drop{} -> unexpected
+      IfFull{} -> unexpected
+      UnboxRu{} -> unexpected
+      CopyRu{} -> unexpected
       _ -> fail "unexpected destructuring form"
   where
-    operation mvs build = do (k,vs') <- useVals pe owned mvs
-                             return (k (build vs'))
+    unexpected = fail ("unexpected form before Perceus: " ++ show expr)
+
+-- A read of `x`, whose branches end the owners deferred to it (`enter`); the descendants of
+-- these do not hold references.
+percRead :: PEnv -> Live -> Path -> VExpr -> P (VarSet,Body)
+percRead pe live x expr
+  = case expr of
+      -- The binder is a copy of trivial contents, so the read consumes `z` if nothing else
+      -- needs its reference.
+      Unscalar _ z y e
+        -> do t <- tyOfVar pe z
+              [[ty]] <- liftE (altTypes (peEnv pe) t expr)
+              let pe' = bind pe [(y,ty)]
+              (u,b) <- percB pe' live e
+              let uses = S.union (removeWithin y u) (usesOf pe [z] `S.difference` live)
+                  r = aliased z
+                  moves d = held pe (S.union live uses) r && not (any (r `within`) d) && not (usedIn r (S.union live (removeWithin y u)))
+                  unscalar d | moves d = Unscalar Owned z y <$> enter pe' (S.union live u) d b
+                             | otherwise = Unscalar Borrowed z y <$> enter pe' (S.union live u) (endingBelow pe live uses d) b
+              return (uses,Read x True unscalar)
+      _ | Just ds <- destructAOf expr
+        -> do t <- tyOfVar pe x
+              tss <- liftE (altTypes (peEnv pe) t expr)
+              (u,k) <- branchesB pe live (usesOf pe [x]) [Branch (bind pe (zip xs ts)) xs [] e | ((xs,e),ts) <- zip (dsAlts ds) tss]
+              return (u,Read x (leadingRead expr) (fmap (dsBuild ds x) . k))
+        | Just ds <- destructVOf expr
+        -> do t <- typeOfV pe (Var x)
+              tss <- liftE (altTypes (peEnv pe) (V t) expr)
+              (u,k) <- branchesB pe live (usesOf pe [x]) [Branch (bind pe (zip xs ts)) xs [] e | ((xs,e),ts) <- zip (dsAlts ds) tss]
+              return (u,Read x (leadingRead expr) (fmap (dsBuild ds (Var x)) . k))
+      _ -> fail ("not a read: " ++ show expr)
+
+-- the duplications at the start of an expression, before the rest of it
+hoistDups :: (VExpr -> VExpr) -> VExpr -> VExpr
+hoistDups k expr
+  = case expr of
+      Dup x e -> Dup x (hoistDups k e)
+      _ -> k expr
+
+-- branches
+
+-- A branch of a node: its environment, its binders, those of them that enter it with a
+-- reference (roots), and its body. The binders of a destructuring of a variable are below it.
+data Branch = Branch PEnv [Path] [Path] VExpr
+
+-- A node that inspects `scrut` and continues in one of its branches, after which the variables
+-- `live` are used. The variables that hold references at the node and are used only in some
+-- branches (or only by the node) end in the others, at their starts.
+-- The owners deferred to the node (`deferred`) end in the branches as well.
+branches :: PEnv -> Live -> VarSet -> [Branch] -> [Path] -> P (VarSet,[VExpr])
+branches pe live scrut bs deferred
+  = do (u,k) <- branchesB pe live scrut bs
+       (,) u <$> k deferred
+
+-- the uses of a branching node, and its branches given the owners deferred to it
+branchesB :: PEnv -> Live -> VarSet -> [Branch] -> P (VarSet,[Path] -> P [VExpr])
+branchesB pe live scrut bs
+  = do rs <- mapM (\(Branch pe' _ _ e) -> percB pe' live e) bs
+       let uses = S.unions ((scrut `S.difference` live) : [foldr removeWithin u xs | (Branch _ xs _ _,(u,_)) <- zip bs rs])
+           enterAll d = sequence [enter pe' (S.union live u) (endingBelow pe live uses d ++ new) b | (Branch pe' _ new _,(u,b)) <- zip bs rs]
+       return (uses,enterAll)
+
+-- The variables that hold references before a node with the uses `uses`, but not after it,
+-- with the owners `deferred` to the node, whose descendants do not hold references.
+endingBelow :: PEnv -> Live -> VarSet -> [Path] -> [Path]
+endingBelow pe live uses deferred
+  = deferred ++ [x | x <- S.toList uses, held pe (S.union live uses) x, not (any (x `within`) deferred)]
 
 -- duplications
-
--- Duplicate the variables `xs` in place for an expression, which takes the new references as
--- owned; `k` comes between the duplications and the expression. A variable of a trivial
--- type needs no references, and a cell is never duplicated. A descendant of another of the
--- variables is not duplicated: it is borrowed from the duplicated one (the owned variables
--- never overlap).
-withDups :: PEnv -> VarSet -> [Path] -> (VExpr -> P VExpr) -> VExpr -> P VExpr
-withDups pe owned xs k expr
-  = do ys <- dupsOf pe [x | x <- xs, not (any (\y -> y /= x && x `within` y) xs)]
-       body <- percE pe (S.union owned (S.fromList ys)) expr
-       compose (map Dup ys) <$> k body
 
 -- the variables among `xs` that need a reference to be duplicated
 dupsOf :: PEnv -> [Path] -> P [Path]
@@ -381,47 +491,47 @@ dupsOf pe xs = concat <$> mapM one xs
                  V (VCell _ _) -> fail ("duplication of a cell: " ++ show x)
                  _ -> return [x]
 
--- the dups at the start of the bound expression of a `let` come before the `let`, so that
--- it binds a value where it can (such as a unique one)
-hoistdupAll :: (VExpr -> VExpr) -> VExpr -> VExpr
-hoistdupAll k expr
-  = case expr of
-      Dup x e -> Dup x (hoistdupAll k e)
-      _ -> k expr
-
-productProjection :: VExpr -> Bool
-productProjection Proj{} = True
-productProjection _ = False
-
--- destructuring
-
-destruct :: PEnv -> VarSet -> Maybe Path -> VExpr -> [[(Path,Ty)]] -> [VExpr] -> P [VExpr]
-destruct pe owned z expr binderss bodies
-  = do let zOwned = case z of
-                      Just x -> S.member x owned
-                      _     -> False
-           zName  = case z of
-                      Just x -> [x]
-                      _     -> []
-           deadIn (bs,e) = not (any (`S.member` neededAlt (map fst bs) e) zName)
-           moveAll  = zOwned && not (isRead expr) && not (productProjection expr) && all deadIn (zip binderss bodies)
-       if moveAll
-         then do let own = owned `S.difference` S.fromList zName
-                 mapM (\(bs,e) -> percE (bind pe bs) (own `S.union` ownedOf pe bs) e) (zip binderss bodies)
-         else mapM (borrowedBody pe owned) (zip binderss bodies)
-
--- the binders are borrowed from the scrutinee (and from its owner)
-borrowedBody :: PEnv -> VarSet -> ([(Path,Ty)],VExpr) -> P VExpr
-borrowedBody pe owned (bs,e) = percE (bind pe bs) owned e
-
 -- values
 
-useVals :: PEnv -> VarSet -> [(Mode,VVal)] -> P (K,[VVal])
-useVals pe owned mvs
-  = do let ownedOcc = concat [occurrences v | (m,v) <- mvs, owning m]
-           borrowedOcc = concat [occurrences v | (Borrowed,v) <- mvs]
-           lastOcc  = M.fromList [(x,i) | (i,x) <- zip [0::Int ..] ownedOcc, S.member x owned, x `notElem` borrowedOcc]
-       (k,_,vs) <- foldM (\(k,i,acc) (m,v) -> do (k',i',v') <- useVal pe lastOcc m i v
+-- A node that consumes its owned operands, after which `live` is used.
+operation :: PEnv -> Live -> [(Mode,VVal)] -> ([VVal] -> VExpr) -> P (VarSet,VExpr)
+operation pe live mvs build
+  = do (u,k,vs,ending') <- consume pe live mvs
+       unless (null ending') (fail ("borrowed operands that are not used later: " ++ show ending'))
+       return (u,k (build vs))
+
+-- The owned operands of a node, after which `live` is used, and its borrowed operands, which
+-- are used while it runs. Each variable that holds a reference before the node and is not used
+-- during or after it moves at one of its owned occurrences (`movers`); the other occurrences
+-- are duplicated. The live descendants of a variable that moves (those used during or after the
+-- node) are duplicated before. Returns the uses, the duplications, the operands, and the
+-- variables that hold references while the node runs but not after it.
+consume :: PEnv -> Live -> [(Mode,VVal)] -> P (VarSet,K,[VVal],[Path])
+consume pe live mvs
+  = do let owned = concat [occurrences v | (m,v) <- mvs, owning m]
+           borrowed = usesOf pe (concat [occurrences v | (Borrowed,v) <- mvs])
+           uses = S.union (usesOf pe owned) borrowed `S.difference` live
+           during = S.union live borrowed
+           moving = movers pe (S.union live uses) during owned
+       ys <- dupsOf pe (concat [topBelow (aliased x) during | x <- M.keys moving])
+       (k,vs) <- useVals pe moving mvs
+       return (uses, compose (map Dup ys) . k, vs, [x | x <- S.toList borrowed, S.notMember x live, held pe during x])
+
+-- The owned occurrence (by its index) that moves the reference of each variable that holds one
+-- before a node (live set `before`) and is not used during or after it (`during`). A use of an
+-- alias takes the reference of the variable it is an alias of; the shortest alias moves, at
+-- its last occurrence.
+movers :: PEnv -> Live -> Live -> [Path] -> M.Map Path Int
+movers pe before during owned
+  = M.fromList [xi | (z,xi) <- M.toList candidates, held pe before z, S.notMember z during]
+  where
+    candidates = M.fromListWith later [(aliased x,(x,i)) | (i,x) <- zip [0::Int ..] owned]
+    later new@(x,_) old@(y,_) = if depth y < depth x then old else new
+    depth (Path _ ss) = length ss
+
+useVals :: PEnv -> M.Map Path Int -> [(Mode,VVal)] -> P (K,[VVal])
+useVals pe moving mvs
+  = do (k,_,vs) <- foldM (\(k,i,acc) (m,v) -> do (k',i',v') <- useVal pe moving m i v
                                                  return (k . k', i', acc ++ [v'])) (id,0,[]) mvs
        return (k,vs)
 
@@ -439,34 +549,34 @@ occurrencesA val = case val of
 
 useVal :: PEnv -> M.Map Path Int -> Mode -> Int -> VVal -> P (K,Int,VVal)
 useVal _ _ Borrowed i v = return (id,i,v)
-useVal pe lastOcc Unique i v = useVal pe lastOcc Owned i v
-useVal pe lastOcc Owned i val
+useVal pe moving Unique i v = useVal pe moving Owned i v
+useVal pe moving Owned i val
   = case val of
-      Var x | M.lookup x lastOcc == Just i -> return (id,i+1,val)
+      Var x | M.lookup x moving == Just i -> return (id,i+1,val)
             | otherwise -> do ys <- dupsOf pe [x]
                               return (compose (map Dup ys),i+1,val)
       Glob _ _ -> do t <- typeOfV pe val
                      return (id,i,if trivialTy (peEnv pe) (V t) then val else DupV val)
       DupV _ -> return (id,i,val)
-      _ -> useChildren pe lastOcc i (descendV (stepA pe lastOcc) (stepV pe lastOcc) val)
+      _ -> useChildren pe moving i (descendV (stepA pe moving) (stepV pe moving) val)
 
+-- A closure captures its free variables, and its body holds references to them and to its
+-- parameters. A capture below another one holds a reference that the body does not need, as
+-- it is borrowed from the other one there (see the top): it is dropped first.
 useA :: PEnv -> M.Map Path Int -> Int -> AVal -> P (K,Int,AVal)
-useA pe lastOcc i val
+useA pe moving i val
   = case val of
       Lam ps r e
         -> do let caps = S.toList (fvA val)
-                  idxs = zip caps [i..]
-                  dups = [x | (x,j) <- idxs, not (moves x j), not (trivial x)]
-              ys <- dupsOf pe dups
-              let g    = M.union (M.fromList [(x,V t) | (x,_,t) <- ps]) (peGamma pe)
-                  inner = PEnv (peEnv pe) g M.empty
-                  own  = S.fromList ([x | x <- caps, not (trivial x)] ++ [x | (x,_,t) <- ps, not (trivialTy (peEnv pe) (V t))])
-              e' <- percE inner own e
-              return (compose (map Dup ys), i + length caps, Lam ps r e')
-      _ -> useChildren pe lastOcc i (descendA stepName (stepA pe lastOcc) (stepV pe lastOcc) val)
+                  inner = PEnv (peEnv pe) (M.union (M.fromList [(x,V t) | (x,_,t) <- ps]) (peGamma pe)) M.empty S.empty
+                  own = [x | x <- caps, not (trivialVar pe x)]
+                  extra = [x | x <- own, any (`elem` own) (prefixes x)]
+              ys <- dupsOf pe [x | (x,j) <- zip caps [i..], M.lookup x moving /= Just j]
+              e' <- closed inner (ownedParams (peEnv pe) ps ++ filter (`notElem` extra) own) e
+              e'' <- dropNames inner extra e'
+              return (compose (map Dup ys), i + length caps, Lam ps r e'')
+      _ -> useChildren pe moving i (descendA stepName (stepA pe moving) (stepV pe moving) val)
   where
-    moves x j = M.lookup x lastOcc == Just j
-    trivial x = maybe False (trivialTy (peEnv pe)) (M.lookup x (peGamma pe))
     stepName :: Path -> StateT (K,Int) (M () NameSupply) Path
     stepName x = do (k,j) <- get
                     put (k,j+1)
@@ -491,21 +601,6 @@ stepA pe occ v
        put (k . k',j)
        return w
 
-valName :: VVal -> Maybe Path
-valName (Var x) = Just x
-valName _ = Nothing
-
--- After a call: drop owned variables that were only passed as borrowed arguments.
-postCall :: PEnv -> VarSet -> [(Mode,VVal)] -> K -> VExpr -> P VType -> P VExpr
-postCall pe owned mvs k call resTp
-  = do let borrowedVars = S.fromList (concat [occurrences v | (Borrowed,v) <- mvs])
-           drops = S.toList (owned `S.intersection` borrowedVars)
-       if null drops then return (k call)
-         else do r <- fresh "r"
-                 t <- resTp
-                 body <- dropNames pe drops (Ret (Var r))
-                 return (k (Let r t call body))
-
 isAtom :: VVal -> Bool
 isAtom (Var _) = True
 isAtom (Glob _ _) = True
@@ -524,5 +619,5 @@ resultOfCall pe f tys
 bind :: PEnv -> [(Path,Ty)] -> PEnv
 bind pe bs = pe{ peGamma = bindAll bs (peGamma pe) }
 
-ownedOf :: PEnv -> [(Path,Ty)] -> VarSet
-ownedOf pe bs = S.fromList [x | (x,t) <- bs, not (trivialTy (peEnv pe) t)]
+ownedOf :: PEnv -> [(Path,Ty)] -> [Path]
+ownedOf pe bs = [x | (x,t) <- bs, not (trivialTy (peEnv pe) t)]
