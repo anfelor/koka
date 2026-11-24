@@ -8,9 +8,11 @@
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 {- Names of the typed IR.
 
-  A copy of the part of Koka's `Common.Name` that the IR needs. The record, the hash,
-  and the `Eq`, `Ord` and `Show` instances are identical to Koka's, so converting a
-  name field by field preserves equality and the iteration order of `Map Name`.
+  A copy of the part of Koka's `Common.Name` that the IR needs. The record, the hash and
+  the `Show` instance are identical to Koka's. Koka's `Eq` and `Ord` ignore case; here,
+  names that differ only in case are distinct (Lean has such names), ordered by their exact
+  spelling. Koka never has two such names, so converting a name field by field preserves
+  equality and the iteration order of `Map Name`.
 -}
 module Lidar.Name
   ( Name(..)
@@ -24,7 +26,8 @@ import Data.Char( toLower, isAlpha, isAlphaNum, isDigit )
 import Prettyprinter( Pretty(pretty) )
 
 -- | A name, as in Koka. The hashes of the three parts speed up comparisons:
--- `h1 > h2` implies `name1 > name2`. Hashes and comparisons are case-insensitive.
+-- `h1 > h2` implies `name1 > name2`. Hashes are case-insensitive; comparisons ignore case
+-- unless two names differ only in case.
 data Name = Name
   { nameModule    :: !String   -- module name (`std/core`)
   , hashModule    :: !Int
@@ -36,7 +39,7 @@ data Name = Name
 
 instance Eq Name where
   nm1@(Name _ hm1 _ hl1 _ hn1) == nm2@(Name _ hm2 _ hl2 _ hn2)
-    = hn1 == hn2 && hl1 == hl2 && hm1 == hm2 && lowerCompare nm1 nm2 == EQ
+    = hn1 == hn2 && hl1 == hl2 && hm1 == hm2 && sameSpelling nm1 nm2
 
 -- compare module, stem name, and then local name for dependencies
 instance Ord Name where
@@ -44,7 +47,7 @@ instance Ord Name where
     = case compare hm1 hm2 of
         EQ -> case compare hn1 hn2 of
                 EQ -> case compare hl1 hl2 of
-                        EQ -> lowerCompare nm1 nm2
+                        EQ -> lowerCompare nm1 nm2 <> exactCompare nm1 nm2
                         lg -> lg
                 lg -> lg
         lg -> lg
@@ -66,6 +69,13 @@ lowerCompare (Name m1 _ l1 _ n1 _) (Name m2 _ l2 _ n2 _)
               EQ -> lowerCompareS n1 n2
               lg -> lg
       lg -> lg
+
+-- names that differ only in case, by their exact spelling
+exactCompare :: Name -> Name -> Ordering
+exactCompare (Name m1 _ l1 _ n1 _) (Name m2 _ l2 _ n2 _) = compare (m1,l1,n1) (m2,l2,n2)
+
+sameSpelling :: Name -> Name -> Bool
+sameSpelling (Name m1 _ l1 _ n1 _) (Name m2 _ l2 _ n2 _) = n1 == n2 && l1 == l2 && m1 == m2
 
 lowerCompareS :: String -> String -> Ordering
 lowerCompareS (c:cs) (d:ds)
