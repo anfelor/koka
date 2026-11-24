@@ -26,7 +26,7 @@ module Lidar.Lean.Elab( elabDump ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Control.Monad( zipWithM )
+import Control.Monad( zipWithM, mfilter )
 import Data.Char( isAlphaNum, isDigit )
 import Data.List( sortOn )
 import Lidar
@@ -39,9 +39,20 @@ import Lidar.Elab.Representation( boxA, shapeLeaves, leafCons, injA, caseSum, co
 import qualified Lidar.Lean.Dump as D
 import Lidar.Lean.Decls
 
--- the declarations, the IR variable and type of each local, and the parameter types of each
--- join point in scope
-data Ctx = Ctx{ cDecls :: Decls, cLocals :: M.Map D.Var (Path,VType), cJoins :: M.Map D.Var (Name,[D.Var],[VType]) }
+-- the declarations, the IR variable and type of each local, the parameter types of each
+-- join point in scope, and the default binder in scope of a case on a local (see `elabCases`)
+data Ctx = Ctx{ cDecls :: Decls, cLocals :: M.Map D.Var (Path,VType), cJoins :: M.Map D.Var (Name,[D.Var],[VType])
+              , cRests :: M.Map D.Var Rest }
+
+-- A `cases` on a local inside the default of a `[case-a]` on it scrutinizes the default
+-- binder instead, whose sum lacks the tags of the alternatives before it: binding the local's
+-- default path again would bind it twice in its scope. `Rest p d tags`: the local at path `p`,
+-- the binder `d` and the tags it lacks.
+data Rest = Rest Path Path [Int]
+
+-- the sum of the local at a path, as `unrollLocal` binds it
+unrolled :: Path -> Path
+unrolled p = child (child p SDeref) SRoll
 
 type E a = M Ctx Int a
 
@@ -51,7 +62,7 @@ elabDump d
   = (Program (newModuleName (D.dumpModule d)) (dTypes ds) (dSigs ds) M.empty (Foreign [] [] []) defs, errs)
   where
     ds = declsOf d
-    results = [(x, evalM (elabDecl x) (Ctx ds M.empty M.empty) 0) | x <- D.dumpDecls d]
+    results = [(x, evalM (elabDecl x) (Ctx ds M.empty M.empty M.empty) 0) | x <- D.dumpDecls d]
     defs = [def | (_,Right (Just def)) <- results]
     errs = [D.declName x ++ ": " ++ err | (x,Left err) <- results]
 
@@ -314,7 +325,7 @@ elabLam (D.FunDecl _ _ ps t b)
        xs <- mapM (const (fresh "a")) ps
        let vs = [varPath (D.paramVar p) (D.paramName p) | p <- ps]
        cs <- zipWithM (\x s -> coerce anyT s (Var x)) xs ts
-       body <- withLocals (zip (map D.paramVar ps) (zip vs ts)) (elabCode r b)
+       body <- local (\c -> c{ cRests = M.empty }) (withLocals (zip (map D.paramVar ps) (zip vs ts)) (elabCode r b))
        y <- fresh "r"
        (kr,w) <- coerce r anyT (Var y)
        let binds = [Let v s (Ret c) | (v,s,(_,c)) <- zip3 vs ts cs]
@@ -481,21 +492,36 @@ elabCases res tname x alts
                 return (k (wrap (CaseV v bs)))
            KRef ->
              do (body,shapes) <- refAlts tname
+                p0 <- fmap fst . M.lookup x <$> asks cLocals
+                rest <- M.lookup x <$> asks cRests
                 let shapeOf i = maybe AUnit id (lookup i shapes)
                     alt y (i,(_,ci,ps,code)) = bindFields ci (shapeOf i) y ps (elabCode res code)
-                unrollLocal x tname $ \r ->
-                  case (body, sortOn fst explicit) of
-                    (ASum _, ex) ->
-                      do as <- mapM (\a@(i,(c,_,_,_)) -> do let y = child r (SInjA i (Con (leanName c)))
-                                                            e <- alt y a
-                                                            return (i,y,e)) ex
-                         d <- if all (covered . fst) shapes then return Nothing
-                                else do e <- maybe (return (Unreachable res)) (elabCode res) (headOf dflt)
-                                        return (Just (child r SRest, e))
-                         return (CaseA r as d)
-                    (_, [a]) -> alt r a
-                    (_, []) | code:_ <- dflt -> elabCode res code
-                    _ -> fail ("a case on " ++ tname ++ " with several alternatives")
+                    other = maybe (return (Unreachable res)) (elabCode res) (headOf dflt)
+                    -- a case on the sum `r`, whose tags are not in `excl`; if `r` is the local
+                    -- at `mp`, its default records its binder for the cases on the local inside
+                    caseSum mp r excl
+                      = do let ex = [a | a@(i,_) <- sortOn fst explicit, i `notElem` excl]
+                               done = excl ++ map fst ex
+                               d = child r SRest
+                               inDefault = case mp of
+                                             Just p -> local (\c -> c{ cRests = M.insert x (Rest p d done) (cRests c) })
+                                             Nothing -> id
+                           as <- mapM (\a@(i,(c,_,_,_)) -> do let y = child r (SInjA i (Con (leanName c)))
+                                                              e <- alt y a
+                                                              return (i,y,e)) ex
+                           if null as then other else
+                             do de <- if all ((`elem` done) . fst) shapes then return Nothing
+                                        else do e <- inDefault other
+                                                return (Just (d,e))
+                                return (CaseA r as de)
+                case (body, rest, p0) of
+                  (ASum _, Just (Rest p d excl), Just p') | p == p' -> caseSum (Just p) d excl
+                  _ -> unrollLocal x tname $ \r ->
+                         case (body, sortOn fst explicit) of
+                           (ASum _, _) -> caseSum (mfilter ((== r) . unrolled) p0) r []
+                           (_, [a]) -> alt r a
+                           (_, []) | code:_ <- dflt -> elabCode res code
+                           _ -> fail ("a case on " ++ tname ++ " with several alternatives")
            _ -> fail ("case on " ++ tname ++ ", which is not a datatype")
   where
     headOf (c:_) = Just c
