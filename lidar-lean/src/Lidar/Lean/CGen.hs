@@ -337,8 +337,9 @@ closureMaxArgs :: Int
 closureMaxArgs = 16
 
 -- A closure: a C function that takes the captured leaves (boxed, as Lean's closures hold
--- objects) and the parameters, which are objects. Applying it consumes the closure and passes
--- the captures owned, as the closure's body owns them.
+-- objects) and the parameters, which are objects, in an array if they are more than a closure
+-- passes one by one. Applying it consumes the closure and passes the captures owned, as the
+-- closure's body owns them.
 genLam :: Ctx -> [(Path,Mode,VType)] -> VType -> VExpr -> G String
 genLam cx ps r e
   = do let caps = S.toList (fvA (Lam ps r e))
@@ -349,14 +350,16 @@ genLam cx ps r e
        let fixed = [(l,n) | (x,ls) <- capLeaves, (l,n) <- zip ls (leafNames x (length ls))]
            arity = length fixed + length ps
        if not (all (== [LObj]) (rls : pls)) then fail "a closure with parameters or result that are not objects"
-       else if arity > closureMaxArgs then fail "a closure with more than 16 arguments"
        else if LCredit `elem` map fst fixed then fail "a credit captured by a closure"
        else do
          fn <- fresh "lt_lam"
          cs <- mapM (const (fresh "c")) fixed
          body <- genE cx{ cxGamma = M.union (M.fromList [(x,V t) | (x,_,t) <- ps]) (cxGamma cx), cxJoins = M.empty } DReturn e
-         let params = ["lean_object* " ++ c | c <- cs] ++ ["lean_object* " ++ localName x | (x,_,_) <- ps]
-             loads = [text (cType l ++ " " ++ n ++ " = " ++ convert LObj l c ++ ";") | ((l,n),c) <- zip fixed cs]
+         let args = cs ++ [localName x | (x,_,_) <- ps]
+             (params,loadArgs)
+               | arity > closureMaxArgs = (["lean_object** _args"], [text ("lean_object* " ++ a ++ " = _args[" ++ show i ++ "];") | (i,a) <- zip [0 :: Int ..] args])
+               | otherwise = (["lean_object* " ++ a | a <- args], [])
+             loads = loadArgs ++ [text (cType l ++ " " ++ n ++ " = " ++ convert LObj l c ++ ";") | ((l,n),c) <- zip fixed cs]
          modify (\st -> st{ stLams = stLams st ++ ["static lean_object*" <+> text (call fn params) <+> block (loads ++ body)] })
          c <- fresh "clo"
          return (stmtExpr (("lean_object* " ++ c ++ " = " ++ call "lean_alloc_closure" ["(void*)" ++ fn, show arity, show (length fixed)] ++ ";")
