@@ -15,7 +15,10 @@
   when it reuses the credit.
 
   The variable must be in scope at the join point and not be bound in its body or scope:
-  every jump then passes the same one. A field that the branches read themselves is first
+  every jump then passes the same one. No path below it may be in scope at the join point,
+  as the body would bind that path again when it reads the parameter. It is captured for
+  one parameter only: two parameters that receive it hold two references (the jumps
+  duplicate it), and the body would bind the same paths of both. A field that the branches read themselves is first
   brought into scope: elaboration reads a field where it is used, and `Paths` merges the
   reads only within a scope, before `Contify` makes the join point. When every binder of
   the variable in the scope of the join is a borrowed `[proj]` of the same variable in scope
@@ -82,10 +85,10 @@ jaE decl outer scope expr
                bound = S.fromList (concatMap bindersE (e0' : map joinBody ds1))
                args j es = transpose (concatMap (jumpArgs j) es) ++ repeat []
                invariant tvs (x,Borrowed,t1) vs@(Var y : _) ws
-                 | all (== Var y) vs, all (== Var x) ws, M.member y scope, S.notMember y bound, not (fieldsOutside y)
+                 | all (== Var y) vs, all (== Var x) ws, M.member y scope, not (readIn scope y), S.notMember y bound, not (fieldsOutside y)
                  , all (`notElem` tvs) (ftv t1) = Just y
                invariant _ _ _ _ = Nothing
-               yss = [zipWith3 (invariant tvs) ps (args j (e0' : [joinBody d' | d' <- ds1, joinName d' /= j])) (args j [body])
+               yss = [once $ zipWith3 (invariant tvs) ps (args j (e0' : [joinBody d' | d' <- ds1, joinName d' /= j])) (args j [body])
                      | JoinDef j tvs ps body <- ds1]
                uncaptured = foldr (.) id [substJump (joinName d) (\ts -> Jump (joinName d) ts . kept ys) | (d,ys) <- zip ds1 yss]
                ds2 = [JoinDef j tvs ps' (uncaptured body) | (JoinDef j tvs ps e1,ys) <- zip ds1 yss, let (ps',body) = capture scope ps ys e1]
@@ -103,9 +106,9 @@ jaE decl outer scope expr
                bound = S.fromList (bindersE e1' ++ bindersE e2')
                args = transpose (jumpArgs j e2') ++ repeat []
                -- for each parameter, the variable that every jump passes to it
-               invariant (_,Owned,_) vs@(Var y : _) | all (== Var y) vs, M.member y scope', S.notMember y bound, not (fieldsOutside y) = Just y
+               invariant (_,Owned,_) vs@(Var y : _) | all (== Var y) vs, M.member y scope', not (readIn scope' y), S.notMember y bound, not (fieldsOutside y) = Just y
                invariant _ _ = Nothing
-               ys = zipWith invariant ps args
+               ys = once (zipWith invariant ps args)
                -- the description of every credit that the jumps pass to a credit without one
                describe (x,m,VReuse f n Nothing) vs
                  | (p:qs) <- [descOf v | v <- vs, not (isNoReuse v)], all (== p) qs, Just d <- p, inScope d
@@ -126,6 +129,8 @@ jaE decl outer scope expr
   where
     -- the descendants of a path follow it in the order of paths
     fieldsOutside y = maybe False (`within` y) (S.lookupGT y outer)
+    -- a descendant of `y` is in scope: the body would bind it again when it reads the parameter
+    readIn sc y = maybe False ((`within` y) . fst) (M.lookupGT y sc)
 
 -- the join body captures the variable `y` instead of each parameter with `Just y`, which
 -- the parameters no longer contain
@@ -135,6 +140,15 @@ capture scope ps ys body
   where
     ps' = kept ys ps
     sub = M.fromList [(x,Var y) | ((x,_,_),Just y) <- zip ps ys]
+
+-- capture a variable for its first parameter only: the parameters hold separate references,
+-- and the paths that the body binds of them would be bound twice
+once :: [Maybe Path] -> [Maybe Path]
+once = go S.empty
+  where
+    go seen (Just y : ys) | S.notMember y seen = Just y : go (S.insert y seen) ys
+    go seen (_ : ys) = Nothing : go seen ys
+    go _ [] = []
 
 -- the arguments of the parameters that are not captured
 kept :: [Maybe Path] -> [a] -> [a]
