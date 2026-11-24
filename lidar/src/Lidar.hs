@@ -47,6 +47,7 @@ import Lidar.Passes.Anf( anfProgram )
 import Lidar.Passes.CheckFip( checkFip )
 import Lidar.Passes.CheckLinear( checkLinear )
 import Lidar.Passes.CheckTypes( checkProgram, checkTypes )
+import Lidar.Passes.Closed( closedProgram )
 import Lidar.Passes.Contify( contifyProgram )
 import Lidar.Passes.DropSpec( dropSpecProgram )
 import Lidar.Passes.ExpandReuse( expandReuseProgram )
@@ -74,6 +75,8 @@ data Options = Options
   , optRecGroups :: [S.Set Name]        -- ^ the recursive groups of the module (for `CheckFip`)
   , optCheckBetween :: Bool             -- ^ run the required checks after every pass, not only
                                         --   after the last one (to find the pass that breaks them)
+  , optFoldable  :: Name -> Bool        -- ^ the functions whose calls with ground arguments the
+                                        --   client folds at compile time (`Passes.Closed`)
   }
 
 type Lowered = (Program,[(String,String)],[(String,String)])
@@ -104,6 +107,7 @@ pipeline opts
     , Pass "anf" anfProgram
     , purePass "simplify" simplifyProgram
     , purePass "yields" yieldsProgram
+    , purePass "closed" (closedProgram (optFoldable opts))
     , Require "linear" checkLinear
     , Pass "perceus" perceusProgram
     , purePass "tailrec" (tailRecProgram fips)

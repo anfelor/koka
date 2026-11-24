@@ -22,7 +22,7 @@
 -}
 module Lidar.Ground
   ( Ground(..), GroundBind(..)
-  , groundValues, groundOrder
+  , groundValues, groundOrder, groundV
   ) where
 
 import qualified Data.Map as M
@@ -98,7 +98,7 @@ groundBody foldable globals body
                    GValue v -> [v]
                    GCall _ _ vs -> vs
 
--- whether a value is ground, given the ground globals and the bound variables
+-- | Whether a value is ground, given the ground globals and the ground variables in scope.
 groundV :: S.Set Name -> S.Set Path -> VVal -> Bool
 groundV globals bound = gv
   where

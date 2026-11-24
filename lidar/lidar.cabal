@@ -30,6 +30,7 @@ library
       Lidar.Passes.CheckFip
       Lidar.Passes.CheckLinear
       Lidar.Passes.CheckTypes
+      Lidar.Passes.Closed
       Lidar.Passes.Common
       Lidar.Passes.Contify
       Lidar.Passes.DropSpec

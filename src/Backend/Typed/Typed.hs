@@ -35,7 +35,8 @@ typedFromCore enableReuse checkAll nt ffi imports uniq core
                                         , optLazies    = lazyFuns nt (progTypes eprog)
                                         , optFips      = fipsOf (core:imports)
                                         , optRecGroups = groupsOf core
-                                        , optCheckBetween = checkAll }
+                                        , optCheckBetween = checkAll
+                                        , optFoldable  = const False }
         -- Elaboration does not name paths (Paths does), so only its types are checked.
         typeErrs               = label "check after elab" (checkTypes eprog)
         (final,errs,warnings)  = if null typeErrs then lowerProgram opts eprog else (eprog,typeErrs,[])
