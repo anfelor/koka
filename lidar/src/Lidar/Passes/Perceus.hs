@@ -63,7 +63,7 @@ import Lidar.Name
 import Lidar.Syntax
 import Lidar.Build( K, compose )
 import Lidar.Traversal( Destruct(..), child, descendA, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fieldsAt, fvA, fvE, fvV, scrutVar, stepsFrom, takesContents, within )
-import Lidar.Passes.Common( isRead, paramModes, prefixes, trivialTy, NameSupply, dropValue, freshFor, perDef, freshPathFrom, nameChildren, projectAll, scopeOf )
+import Lidar.Passes.Common( isRead, paramModes, prefixes, trivialTy, NameSupply, defGamma, descendTyped, dropValue, freshFor, perDef, freshPathFrom, lamsTyped, nameChildren, projectAll, scopeOf )
 import Lidar.Env( Env(..), envOf, M, evalM, get, lift, liftE, put, state, StateT, runStateT )
 import Lidar.Query( Gamma, bindAll, inferV, altTypes, lockGamma, uniqueGamma )
 import Lidar.Types( inst, isPtr )
@@ -71,7 +71,7 @@ import Lidar.Types( inst, isPtr )
 type VarSet = S.Set Path
 
 -- `peJoins`: the parameter modes of the join points in scope
-data PEnv = PEnv{ peEnv :: Env, peGamma :: Gamma, peBorrowed :: VarSet, peJoins :: M.Map Name [Mode] }
+data PEnv = PEnv{ peEnv :: Env, peGamma :: Gamma, peJoins :: M.Map Name [Mode] }
 
 type P a = M () NameSupply a
 
@@ -85,16 +85,37 @@ perceusProgram prog = perDef (\d -> evalM (perceusDef (envOf prog) d) () (freshF
 
 perceusDef :: Env -> Def -> P Def
 perceusDef env def
-  = case def of
-      DefFun{ defArgs = args, defBody = body }
-        -> do body' <- percE (paramEnv env args M.empty) (ownedParams env args) body
-              return def{ defBody = body' }
-      DefVal x tvs t body
-        -> DefVal x tvs t <$> percE (PEnv env M.empty S.empty M.empty) S.empty body
+  = do body <- prepare env (defGamma def) (defBody def)
+       case def of
+         DefFun{ defArgs = args }
+           -> (\b -> def{ defBody = b }) <$> percE (paramEnv env args M.empty) (ownedParams env args) body
+         DefVal x tvs t _
+           -> DefVal x tvs t <$> percE (PEnv env M.empty M.empty) S.empty body
+
+-- Bind what the pass would otherwise rewrite and process again: a non-atomic borrowed
+-- argument of a call and the scrutinee of a value destructuring that is not a variable or
+-- global; and name the binders of a value destructuring by their paths.
+prepare :: Env -> Gamma -> VExpr -> P VExpr
+prepare env g expr
+  = case expr of
+      Call f tys vs
+        | ((i,v):_) <- [(i,v) | (i,(Borrowed,v)) <- zip [0..] (zip (paramModes env f (length vs)) vs), not (isAtom v)]
+        -> bindVal "a" v (\s -> Call f tys (take i vs ++ [Var s] ++ drop (i+1) vs))
+      _ | Just ds <- destructVOf expr
+        -> case dsScrut ds of
+             Var _ -> next (nameChildren expr)
+             Glob _ _ -> next (nameChildren expr)
+             v -> bindVal "s" v (\s -> dsBuild ds (Var s) (map snd (dsAlts ds)))
+      _ -> next expr
+  where
+    next = descendTyped env g (lamsTyped g (prepare env)) (prepare env)
+    bindVal prefix v k = do t <- liftE (inferV env g v)
+                            s <- fresh prefix
+                            prepare env g (Let s t (Ret v) (k s))
 
 -- the environment of the body of a function or join point
 paramEnv :: Env -> [(Path,Mode,VType)] -> M.Map Name [Mode] -> PEnv
-paramEnv env ps js = PEnv env (M.fromList [(x,V t) | (x,_,t) <- ps]) (S.fromList [x | (x,Borrowed,_) <- ps]) js
+paramEnv env ps js = PEnv env (M.fromList [(x,V t) | (x,_,t) <- ps]) js
 
 ownedParams :: Env -> [(Path,Mode,VType)] -> VarSet
 ownedParams env ps = S.fromList [x | (x,m,t) <- ps, owning m, not (trivialTy env (V t))]
@@ -210,7 +231,7 @@ consumedWith expr z x
       _ | Just ds <- destructVOf expr
         -> case dsScrut ds of
              Var y -> y == z && not (isRead expr) && not (any (S.member z . uncurry neededAlt) (dsAlts ds))
-             v     -> S.member z (fvV v) && not (S.member z (needs (restFv ds)))
+             _     -> False
       _ -> False
 
 -- An alias is its pointer at run time (`keepsPtr`), so a use of it needs the variables that it
@@ -249,11 +270,6 @@ settle pe owned expr z xs
                      (as,SContents:_) -> Just (foldl child z (as ++ [SContents]))
                      _ -> Nothing
 
--- Only unboxed values can be returned and bound by `let`.
-letVal :: Path -> Ty -> VVal -> P K
-letVal x (V s) v = return (Let x s (Ret v))
-letVal _ (A _) _ = fail "cannot bind an unboxed value at a boxed type"
-
 tyOfVar :: PEnv -> Path -> P Ty
 tyOfVar pe x = maybe (fail ("unknown variable " ++ show x)) return (M.lookup x (peGamma pe))
 
@@ -273,13 +289,10 @@ percE' pe owned expr
        dsBuild ds z <$> destruct pe owned (Just z) expr [zip xs ts | ((xs,_),ts) <- zip (dsAlts ds) tss] (map snd (dsAlts ds))
 percE' pe owned expr
   | Just ds <- destructVOf expr
-  = atomic pe owned (dsScrut ds) (needs (restFv ds)) $ \pe1 own1 z ->
-    do t <- typeOfV pe1 z
-       let expr' = nameChildren (dsBuild ds z (map snd (dsAlts ds)))
-       case destructVOf expr' of
-         Just ds' -> do tss <- liftE (altTypes (peEnv pe1) (V t) expr')
-                        dsBuild ds' z <$> destruct pe1 own1 (valName z) expr' [zip xs ts | ((xs,_),ts) <- zip (dsAlts ds') tss] (map snd (dsAlts ds'))
-         Nothing -> fail "expected a value destructuring"
+  = do let z = dsScrut ds
+       t <- typeOfV pe z
+       tss <- liftE (altTypes (peEnv pe) (V t) expr)
+       dsBuild ds z <$> destruct pe owned (valName z) expr [zip xs ts | ((xs,_),ts) <- zip (dsAlts ds) tss] (map snd (dsAlts ds))
 percE' pe owned expr
   = case expr of
       Ret v -> do (k,[v']) <- useVals pe owned [(Owned,v)]
@@ -288,7 +301,7 @@ percE' pe owned expr
         -> do let live2 = needs (fvE e2)
                   own2  = owned `S.intersection` live2
                   own1  = owned `S.difference` live2
-              e1' <- percE pe{ peBorrowed = peBorrowed pe `S.union` own2 } own1 e1
+              e1' <- percE pe own1 e1
               e2' <- percE (bind pe [(x,V t)]) (own2 `S.union` ownedOf pe [(x,V t)]) e2
               return (hoistdupAll (\e1'' -> Let x t e1'' e2') e1')
       -- the token moves into the test, and each branch owns its new token
@@ -299,13 +312,8 @@ percE' pe owned expr
       Unreachable _ -> return expr
       Call f tys vs
         -> do let ms = paramModes (peEnv pe) f (length vs)
-              case [(i,v) | (i,(Borrowed,v)) <- zip [0..] (zip ms vs), not (isAtom v)] of
-                ((i,v):_) -> do t <- typeOfV pe v
-                                s <- fresh "a"
-                                k <- letVal s (V t) v
-                                percE' pe owned (k (Call f tys (take i vs ++ [Var s] ++ drop (i+1) vs)))
-                [] -> do (k,vs') <- useVals pe owned (zip ms vs)
-                         postCall pe owned (zip ms vs) k (Call f tys vs') (resultOfCall pe f tys)
+              (k,vs') <- useVals pe owned (zip ms vs)
+              postCall pe owned (zip ms vs) k (Call f tys vs') (resultOfCall pe f tys)
       Jump j ts vs
         -> do ms <- maybe (fail ("unknown join point " ++ show j)) return (M.lookup j (peJoins pe))
               (k,vs') <- useVals pe owned (zip ms vs)
@@ -387,25 +395,6 @@ productProjection _ = False
 
 -- destructuring
 
--- make the scrutinee a variable or global
-atomic :: PEnv -> VarSet -> VVal -> VarSet -> (PEnv -> VarSet -> VVal -> P VExpr) -> P VExpr
-atomic pe owned v liveRest cont
-  = case v of
-      Var _  -> cont pe owned v
-      Glob _ _ -> cont pe owned v
-      _ -> do t <- typeOfV pe v
-              s <- fresh "s"
-              let ownV     = (owned `S.intersection` fvV v) `S.difference` liveRest
-                  rest     = owned `S.difference` ownV
-              (k,[v']) <- useVals pe{ peBorrowed = peBorrowed pe `S.union` rest } ownV [(Owned,v)]
-              body <- cont (bind pe [(s,V t)]) (rest `S.union` ownedOf pe [(s,V t)]) (Var s)
-              kv <- letVal s (V t) v'
-              return (k (kv body))
-
--- free variables of a destructuring expression without its scrutinee
-restFv :: Destruct v -> VarSet
-restFv ds = S.unions [fvE e `S.difference` S.fromList xs | (xs,e) <- dsAlts ds]
-
 destruct :: PEnv -> VarSet -> Maybe Path -> VExpr -> [[(Path,Ty)]] -> [VExpr] -> P [VExpr]
 destruct pe owned z expr binderss bodies
   = do let zOwned = case z of
@@ -423,7 +412,7 @@ destruct pe owned z expr binderss bodies
 
 -- the binders are borrowed from the scrutinee (and from its owner)
 borrowedBody :: PEnv -> VarSet -> ([(Path,Ty)],VExpr) -> P VExpr
-borrowedBody pe owned (bs,e) = percE (bind pe{ peBorrowed = peBorrowed pe `S.union` ownedOf pe bs } bs) owned e
+borrowedBody pe owned (bs,e) = percE (bind pe bs) owned e
 
 -- values
 
@@ -470,7 +459,7 @@ useA pe lastOcc i val
                   dups = [x | (x,j) <- idxs, not (moves x j), not (trivial x)]
               ys <- dupsOf pe dups
               let g    = M.union (M.fromList [(x,V t) | (x,_,t) <- ps]) (peGamma pe)
-                  inner = PEnv (peEnv pe) g S.empty M.empty
+                  inner = PEnv (peEnv pe) g M.empty
                   own  = S.fromList ([x | x <- caps, not (trivial x)] ++ [x | (x,_,t) <- ps, not (trivialTy (peEnv pe) (V t))])
               e' <- percE inner own e
               return (compose (map Dup ys), i + length caps, Lam ps r e')
