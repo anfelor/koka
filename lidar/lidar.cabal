@@ -22,6 +22,7 @@ library
       Lidar.Elab.TypeMatch
       Lidar.Env
       Lidar.Force
+      Lidar.Ground
       Lidar.Layout
       Lidar.Name
       Lidar.Parse
