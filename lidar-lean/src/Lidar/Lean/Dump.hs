@@ -103,11 +103,13 @@ data Alt = Alt Name [Param] Code | Default Code | AltUnsupported
 data ModInit = ModInit { initPhase :: String, initName :: String, initLean :: String, initImports :: [String] }
   deriving (Eq, Show)
 
--- | How a constant is linked: its C name, @\@[export]@ name, impure signature (parameters with
--- impure types and borrow flags, and the impure result type) and @\@[extern]@ entries.
+-- | How a constant is linked: its C name, @\@[export]@ name, the C name of its @_boxed@ version (for
+-- the module's declarations), impure signature (parameters with impure types and borrow flags,
+-- and the impure result type) and @\@[extern]@ entries.
 data Link = Link
   { linkCName  :: String
   , linkExport :: Maybe String
+  , linkBoxed  :: Maybe String
   , linkImpure :: Maybe ([Param], Type)
   , linkExtern :: Maybe [ExternEntry]
   } deriving (Eq, Show)
@@ -333,11 +335,12 @@ rExtern = mapM entry
 
 -- | The link and init attributes after a constant's name, and the items after them.
 rAttrs :: [SExp] -> R (Link, [Init], [SExp])
-rAttrs = go (Link "" Nothing Nothing Nothing) []
+rAttrs = go (Link "" Nothing Nothing Nothing Nothing) []
   where
     go l is es = case es of
       SList [SSym "cname", SStr c] : rest -> go l { linkCName = c } is rest
       SList [SSym "export", SStr c] : rest -> go l { linkExport = Just c } is rest
+      SList [SSym "boxed-cname", SStr c] : rest -> go l { linkBoxed = Just c } is rest
       SList [SSym "impure", ps, t] : rest -> do
         ps' <- rParams ps; t' <- rType t; go l { linkImpure = Just (ps', t') } is rest
       SList (SSym "extern" : xs) : rest -> do
@@ -486,9 +489,10 @@ sExtern es = SList (SSym "extern" : map entry es)
         entry Opaque = SSym "opaque"
 
 sAttrs :: Link -> [Init] -> [SExp]
-sAttrs (Link c ex imp ext) is =
+sAttrs (Link c ex bx imp ext) is =
   [SList [SSym "cname", SStr c]]
   ++ [ SList [SSym "export", SStr x] | Just x <- [ex] ]
+  ++ [ SList [SSym "boxed-cname", SStr x] | Just x <- [bx] ]
   ++ [ SList [SSym "impure", sParams ps, sType t] | Just (ps, t) <- [imp] ]
   ++ [ sExtern xs | Just xs <- [ext] ]
   ++ map sInit is

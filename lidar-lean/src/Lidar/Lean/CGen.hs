@@ -721,13 +721,11 @@ prototypes d
 -- or `lcVoid` parameter or a scalar result, if it is external, or if it has more parameters than
 -- a closure passes one by one (`requiresBoxedVersion`). It takes every parameter as an object (in
 -- an array beyond that), unboxes and releases the scalars, calls the declaration, releases the
--- borrowed objects and boxes a scalar result. Its C name is the declaration's symbol stem with
--- `___boxed`; the stem is the C name, except for `main` and exported declarations, which get no
--- boxed version.
+-- borrowed objects and boxes a scalar result. Its C name is in the dump.
 boxedFn :: D.Decl -> [C]
 boxedFn x
-  = case D.linkImpure link of
-      Just (ips,ir) | needsBoxed ips ir, Nothing <- D.linkExport link, D.declName x /= "main"
+  = case (D.linkImpure link, D.linkBoxed link) of
+      (Just (ips,ir), Just boxedName) | needsBoxed ips ir
         -> let n = length ips
                xs = ["x_" ++ show i | i <- [1..n]]
                (params,loads)
@@ -745,7 +743,7 @@ boxedFn x
                             Just l@(LScalar r) -> (cType l, boxScalar r "res")
                             _ -> ("lean_object*", "res")
                releases = ["lean_dec(" ++ x' ++ ");" | (p,x') <- zip ips xs, D.paramBorrow p, impureLeaf (D.paramType p) == Just LObj]
-           in ["LEAN_EXPORT lean_object*" <+> text (call (D.linkCName link ++ "___boxed") params)
+           in ["LEAN_EXPORT lean_object*" <+> text (call boxedName params)
                <+> block (map text (loads ++ unboxes ++ [rt ++ " res = " ++ app ++ ";"] ++ releases ++ ["return " ++ res ++ ";"]))]
       _ -> []
   where
