@@ -446,14 +446,15 @@ mayBeDummy expr
 -- which `matchCore` types as total) calls a function that takes a token, overapproximated: a
 -- function is also taken at its generic type (an effect-polymorphic function at a total
 -- instance takes a token), and one under an identity cast (`.open`, `unsafe-total`) at both
--- of its types, as elaboration calls it at its own (`elabApp`). The tests of the yield flag
+-- of its types, as elaboration calls it at its own (`elabApp`), as is a function returned by
+-- a call of a global (`ownResult`). The tests of the yield flag
 -- take a token too (`funTypeOf`), as does a function whose elaborated type takes one although
 -- its Koka type is total here: a global value (a handler at `∀e. … -> e r`, used at a total
 -- effect) or a local bound at such a type.
 usesToken :: Env -> C.Expr -> Bool
 usesToken en expr
   = case expr of
-      C.App f args -> any calls (typeOf f : generic f ++ maybe [] (\g -> typeOf g : generic g) (identityCast f)) || any (`isPrim` f) [nameYielding, nameYieldingNonFinal]
+      C.App f args -> any calls (typeOf f : generic f ++ maybe [] (\g -> typeOf g : generic g) (identityCast f) ++ genericResult f) || any (`isPrim` f) [nameYielding, nameYieldingNonFinal]
                       || any elaborated (f : maybe [] (: []) (identityCast f)) || any (usesToken en) (f : args)
       C.TypeApp e _ -> usesToken en e
       C.TypeLam _ e -> usesToken en e
@@ -468,6 +469,14 @@ usesToken en expr
     generic f = case splitTypeApp f of
                   (Just (TName _ gtp,_),_) -> [gtp]
                   _ -> []
+    -- a function returned by a call of a global is called at its generic type (`ownResult`)
+    genericResult f = case f of
+                        C.App g _ -> [r | gtp <- generic g, Just r <- [resultOf gtp]]
+                        _ -> []
+    resultOf tp = case expandSyn tp of
+                    TForall _ t -> resultOf t
+                    TFun _ _ r -> Just r
+                    _ -> Nothing
     bound d = case splitLam (C.defExpr d) of
                 Just (_,_,body) | isJoinName (C.defName d) -> usesToken en body
                 _ -> usesToken en (C.defExpr d)
@@ -560,10 +569,44 @@ elabApp f args resTp
                  callWith (coerceCall g)
                           (\vs -> do (ks,vs') <- unzip <$> sequence (zipWith3 ctxCopy copies params vs)
                                      return (compose ks (Call (toLidar g) tysD vs'))) params res args
-         _ -> do (k1,fv) <- elabVal f
-                 (params,res) <- funType f
-                 body <- callWith coerceExpr (applyFun (AFun params res) fv) (map snd params) res args
-                 return (k1 body)
+         _ -> do t <- vt (typeOf f)
+                 own <- ownResult f t
+                 (k1,fv,u) <- case own of
+                                Just r -> do x <- fresh "a"
+                                             (k,r') <- bindExpr x r f
+                                             return (k, Var x, r')
+                                Nothing -> elabValT f
+                 case u of
+                   -- a function value that would be wrapped (`wrapped`) is called at its own
+                   -- type, and its result is tested for null by `callWith`: no wrapper is allocated
+                   VPtr (AFun params res) | wrapped u t
+                     -> k1 <$> callWith coerceExpr (applyFun (AFun params res) fv) (map snd params) res args
+                   _ -> do (k2,fv') <- coerce u t fv
+                           (params,res) <- funType f
+                           body <- callWith coerceExpr (applyFun (AFun params res) fv') (map snd params) res args
+                           return (k1 (k2 body))
+
+-- The result type of a call `expr` of a global function at its own instance, where it is a
+-- function that would be wrapped at its Koka type `t` (`wrapped`), as for an effect-polymorphic
+-- function returned at a total effect (`unsafe-no-state-div-cast` in `force`)
+ownResult :: C.Expr -> VType -> E (Maybe VType)
+ownResult expr t
+  = case (expr,t) of
+      (C.App g args, VPtr (AFun _ _))
+        | not (isConApp g), isNothing (identityCast expr), isNothing (identityCast g), not (isJoin g)
+        -> do mbsig <- globalOf g
+              case mbsig of
+                Just (n,sig@SigFun{},gtp,tys) | length args == sigArity sig
+                  -> do (_,_,res) <- instFun n sig gtp tys
+                        return (if wrapped res t then Just res else Nothing)
+                _ -> return Nothing
+      _ -> return Nothing
+  where
+    isJoin g = case splitTypeApp g of
+                 (Just (TName j _,_),_) -> isJoinName j
+                 _ -> False
+    sigArity (SigFun _ ps _ _) = length (fst (tokenParam ps))
+    sigArity _ = -1
 
 globalOf :: C.Expr -> E (Maybe (Name,Sig,Type,[Type]))
 globalOf f

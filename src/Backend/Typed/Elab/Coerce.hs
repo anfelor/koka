@@ -7,7 +7,7 @@
 -----------------------------------------------------------------------------
 
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
-module Backend.Typed.Elab.Coerce( coerce, coerceInst, coerceExpr, coerceYielded, genVal, genPtr, applyFun ) where
+module Backend.Typed.Elab.Coerce( coerce, coerceInst, coerceExpr, coerceYielded, genVal, genPtr, applyFun, wrapped ) where
 
 import qualified Data.Map as M
 import Data.Maybe( isJust )
