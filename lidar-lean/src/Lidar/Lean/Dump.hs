@@ -43,7 +43,7 @@ data Dump = Dump
   , dumpIsModule   :: Bool
   , dumpImports    :: [Name]
   , dumpInits      :: [ModInit]     -- ^ the module's initializers
-  , dumpDecls      :: [Decl]        -- ^ the module's mono declarations, by name
+  , dumpDecls      :: [Decl]        -- ^ the module's mono declarations, in the order of declaration
   , dumpCtors      :: [CtorRef]     -- ^ constructors used by the declarations
   , dumpConsts     :: [Const]       -- ^ other constants used by the declarations
   , dumpInductives :: [Inductive]   -- ^ inductive types mentioned, closed under constructor fields

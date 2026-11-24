@@ -697,13 +697,16 @@ genDef env tgts cnames def
     cx0 = Ctx env tgts M.empty M.empty
     cname f = maybe (fail ("no C name for " ++ show f)) return (M.lookup f cnames)
 
--- the prototypes of the functions and values of other modules that the module uses (Lean's
--- `emitFnDecls`)
+-- the prototypes of the functions and values of other modules that the module uses, and the
+-- globals of the module's declarations with an `[init]` function (Lean's `emitFnDecls`)
 prototypes :: D.Dump -> [C]
 prototypes d
   = [ text p | c <- D.dumpConsts d, Just p <- [proto (linkTarget False (D.constLink c))] ]
-    ++ [ text p | x <- D.dumpDecls d, D.Extern _ <- [D.declValue x], Just p <- [proto (linkTarget False (D.declLink x))] ]
+    ++ [ text p | x <- D.dumpDecls d, D.Extern _ <- [D.declValue x]
+                , Just p <- [if hasInitFn x then global (D.declLink x) else proto (linkTarget False (D.declLink x))] ]
   where
+    global l = do (_,r) <- D.linkImpure l
+                  return ("LEAN_EXPORT " ++ ctype r ++ " " ++ D.linkCName l ++ ";")
     proto tgt
       = case (tgtCall tgt, tgtImpure tgt) of
           (Pattern,_) -> Nothing
@@ -780,17 +783,45 @@ initFns inits valueInits = concatMap initFn inits
                ++ ["return lean_io_result_mk_ok(lean_box(0));"]) ]
       where flag = "_G_" ++ D.initPhase i ++ "_initialized"
 
--- The module's values in an order in which each comes after the values that it reads, also
--- through the functions that it calls (as Lean initializes them in the order of declaration).
-initOrder :: [Def] -> [Name]
-initOrder defs = reverse (snd (foldl visit (S.empty,[]) (map defName defs)))
+-- The initializers of an `[init]` declaration (an `initialize` or `builtin_initialize` with a
+-- value, by the function that computes it) and of an `IO Unit` initializer, as Lean's
+-- `emitDeclInit` writes them for the runtime phase, where builtin initializers take precedence.
+-- The functions take only the world, which has no C parameter.
+hasInitFn :: D.Decl -> Bool
+hasInitFn x = not (null (initFnOf x))
+
+initFnOf :: D.Decl -> [D.Name]
+initFnOf x = [f | null (D.declParams x), f <- [f | D.BuiltinInitFn f <- D.declInit x] ++ [f | D.InitFn f <- D.declInit x]]
+
+isUnitInit :: D.Decl -> Bool
+isUnitInit x = any (`elem` [D.IOUnitInit, D.IOUnitBuiltinInit]) (D.declInit x)
+
+declInitCode :: M.Map Name Target -> D.Decl -> Either String [C]
+declInitCode tgts x
+  | isUnitInit x = return (run (D.linkCName link) [])
+  | f:_ <- initFnOf x
+  = do tgt <- maybe (Left ("no C name for the initializer " ++ f)) Right (M.lookup (leanName f) tgts)
+       let name = D.linkCName link
+           value = "lean_io_result_get_value(res)"
+       return $ run (tgtName tgt) $ case D.linkImpure link >>= impureLeaf . snd of
+         Just (LScalar r) -> [name ++ " = " ++ unboxScalar r value ++ ";"]
+         _ -> [name ++ " = " ++ value ++ ";", "if (!lean_is_scalar(" ++ name ++ ")) lean_mark_persistent(" ++ name ++ ");"]
+  | otherwise = return []
   where
-    uses = M.fromList [(defName d, namesE (defBody d)) | d <- defs]
-    values = S.fromList [defName d | d@DefVal{} <- defs]
+    link = D.declLink x
+    run f after = map text (["res = " ++ f ++ "();", "if (lean_io_result_is_error(res)) return res;"] ++ after ++ ["lean_dec_ref(res);"])
+
+-- The names with initializers (`inits`) in an order in which each comes after the declarations
+-- whose values it reads, also through the functions that it calls, and otherwise in the order of
+-- `roots` (the order of declaration, in which Lean initializes them). `uses` gives the names
+-- that each declaration uses.
+initOrder :: [Name] -> M.Map Name (S.Set Name) -> S.Set Name -> [Name]
+initOrder roots uses inits = reverse (snd (foldl visit (S.empty,[]) roots))
+  where
     visit (seen,acc) x
       | S.member x seen = (seen,acc)
       | otherwise = let (seen',acc') = foldl visit (S.insert x seen,acc) (S.toList (M.findWithDefault S.empty x uses))
-                    in (seen', if S.member x values then x : acc' else acc')
+                    in (seen', if S.member x inits then x : acc' else acc')
 
 -- the top-level functions and values that an expression uses
 namesE :: VExpr -> S.Set Name
@@ -872,10 +903,15 @@ cgenModule d prog
   = case runM (mapM genOne (progDefs prog)) () (St 0 []) of
       Left err -> Left [err]
       Right (rs,st)
-        | errs@(_:_) <- [e | Left e <- rs] -> Left errs
+        | errs@(_:_) <- [e | Left e <- rs] ++ [D.declName x ++ ": " ++ e | (x,Left e) <- declInits] -> Left errs
         | otherwise ->
             let ok = [x | Right x <- rs]
-                inits = M.fromList [(defName def, i) | (def,Right (_,_,i)) <- zip (progDefs prog) rs]
+                inits = M.filter (not . null) $ M.fromListWith (flip (++)) $
+                          [(defName def, i) | (def,Right (_,_,i)) <- zip (progDefs prog) rs]
+                          ++ [(leanName (D.declName x), i) | (x,Right i) <- declInits]
+                roots = map (leanName . D.declName) (D.dumpDecls d) ++ map defName (progDefs prog)
+                uses = M.fromList ([(defName def, namesE (defBody def)) | def <- progDefs prog]
+                                   ++ [(leanName (D.declName x), S.fromList (map leanName (initFnOf x))) | x <- D.dumpDecls d, hasInitFn x])
                 leanMain = maybe "_lean_main" tgtName (M.lookup (leanName "main") tgts)
                 doc = vsep ([ text ("// Lean compiler output (lidar-lean)")
                             , text ("// Module: " ++ D.dumpModule d)
@@ -900,13 +936,14 @@ cgenModule d prog
                             ++ stLams st
                             ++ [c | (_,c,_) <- ok]
                             ++ concatMap boxedFn [x | x <- D.dumpDecls d, defined x]
-                            ++ initFns (D.dumpInits d) (concat [inits M.! x | x <- initOrder (progDefs prog), M.member x inits])
+                            ++ initFns (D.dumpInits d) (concat [inits M.! x | x <- initOrder roots uses (M.keysSet inits)])
                             ++ maybe [] (mainFn d leanMain) (D.dumpMain d)
                             ++ ["#ifdef __cplusplus", "}", "#endif"])
             in Right (renderString (layoutPretty (LayoutOptions Unbounded) doc) ++ "\n")
   where
     env = envOf prog
     tgts = targetsOf d
+    declInits = [(x, declInitCode tgts x) | x <- D.dumpDecls d]
     cnames = M.fromList [(leanName (D.declName x), D.linkCName (D.declLink x)) | x <- D.dumpDecls d]
     -- the declarations that have a C function: the externs, and the functions that lowering kept
     funs = S.fromList [f | DefFun{ defName = f } <- progDefs prog]
