@@ -42,7 +42,7 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad.State( State, evalState, state )
 import Lidar.Syntax
-import Lidar.Traversal( descendAll, fvE, fvV, hasRegion, jumpArgs, stepsFrom, within )
+import Lidar.Traversal( descendAll, descendE, fvE, fvFrom, fvV, hasRegion, jumpArgs, lamsV, stepsFrom, usedIn, within )
 import Lidar.Passes.Common( mapAll, NameSupply, SubstExpr, cloneE, defScope, freshFor, freshNameFrom, project, substJump, substJumpM, substName, substStep, substTypesE, valueAt )
 import Lidar.Types( Types(..) )
 
@@ -50,7 +50,7 @@ simplifyProgram :: Program -> Program
 simplifyProgram prog = prog{ progDefs = map simplifyDef (progDefs prog) }
 
 simplifyDef :: Def -> Def
-simplifyDef def = def{ defBody = knownE M.empty (freshE (copyE (defScope def) (const Nothing) inlined)) }
+simplifyDef def = def{ defBody = fst (knownE M.empty (freshE (copyE (defScope def) (const Nothing) inlined))) }
   where
     inlined = evalState (inlineE (defBody def)) (freshFor def)
 
@@ -147,28 +147,39 @@ appendFresh x k expr
 
 -- cases of known values
 
-knownE :: M.Map Path VVal -> VExpr -> VExpr
+-- The result comes with its free variables, which `knownE` keeps as it rebuilds (`fvFrom`).
+knownE :: M.Map Path VVal -> VExpr -> (VExpr, S.Set Path)
 knownE known expr
   = case expr of
       Let x t e1 e2
-        -> let e1' = knownE known e1
+        -> let (e1',fv1) = knownE known e1
                known' = case e1' of
                           Ret v -> M.insert x v (shadow [x] known)
                           _     -> shadow [x] known
-               e2' = knownE known' e2
-           in if isRet e1' && not (used x e2') then e2' else Let x t e1' e2'
-      Deref v x e -> ifUsed x (Deref v x) (knownE (shadow [x] known) e)
-      Unroll v x e -> ifUsed x (Unroll v x) (knownE (shadow [x] known) e)
+               r2@(e2',fv2) = knownE known' e2
+           in if isRet e1' && not (usedIn x fv2) then r2 else rebuilt [fv1,fv2] (Let x t e1' e2')
+      Deref v x e -> keepIfUsed x (Deref v x) [] (knownE (shadow [x] known) e)
+      Unroll v x e -> keepIfUsed x (Unroll v x) [] (knownE (shadow [x] known) e)
       _ | Just (x,e) <- decided known expr -> taken x e
-      IsNull v n@Unreachable{} (x,e) -> ifUsed x (\e' -> IsNull v n (x,e')) (knownE (shadow [x] known) e)
+      IsNull v n@Unreachable{} (x,e) -> keepIfUsed x (\e' -> IsNull v n (x,e')) [S.empty] (knownE (shadow [x] known) e)
       _ -> descend
   where
-    descend = mapAll (\xs -> knownE (shadow xs known)) expr
+    descend = uncurry rebuilt (descendE pure (lamsV (\ps _ e -> ([], fst (knownE (shadow [y | (y,_,_) <- ps] known) e))))
+                                         (\xs e -> let (e',fv) = knownE (shadow xs known) e in ([fv], e')) expr)
     -- the taken alternative, unless it uses its binder
-    taken x e = let e' = knownE (shadow [x] known) e
-                in if used x e' then descend else e'
+    taken x e = let r@(_,fv) = knownE (shadow [x] known) e
+                in if usedIn x fv then descend else r
     isRet (Ret _) = True
     isRet _ = False
+
+-- an expression with its free variables, given those of its subexpressions
+rebuilt :: [S.Set Path] -> VExpr -> (VExpr, S.Set Path)
+rebuilt fvs e = (e, fvFrom fvs e)
+
+-- `ifUsed` on an expression with its free variables; `wrap` puts it last among subexpressions
+-- whose free variables are `fvs`
+keepIfUsed :: Path -> (VExpr -> VExpr) -> [S.Set Path] -> (VExpr, S.Set Path) -> (VExpr, S.Set Path)
+keepIfUsed x wrap fvs r@(e,fv) = if usedIn x fv then rebuilt (fvs ++ [fv]) (wrap e) else r
 
 -- the alternative of a destructuring of a known value, with its binder
 decided :: M.Map Path VVal -> VExpr -> Maybe (Path,VExpr)
@@ -202,7 +213,7 @@ ifUsed :: Path -> (VExpr -> VExpr) -> VExpr -> VExpr
 ifUsed x wrap e = if used x e then wrap e else e
 
 used :: Path -> VExpr -> Bool
-used x e = any (`within` x) (fvE e)
+used x e = usedIn x (fvE e)
 
 -- the known boxed value at a path that passes through a pointer of a known value
 knownAt :: M.Map Path VVal -> Path -> Maybe AVal

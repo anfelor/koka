@@ -297,6 +297,20 @@ fvV val
 fvE :: VExpr -> S.Set Path
 fvE expr = getConst (descendE (Const . S.singleton) (Const . fvV) (\xs e -> Const (fvE e `S.difference` S.fromList xs)) expr)
 
+-- The free variables of an expression, given those of its subexpressions in the order of
+-- `descendE`. A pass that rebuilds an expression bottom-up can keep them as it goes, rather
+-- than calling `fvE`, which is quadratic in the length of a `let` chain.
+fvFrom :: [S.Set Path] -> VExpr -> S.Set Path
+fvFrom fvs expr = S.unions (operands : zipWith (\xs fv -> fv `S.difference` S.fromList xs) binders fvs)
+  where
+    operands = getConst (descendE (Const . S.singleton) (Const . fvV) (\_ _ -> Const S.empty) expr)
+    binders = getConst (descendE (const (Const [])) (const (Const [])) (\xs _ -> Const [xs]) expr)
+
+-- Whether `x` or a path below it is in a set of free variables. The paths below `x` follow it
+-- in `Ord Path`.
+usedIn :: Path -> S.Set Path -> Bool
+usedIn x fvs = maybe False (`within` x) (S.lookupGE x fvs)
+
 -- the occurrences of the hole, except in nested contexts and closures (which do not bind it)
 holes :: VVal -> Int
 holes = getSum . holesV
