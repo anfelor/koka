@@ -180,13 +180,17 @@ childrenToward tr p@(Path _ ss) (Path _ ts) = go p (drop (length ss) ts)
     go v (s:rest) = [key tr q | q <- siblingsOf tr (child v s)] ++ go (child v s) rest
 
 -- Count the references to a variable with one of the `keys` (or another variable of the
--- counts) below it as references to its children. The variables above `q` are its prefixes,
--- so they are looked up instead of comparing every pair.
+-- counts) below it as references to its children. A path comes right after its prefixes, as
+-- every path between them has the same prefix: where the counts do not overlap, the only one
+-- above a key `q` is the largest one before it, and counts that overlap (`key` changes as
+-- children are recorded) are neighbours.
 refine :: Children -> [Path] -> Counts -> Counts
 refine tr keys m
-  = case [(p,q) | q <- keys ++ M.keys m, p <- prefixes q, M.member p m] of
+  = case [(p,q) | q <- keys, Just (p,_) <- [M.lookupLT q m], q `within` p] ++ [(p,q) | (p,q) <- zip ks (drop 1 ks), q `within` p] of
       ((p,q):_) -> refine tr keys (M.filter (/= 0) (M.unionWith (+) (M.delete p m) (M.fromList [(r,m M.! p) | r <- childrenToward tr p q])))
       [] -> m
+  where
+    ks = M.keys m
 
 -- Count the references to all children of a variable as references to the variable. Like
 -- `[own-pair]` and `[own-child]` of the paper, read bottom-up, this happens only where a
