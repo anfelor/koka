@@ -25,8 +25,8 @@ import Backend.Typed.Elab.FromCore( elabProgram )
 import Backend.Typed.Elab.Lazy( lazyFuns )
 
 -- returns the lowered program, its errors and its warnings, labeled by the phase that produced them
-typedFromCore :: Bool -> Newtypes -> Foreign -> [C.Core] -> Int -> C.Core -> (Program,[(String,String)],[(String,String)])
-typedFromCore enableReuse nt ffi imports uniq core
+typedFromCore :: Bool -> Bool -> Newtypes -> Foreign -> [C.Core] -> Int -> C.Core -> (Program,[(String,String)],[(String,String)])
+typedFromCore enableReuse checkAll nt ffi imports uniq core
   = assertion "Backend.Typed.Typed: lidar names differ from Koka's" lidarNamesAgree $
     let (acore,_)              = runUnique uniq (matchCore nt core)
         (eprog,elabErrs,notes) = elabProgram nt ffi imports acore
@@ -34,7 +34,8 @@ typedFromCore enableReuse nt ffi imports uniq core
                                         , optPeephole  = null elabErrs
                                         , optLazies    = lazyFuns nt (progTypes eprog)
                                         , optFips      = fipsOf (core:imports)
-                                        , optRecGroups = groupsOf core }
+                                        , optRecGroups = groupsOf core
+                                        , optCheckBetween = checkAll }
         -- Elaboration does not name paths (Paths does), so only its types are checked.
         typeErrs               = label "check after elab" (checkTypes eprog)
         (final,errs,warnings)  = if null typeErrs then lowerProgram opts eprog else (eprog,typeErrs,[])

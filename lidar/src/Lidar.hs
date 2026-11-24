@@ -24,8 +24,13 @@ module Lidar
     -- * Checking and lowering
   , checkTypes
   , Options(..), Lazies(..)
-  , lowerProgram
+  , lowerProgram, lowerProgramTimed
   ) where
+
+import Control.Exception( evaluate )
+import Data.Functor.Identity( runIdentity )
+import Data.IORef( newIORef, modifyIORef, readIORef )
+import GHC.Clock( getMonotonicTime )
 
 import Data.List( nubBy )
 import Data.Function( on )
@@ -34,6 +39,7 @@ import qualified Data.Set as S
 import Lidar.Name
 import Lidar.Syntax
 import Lidar.Env( Lazies(..) )
+import Lidar.Force( rnf )
 import Lidar.Pretty( ppr, prettyProgram )
 import Lidar.Parse( parseProgram, unknownA, unknownV )
 import Lidar.Annotate( annotateProgram )
@@ -66,12 +72,28 @@ data Options = Options
   , optLazies    :: Lazies              -- ^ the lazy constructors (`Passes.Lazy`)
   , optFips      :: M.Map Name Fip      -- ^ the FIP annotations of functions, incl. imported ones
   , optRecGroups :: [S.Set Name]        -- ^ the recursive groups of the module (for `CheckFip`)
+  , optCheckBetween :: Bool             -- ^ run the required checks after every pass, not only
+                                        --   after the last one (to find the pass that breaks them)
   }
+
+type Lowered = (Program,[(String,String)],[(String,String)])
 
 -- lowers a program for which `checkTypes` reports no errors; returns the lowered program,
 -- its errors and its warnings, labeled by the pass that produced them
-lowerProgram :: Options -> Program -> (Program,[(String,String)],[(String,String)])
-lowerProgram opts prog = runPipeline prog (pipeline opts)
+lowerProgram :: Options -> Program -> Lowered
+lowerProgram opts prog = runIdentity (runPipeline (\_ _ -> return ()) opts prog)
+
+-- `lowerProgram`, also returning the time in seconds of each pass and check, in the order they ran
+lowerProgramTimed :: Options -> Program -> IO (Lowered,[(String,Double)])
+lowerProgramTimed opts prog
+  = do ref <- newIORef []
+       let tick name work = do t0 <- getMonotonicTime
+                               _ <- evaluate work
+                               t1 <- getMonotonicTime
+                               modifyIORef ref ((name,t1 - t0):)
+       lowered <- runPipeline tick opts prog
+       times <- readIORef ref
+       return (lowered,reverse times)
 
 pipeline :: Options -> [PipelineStep]
 pipeline opts
@@ -120,23 +142,39 @@ data PipelineStep = Pass String (Program -> (Program,[String]))
 
 -- Stop at the first failing pass or required check, so that the errors identify the pass
 -- responsible. Report each warning only after the first pass where it appears.
-runPipeline :: Program -> [PipelineStep] -> (Program,[(String,String)],[(String,String)])
-runPipeline prog0 steps0
-  = let (final,errs,warnings) = go [] [] prog0 steps0
-    in (final,errs,nubBy ((==) `on` snd) warnings)
+-- Unless `optCheckBetween`, the required checks run only after the last pass.
+-- `tick name work` is called with the full evaluation of each pass and check, in order.
+runPipeline :: Monad m => (String -> () -> m ()) -> Options -> Program -> m Lowered
+runPipeline tick opts prog0
+  = do (final,errs,warnings) <- go [] [] prog0 (pipeline opts)
+       return (final,errs,nubBy ((==) `on` snd) warnings)
   where
-    go _ _ prog [] = (prog,[],[])
+    go required _ prog []
+      | optCheckBetween opts = return (prog,[],[])
+      | otherwise = do errss <- mapM (runCheck "all passes" prog) required
+                       return (prog,firstErrors errss,[])
     go required advisory prog (Require name check:steps)
       = go (required ++ [(name,check)]) advisory prog steps
     go required advisory prog (Advise name check:steps)
       = go required (advisory ++ [(name,check)]) prog steps
     go required advisory prog (Pass name pass:steps)
-      = let (prog',errs) = pass prog
-            checkAfter (kind,check) = label (kind ++ " after " ++ name) (check prog')
-        in case dropWhile null (label name errs : map checkAfter required) of
-             firstErrs:_ -> (prog',firstErrs,[])
-             [] -> let (final,errors,warnings) = go required advisory prog' steps
-                   in (final,errors,concatMap checkAfter advisory ++ warnings)
+      = do let (prog',errs) = pass prog
+               passErrs = label name errs
+           tick name (rnf prog' `seq` rnf passErrs)
+           errss <- if optCheckBetween opts then mapM (runCheck name prog') required else return []
+           case firstErrors (passErrs : errss) of
+             [] -> do warningss <- mapM (runCheck name prog') advisory
+                      (final,errors,warnings) <- go required advisory prog' steps
+                      return (final,errors,concat warningss ++ warnings)
+             firstErrs -> return (prog',firstErrs,[])
+
+    runCheck after prog (kind,check)
+      = do let msgs = label (kind ++ " after " ++ after) (check prog)
+           tick (kind ++ " after " ++ after) (rnf msgs)
+           return msgs
+    firstErrors errss = case dropWhile null errss of
+                          errs:_ -> errs
+                          []     -> []
 
 label :: String -> [String] -> [(String,String)]
 label l msgs = [(l,msg) | msg <- msgs]

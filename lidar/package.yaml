@@ -8,6 +8,7 @@ description: The typed intermediate representation of Koka's typed backend.
 dependencies:
   - base >= 4.9
   - containers
+  - deepseq
   - mtl
   - parsec
   - prettyprinter

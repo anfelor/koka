@@ -26,12 +26,12 @@ import qualified Backend.Typed.CGen.CGen as CGen
 
 -- Returns the final IR (for debugging), the diagnostics, and either an error or the header
 -- and source.
-typedCFromCore :: BuildType -> FilePath -> Bool -> Newtypes -> [C.Core] -> C.Core -> (Doc,[String],Either String (String,String))
-typedCFromCore buildType sourceDir enableReuse newtypes imports core
+typedCFromCore :: BuildType -> FilePath -> Bool -> Bool -> Newtypes -> [C.Core] -> C.Core -> (Doc,[String],Either String (String,String))
+typedCFromCore buildType sourceDir enableReuse checkAll newtypes imports core
   = (string (ppr tprog) <.> linebreak, map diagnostic (errors ++ warnings), result)
   where
     modName                 = C.coreProgName core
-    (tprog,errors,warnings) = typedFromCore enableReuse newtypes (foreignOf buildType sourceDir core) imports 1000000 core
+    (tprog,errors,warnings) = typedFromCore enableReuse checkAll newtypes (foreignOf buildType sourceDir core) imports 1000000 core
     diagnostic (phase,msg)  = "typed " ++ phase ++ ": " ++ msg
 
     -- Warnings (such as FIP diagnostics) are advisory, like the frontend's FIP warnings.

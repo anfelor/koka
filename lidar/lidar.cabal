@@ -21,6 +21,7 @@ library
       Lidar.Elab.Representation
       Lidar.Elab.TypeMatch
       Lidar.Env
+      Lidar.Force
       Lidar.Layout
       Lidar.Name
       Lidar.Parse
@@ -59,6 +60,7 @@ library
   build-depends:
       base >=4.9
     , containers
+    , deepseq
     , mtl
     , parsec
     , prettyprinter
