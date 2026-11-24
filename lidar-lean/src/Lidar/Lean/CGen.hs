@@ -283,7 +283,8 @@ genA cx tag val
 
 -- A constructor object: fresh, or in the block of a credit. The leaves are evaluated before
 -- the block is written. All fields are written, so a block may come from any credit of its
--- size: its header gets the tag and the number of objects.
+-- size: its header gets the tag and the number of objects. Spill objects are always fresh, as
+-- a credit has none (`UnboxRu`).
 genBox :: Ctx -> Int -> Maybe Path -> VVal -> G String
 genBox cx tag at v
   = do ls <- tyOf cx v >>= leavesOf
@@ -299,6 +300,7 @@ genBox cx tag at v
                                  _ -> call "lt_reuse" [localName r, allocCtor tag pl, show tag, show (plObjs pl)]
        return (stmtExpr ([cType l ++ " " ++ x ++ " = " ++ e ++ ";" | (l,x,e) <- zip3 ls tmps es]
                          ++ ["lean_object* " ++ b ++ " = " ++ alloc ++ ";"]
+                         ++ allocSpills pl b
                          ++ [writeSlot pl b s x | (s,x) <- zip (plSlots pl) tmps]) b)
 
 -- A top-level function as a closure. Lean's closures take objects, so its parameters and
@@ -418,8 +420,11 @@ genE cx dest expr
            return [ifElse (localName r ++ " != NULL") s1 s2]
       UnboxRu z e ->
         do g <- liftQ (unboxRuGamma (cxGamma cx) z)
+           A a <- tyOfName cx z
+           pl <- liftQ (boxContents a) >>= leavesOf >>= liftQ . payload
            s <- genE cx{ cxGamma = g } dest e
-           return (text ("lean_object* " ++ localName (child z SCredit) ++ " = " ++ localName z ++ ";") : s)
+           return (map text (releaseSpills pl (localName z))
+                   ++ text ("lean_object* " ++ localName (child z SCredit) ++ " = " ++ localName z ++ ";") : s)
       -- the credit needs no copy of the contents, as a box written into it writes all fields
       CopyRu z r e ->
         do g <- liftQ (copyRuGamma (cxGamma cx) z r)
@@ -880,7 +885,28 @@ prelude
     , "  lean_ctor_set_tag(r, tag); r->m_other = objs; return r;"
     , "}"
     , "// the block of a credit that may be empty, or else a fresh constructor object"
-    , "#define lt_reuse(r, fresh, tag, objs) ((r) == NULL ? (fresh) : lt_reuse_full(r, tag, objs))" ]
+    , "#define lt_reuse(r, fresh, tag, objs) ((r) == NULL ? (fresh) : lt_reuse_full(r, tag, objs))"
+    , "// the next spill object of a spill object s, or NULL (only the last one has fewer than 255 objects)"
+    , "static inline lean_object* lt_next_spill(lean_object* s) {"
+    , "  return lean_ctor_num_objs(s) == LEAN_MAX_CTOR_NUM_OBJS ? lean_ctor_get(s, LEAN_MAX_CTOR_NUM_OBJS - 1) : NULL;"
+    , "}"
+    , "// releases the chain of spill objects s of a unique constructor object whose fields were read"
+    , "// out of it without changing reference counts: frees the unique ones, and takes references to"
+    , "// the fields read out of a shared one and its successors before releasing it"
+    , "static inline void lt_release_spills(lean_object* s) {"
+    , "  while (lean_is_exclusive(s)) {"
+    , "    lean_object* next = lt_next_spill(s);"
+    , "    lean_free_object(s);"
+    , "    if (next == NULL) return;"
+    , "    s = next;"
+    , "  }"
+    , "  for (lean_object* t = s; t != NULL; t = lt_next_spill(t)) {"
+    , "    unsigned n = lean_ctor_num_objs(t);"
+    , "    if (n == LEAN_MAX_CTOR_NUM_OBJS) n--;"
+    , "    for (unsigned i = 0; i < n; i++) lean_inc(lean_ctor_get(t, i));"
+    , "  }"
+    , "  lean_dec(s);"
+    , "}" ]
 
 -- | The C file of a lowered program and the dump it was elaborated from, or the errors of the
 -- definitions that could not be generated.

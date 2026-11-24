@@ -17,6 +17,7 @@ scalars (@UInt32.ofNat@) into the scalars.
 -}
 module Lidar.Lean.CGen.Ground( foldable, groundDecls, cString ) where
 
+import Control.Monad( foldM )
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Bits( shiftL, shiftR, xor, (.&.) )
@@ -204,13 +205,19 @@ header :: String -> Int -> Int -> String
 header size other tag = "{.m_rc = 0, .m_cs_sz = " ++ size ++ ", .m_other = " ++ show other ++ ", .m_tag = " ++ show tag ++ "}"
 
 -- A constructor object: its objects, `usize` fields and other scalars in the slots of
--- `CGen.Layout.payload`, the scalars as bytes in words of 8 (`LEAN_SCALAR_PTR_LITERAL`).
+-- `CGen.Layout.payload`, the scalars as bytes in words of 8 (`LEAN_SCALAR_PTR_LITERAL`), and its
+-- spill objects, which are written first.
 ctorObject :: Int -> [Leaf] -> [GLeaf] -> G String
 ctorObject tag ls gs
   = do pl <- liftE (payload ls)
        if length gs /= length ls then fail "a constructor object with the wrong number of fields" else do
          fields <- mapM slot (zip (plSlots pl) gs)
-         let objs = M.fromList [(i,e) | Left (Left (i,e)) <- fields]
+         let spilled = M.fromList [(di,e) | Left (Left (Right di,e)) <- fields]
+             spill d n link = object "lean_ctor_object"
+                                ("{.m_header = " ++ header ("sizeof(lean_ctor_object) + sizeof(void*)*" ++ show n) n 0
+                                 ++ ", .m_objs = {" ++ intercalate "," ([spilled M.! (d,i) | i <- [0 .. n - 1 - length link]] ++ link) ++ "}}")
+         links <- foldM (\link (d,n) -> (:[]) <$> spill d n link) [] (reverse (zip [1..] (plSpills pl)))
+         let objs = M.fromList ([(i,e) | Left (Left (Left i,e)) <- fields] ++ [(plObjs pl - 1, l) | l <- links])
              usizes = M.fromList [(i,n) | Left (Right (i,n)) <- fields]
              bytes = M.fromList (concat [b | Right b <- fields])
              ssize = ((plScalars pl + 7) `div` 8) * 8
@@ -223,7 +230,8 @@ ctorObject tag ls gs
          object "lean_ctor_object" ("{.m_header = " ++ header size (plObjs pl) tag ++ ", .m_objs = {" ++ intercalate "," fs ++ "}}")
   where
     slot (s,g) = case (s,g) of
-                   (SObj i, GObj e) -> return (Left (Left (i,e)))
+                   (SObj i, GObj e) -> return (Left (Left (Left i,e)))
+                   (SSpill d i, GObj e) -> return (Left (Left (Right (d,i),e)))
                    (SUSize i, GScalar n) -> return (Left (Right (i,n)))
                    (SScalar r off, GScalar n) -> do k <- maybe (fail "a usize scalar") return (scalarSize r)
                                                     return (Right [(off + j, (n `shiftR` (8*j)) .&. 0xff) | j <- [0 .. k-1]])

@@ -20,10 +20,14 @@ enumeration is a scalar of the size Lean gives it.
 A box @Box V@ with tag i is a constructor object with tag i (Lean's @cidx@), whose fields are the
 leaves of V in Lean's order (@getCtorLayout@ in Lean's @ToImpureType.lean@): the objects, then
 the @usize@ fields, then the other scalars by decreasing size, each group in the order of V.
+A box with more objects than a constructor object holds (@LEAN_MAX_CTOR_NUM_OBJS@) keeps the
+first 254 and links to a chain of spill objects (constructor objects with tag 0) in its last
+object field; each spill object holds the next 254 objects and links to the next one, except the
+last, which holds the rest (@spilled@ fields in Lean's @ToImpureType.lean@).
 -}
 module Lidar.Lean.CGen.Layout
   ( Leaf(..), leafOf, cType
-  , Slot(..), Payload(..), payload, allocCtor, readSlot, writeSlot
+  , Slot(..), Payload(..), payload, allocCtor, readSlot, writeSlot, allocSpills, releaseSpills
   , boxScalar, unboxScalar, scalarSize
   ) where
 
@@ -88,26 +92,40 @@ scalarSize r = let (_,n,_) = scalarOf r in n
 accessor :: Raw -> String
 accessor r = let (_,_,a) = scalarOf r in a
 
--- | Where a leaf of a payload is: an object field, a @usize@ field (by index among them), or a
--- scalar field at a byte offset after the objects and @usize@ fields.
-data Slot = SObj Int | SUSize Int | SScalar Raw Int
+-- | Where a leaf of a payload is: an object field, an object field of the spill object at a
+-- depth, a @usize@ field (by index among them), or a scalar field at a byte offset after the
+-- objects and @usize@ fields.
+data Slot = SObj Int | SSpill Int Int | SUSize Int | SScalar Raw Int
 
 -- | The layout of the payload of a constructor object: the numbers of object and @usize@
--- fields, the size of the other scalars, and the slot of each leaf.
-data Payload = Payload{ plObjs :: Int, plUSize :: Int, plScalars :: Int, plSlots :: [Slot] }
+-- fields, the size of the other scalars, the slot of each leaf, and the number of object fields
+-- of each spill object, by depth.
+data Payload = Payload{ plObjs :: Int, plUSize :: Int, plScalars :: Int, plSlots :: [Slot], plSpills :: [Int] }
+
+maxCtorObjs, spillLink :: Int
+maxCtorObjs = 255
+spillLink = maxCtorObjs - 1
 
 payload :: [Leaf] -> Either String Payload
 payload ls
   | LCredit `elem` ls = Left "a credit in a constructor object"
-  | otherwise = Right (Payload (length objs) (length usizes) (sum (map snd scalars)) (map (slots M.!) (map fst indexed)))
+  | otherwise = Right (Payload (if spills == 0 then nobjs else maxCtorObjs) (length usizes) (sum (map snd scalars))
+                               (map (slots M.!) (map fst indexed))
+                               [if d < spills then maxCtorObjs else nobjs - spills * spillLink | d <- [1 .. spills]])
   where
+    nobjs = length objs
+    spills = if nobjs <= maxCtorObjs then 0 else (nobjs - 1) `div` spillLink
+    objSlot j | spills == 0 = SObj j
+              | otherwise = case j `divMod` spillLink of
+                              (0,i) -> SObj i
+                              (d,i) -> SSpill d i
     indexed = zip [0 :: Int ..] ls
     objs = [i | (i,LObj) <- indexed]
     usizes = [i | (i,LScalar r) <- indexed, scalarSize r == Nothing]
     -- by decreasing size, each size in leaf order
     scalars = [(i,n) | n <- [8,4,2,1], (i,LScalar r) <- indexed, scalarSize r == Just n]
     scalarRaw i = case ls !! i of { LScalar r -> r; _ -> RUInt8 }
-    slots = M.fromList (zip objs (map SObj [0..]) ++ zip usizes (map SUSize [0..])
+    slots = M.fromList (zip objs (map objSlot [0..]) ++ zip usizes (map SUSize [0..])
                         ++ [(i,SScalar (scalarRaw i) off) | ((i,_),off) <- zip scalars (scanl (+) 0 (map snd scalars))])
 
 -- | A fresh constructor object with the given tag for the payload.
@@ -124,6 +142,7 @@ readSlot :: Payload -> String -> Slot -> String
 readSlot pl o s
   = case s of
       SObj i -> "lean_ctor_get(" ++ o ++ ", " ++ show i ++ ")"
+      SSpill d i -> "lean_ctor_get(" ++ spillAt o d ++ ", " ++ show i ++ ")"
       SUSize i -> "lean_ctor_get_usize(" ++ o ++ ", " ++ show (plObjs pl + i) ++ ")"
       SScalar r off -> "lean_ctor_get_" ++ accessor r ++ "(" ++ o ++ ", " ++ scalarOffset pl off ++ ")"
 
@@ -132,8 +151,29 @@ writeSlot :: Payload -> String -> Slot -> String -> String
 writeSlot pl o s v
   = case s of
       SObj i -> "lean_ctor_set(" ++ o ++ ", " ++ show i ++ ", " ++ v ++ ");"
+      SSpill d i -> "lean_ctor_set(" ++ spillAt o d ++ ", " ++ show i ++ ", " ++ v ++ ");"
       SUSize i -> "lean_ctor_set_usize(" ++ o ++ ", " ++ show (plObjs pl + i) ++ ", " ++ v ++ ");"
       SScalar r off -> "lean_ctor_set_" ++ accessor r ++ "(" ++ o ++ ", " ++ scalarOffset pl off ++ ", " ++ v ++ ");"
+
+-- the spill object at depth d of the constructor object o (o itself at depth 0)
+spillAt :: String -> Int -> String
+spillAt o 0 = o
+spillAt o d = "lean_ctor_get(" ++ spillAt o (d-1) ++ ", " ++ show spillLink ++ ")"
+
+-- | The statements that give the constructor object @o@ fresh spill objects, before its slots
+-- are written.
+allocSpills :: Payload -> String -> [String]
+allocSpills pl o
+  = [ "lean_ctor_set(" ++ spillAt o (d-1) ++ ", " ++ show spillLink ++ ", lean_alloc_ctor(0, " ++ show n ++ ", 0));"
+    | (d,n) <- zip [1..] (plSpills pl) ]
+
+-- | The statements that release the spill objects of the unique constructor object @o@ whose
+-- contents were read out without changing reference counts, when its block becomes a credit
+-- (@lt_release_spills@).
+releaseSpills :: Payload -> String -> [String]
+releaseSpills pl o
+  | null (plSpills pl) = []
+  | otherwise = ["lt_release_spills(" ++ spillAt o 1 ++ ");"]
 
 -- | Lean's box of a scalar (@Scalar raw@): immediate for small integers, an object otherwise.
 boxScalar :: Raw -> String -> String
