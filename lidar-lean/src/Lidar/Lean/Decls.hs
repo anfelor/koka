@@ -61,7 +61,10 @@ data CtorInfo = CtorInfo
 data Kind = KRaw Raw              -- ^ a scalar
           | KPrim VType           -- ^ @int*@ or @string*@
           | KAbstract             -- ^ a type without constructors that the IR knows
-          | KTrivial D.Type       -- ^ a trivial structure: the type of its relevant field
+          | KTrivial D.Type (Maybe Int)
+            -- ^ a trivial structure: the mono type of its relevant field, and the parameter that
+            -- is that type, if it is one (mono types erase parameters to @lcAny@, but Lean's impure
+            -- type of @ST.Out σ α@ is that of @α@)
           | KEnum [D.Name]        -- ^ an enumeration, by its constructors
           | KRef                  -- ^ a reference datatype
 
@@ -114,8 +117,8 @@ typeKind inds n
   = case M.lookup n inds of
       Nothing -> KAbstract
       Just ind
-        | Just (c,_,f) <- D.indTrivial ind, Just ctor <- lookupCtor c ind
-          -> KTrivial (maybe (D.TConst "lcAny") id (ctorFieldType ctor (fromInteger f)))
+        | Just (c,_,f,k) <- D.indTrivial ind, Just ctor <- lookupCtor c ind
+          -> KTrivial (maybe (D.TConst "lcAny") id (ctorFieldType ctor (fromInteger f))) (fromInteger <$> k)
         | Just (D.TConst s) <- D.indImpure ind, Just r <- lookup s rawTypes
           -> if s `elem` ["UInt8","UInt16","UInt32"] && not (null (D.indCtors ind)) && all ((== 0) . D.ctorNumFields) (D.indCtors ind)
                then KEnum (map D.ctorName (sortOn D.ctorIndex (D.indCtors ind)))
@@ -134,14 +137,16 @@ irType inds t
       D.TConst "lcVoid" -> VUnit
       D.TConst n | n `elem` ["lcAny","lcErased"] -> anyT
       D.TConst n -> named n
-      D.TApp (D.TConst n) _ -> named n
+      D.TApp (D.TConst n) as
+        | KTrivial _ (Just k) <- typeKind inds n, k < length as -> irType inds (as !! k)
+        | otherwise -> named n
       _ -> anyT
   where
     named n = case typeKind inds n of
                 KRaw r -> VRaw r
                 KPrim v -> v
                 KAbstract -> VPtr (ACon (leanName n) [])
-                KTrivial f -> irType inds f
+                KTrivial f _ -> irType inds f
                 KEnum cs -> VSum [(Con (leanName c), VUnit) | c <- cs]
                 KRef -> VPtr (ACon (leanName n) [])
 

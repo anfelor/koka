@@ -340,7 +340,7 @@ trivialField :: D.Name -> E (Maybe Int)
 trivialField tname
   = do is <- inds
        return $ case (typeKind is tname, M.lookup tname is) of
-                  (KTrivial _, Just ind) | Just (_,_,f) <- D.indTrivial ind -> Just (fromInteger f)
+                  (KTrivial _ _, Just ind) | Just (_,_,f,_) <- D.indTrivial ind -> Just (fromInteger f)
                   _ -> Nothing
 
 elabConValue :: CtorInfo -> [D.Arg] -> E (K,VExpr,VType)
@@ -463,7 +463,7 @@ elabCases res tname x alts
        if length explicit + length dflt /= length alts then fail ("an alternative of a case on " ++ tname) else
          case typeKind is tname of
            -- the alternative of a trivial structure binds its relevant field to the scrutinee
-           KTrivial _ | [(_,(_,_,ps,code))] <- explicit, Just f <- trivial ->
+           KTrivial _ _ | [(_,(_,_,ps,code))] <- explicit, Just f <- trivial ->
              do let bind (j,p) k = do tp <- irT (D.paramType p)
                                       (kv,w) <- if j == f then localVal x tp else erased tp
                                       bindLocal (D.paramVar p) (D.paramName p) tp $ \v ->

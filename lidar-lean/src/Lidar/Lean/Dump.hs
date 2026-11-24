@@ -148,7 +148,9 @@ data ConstMono = MonoSig [Param] Type | MonoType Type
 data Inductive = Inductive
   { indName    :: Name
   , indImpure  :: Maybe Type                    -- ^ impure type of its values
-  , indTrivial :: Maybe (Name, Integer, Integer)  -- ^ trivial structure: constructor, parameters, field
+  , indTrivial :: Maybe (Name, Integer, Integer, Maybe Integer)
+    -- ^ trivial structure: constructor, parameters, field, and the parameter that is the
+    -- field's type, if it is one
   , indCtors   :: [Ctor]
   } deriving (Eq, Show)
 
@@ -383,7 +385,9 @@ rInductive e = case e of
     it' <- case it of SSym "unknown" -> pure Nothing
                       _ -> Just <$> rType it
     case rest of
-      SList [SSym "trivial", SStr c, SInt p, SInt f] : cs -> Inductive n it' (Just (c, p, f)) <$> mapM rCtor cs
+      SList [SSym "trivial", SStr c, SInt p, SInt f] : cs -> Inductive n it' (Just (c, p, f, Nothing)) <$> mapM rCtor cs
+      SList [SSym "trivial", SStr c, SInt p, SInt f, SList [SSym "param", SInt k]] : cs ->
+        Inductive n it' (Just (c, p, f, Just k)) <$> mapM rCtor cs
       cs -> Inductive n it' Nothing <$> mapM rCtor cs
   _ -> bad "an inductive type" e
   where
@@ -518,7 +522,8 @@ sConst (Const n l m) =
 sInductive :: Inductive -> SExp
 sInductive (Inductive n it tr cs) =
   SList (SSym "inductive" : SStr n : SList [SSym "impure", maybe (SSym "unknown") sType it]
-         : [ SList [SSym "trivial", SStr c, SInt p, SInt f] | Just (c, p, f) <- [tr] ]
+         : [ SList ([SSym "trivial", SStr c, SInt p, SInt f] ++ [SList [SSym "param", SInt k] | Just k <- [pk]])
+           | Just (c, p, f, pk) <- [tr] ]
          ++ map sCtor cs)
   where
     sCtor (Ctor cn i np nf t l) =
