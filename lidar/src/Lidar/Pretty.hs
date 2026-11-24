@@ -330,7 +330,7 @@ prettyExpr pp expr
       Deref v x e -> letIn emptyDoc ("ptr" <+> pp x) (prettyVal pp v) e
       Unroll v x e -> letIn emptyDoc ("roll" <+> pp x) (pp v) e
       Unbox v x e -> letIn emptyDoc ("box" <+> pp x) (pp v) e
-      Unscalar m v x e -> letIn (mode m) ("scalar" <+> pp x) (pp v) e
+      Unscalar v x e -> letIn emptyDoc ("scalar" <+> pp x) (pp v) e
       IsNull v n (x,e) -> caseOf "is-null" (prettyVal pp v) [("null", n), (pp x, e)]
       IfYielding v (k3,e3) (k2,e2) -> caseOf "if-yielding" (prettyVal pp v) [("yield" <+> pp k3, e3), (pp k2, e2)]
       Unpack v vs x e -> letIn emptyDoc ("pack" <> brackets (commaSep (map tv vs)) <+> pp x) (prettyVal pp v) e

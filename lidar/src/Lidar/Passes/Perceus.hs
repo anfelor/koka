@@ -37,8 +37,7 @@
   end at its start, and ends them in its branches instead: those of the owners of `x`, so
   that a branch that does not use the descendants of `x` that another branch uses drops the
   owner instead of duplicating them, and all of them after a leading read such as `[proj]`.
-  Reading the contents of a box is always borrowed, while reading a dead owned scalar consumes
-  it (`[unscalar]`).
+  Reading the contents of a box or a scalar is always borrowed.
 
   Variables are duplicated in place (`[dup]`): a duplicated variable keeps its name and gains
   an owned reference, so the paths always show where a variable comes from. A variable at a
@@ -324,7 +323,7 @@ leadingRead expr
       Proj (Var _) _ _ _ -> True
       Unbox{} -> True
       Unscalar{} -> True
-      Deref (Var _) x (Unscalar _ z _ _) -> x == z
+      Deref (Var _) x (Unscalar z _ _) -> x == z
       _ -> False
 
 percExpr :: PEnv -> Live -> VExpr -> P (VarSet,VExpr)
@@ -418,19 +417,6 @@ percExpr pe live expr
 percRead :: PEnv -> Live -> Path -> VExpr -> P (VarSet,Body)
 percRead pe live x expr
   = case expr of
-      -- The binder is a copy of trivial contents, so the read consumes `z` if nothing else
-      -- needs its reference.
-      Unscalar _ z y e
-        -> do t <- tyOfVar pe z
-              [[ty]] <- liftE (altTypes (peEnv pe) t expr)
-              let pe' = bind pe [(y,ty)]
-              (u,b) <- percB pe' live e
-              let uses = S.union (removeWithin y u) (usesOf pe [z] `S.difference` live)
-                  r = aliased z
-                  moves d = held pe (S.union live uses) r && not (any (r `within`) d) && not (usedIn r (S.union live (removeWithin y u)))
-                  unscalar d | moves d = Unscalar Owned z y <$> enter pe' (S.union live u) d b
-                             | otherwise = Unscalar Borrowed z y <$> enter pe' (S.union live u) (endingBelow pe live uses d) b
-              return (uses,Read x True unscalar)
       _ | Just ds <- destructAOf expr
         -> do t <- tyOfVar pe x
               tss <- liftE (altTypes (peEnv pe) t expr)

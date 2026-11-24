@@ -653,7 +653,7 @@ data VExpr
   | App Path [VVal]
 
   -- Destructuring. As in the paper, destructuring borrows its scrutinee and has no mode; only
-  -- `[unbox-ru]`, `[lock]` and `[unscalar]` take ownership. For a variable scrutinee z, the
+  -- `[unbox-ru]` and `[lock]` take ownership. For a variable scrutinee z, the
   -- binders are children of z (see "Structural rules"): they are owned where z is owned, and
   -- those that stand for z itself are unique where z is unique. For any other scrutinee, the
   -- binders are roots that borrow the variables of the scrutinee in the whole alternative.
@@ -717,13 +717,14 @@ data VExpr
   -- owned `[unbox]` is `[unbox-ru]`.
   | Unbox Path Path VExpr
 
-  --   Γ₁ ⊢ v :q Scalar raw    Γ₂, x : raw ⊢ e : W
+  --   Γ₁ ⊢ v :^ Scalar raw    Γ₂, x : raw ⊢ e : W
   --  ───────────────────────────────────────────── [unscalar]
-  --   Γ₁, Γ₂ ⊢ let_q scalar x = v in e : W
+  --   Γ₁, Γ₂ ⊢ let scalar x = v in e : W
   --
-  -- Copies the contents, which are trivial, so x is a root. The only destructuring with a mode:
-  -- an owned or unique read consumes the scalar (and frees it if it is in the heap).
-  | Unscalar Mode Path Path VExpr
+  -- Copies the contents, which are trivial, so x is a root. Like `[bunbox]`, it only reads the
+  -- scalar, which is dropped separately (a scalar is never reused, so an owned read would only
+  -- combine the read with the drop).
+  | Unscalar Path Path VExpr
 
   --   Γ₁ ⊢ v :^ ∃ā. V    Γ₂, x :^ V[b̄/ā] ⊢ e : W    b̄ ∉ ftv(Γ₂, W)
   --  ────────────────────────────────────────────────────────────────── [unpack]

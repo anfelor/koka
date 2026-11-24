@@ -541,11 +541,11 @@ genUnbox cx dest v x e
        ue <- unboxBlock t (localName v)
        genRead cx dest x t ue e
 
--- An owned read lets the runtime release a heap-backed scalar.
-genUnscalar :: Ctx -> Dest -> Mode -> Path -> Path -> VExpr -> G [Doc]
-genUnscalar cx dest m v x e
+-- The read borrows the scalar; a heap-backed one is released by its drop (`dropScalar`).
+genUnscalar :: Ctx -> Dest -> Path -> Path -> VExpr -> G [Doc]
+genUnscalar cx dest v x e
   = do A (AScalar r) <- tyOfName cx v
-       genRead cx dest x (VRaw r) (unboxScalar m r (localName v)) e
+       genRead cx dest x (VRaw r) (unboxScalar r (localName v)) e
 
 -- bind the contents `ue : t` that were read from a box or scalar
 genRead :: Ctx -> Dest -> Path -> VType -> Doc -> VExpr -> G [Doc]
@@ -595,10 +595,9 @@ genScalar cx v
        e <- genV cx v
        return (text (fst (primBox r)) <.> "(" <.> e <.> ",_ctx)")
 
-unboxScalar :: Mode -> Raw -> Doc -> Doc
-unboxScalar mode r e
-  = let borrow = if owning mode then "KK_OWNED" else "KK_BORROWED"
-    in text (snd (primBox r)) <.> "(" <.> e <.> "," <.> borrow <.> ",_ctx)"
+unboxScalar :: Raw -> Doc -> Doc
+unboxScalar r e
+  = text (snd (primBox r)) <.> "(" <.> e <.> ",KK_BORROWED,_ctx)"
 
 -- Koka's box of a scalar is a heap block only on targets where the scalar is not immediate
 -- (`scalarHeapSize`), and needs no drop elsewhere. Like kklib's unbox, which ignores
@@ -944,7 +943,7 @@ genE cx dest expr
               a <- liftC (dataBody (cxEnv cx) t)
               genAlias (shareAlias cx v x) dest (localName v) x (A a) e
       Unbox v x e -> genUnbox cx dest v x e
-      Unscalar m v x e -> genUnscalar cx dest m v x e
+      Unscalar v x e -> genUnscalar cx dest v x e
       _ | Just (tests,failure) <- conjunction expr
         -> genConjunction cx dest tests failure
       SplitA{} -> failG "a split is a conjunction"

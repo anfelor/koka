@@ -119,7 +119,7 @@ unboxAV t a
       VSum _      -> unbox Unbox
       VPtr _      -> unbox Unbox
       VProd _     -> unbox Unbox
-      VRaw _      -> unbox (Unscalar Owned)
+      VRaw _      -> unbox Unscalar
       VExists _ _ -> unbox Unbox
       VReuse _ _ _  -> unbox Unbox
       VCtx _ _ _  -> unbox Unbox

@@ -533,8 +533,7 @@ headP
 letP :: P VExpr
 letP
   = choice
-      [ do m <- (Unique <$ sym "!") <|> (Borrowed <$ sym "^"); kw "scalar"; unscalar m
-      , kw "scalar" >> unscalar Owned
+      [ kw "scalar" >> unscalar
       , kw "ptr" >> (do raw <- pathP; sym "="; v <- valP; kw "in"; x <- childBinder v (const SDeref) raw; Deref v x <$> exprP)
       , kw "roll" >> destruct Unroll SRoll
       , kw "box" >> destruct Unbox SContents
@@ -547,7 +546,7 @@ letP
       , do raw <- pathP
            (sym ":" >> typed raw) <|> (sym "=" >> proj raw) ]
   where
-    unscalar m = do raw <- pathP; sym "="; z <- localP; kw "in"; x <- rootBinder raw; Unscalar m z x <$> exprP
+    unscalar = do raw <- pathP; sym "="; z <- localP; kw "in"; x <- rootBinder raw; Unscalar z x <$> exprP
     destruct form step = do raw <- pathP; sym "="; z <- localP; kw "in"; x <- childBinder (Var z) (const step) raw; form z x <$> exprP
     takeBlock = do raw <- pathP; sym "="; z <- localP; kw "in"; return (raw,z)
     typed raw = do t <- vP

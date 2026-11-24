@@ -122,7 +122,7 @@ descendB fn fv fb expr
       Deref v x e           -> (\v' (x',e') -> Deref v' x' e') <$> fv v <*> one x [SDeref] e
       Unroll v x e          -> (\v' (x',e') -> Unroll v' x' e') <$> fn v <*> one x [SRoll] e
       Unbox v x e           -> (\v' (x',e') -> Unbox v' x' e') <$> fn v <*> one x [SContents] e
-      Unscalar m v x e      -> (\v' (x',e') -> Unscalar m v' x' e') <$> fn v <*> one x [] e
+      Unscalar v x e        -> (\v' (x',e') -> Unscalar v' x' e') <$> fn v <*> one x [] e
       Unpack v tvs x e      -> (\v' (x',e') -> Unpack v' tvs x' e') <$> fv v <*> one x [SPack] e
       IsNull v n (x,e)      -> (\v' n' (x',e') -> IsNull v' n' (x',e')) <$> fv v <*> plain n <*> one x [SSome] e
       IfYielding v (k3,e3) (k2,e2) -> IfYielding <$> fv v <*> one k3 [] e3 <*> one k2 [] e2
@@ -352,7 +352,7 @@ destructAOf expr
                                     (fmap (\(x,_) -> (x,last es)) def)))
       Unroll v x e          -> Just (Destruct v [([x],e)] (\v' es -> Unroll v' x (head es)))
       Unbox v x e           -> Just (Destruct v [([x],e)] (\v' es -> Unbox v' x (head es)))
-      Unscalar m v x e      -> Just (Destruct v [([x],e)] (\v' es -> Unscalar m v' x (head es)))
+      Unscalar v x e        -> Just (Destruct v [([x],e)] (\v' es -> Unscalar v' x (head es)))
       CaseOpen v alts def -> Just (Destruct v ([(xs,e) | (_,xs,e) <- alts] ++ [([],def)])
                                        (\v' es -> CaseOpen v' [(c,xs,e) | ((c,xs,_),e) <- zip alts es] (last es)))
       Proj{} -> Nothing

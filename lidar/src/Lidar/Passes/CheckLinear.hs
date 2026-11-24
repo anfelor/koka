@@ -27,8 +27,8 @@
   the scrutinee (`Nothing`), the scrutinee needs no references: it counts as consuming as many
   as the other alternatives, or as it holds if they all diverge. A destructuring of a variable
   therefore needs no mode: it only reads the scrutinee, and its alternatives consume the children
-  they take over. `Unscalar` copies the trivial contents of a scalar into a root, so its mode
-  matters: an owned read consumes the scalar. The binders of a destructuring of a value that is
+  they take over. `Unscalar` copies the trivial contents of a scalar into a root and only reads
+  the scalar. The binders of a destructuring of a value that is
   not a variable are borrowed roots, which borrow the variables of the value for the whole
   alternative.
 
@@ -437,11 +437,11 @@ ownedParams a = unless (all (== Owned) (modes a)) (fail ("closure with parameter
 -- expressions
 
 checkE :: Env -> Gamma -> Joins -> Mode -> VExpr -> L Use
--- the binder is a copy of trivial contents, and an owned read consumes the scalar
-checkE env g js q expr@(Unscalar m z x e)
+-- the binder is a copy of trivial contents, which reads the scalar
+checkE env g js q expr@(Unscalar z x e)
   = do t <- liftE (inferVar g z)
        [[tx]] <- liftE (altTypes env t expr)
-       before ((if owning m then consume else readVar) env g z) (checkE env (bindAll [(x,tx)] g) js q e)
+       before (readVar env g z) (checkE env (bindAll [(x,tx)] g) js q e)
 checkE env g js q expr
   | Just ds <- destructAOf expr = destructE (liftE (inferVar g (dsScrut ds))) (Var (dsScrut ds)) (dsAlts ds)
   | Just ds <- destructVOf expr = destructE (V <$> liftE (inferV env g (dsScrut ds))) (dsScrut ds) (dsAlts ds)
