@@ -574,7 +574,7 @@ useA pe moving i val
                   extra = [x | x <- own, any (`elem` own) (prefixes x)]
               ys <- dupsOf pe [x | (x,j) <- zip caps [i..], M.lookup x moving /= Just j]
               e' <- closed inner (ownedParams (peEnv pe) ps ++ filter (`notElem` extra) own) e
-              e'' <- dropNames inner extra e'
+              e'' <- dropFirst inner extra e'
               return (compose (map Dup ys), i + length caps, Lam ps r e'')
       _ -> useChildren pe moving i (descendA stepName (stepA pe moving) (stepV pe moving) val)
   where
@@ -582,6 +582,16 @@ useA pe moving i val
     stepName x = do (k,j) <- get
                     put (k,j+1)
                     return x
+
+-- Drops the captures `xs` before the body. The drops are a `let` of their own, so that the
+-- aliases they bind (`x.deref`) are not in scope in the body, which may bind them again to drop
+-- `x` after duplicating it.
+dropFirst :: PEnv -> [Path] -> VExpr -> P VExpr
+dropFirst _ [] e = return e
+dropFirst pe xs e
+  = do drops <- dropNames pe xs (Ret UnitV)
+       u <- fresh "u"
+       return (Let u VUnit drops e)
 
 useChildren :: PEnv -> M.Map Path Int -> Int -> StateT (K,Int) (M () NameSupply) a -> P (K,Int,a)
 useChildren _ _ i action
