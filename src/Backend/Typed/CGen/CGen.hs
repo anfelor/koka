@@ -24,7 +24,7 @@ import qualified Data.Set as S
 import Data.List( intercalate, sortOn )
 import Data.Maybe( fromMaybe, isJust )
 import qualified Numeric
-import Control.Monad( forM, when )
+import Control.Monad( forM, foldM, when )
 import Lib.PPrint( Doc, text, string, int, integer, empty, isEmptyDoc, line, nest, align, vcat, hcat, hsep, punctuate, (<.>), (<+>), (<->) )
 import qualified Common.Name as K
 import Common.NamePrim( nameInt32, nameInternalInt32, nameInt64, nameSSizeT, nameInternalSSizeT, nameIntPtrT, nameByte )
@@ -37,6 +37,7 @@ import Lidar.Types( inst, isShape, isToken, unToken )
 import Lidar.Env( Env(..), envOf, dataBody, openFields, boxContents, M, get, gets, liftE, modify, put, runM, state )
 import Lidar.Query( Gamma, inferE, inferV, inferVar, noJoins, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 import Lidar.Layout
+import Lidar.Ground( Ground(..), GroundBind(..), groundValues, groundOrder )
 import Backend.Typed.CGen.Layout hiding( dupExpr, dropStmt )
 import Backend.Typed.CGen.Koka
 import Backend.Typed.CGen.Decls( typeDecls, openPayload, openTagName )
@@ -1281,23 +1282,150 @@ genWrapper env cenv f
               return (sig <.> ";", sig <+> block (("kk_function_static_drop(_fself,_ctx);" : tokens) ++ body))
       _ -> failG ("wrapper for unknown function " ++ show f)
 
+-- static ground values
+
+{- A ground value (`Lidar.Ground`) is static data: blocks with a stuck reference count
+  (`KK_HEADER_STATIC`), which kklib never counts or frees, and strings that are valid UTF-8 as
+  normal bytes blocks.
+  A block pointer is its address (the typed C assumes uncompressed pointers, as its layouts do).
+  Top-level functions as values stay initialised, as their static blocks are filled on first
+  use (`kk_define_static_function`).
+-}
+
+-- what the leaves of a ground value are made of: its locals and the ground globals written so
+-- far (as C constants, one per leaf), the types of its locals, and the prefix of its block names
+data SCtx = SCtx{ scEnv :: Env, scLocals :: M.Map Path [Doc], scGamma :: Gamma, scGlobals :: M.Map Name [Doc], scBase :: String }
+
+-- The initialisers of the ground values of a program that can be written statically; their
+-- blocks go to the declarations of the C file. A value that cannot be written, or that refers
+-- to one that cannot, is initialised as before.
+staticValues :: Program -> G (M.Map Name Doc)
+staticValues prog
+  = do (inits,_,blocks) <- foldM one (M.empty,M.empty,[]) (groundOrder grounds)
+       when (not (null blocks)) (emitDecl (vcat (reverse blocks)))
+       return inits
+  where
+    env = envOf prog
+    grounds = groundValues (const False) prog
+    types = M.fromList [(x,t) | DefVal x _ t _ <- progDefs prog]
+    one :: (M.Map Name Doc,M.Map Name [Doc],[Doc]) -> Name -> G (M.Map Name Doc,M.Map Name [Doc],[Doc])
+    one acc@(inits,globals,blocks) x
+      = do st <- get
+           case runM (staticValue (SCtx env M.empty M.empty globals (cName x)) (types M.! x) (grounds M.! x) blocks) () st of
+             Right ((ini,ls,blocks'),st') -> do put st'
+                                                return (M.insert x ini inits, M.insert x ls globals, blocks')
+             Left _ -> return acc
+
+-- the initialiser and the leaves of a ground value of type t, and the blocks written so far
+-- (last first) with its own
+staticValue :: SCtx -> VType -> Ground -> [Doc] -> G (Doc,[Doc],[Doc])
+staticValue sc0 t (Ground binds res) blocks0
+  = do (sc,blocks) <- foldM bind (sc0,blocks0) binds
+       (ls,blocks') <- staticLeaves sc blocks res
+       ct <- ctype t
+       ini <- staticInit ct ls
+       return (ini,ls,blocks')
+  where
+    bind (sc,blocks) (x,tx,b)
+      = case b of
+          GValue v -> do (ls,blocks') <- staticLeaves sc blocks v
+                         return (sc{ scLocals = M.insert x ls (scLocals sc), scGamma = M.insert x (V tx) (scGamma sc) }, blocks')
+          GCall f _ _ -> failG ("cannot fold " ++ show f)
+
+-- the C constants of the leaves of a ground value, and the blocks written so far with its own
+staticLeaves :: SCtx -> [Doc] -> VVal -> G ([Doc],[Doc])
+staticLeaves sc blocks val
+  = case val of
+      Var x -> found (M.lookup x (scLocals sc))
+      Glob g _ -> found (M.lookup g (scGlobals sc))
+      DupV v -> staticLeaves sc blocks v
+      UnitV -> return ([],blocks)
+      Lit (LitInt i) -> return (["((kk_intb_t)" <.> integer (4*i + 1) <.> ")"],blocks)   -- `kk_integer_from_small`
+      Lit (LitChar c) -> return (["((kk_char_t)" <.> int (fromEnum c) <.> ")"],blocks)
+      Lit (LitString "") -> return (["kk_datatype_tag_init(1)"],blocks)                   -- `kk_string_empty`
+      -- as `kk_string_alloc_from_utf8n` leaves it, which converts invalid UTF-8 (a NUL is `C0 80`)
+      Lit (LitString str) | all validChar str
+                          -> let (cstr,clen) = cstring str
+                             in block ("struct { struct kk_bytes_s _base; kk_ssize_t length; uint8_t buf[" <.> int (clen+1) <.> "]; }")
+                                      ("{ { { KK_HEADER_STATIC(0,KK_TAG_STRING) } }," <+> int clen <.> "," <+> text cstr <+> "}") "._base._block"
+      Inj i t UnitV | isEnum t -> return ([int i],blocks)
+      Tuple vs -> foldM (\(ls,bs) v -> do (ls',bs') <- staticLeaves sc bs v
+                                          return (ls ++ ls',bs')) ([],blocks) vs
+      Ptr _ a -> staticBox sc blocks 0 a
+      TyApp v _ -> staticLeaves sc blocks v
+      Up v -> staticLeaves sc blocks v
+      Down _ v -> staticLeaves sc blocks v
+      Some v -> staticLeaves sc blocks v
+      Pack _ _ v -> staticLeaves sc blocks v
+      _ -> failG ("not a static value: " ++ show val)
+  where
+    validChar c = c /= '\0' && (c < '\xD800' || c > '\xDFFF')
+    found = maybe (failG ("not static: " ++ show val)) (\ls -> return (ls,blocks))
+    -- a new static block of a C type with an initialiser, and the member that is its `kk_block_t`
+    block decl ini member
+      = do let name = text (scBase sc ++ "_value_" ++ show (length blocks))
+           return (["((kk_intb_t)&" <.> name <.> member <.> ")"], ("static" <+> decl <+> name <+> "=" <+> ini <.> ";") : blocks)
+
+-- a pointer to a block or a singleton, with the index of the alternative that it is an injection into
+staticBox :: SCtx -> [Doc] -> Int -> AVal -> G ([Doc],[Doc])
+staticBox sc blocks tag val
+  = case val of
+      UnitA -> return (["kk_datatype_tag_init(" <.> int (kkTag tag) <.> ")"],blocks)   -- `kk_datatype_from_tag`
+      Roll _ v -> staticBox sc blocks tag v
+      InjA i _ v -> staticBox sc blocks i v
+      InjLazy _ _ v -> staticBox sc blocks tag v
+      Box v -> do t <- liftC (inferV (scEnv sc) (scGamma sc) v)
+                  ct <- ctype t
+                  bt <- blockType ct
+                  (ls,blocks') <- staticLeaves sc blocks v
+                  payload <- if ct == CUnit then return [] else (:[]) <$> staticInit ct ls
+                  let name = text (scBase sc ++ "_value_" ++ show (length blocks'))
+                      header = "{ KK_HEADER_STATIC(" <.> int (scanOf ct) <.> "," <.> int (kkTag tag) <.> ") }"
+                  return (["((kk_intb_t)&" <.> name <.> "._block)"],
+                          ("static" <+> bt <+> name <+> "= {" <+> hcat (punctuate ", " (header : payload)) <+> "};") : blocks')
+      _ -> failG ("not a static block: " ++ show val)
+
+-- the initialiser of a value of a C type from the C constants of its leaves
+staticInit :: CT -> [Doc] -> G Doc
+staticInit ct ls
+  = case (ct,ls) of
+      (CProd fs,_) | length fs == length ls -> return ("{" <+> hcat (punctuate ", " ["." <.> "f" <.> int i <+> "=" <+> leaf f (ls !! i) | (i,f) <- fs]) <+> "}")
+      (CUnit,[]) -> return "kk_Unit"
+      (_,[l]) | isLeaf ct -> return (leaf ct l)
+      _ -> failG "a static value of this C type"
+  where
+    leaf CBox l = "{" <+> l <+> "}"
+    leaf _ l = l
+    isLeaf c = case c of
+                 CBox -> True
+                 CPrim _ -> True
+                 CEnum _ -> True
+                 _ -> False
+
 -- modules
 
 cgenModule :: CEnv -> Program -> (String,String,[String])
 cgenModule cenv prog
   = let env = envOf prog
         -- (prototype, definition in the header, definition in the C file, initialization)
-        genDefE :: Def -> G (Either String (Doc,Doc,Doc,Doc))
-        genDefE d = do st <- get
-                       case runM (genDef env cenv d) () st{ stLocal = False } of
-                         Left err -> return (Left (show (defName d) ++ ": " ++ err))
-                         Right ((p,c,i),st') -> do put st'
-                                                   return (Right (if inHeader d st' then ("static inline" <+> p,"static inline" <+> c,empty,i) else (p,empty,c,i)))
+        genDefE :: M.Map Name Doc -> Def -> G (Either String (Doc,Doc,Doc,Doc))
+        genDefE statics d
+          | Just ini <- M.lookup (defName d) statics
+          = do ct <- ctype (defType d)
+               let name = cty ct <+> text (cName (defName d))
+               return (Right ("extern" <+> name <.> ";", empty, name <+> "=" <+> ini <.> ";", empty))
+        genDefE _ d
+          = do st <- get
+               case runM (genDef env cenv d) () st{ stLocal = False } of
+                 Left err -> return (Left (show (defName d) ++ ": " ++ err))
+                 Right ((p,c,i),st') -> do put st'
+                                           return (Right (if inHeader d st' then ("static inline" <+> p,"static inline" <+> c,empty,i) else (p,empty,c,i)))
         -- an inline function is defined in the header unless it uses declarations of the C file
         inHeader d st = isInline d && not (stLocal st)
         isInline d@DefFun{} = defInline d == InlineAlways
         isInline DefVal{} = False
-        genAll = do rs <- mapM genDefE (progDefs prog)
+        genAll = do statics <- staticValues prog
+                    rs <- mapM (genDefE statics) (progDefs prog)
                     ws <- gets (S.toList . stWrappers)
                     wdefs <- mapM (genWrapper env cenv) ws
                     return (rs,wdefs)
@@ -1335,7 +1463,7 @@ cgenModule cenv prog
                                 ++ [initf <+> block (once "_initialized"
                                                      ++ [text (ktInitName m) <.> "(_ctx);" | m <- ceImports cenv]
                                                      ++ hook "KK_CUSTOM_INIT"
-                                                     ++ [i | (_,_,_,i) <- ok])
+                                                     ++ [i | (_,_,_,i) <- ok, not (isEmptyDoc i)])
                                    ,donef <+> block (once "_done"
                                                      ++ hook "KK_CUSTOM_DONE"
                                                      ++ [text (ktDoneName m) <.> "(_ctx);" | m <- reverse (ceImports cenv)])])
