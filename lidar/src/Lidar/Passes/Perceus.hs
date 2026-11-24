@@ -103,14 +103,14 @@ perceusDef env def
          DefVal x tvs t _
            -> DefVal x tvs t <$> closed (PEnv env M.empty M.empty S.empty) [] body
 
--- Bind what the pass would otherwise rewrite and process again: a non-atomic borrowed
--- argument of a call and the scrutinee of a value destructuring that is not a variable or
+-- Bind what the pass would otherwise rewrite and process again: a borrowed argument of a call
+-- that is not `borrowable` and the scrutinee of a value destructuring that is not a variable or
 -- global; and name the binders of a value destructuring by their paths.
 prepare :: Env -> Gamma -> VExpr -> P VExpr
 prepare env g expr
   = case expr of
       Call f tys vs
-        | ((i,v):_) <- [(i,v) | (i,(Borrowed,v)) <- zip [0..] (zip (paramModes env f (length vs)) vs), not (isAtom v)]
+        | ((i,v):_) <- [(i,v) | (i,(Borrowed,v)) <- zip [0..] (zip (paramModes env f (length vs)) vs), not (borrowable v)]
         -> bindVal "a" v (\s -> Call f tys (take i vs ++ [Var s] ++ drop (i+1) vs))
       _ | Just ds <- destructVOf expr
         -> case dsScrut ds of
@@ -601,12 +601,16 @@ stepA pe occ v
        put (k . k',j)
        return w
 
-isAtom :: VVal -> Bool
-isAtom (Var _) = True
-isAtom (Glob _ _) = True
-isAtom (Lit _) = True
-isAtom UnitV = True
-isAtom _ = False
+-- a borrowed argument that needs no binding: an atom, or an upcast of one (the same pointer, as
+-- an argument of type `any`), which stays borrowed: binding it would own it, so a call of
+-- Lean's `isExclusiveUnsafe` would see the extra reference
+borrowable :: VVal -> Bool
+borrowable (Var _) = True
+borrowable (Glob _ _) = True
+borrowable (Lit _) = True
+borrowable UnitV = True
+borrowable (Up v) = borrowable v
+borrowable _ = False
 
 resultOfCall :: PEnv -> Name -> [AType] -> P VType
 resultOfCall pe f tys
