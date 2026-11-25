@@ -13,7 +13,8 @@ its scalar.
 
 Calls of @Name.mkStr@, @Name.str@ and @Name.num@ are folded into the constructor objects of the
 names, with the hashes that Lean computes (@Name.hash@), and the conversions of literals to
-scalars (@UInt32.ofNat@) into the scalars.
+scalars (@UInt32.ofNat@) into the scalars. Empty arrays (@Array.mkEmpty@) are extracted too,
+but not written statically: they are initialised once.
 -}
 module Lidar.Lean.CGen.Ground( foldable, groundDecls, cString ) where
 
@@ -39,7 +40,7 @@ import Lidar.Lean.CGen.Layout
 
 -- | The functions whose calls with ground arguments are folded at compile time.
 foldable :: Name -> Bool
-foldable f = S.member f (S.fromList (M.keys ofNats ++ mkStrs ++ [nameStr, nameNum]))
+foldable f = S.member f (S.fromList (M.keys ofNats ++ mkStrs ++ emptyArrays ++ [nameStr, nameNum]))
 
 -- the conversions of literals to scalars (`Decls.rawOfNat`)
 ofNats :: M.Map Name Raw
@@ -47,6 +48,11 @@ ofNats = M.fromList [(leanName f, r) | r <- [RUInt8, RUInt16, RUInt32, RUInt64, 
 
 mkStrs :: [Name]
 mkStrs = [leanName ("Lean.Name.mkStr" ++ show i) | i <- [1..8 :: Int]]
+
+-- the empty arrays of a given capacity (as Lean's `extractClosed` does, which `getAux` of
+-- `PersistentArray` relies on for its default node)
+emptyArrays :: [Name]
+emptyArrays = [leanName "Array.mkEmpty", leanName "Array.emptyWithCapacity"]
 
 nameStr, nameNum :: Name
 nameStr = leanName "Lean.Name.str._override"
