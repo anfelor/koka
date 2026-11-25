@@ -40,9 +40,10 @@ import qualified Lidar.Lean.Dump as D
 import Lidar.Lean.Decls
 
 -- the declarations, the IR variable and type of each local, the parameter types of each
--- join point in scope, and the default binder in scope of a case on a local (see `elabCases`)
+-- join point in scope, the default binder in scope of a case on a local (see `elabCases`),
+-- and the borrowed locals (see `closedJoin`)
 data Ctx = Ctx{ cDecls :: Decls, cLocals :: M.Map D.Var (Path,VType), cJoins :: M.Map D.Var (Name,[D.Var],[VType])
-              , cRests :: M.Map D.Var Rest }
+              , cRests :: M.Map D.Var Rest, cBorrowed :: S.Set D.Var }
 
 -- A `cases` on a local inside the default of a `[case-a]` on it scrutinizes the default
 -- binder instead, whose sum lacks the tags of the alternatives before it: binding the local's
@@ -62,7 +63,7 @@ elabDump d
   = (Program (newModuleName (D.dumpModule d)) (dTypes ds) (dSigs ds) M.empty (Foreign [] [] []) defs, errs)
   where
     ds = declsOf d
-    results = [(x, evalM (elabDecl x) (Ctx ds M.empty M.empty M.empty) 0) | x <- D.dumpDecls d]
+    results = [(x, evalM (elabDecl x) (Ctx ds M.empty M.empty M.empty S.empty) 0) | x <- D.dumpDecls d]
     defs = [def | (_,Right (Just def)) <- results]
     errs = [D.declName x ++ ": " ++ err | (x,Left err) <- results]
 
@@ -76,7 +77,8 @@ elabDecl x
              Just (SigVal _ t) -> Just . DefVal name [] t <$> elabCode t code
              Just (SigFun _ ps _ r) ->
                do let args = [(p,varPath (D.paramVar p) (D.paramName p),m,t) | (p,(m,t)) <- zip (D.declParams x) ps]
-                  body <- withLocals [(D.paramVar p,(v,t)) | (p,v,_,t) <- args] (elabCode r code)
+                  body <- local (\c -> c{ cBorrowed = S.fromList [D.paramVar p | (p,_,Borrowed,_) <- args] })
+                            (withLocals [(D.paramVar p,(v,t)) | (p,v,_,t) <- args] (elabCode r code))
                   return (Just (DefFun name [] [(v,m,t) | (_,v,m,t) <- args] Owned r body InlineAuto))
              _ -> fail "no signature"
   where
@@ -325,7 +327,7 @@ elabLam (D.FunDecl _ _ ps t b)
        xs <- mapM (const (fresh "a")) ps
        let vs = [varPath (D.paramVar p) (D.paramName p) | p <- ps]
        cs <- zipWithM (\x s -> coerce anyT s (Var x)) xs ts
-       body <- local (\c -> c{ cRests = M.empty }) (withLocals (zip (map D.paramVar ps) (zip vs ts)) (elabCode r b))
+       body <- local (\c -> c{ cRests = M.empty, cBorrowed = S.empty }) (withLocals (zip (map D.paramVar ps) (zip vs ts)) (elabCode r b))
        y <- fresh "r"
        (kr,w) <- coerce r anyT (Var y)
        let binds = [Let v s (Ret c) | (v,s,(_,c)) <- zip3 vs ts cs]
@@ -545,18 +547,23 @@ defaultBranch res n dflt
 -- The parameters and body of a join point with the given parameters (paths, and the locals
 -- they bind). Join points are closed, as Perceus requires: the locals that the body uses
 -- (also through the join points it jumps to) become parameters in front of its own, and
--- jumps pass them (first in the returned list).
+-- jumps pass them (first in the returned list). A borrowed local (a borrowed parameter of the
+-- function, or a capture of one) is captured borrowed, as the join point runs in the frame
+-- that borrows it: captured owned, each jump would duplicate it and the body drop it after a
+-- tail call, which then no longer is one (`String.fromUTF8Lossy.go`).
 closedJoin :: VType -> [(Path,(D.Var,VType))] -> D.Code -> E ([D.Var],[(Path,Mode,VType)],VExpr)
 closedJoin res own code
   = do ls <- asks cLocals
        js <- asks cJoins
+       bs <- asks cBorrowed
        let fvs = freeVars code
            used = S.union fvs (S.fromList [y | j <- S.toList fvs, Just (_,ys,_) <- [M.lookup j js], y <- ys])
            captured = [(y,t) | y <- S.toList used, y `notElem` map (fst . snd) own, Just (_,t) <- [M.lookup y ls]]
+           mode y = if S.member y bs then Borrowed else Owned
        cs <- mapM (const (fresh "capture")) captured
-       let params = zip cs (map snd captured) ++ [(p,t) | (p,(_,t)) <- own]
-       body <- withLocals (zip (map fst captured ++ map (fst . snd) own) params) (elabCode res code)
-       return (map fst captured, [(p,Owned,t) | (p,t) <- params], body)
+       let params = [(c,mode y,t) | (c,(y,t)) <- zip cs captured] ++ [(p,Owned,t) | (p,(_,t)) <- own]
+       body <- withLocals (zip (map fst captured ++ map (fst . snd) own) [(p,t) | (p,_,t) <- params]) (elabCode res code)
+       return (map fst captured, params, body)
 
 -- the free locals of code (and the join points it jumps to)
 freeVars :: D.Code -> S.Set D.Var
