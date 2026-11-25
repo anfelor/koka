@@ -26,6 +26,7 @@ import Lidar.Force( NFData, rnf )
 import Lidar.Lean.Dump
 import Lidar.Lean.Elab
 import Lidar.Lean.CGen
+import Lidar.Lean.CGen.Ground( foldable )
 
 usage :: String
 usage = unlines
@@ -94,7 +95,8 @@ lowerDump flags d = do
   return (final, [("elab",err) | err <- elabErrs] ++ errs)
   where
     opts = Options{ optReuse = True, optPeephole = True, optLazies = Lazies M.empty S.empty M.empty
-                  , optFips = M.empty, optRecGroups = [], optCheckBetween = checkAll flags }
+                  , optFips = M.empty, optRecGroups = [], optCheckBetween = checkAll flags
+                  , optFoldable = foldable }
     lowerProgram' prog
       | timings flags = do ((final,errs,_),times) <- lowerProgramTimed opts prog
                            mapM_ (uncurry printTime) times

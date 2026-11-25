@@ -108,10 +108,11 @@ type G a = M Ctx St a
 
 -- | The static objects of the ground values of a lowered program that can be written statically
 -- (each before the objects that point to it), and the prototype and the definition of each of
--- these values, given the C names of functions (for closures) and of values. A value that
--- cannot be written, or that refers to one that cannot, is initialised as before.
-groundDecls :: Env -> (Name -> Maybe String) -> M.Map Name String -> Program -> ([String], M.Map Name (String,String))
-groundDecls env funName cnames prog = go (groundOrder grounds) (St [] 0 M.empty M.empty M.empty) M.empty
+-- these values, given the C names of functions (for closures) and of values, and the values
+-- that are local to the module (static). A value that cannot be written, or that refers to one
+-- that cannot, is initialised as before.
+groundDecls :: Env -> (Name -> Maybe String) -> M.Map Name String -> (Name -> Bool) -> Program -> ([String], M.Map Name (String,String))
+groundDecls env funName cnames local prog = go (groundOrder grounds) (St [] 0 M.empty M.empty M.empty) M.empty
   where
     grounds = groundValues foldable prog
     types = M.fromList [(x,t) | DefVal x _ t _ <- progDefs prog]
@@ -119,7 +120,8 @@ groundDecls env funName cnames prog = go (groundOrder grounds) (St [] 0 M.empty 
     go (x:xs) st protos
       = case M.lookup x cnames of
           Just cname | Right ((rt,c),st') <- runM (writeValue x (types M.! x) (grounds M.! x)) (Ctx env funName cname) st
-            -> go xs st' (M.insert x ("LEAN_EXPORT " ++ rt ++ " " ++ cname ++ ";", "LEAN_EXPORT " ++ rt ++ " " ++ cname ++ " = " ++ c ++ ";") protos)
+            -> let decl = (if local x then "static " else "LEAN_EXPORT ") ++ rt ++ " " ++ cname
+               in go xs st' (M.insert x (decl ++ ";", decl ++ " = " ++ c ++ ";") protos)
           _ -> go xs st protos
 
 -- the C type and the initialiser of a ground value
