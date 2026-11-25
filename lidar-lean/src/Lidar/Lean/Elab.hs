@@ -158,7 +158,7 @@ fromAny t a
         do s <- fresh "s"
            x <- fresh "x"
            let d = child s SDeref
-           return (Let s (VPtr (AScalar r)) (Ret (Down (AScalar r) a)) . Deref (Var s) d . Unscalar Owned d x, Var x)
+           return (Let s (VPtr (AScalar r)) (Ret (Down (AScalar r) a)) . Deref (Var s) d . Unscalar d x, Var x)
       VSum ts | isEnum t ->
         do s <- fresh "s"
            r <- fresh "e"

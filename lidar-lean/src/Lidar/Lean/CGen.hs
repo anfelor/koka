@@ -487,11 +487,10 @@ genE cx dest expr
            pl <- liftQ (payload ls)
            body <- genE (bindVar cx x (V t)) dest e
            return (declare x ls [readSlot pl (localName v) s | s <- plSlots pl] ++ body)
-      Unscalar m v x e ->
+      Unscalar v x e ->
         do A (AScalar r) <- tyOfName cx v
            body <- genE (bindVar cx x (V (VRaw r))) dest e
-           let release = [text ("lean_dec(" ++ localName v ++ ");") | owning m]
-           return (declare x [LScalar r] [unboxScalar r (localName v)] ++ release ++ body)
+           return (declare x [LScalar r] [unboxScalar r (localName v)] ++ body)
       CaseA v alts def ->
         do t <- tyOfName cx v
            tss <- liftQ (altTypes (cxEnv cx) t expr)
