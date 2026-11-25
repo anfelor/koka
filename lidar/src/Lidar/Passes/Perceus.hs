@@ -135,10 +135,14 @@ prepare env g expr
                             prepare env g (Let s t (Ret v) (k s))
 
 -- the captures of the closures in the operands of an expression that are below another capture
--- of the same closure (and not of a trivial type)
+-- of the same closure (and not of a trivial type), and the captures below those. Only those with
+-- no capture below them are returned: renaming a capture renames the paths below it in the body,
+-- so the captures below it become captures of the new variable first.
 nestedCaptures :: Env -> Gamma -> VExpr -> [Path]
 nestedCaptures env g expr
-  = [x | caps <- capss, x <- caps, any (`elem` caps) (prefixes x), maybe False (not . trivialTy env) (M.lookup x g)]
+  = [x | caps <- capss
+       , let nested = [x | x <- caps, any (`elem` caps) (prefixes x), maybe False (not . trivialTy env) (M.lookup x g)]
+       , x <- caps, any (`elem` nested) (x : prefixes x), not (any ((x `elem`) . prefixes) caps)]
   where
     capss = getConst (descendE (const (Const [])) (lamsV (\ps r e -> Const [S.toList (fvA (Lam ps r e))])) (\_ _ -> Const []) expr)
 
