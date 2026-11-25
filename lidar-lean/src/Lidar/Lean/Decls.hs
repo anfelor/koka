@@ -30,10 +30,11 @@ Mono types become IR types as follows.
 -}
 module Lidar.Lean.Decls
   ( Decls(..), Kind(..), CtorInfo(..)
-  , declsOf, leanName, irType, typeKind, anyT, resultType, rawOfNat, isBuiltinType
+  , declsOf, worldTypes, leanName, irType, typeKind, anyT, resultType, rawOfNat, isBuiltinType
   ) where
 
 import qualified Data.Map as M
+import qualified Data.Set as S
 import Data.List( sortOn )
 import Data.Maybe( mapMaybe )
 import Lidar
@@ -224,6 +225,16 @@ constSig c
   where
     arrows (D.TArrow a b) = a : arrows b
     arrows _ = []
+
+-- | The types whose constructors take the state of the world (@EST.Out@, the result of an
+-- @IO@ action). Lean builds their values afresh in every run of an action, as the state is a
+-- variable, and every allocation counts a heartbeat, which loops that call @checkSystem@ rely on
+-- to run out of heartbeats.
+worldTypes :: D.Dump -> Name -> Bool
+worldTypes d = (`S.member` types)
+  where
+    types = S.fromList [leanName (D.indName i) | i <- D.dumpInductives d, any takesWorld (D.indCtors i)]
+    takesWorld c = D.FVoid `elem` maybe [] D.layoutFields (D.ctorLayout c)
 
 declsOf :: D.Dump -> Decls
 declsOf d

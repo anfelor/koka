@@ -27,6 +27,7 @@ import Lidar.Lean.Dump
 import Lidar.Lean.Elab
 import Lidar.Lean.CGen
 import Lidar.Lean.CGen.Ground( foldable )
+import Lidar.Lean.Decls( worldTypes )
 
 usage :: String
 usage = unlines
@@ -96,7 +97,7 @@ lowerDump flags d = do
   where
     opts = Options{ optReuse = True, optPeephole = True, optLazies = Lazies M.empty S.empty M.empty
                   , optFips = M.empty, optRecGroups = [], optCheckBetween = checkAll flags
-                  , optFoldable = foldable }
+                  , optFoldable = foldable, optFresh = worldTypes d }
     lowerProgram' prog
       | timings flags = do ((final,errs,_),times) <- lowerProgramTimed opts prog
                            mapM_ (uncurry printTime) times
