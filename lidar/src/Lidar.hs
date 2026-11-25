@@ -77,6 +77,8 @@ data Options = Options
                                         --   after the last one (to find the pass that breaks them)
   , optFoldable  :: Name -> Bool        -- ^ the functions whose calls with ground arguments the
                                         --   client folds at compile time (`Passes.Closed`)
+  , optFresh     :: Name -> Bool        -- ^ the datatypes whose values are built afresh every
+                                        --   time, never extracted as closed values (`Passes.Closed`)
   }
 
 type Lowered = (Program,[(String,String)],[(String,String)])
@@ -107,7 +109,7 @@ pipeline opts
     , Pass "anf" anfProgram
     , Pass "simplify" simplifyProgram
     , purePass "yields" yieldsProgram
-    , purePass "closed" (closedProgram (optFoldable opts))
+    , purePass "closed" (closedProgram (optFoldable opts) (optFresh opts))
     , Require "linear" checkLinear
     , Pass "perceus" perceusProgram
     , purePass "tailrec" (tailRecProgram fips)
