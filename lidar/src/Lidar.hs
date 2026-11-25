@@ -105,7 +105,7 @@ pipeline opts
     , Pass "lazy" (lazyProgram (optLazies opts))
     , Pass "contify" contifyProgram
     , Pass "anf" anfProgram
-    , purePass "simplify" simplifyProgram
+    , Pass "simplify" simplifyProgram
     , purePass "yields" yieldsProgram
     , purePass "closed" (closedProgram (optFoldable opts))
     , Require "linear" checkLinear

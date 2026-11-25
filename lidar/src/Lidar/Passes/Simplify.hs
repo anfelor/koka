@@ -23,6 +23,12 @@
   `join j(x) = case x of {...} in ... jump j(inj₁ ()) ...` the jump becomes the first
   alternative.
 
+  Inlining can put a case on a boxed sum `z` in the default of a case on `z`, whose binder
+  `z.rest` it would bind again (`substStep` reuses the outer case only if both took the same
+  tags). The inner case then scrutinizes `z.rest` instead: it drops the alternatives that
+  the outer case took, keeps its default only if a tag remains, and is its default if no
+  alternative remains.
+
   Afterwards, a fresh context that is only appended is inlined: elaboration binds the
   argument of `c ++ ctx K` (Koka's `cctx/(++)`) and copies it as if it may be shared
   but the literal is unique, and appended in place it extends `c` without testing
@@ -42,15 +48,19 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad.State( State, evalState, state )
 import Lidar.Syntax
-import Lidar.Traversal( descendAll, descendE, fvE, fvFrom, fvV, hasRegion, jumpArgs, lamsV, stepsFrom, usedIn, within )
-import Lidar.Passes.Common( mapAll, NameSupply, SubstExpr, cloneE, defScope, freshFor, freshNameFrom, project, substJump, substJumpM, substName, substStep, substTypesE, valueAt )
+import Lidar.Traversal( child, descendAll, descendE, fvE, fvFrom, fvV, hasRegion, jumpArgs, lamsV, stepsFrom, usedIn, within )
+import Lidar.Passes.Common( mapAll, NameSupply, SubstExpr, cloneE, defGamma, defScope, descendTyped, freshFor, freshNameFrom, lamsTyped, perBody, project, renamePath, substJump, substJumpM, substName, substStep, substTypesE, valueAt )
 import Lidar.Types( Types(..) )
+import Lidar.Env( Env, M, envOf, evalM, liftE )
+import Lidar.Query( Gamma, inferVar )
 
-simplifyProgram :: Program -> Program
-simplifyProgram prog = prog{ progDefs = map simplifyDef (progDefs prog) }
+simplifyProgram :: Program -> (Program,[String])
+simplifyProgram prog = perBody (simplifyDef (envOf prog)) prog
 
-simplifyDef :: Def -> Def
-simplifyDef def = def{ defBody = fst (knownE M.empty (freshE (copyE (defScope def) (const Nothing) inlined))) }
+simplifyDef :: Env -> Def -> Either String VExpr
+simplifyDef env def
+  = do copied <- evalM (restsE env (defGamma def) (copyE (defScope def) (const Nothing) inlined)) () ()
+       return (fst (knownE M.empty (freshE copied)))
   where
     inlined = evalState (inlineE (defBody def)) (freshFor def)
 
@@ -117,6 +127,31 @@ inlineApply expr
                 _ | Just body' <- apply rest -> body'
                 _ -> expr
       _ -> expr
+
+-- cases in the default of a case on the same sum
+
+restsE :: Env -> Gamma -> VExpr -> M () () VExpr
+restsE env g expr
+  = case expr of
+      CaseA z alts def
+        | let r = child z SRest, M.member r g
+        -> restsE env g =<< inRest r z alts def
+      _ -> descendTyped env g (lamsTyped g (restsE env)) (restsE env) expr
+  where
+    -- the case on `z` as a case on its default binder `r` in scope
+    inRest r z alts def
+      = do t <- liftE (inferVar g r)
+           tags <- case t of
+                     A (ASum ts) -> return (map fst ts)
+                     _ -> fail ("the default of a case is not a boxed sum: " ++ show r)
+           let moved y e = let y' = if y `within` z then foldl child r (stepsFrom z y) else y
+                           in (y', renamePath y y' e)
+               alts' = [(i,y',e') | (i,y,e) <- alts, i `elem` tags, let (y',e') = moved y e]
+               left = [i | i <- tags, i `notElem` [j | (j,_,_) <- alts']]
+           case (alts',def) of
+             ([], Just (d,e)) -> return (renamePath d r e)
+             ([], Nothing) -> fail ("a case without alternatives in the default of a case: " ++ show z)
+             _ -> return (CaseA r alts' (if null left then Nothing else uncurry moved <$> def))
 
 shadow :: [Path] -> M.Map Path a -> M.Map Path a
 shadow xs sub = foldr M.delete sub xs
