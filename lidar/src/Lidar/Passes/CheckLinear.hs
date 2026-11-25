@@ -63,7 +63,8 @@
   must consume the same references. A root must be consumed once in its scope (a borrowed one
   not at all), it must never be needed when no reference is left, and only a unique one may
   be consumed as unique (`leave`). A term whose every path ends in `unreachable` diverges: it
-  counts as consuming every reference it does not use, so it need not consume its roots.
+  counts as consuming every reference it does not use, so it need not consume its roots. A
+  jump to a join point whose body diverges diverges as well.
 
   The body of a join point is checked like the body of a function whose parameters include
   the variables it captures, including those of the join points it jumps to: unique if the
@@ -117,9 +118,9 @@ data Use = Use{ uNet :: Counts, uPeak :: Counts, uBorrowed :: S.Set Path, uUniqu
 
 type L a = M Owners Children a
 
--- the modes of the parameters of the join points in scope, and the variables they capture
--- with their modes
-type Joins = M.Map Name ([Mode],[(Path,Mode)])
+-- the modes of the parameters of the join points in scope, the variables they capture with
+-- their modes, and whether their body diverges
+type Joins = M.Map Name ([Mode],[(Path,Mode)],Bool)
 
 checkLinear :: Program -> [String]
 checkLinear prog
@@ -475,25 +476,26 @@ checkE env g js q expr
                           (fail ("unique result of a call to a function without one: " ++ show f))
                         args [] (paramModes env f (length vs)) vs
       Jump j _ vs -> case M.lookup j js of
-                     Just (ms,caps) -> args caps ms vs
+                     Just (ms,caps,d) -> do u <- args caps ms vs
+                                            return u{ uDiverges = d }
                      Nothing -> fail ("jump to unknown join point " ++ show j)
       -- the captured variables that are not descendants of other captured variables, including those
       -- of the join points that the body jumps to
       Join j _ ps e1 e2
                         -> do let fvs = S.toList (S.union (fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps])
-                                                           (S.fromList [x | (_,cs) <- M.elems (M.restrictKeys js (jumpTargets e1)), (x,_) <- cs]))
+                                                           (S.fromList [x | (_,cs,_) <- M.elems (M.restrictKeys js (jumpTargets e1)), (x,_) <- cs]))
                               let xs = [x | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
                               u <- local (const (M.fromList (params env ps ++ [(x,Unique) | x <- xs])))
                                          (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) js q e1)
                               caps <- concat <$> mapM (captured u) xs
                               _ <- leave (params env ps ++ caps) u
-                              checkE env g (M.insert j ([m | (_,m,_) <- ps],caps) js) q e2
+                              checkE env g (M.insert j ([m | (_,m,_) <- ps],caps,uDiverges u) js) q e2
       -- bodies, like those of functions, in which only the group is in scope, and whose
       -- captures (those of all bodies) are borrowed: every jump lends them
       JoinRec _ ds e
         -> do let fvs = S.toList (S.unions [S.filter (\y -> not (any (y `within`) [x | (x,_,_) <- ps])) (fvE e1) | JoinDef _ _ ps e1 <- ds])
                   caps = [(x,Borrowed) | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
-                  group = M.fromList [(j,([m | (_,m,_) <- ps],caps)) | JoinDef j _ ps _ <- ds]
+                  group = M.fromList [(j,([m | (_,m,_) <- ps],caps,False)) | JoinDef j _ ps _ <- ds]
               forM_ ds $ \(JoinDef _ _ ps e1) -> closed (params env ps ++ caps) (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) group q e1)
               checkE env g (M.union group js) q e
       App f vs -> do ft <- liftE (inferVar g f)
