@@ -65,11 +65,12 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad( foldM, unless )
 import Data.Functor.Const( Const(..) )
+import Data.Functor.Identity( runIdentity )
 import Lidar.Name
 import Lidar.Syntax
 import Lidar.Build( K, compose )
-import Lidar.Traversal( Destruct(..), child, descendA, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fieldsAt, fvA, fvV, scrutVar, stepsFrom, takesContents, usedIn, within )
-import Lidar.Passes.Common( paramModes, prefixes, trivialTy, NameSupply, defGamma, descendTyped, dropValue, freshFor, perDef, freshPathFrom, lamsTyped, nameChildren, projectAll, scopeOf )
+import Lidar.Traversal( Destruct(..), child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fieldsAt, fvA, fvV, lamsV, scrutVar, stepsFrom, takesContents, usedIn, within )
+import Lidar.Passes.Common( paramModes, prefixes, trivialTy, NameSupply, defGamma, descendTyped, dropValue, freshFor, perDef, freshPathFrom, lamsTyped, nameChildren, projectAll, renamePath, scopeOf )
 import Lidar.Env( Env(..), envOf, M, evalM, get, lift, liftE, put, state, StateT, runStateT )
 import Lidar.Query( Gamma, bindAll, inferV, altTypes, lamGamma, lockGamma, uniqueGamma )
 import Lidar.Types( inst, isPtr )
@@ -104,10 +105,20 @@ perceusDef env def
 
 -- Bind what the pass would otherwise rewrite and process again: a borrowed argument of a call
 -- that is not `borrowable` and the scrutinee of a value destructuring that is not a variable or
--- global; and name the binders of a value destructuring by their paths.
+-- global; and name the binders of a value destructuring by their paths. A closure that captures
+-- a variable and a path below it (`v` and `v.f`) captures a new variable bound to `v.f` instead,
+-- so that the body holds a reference to each capture: otherwise `v.f` would be borrowed from `v`
+-- there, and the body would drop the reference of `v.f` and duplicate it again where it is used.
 prepare :: Env -> Gamma -> VExpr -> P VExpr
 prepare env g expr
   = case expr of
+      _ | (x:_) <- nestedCaptures env g expr
+        -> do t <- maybe (fail ("unknown variable " ++ show x)) return (M.lookup x g)
+              c <- fresh "c"
+              let renamed = runIdentity (descendE pure (lamsV (\_ _ e -> pure (renamePath x c e))) (\_ e -> pure e) expr)
+              case t of
+                V vt -> prepare env g (Let c vt (Ret (Var x)) renamed)
+                A _ -> fail ("captured boxed variable " ++ show x)
       Call f tys vs
         | ((i,v):_) <- [(i,v) | (i,(Borrowed,v)) <- zip [0..] (zip (paramModes env f (length vs)) vs), not (borrowable v)]
         -> bindVal "a" v (\s -> Call f tys (take i vs ++ [Var s] ++ drop (i+1) vs))
@@ -122,6 +133,14 @@ prepare env g expr
     bindVal prefix v k = do t <- liftE (inferV env g v)
                             s <- fresh prefix
                             prepare env g (Let s t (Ret v) (k s))
+
+-- the captures of the closures in the operands of an expression that are below another capture
+-- of the same closure (and not of a trivial type)
+nestedCaptures :: Env -> Gamma -> VExpr -> [Path]
+nestedCaptures env g expr
+  = [x | caps <- capss, x <- caps, any (`elem` caps) (prefixes x), maybe False (not . trivialTy env) (M.lookup x g)]
+  where
+    capss = getConst (descendE (const (Const [])) (lamsV (\ps r e -> Const [S.toList (fvA (Lam ps r e))])) (\_ _ -> Const []) expr)
 
 
 -- the environment of the body of a function or join point
@@ -547,9 +566,8 @@ useVal pe moving Owned i val
       _ -> useChildren pe moving i (descendV (stepA pe moving) (stepV pe moving) val)
 
 -- A closure captures its free variables, and its body holds references to them and to its
--- parameters. A capture below another one holds a reference that the body does not need, as
--- it is borrowed from the other one there (see the top): it is dropped first. Only the captures
--- are in scope in the body (`lamGamma`), so that its drops do not name aliases bound outside it.
+-- parameters (no capture is below another one, see `prepare`). Only the captures are in scope
+-- in the body (`lamGamma`), so that its drops do not name aliases bound outside it.
 useA :: PEnv -> M.Map Path Int -> Int -> AVal -> P (K,Int,AVal)
 useA pe moving i val
   = case val of
@@ -557,27 +575,15 @@ useA pe moving i val
         -> do let caps = S.toList (fvA val)
                   inner = PEnv (peEnv pe) (lamGamma ps e (peGamma pe)) M.empty S.empty
                   own = [x | x <- caps, not (trivialVar pe x)]
-                  extra = [x | x <- own, any (`elem` own) (prefixes x)]
               ys <- dupsOf pe [x | (x,j) <- zip caps [i..], M.lookup x moving /= Just j]
-              e' <- closed inner (ownedParams (peEnv pe) ps ++ filter (`notElem` extra) own) e
-              e'' <- dropFirst inner extra e'
-              return (compose (map Dup ys), i + length caps, Lam ps r e'')
+              e' <- closed inner (ownedParams (peEnv pe) ps ++ own) e
+              return (compose (map Dup ys), i + length caps, Lam ps r e')
       _ -> useChildren pe moving i (descendA stepName (stepA pe moving) (stepV pe moving) val)
   where
     stepName :: Path -> StateT (K,Int) (M () NameSupply) Path
     stepName x = do (k,j) <- get
                     put (k,j+1)
                     return x
-
--- Drops the captures `xs` before the body. The drops are a `let` of their own, so that the
--- aliases they bind (`x.deref`) are not in scope in the body, which may bind them again to drop
--- `x` after duplicating it.
-dropFirst :: PEnv -> [Path] -> VExpr -> P VExpr
-dropFirst _ [] e = return e
-dropFirst pe xs e
-  = do drops <- dropNames pe xs (Ret UnitV)
-       u <- fresh "u"
-       return (Let u VUnit drops e)
 
 useChildren :: PEnv -> M.Map Path Int -> Int -> StateT (K,Int) (M () NameSupply) a -> P (K,Int,a)
 useChildren _ _ i action
