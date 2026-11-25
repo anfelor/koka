@@ -180,18 +180,83 @@ childrenToward tr p@(Path _ ss) (Path _ ts) = go p (drop (length ss) ts)
     go v [] = [v]
     go v (s:rest) = [key tr q | q <- siblingsOf tr (child v s)] ++ go (child v s) rest
 
--- Count the references to a variable with one of the `keys` (or another variable of the
--- counts) below it as references to its children. A path comes right after its prefixes, as
--- every path between them has the same prefix: where the counts do not overlap, the only one
--- above a key `q` is the largest one before it, and counts that overlap (`key` changes as
--- children are recorded) are neighbours.
-refine :: Children -> [Path] -> Counts -> Counts
-refine tr keys m
-  = case [(p,q) | q <- keys, Just (p,_) <- [M.lookupLT q m], q `within` p] ++ [(p,q) | (p,q) <- zip ks (drop 1 ks), q `within` p] of
-      ((p,q):_) -> refine tr keys (M.filter (/= 0) (M.unionWith (+) (M.delete p m) (M.fromList [(r,m M.! p) | r <- childrenToward tr p q])))
-      [] -> m
+-- Counts never overlap: no count is for a path below another. A path comes right after its
+-- prefixes, as every path between them has the same prefix, so the only count above a path
+-- `q` is the largest one before it, and the counts below `q` come right after it. This lets
+-- `insertCount` resolve the overlaps an insertion would create in O(log n), plus the counts
+-- below the new path.
+
+-- Add `n` references to `k`: a count above `k` is split toward it, and the references to `k`
+-- are split toward the counts below it.
+insertCount :: Children -> Path -> Int -> Counts -> Counts
+insertCount tr k n m
+  | n == 0 = m
+  | otherwise
+  = case M.lookupLT k m of
+      Just (a,c) | k `within` a -> add k n (foldl' (flip (uncurry add)) (M.delete a m) (split tr a c [k]))
+      _ -> foldl' (flip (uncurry add)) m (split tr k n (M.keys (below k m)))
   where
-    ks = M.keys m
+    add p x = M.alter (\c -> let c' = maybe x (+ x) c in if c' == 0 then Nothing else Just c') p
+
+-- counts from references to paths that can overlap
+fromCounts :: Children -> [(Path,Int)] -> Counts
+fromCounts tr = foldl' (\m (p,n) -> insertCount tr p n m) M.empty
+
+-- the references to `k`, which a count above it includes
+count :: Counts -> Path -> Int
+count m k = case M.lookupLE k m of
+              Just (p,n) | k `within` p -> n
+              _ -> 0
+
+-- Count the references to a variable with one of the `keys` below it as references to its
+-- children. One lookup per key, so `keys` should be the smaller side.
+refine :: Children -> [Path] -> Counts -> Counts
+refine tr keys m = foldl' step m keys
+  where
+    step m' q = case M.lookupLT q m' of
+                  Just (p,n) | q `within` p -> foldl' (\m'' (r,x) -> insertCount tr r x m'') (M.delete p m') (split tr p n [q])
+                  _ -> m'
+
+-- `refine` of a small `m` by the paths of `big`: for each count, a range query for the paths
+-- below it (they come right after it)
+refineFrom :: Children -> M.Map Path a -> Counts -> Counts
+refineFrom tr big m
+  = fromCounts tr (concat [split tr p n (M.keys (below p big)) | (p,n) <- M.toList m])
+
+-- the entries of `m` strictly below `p`
+below :: Path -> M.Map Path a -> M.Map Path a
+below p = M.takeWhileAntitone (`within` p) . M.dropWhileAntitone (<= p)
+
+-- `n` references to `p` as references to the children on the way to each path `qs` below it
+split :: Children -> Path -> Int -> [Path] -> [(Path,Int)]
+split tr p n qs
+  = case [q | q <- qs, q /= p, q `within` p] of
+      [] -> [(p,n)]
+      qs'@(q:_) -> concat [split tr r n [q' | q' <- qs', q' `within` r] | r <- childrenToward tr p q]
+
+-- The counts `f a1 a2 b1 b2` at each variable, from the counts of the small side `(a1,a2)`
+-- and the large side `(b1,b2)`, where `f` gives `b1` wherever `a1` and `a2` have none. Only
+-- the variables of the small side change, so this costs O(s · log b) for the sizes `s` and `b`
+-- of the two sides, plus the paths of the large side below a path of the small one. The small
+-- side is refined by the paths of the large side below it and by its own, then the large side
+-- by the result. Each result replaces the count at its path through `insertCount`.
+pointwise :: Children -> (Int -> Bool) -> (Int -> Int -> Int -> Int -> Int) -> (Counts,Counts) -> (Counts,Counts) -> Counts
+pointwise tr keep f (a1,a2) (b1,b2)
+  = foldl' at b1' (S.toList ks)
+  where
+    inBig = refineFrom tr b1 . refineFrom tr b2
+    (a1s,a2s) = (inBig a1, inBig a2)
+    a1' = refine tr (M.keys a2s) a1s
+    a2' = refine tr (M.keys a1s) a2s
+    ks = S.union (M.keysSet a1') (M.keysSet a2')
+    b1' = refine tr (S.toList ks) b1
+    b2' = refine tr (S.toList ks) b2
+    at m k = let v = f (count a1' k) (count a2' k) (count b1' k) (count b2' k)
+             in insertCount tr k ((if keep v then v else 0) - count m k) m
+
+-- the smaller and the larger of two counts
+bySize :: Counts -> Counts -> (Counts,Counts)
+bySize a b = if M.size a <= M.size b then (a,b) else (b,a)
 
 -- Count the references to all children of a variable as references to the variable. Like
 -- `[own-pair]` and `[own-child]` of the paper, read bottom-up, this happens only where a
@@ -200,20 +265,21 @@ refine tr keys m
 rollUp :: Children -> Counts -> Counts
 rollUp tr m
   = case [(p,qs,n) | (p,n) <- M.toList m, let qs = siblingsOf tr p, not (null qs), all ((== Just n) . (`M.lookup` m)) qs] of
-      ((p@(Path x ss),qs,n):_) -> rollUp tr (M.insert (key tr (Path x (init ss))) n (foldr M.delete m (p:qs)))
+      ((p@(Path x ss),qs,n):_) -> rollUp tr (insertCount tr (key tr (Path x (init ss))) n (foldr M.delete m (p:qs)))
       [] -> m
 
 plus :: Children -> Counts -> Counts -> Counts
-plus tr a b = M.filter (/= 0) (M.unionWith (+) (refine tr (M.keys b) a) (refine tr (M.keys a) b))
+plus tr a b = pointwise tr (/= 0) (\x _ y _ -> x + y) (s,M.empty) (l,M.empty)
+  where (s,l) = bySize a b
 
 minus :: Children -> Counts -> Counts -> Counts
 minus tr a b = plus tr a (M.map negate b)
 
--- the larger number of references to each variable (a missing one is 0)
+-- the larger number of references to each variable (a missing one is 0) of two counts that
+-- are not negative
 upper :: Children -> Counts -> Counts -> Counts
-upper tr a b = M.filter (> 0) (M.unionWith max (refine tr ks a) (refine tr ks b))
-  where
-    ks = M.keys a ++ M.keys b
+upper tr a b = pointwise tr (> 0) (\x _ y _ -> max x y) (s,M.empty) (l,M.empty)
+  where (s,l) = bySize a b
 
 -- uses
 
@@ -227,9 +293,18 @@ andThen u1 u2
          when (any (`S.member` uBorrowed u1) (p : prefixes p))
            (fail ("unique use of a variable after a borrowed use: " ++ show p))
        tr <- get
-       return (Use (plus tr (uNet u1) (uNet u2)) (upper tr (uPeak u1) (plus tr (uNet u1) (uPeak u2)))
+       return (Use (plus tr (uNet u1) (uNet u2)) (peak tr)
                    (S.union (uBorrowed u1) (uBorrowed u2)) (S.union (uUnique u1) (uUnique u2))
                    (uDiverges u1 || uDiverges u2))
+  where
+    -- The references needed before `u1` (`max p1 (n1 + p2)` at each variable) only change
+    -- where the smaller side has counts. Where `u2` has none, they are those of `u1`, as no
+    -- term consumes more references than it needs before it (`uNet` is at most `uPeak`).
+    peak tr
+      | M.size (uNet u1) + M.size (uPeak u1) <= M.size (uPeak u2)
+      = pointwise tr (> 0) (\n1 p1 p2 _ -> max p1 (n1 + p2)) (uNet u1,uPeak u1) (uPeak u2,M.empty)
+      | otherwise
+      = pointwise tr (> 0) (\p2 _ p1 n1 -> max p1 (n1 + p2)) (uPeak u2,M.empty) (uPeak u1,uNet u1)
 
 -- the uses of terms that are evaluated in order
 uses :: [L Use] -> L Use
@@ -263,14 +338,14 @@ leave xs u
   = do tr <- get
        let zs = [(key tr x,m) | (x,m) <- xs]
            mine p = any ((p `within`) . fst) zs
-           held = M.fromListWith (+) [(z,1) | (z,_) <- zs]
-           left = refine tr (M.keys held) (minus tr (uNet u) (M.fromListWith (+) [(z,1) | (z,m) <- zs, owning m]))
+           held = fromCounts tr [(z,1) | (z,_) <- zs]
+           left = refine tr (M.keys held) (minus tr (uNet u) (fromCounts tr [(z,1) | (z,m) <- zs, owning m]))
            peak = refine tr (M.keys held) (uPeak u)
        forM_ (M.toList left) $ \(p,n) ->
          when (mine p && (n > 0 || not (uDiverges u)))
            (fail ((if n < 0 then "owned variable is not consumed: " else "variable is consumed more often than it is owned: ") ++ show p))
        forM_ (M.toList peak) $ \(p,n) ->
-         when (mine p && n > M.findWithDefault 0 p (refine tr [p] held)) (fail ("use of a consumed variable: " ++ show p))
+         when (mine p && n > count held p) (fail ("use of a consumed variable: " ++ show p))
        forM_ (S.toList (uUnique u)) $ \p -> forM_ zs $ \(z,m) ->
          when (p `within` z && childMode tr z m p /= Unique)
            (fail ("unique use of a variable that is not unique: " ++ show p))
