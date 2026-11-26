@@ -425,10 +425,12 @@ genE cx dest expr
            s2 <- genE (bindVar cx x (V t)) dest e2
            return (s1 ++ s2)
       Unreachable _ -> return ["lean_internal_panic_unreachable();"]
-      Dup x e ->
+      Dup count x e ->
         do ls <- tyOfName cx x >>= leavesOfTy
            s <- genE cx dest e
-           return ([text ("lean_inc(" ++ n ++ ");") | (LObj,n) <- zip ls (leafNames x (length ls))] ++ s)
+           let inc n | count == 1 = "lean_inc(" ++ n ++ ");"
+                     | otherwise = "lean_inc_n(" ++ n ++ ", " ++ show count ++ ");"
+           return ([text (inc n) | (LObj,n) <- zip ls (leafNames x (length ls))] ++ s)
       Drop x e ->
         do ls <- tyOfName cx x >>= leavesOfTy
            s <- genE cx dest e
