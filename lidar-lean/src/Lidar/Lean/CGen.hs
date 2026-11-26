@@ -224,10 +224,16 @@ natLit n
 strLit :: String -> String
 strLit s = let (lit,size,len) = cString s in call "lean_mk_string_unchecked" [lit, show size, show len]
 
+-- a literal of an unsigned raw type
+rawLit :: Raw -> Integer -> String
+rawLit r n = "((" ++ cType (LScalar r) ++ ")" ++ show n ++ "ULL)"
+
 genLit :: Lit -> G String
 genLit lit
   = case lit of
-      LitInt n | n >= 0 -> return (natLit n)
+      LitSmallInt n | n >= 0 -> return (natLit n)
+      LitBigInt n | n >= 0 -> return (natLit n)
+      LitRaw r n | n >= 0 -> return (rawLit r n)
       LitString s -> return (strLit s)
       LitChar c -> return (show (ord c) ++ "u")
       _ -> fail ("literal " ++ show lit)
@@ -610,8 +616,8 @@ genCall cx dest f vs
        tgt <- target cx f
        case (vs, r) of
          -- the conversion of a literal (`Decls.rawOfNat`) is a C literal
-         ([Lit (LitInt n)], VRaw raw) | n >= 0, fmap leanName (rawOfNat raw) == Just f
-           -> assignTo dest ["((" ++ cType (LScalar raw) ++ ")" ++ show n ++ "ULL)"]
+         ([Lit l], VRaw raw) | Just n <- litInteger l, n >= 0, fmap leanName (rawOfNat raw) == Just f
+           -> assignTo dest [rawLit raw n]
          _ -> do args <- mapM (\v -> do es <- genV cx v
                                         ls <- tyOf cx v >>= leavesOf
                                         return (zip ls es)) vs

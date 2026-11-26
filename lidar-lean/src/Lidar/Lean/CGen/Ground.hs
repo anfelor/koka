@@ -167,7 +167,8 @@ genVal val
                      maybe (fail ("not static: " ++ show g)) return v
       DupV v -> genVal v
       UnitV -> return (leavesOnly [])
-      Lit (LitInt n) | n >= 0 -> return (leavesOnly [GObj (tagged n)])
+      Lit (LitSmallInt n) | n >= 0 -> return (leavesOnly [GObj (tagged n)])
+      Lit (LitRaw _ n) | n >= 0 -> return (leavesOnly [GScalar n])
       Lit (LitString s) -> do o <- stringObject s
                               return (Val [GObj o] (Just s) Nothing)
       Lit (LitChar c) -> return (leavesOnly [GScalar (toInteger (ord c))])
@@ -268,7 +269,7 @@ stringObject s
 -- object holds its prefix, its last component and its hash.
 foldCall :: VType -> Name -> [VVal] -> G Val
 foldCall t f vs
-  | Just _ <- M.lookup f ofNats, [Lit (LitInt n)] <- vs, VRaw r <- t
+  | Just _ <- M.lookup f ofNats, [Lit l] <- vs, Just n <- litInteger l, VRaw r <- t
   = return (leavesOnly [GScalar (n `mod` (2 ^ (8 * maybe 8 id (scalarSize r))))])
   | f `elem` mkStrs
   = do ss <- mapM genVal vs
@@ -277,7 +278,7 @@ foldCall t f vs
   = do pv <- genVal p
        sv <- genVal s
        strName pv sv
-  | f == nameNum, [p, Lit (LitInt n)] <- vs
+  | f == nameNum, [p, Lit l] <- vs, Just n <- litInteger l
   = do pv <- genVal p
        h <- prefixHash pv
        name 2 pv (GObj (tagged n)) (mixHash h (if n < 2^(64 :: Int) then fromInteger n else 17))
