@@ -278,12 +278,67 @@ data ConLabel = ConLabel{ lblCon :: Name, lblFields :: [Field], lblDecls :: [May
 type TypeDefs = M.Map Name TypeDef
 
 -- the type of a literal, `type(l)` (`Query.litType`): `int*` and `string*` (builtin
--- abstract types, `APrim`), and raw `char` and `float64`
-data Lit = LitInt Integer
+-- abstract types, `APrim`), and raw types. A small `int*` literal (`isSmallInt`) is an
+-- immediate; a big one and a string allocate (`litAllocates`). A raw integer literal is in the
+-- range of its type (`rawRange`). `litInt` picks the form of an `int*` literal.
+data Lit = LitSmallInt Integer
+         | LitBigInt Integer
+         | LitRaw Raw Integer
          | LitFloat Double
          | LitChar Char
          | LitString String
          deriving (Eq,Show)
+
+-- an `int*` literal
+litInt :: Integer -> Lit
+litInt n = if isSmallInt n then LitSmallInt n else LitBigInt n
+
+-- Integers that every runtime holds in an `int*` without an allocation (on 32-bit platforms
+-- too).
+isSmallInt :: Integer -> Bool
+isSmallInt n = -(2^(29::Int)) <= n && n < 2^(29::Int)
+
+-- the literals that allocate, which are owned values; the others are immediates
+litAllocates :: Lit -> Bool
+litAllocates lit
+  = case lit of
+      LitBigInt _ -> True
+      LitString _ -> True
+      _ -> False
+
+-- the literals of an integer raw type (those of a size that depends on the platform fit in
+-- 32 bits)
+rawRange :: Raw -> Maybe (Integer,Integer)
+rawRange r
+  = case r of
+      RInt64  -> signed 64
+      RInt32  -> signed 32
+      RInt16  -> signed 16
+      RInt8   -> signed 8
+      RSSize  -> signed 32
+      RIntPtr -> signed 32
+      RUInt64 -> unsigned 64
+      RUInt32 -> unsigned 32
+      RUInt16 -> unsigned 16
+      RUInt8  -> unsigned 8
+      RUSize  -> unsigned 32
+      RChar   -> Nothing
+      RFloat64 -> Nothing
+      RFloat32 -> Nothing
+  where
+    signed :: Int -> Maybe (Integer,Integer)
+    signed b = Just (-(2^(b-1)), 2^(b-1) - 1)
+    unsigned :: Int -> Maybe (Integer,Integer)
+    unsigned b = Just (0, 2^b - 1)
+
+-- the value of an integer literal of any type
+litInteger :: Lit -> Maybe Integer
+litInteger lit
+  = case lit of
+      LitSmallInt n -> Just n
+      LitBigInt n -> Just n
+      LitRaw _ n -> Just n
+      _ -> Nothing
 
 -- Variables are paths, as in the paper: a root followed by the steps of the destructurings
 -- that lead to the variable, outermost first. For example, `let ptr x = z.left` binds

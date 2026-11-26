@@ -28,10 +28,10 @@ import Data.Functor.Const( Const(..) )
 import Data.Monoid( Any(..) )
 import Lidar.Name
 import Lidar.Syntax
-import Lidar.Types( inst, forallA, orNull, withToken, atAny, vtInt, vtString, vtChar, vtFloat, traverseReuseContents )
+import Lidar.Types( inst, forallA, orNull, withToken, atAny, traverseReuseContents )
 import Lidar.Traversal( Destruct(..), descendV, destructAOf, destructVOf )
 import Lidar.Env( Env(..), envOf, funSig, dataBody, lazySides )
-import Lidar.Query( Gamma, bindAll, altTypes, lamGamma, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
+import Lidar.Query( Gamma, litType, bindAll, altTypes, lamGamma, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 import Lidar.Pretty( ppr )
 
 -- the environment, the types of the variables, and the type parameters and parameter types of
@@ -250,14 +250,6 @@ annotated val
       Context{} -> True
       Null{} -> True
       _ -> getAny (getConst (descendV (const (Const (Any True))) (Const . Any . annotated) val))
-
-litType :: Lit -> VType
-litType lit
-  = case lit of
-      LitInt _    -> vtInt
-      LitString _ -> vtString
-      LitChar _   -> vtChar
-      LitFloat _  -> vtFloat
 
 checkA :: Ctx -> AVal -> AType -> An AVal
 checkA c val t

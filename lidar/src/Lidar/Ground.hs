@@ -40,10 +40,6 @@ data GroundBind = GValue VVal               -- ^ a ground value
                 | GCall Name [AType] [VVal] -- ^ a call that the client folds, with ground arguments
                 deriving (Show)
 
--- | Integer literals that every runtime holds without an allocation (on 32-bit platforms too).
-isSmallInt :: Integer -> Bool
-isSmallInt n = -(2^(29::Int)) <= n && n < 2^(29::Int)
-
 -- | The ground values of a lowered program, given the functions whose calls the client folds.
 -- A value is ground if its body is, given the ground values found so far: the least fixpoint,
 -- so that values never refer to each other in a cycle.
@@ -132,7 +128,9 @@ groundV globals bound = gv
              Lam{} -> False
              BoxAt{} -> False
     groundLit lit = case lit of
-                      LitInt n -> isSmallInt n
+                      LitSmallInt _ -> True
+                      LitBigInt _ -> False
+                      LitRaw _ _ -> True
                       LitString _ -> True
                       LitChar _ -> True
                       LitFloat _ -> False

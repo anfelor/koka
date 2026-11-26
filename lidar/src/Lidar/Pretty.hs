@@ -303,7 +303,9 @@ atomVal pp v
 prettyLit :: Lit -> Doc ann
 prettyLit lit
   = case lit of
-      LitInt i    -> viaShow i
+      LitSmallInt i -> viaShow i
+      LitBigInt i -> viaShow i
+      LitRaw r i  -> viaShow i <> "_" <> prettyRaw r
       LitFloat d  -> viaShow d
       LitChar c   -> viaShow c
       LitString s -> viaShow s

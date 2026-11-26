@@ -27,7 +27,6 @@ import qualified Numeric
 import Control.Monad( forM, foldM, when )
 import Lib.PPrint( Doc, text, string, int, integer, empty, isEmptyDoc, line, nest, align, vcat, hcat, hsep, punctuate, (<.>), (<+>), (<->) )
 import qualified Common.Name as K
-import Common.NamePrim( nameInt32, nameInternalInt32, nameInt64, nameSSizeT, nameInternalSSizeT, nameIntPtrT, nameByte )
 import Lidar.Name
 import Backend.Typed.LidarName( fromLidar )
 import Platform.Runtime( showHFloat )
@@ -664,7 +663,9 @@ nullTest n@(_,leaf) e
 genLit :: Lit -> G Doc
 genLit lit
   = case lit of
-      LitInt i -> return ("kt_box_integer(" <.> intLit i <.> ")")
+      LitSmallInt i -> return ("kt_box_integer(kk_integer_from_small(" <.> integer i <.> "))")
+      LitBigInt i -> return ("kt_box_integer(" <.> intLit i <.> ")")
+      LitRaw r i -> return (rawLit r i)
       LitFloat d -> return (text (showHFloat d ""))
       LitChar c -> return ("((kk_char_t)" <.> int (fromEnum c) <.> ")")
       LitString "" -> return "kt_box_string(kk_string_empty())"
@@ -674,11 +675,23 @@ genLit lit
                                          ("kt_box_string(kk_string_dup(" <.> x <.> ",_ctx))"))
 
 -- Use a C literal when it fits; exclude the signed minimum, which is not a valid C literal.
+-- a big integer (`LitBigInt`)
 intLit :: Integer -> Doc
 intLit i
-  | i >= -8191 && i <= 8191 = "kk_integer_from_small(" <.> integer i <.> ")"
   | abs i < 2^63 = "kk_integer_from_int64(KK_I64(" <.> integer i <.> "),_ctx)"
   | otherwise = "kk_integer_from_str(\"" <.> integer i <.> "\",_ctx)"
+
+-- a literal of a raw integer type; the minimum of a signed type is not a C literal
+rawLit :: Raw -> Integer -> Doc
+rawLit r i
+  | Just (lo,_) <- rawRange r, i == lo, lo < 0 = "(" <.> rawLit r (i+1) <+> "- 1)"
+  | otherwise
+  = case r of
+      RInt32 -> "KK_I32(" <.> integer i <.> ")"
+      RInt64 -> "KK_I64(" <.> integer i <.> ")"
+      RSSize -> "KK_IZ(" <.> integer i <.> ")"
+      RIntPtr -> "KK_IP(" <.> integer i <.> ")"
+      _ -> "((" <.> text (ctName (CPrim r)) <.> ")" <.> integer i <.> ")"
 
 cstring :: String -> (String,Int)
 cstring s
@@ -1167,7 +1180,9 @@ ifChain ((test,s):rest) other = "if (" <.> test <.> ")" <+> block s <+> "else" <
 litTest :: Doc -> Lit -> Doc
 litTest ve lit
   = case lit of
-      LitInt i -> "kk_integer_eq_borrow(kt_unbox_integer(" <.> ve <.> ")," <.> intLit i <.> ",_ctx)"
+      LitSmallInt i -> "kk_integer_eq_borrow(kt_unbox_integer(" <.> ve <.> "),kk_integer_from_small(" <.> integer i <.> "),_ctx)"
+      LitBigInt i -> "kk_integer_eq_borrow(kt_unbox_integer(" <.> ve <.> ")," <.> intLit i <.> ",_ctx)"
+      LitRaw r i -> "(" <.> ve <+> "==" <+> rawLit r i <.> ")"
       LitString s -> "(kk_string_cmp_cstr_borrow(kt_unbox_string(" <.> ve <.> ")," <.> text (fst (cstring s)) <.> ",_ctx) == 0)"
       LitChar c -> "(" <.> ve <+> "==" <+> int (fromEnum c) <.> ")"
       LitFloat d -> "(" <.> ve <+> "==" <+> text (showHFloat d "") <.> ")"
@@ -1183,10 +1198,6 @@ openTypeArgs cx v
 
 genCall :: Ctx -> Dest -> Name -> [AType] -> [VVal] -> G [Doc]
 genCall cx dest f tys vs
-  | [Lit (LitInt i)] <- vs, Just (kt,lit) <- fixedWidthLit f i
-  = do (_,r) <- callSig cx f tys
-       rct <- ctype r
-       return (assignTo dest rct (fromKoka kt rct lit))
   | Just ext <- M.lookup f (envExterns (cxEnv cx)) = genExtern cx dest f tys vs ext
   | otherwise
   = do (ps,r) <- callSig cx f tys
@@ -1205,18 +1216,6 @@ parallelAssign params args
 -- Conversions of small integer literals to fixed-width integers become C literals
 -- (as in `Backend.C.FromCore.genAppSpecial`); `ssize_t` and `intptr_t` stay within 32 bits
 -- so that they fit on every platform.
-fixedWidthLit :: Name -> Integer -> Maybe (String,Doc)
-fixedWidthLit name i
-  | f `elem` [nameInt32,nameInternalInt32] && within 31 = Just ("int32_t", "KK_I32(" <.> integer i <.> ")")
-  | f == nameInt64 && within 63                         = Just ("int64_t", "KK_I64(" <.> integer i <.> ")")
-  | f `elem` [nameSSizeT,nameInternalSSizeT] && within 31 = Just ("kk_ssize_t", "KK_IZ(" <.> integer i <.> ")")
-  | f == nameIntPtrT && within 31                       = Just ("intptr_t", "KK_IP(" <.> integer i <.> ")")
-  | f == nameByte && i >= 0 && i <= 255                 = Just ("uint8_t", "((uint8_t)" <.> integer i <.> ")")
-  | otherwise = Nothing
-  where
-    f = fromLidar name
-    within bits = abs i < 2^bits   -- excludes the minimum, which is not a valid C literal
-
 callSig :: Ctx -> Name -> [AType] -> G ([VType],VType)
 callSig cx f tys
   = case M.lookup f (envSigs (cxEnv cx)) of
@@ -1342,7 +1341,8 @@ staticLeaves sc blocks val
       Glob g _ -> found (M.lookup g (scGlobals sc))
       DupV v -> staticLeaves sc blocks v
       UnitV -> return ([],blocks)
-      Lit (LitInt i) -> return (["((kk_intb_t)" <.> integer (4*i + 1) <.> ")"],blocks)   -- `kk_integer_from_small`
+      Lit (LitSmallInt i) -> return (["((kk_intb_t)" <.> integer (4*i + 1) <.> ")"],blocks)   -- `kk_integer_from_small`
+      Lit (LitRaw r i) -> return ([rawLit r i],blocks)
       Lit (LitChar c) -> return (["((kk_char_t)" <.> int (fromEnum c) <.> ")"],blocks)
       Lit (LitString "") -> return (["kk_datatype_tag_init(1)"],blocks)                   -- `kk_string_empty`
       -- as `kk_string_alloc_from_utf8n` leaves it, which converts invalid UTF-8 (a NUL is `C0 80`)

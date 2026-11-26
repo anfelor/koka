@@ -16,7 +16,7 @@ import Data.Maybe( isJust, isNothing, listToMaybe )
 import Control.Monad( foldM, unless )
 import Control.Monad.Reader( local )
 import Common.Name
-import Common.NamePrim( nameCoreHnd, nameFieldAddrOf, nameCCtxHoleCreate, nameCCtxCreate, nameCCtxExtend, nameCCtxApply, nameCCtxEmpty, nameCCtxCompose, nameCCtxComposeExtend
+import Common.NamePrim( nameInt32, nameInternalInt32, nameInt64, nameSSizeT, nameInternalSSizeT, nameIntPtrT, nameByte, nameCoreHnd, nameFieldAddrOf, nameCCtxHoleCreate, nameCCtxCreate, nameCCtxExtend, nameCCtxApply, nameCCtxEmpty, nameCCtxCompose, nameCCtxComposeExtend
                       , nameYielding, nameTrue, nameFalse, nameEffectOpen, nameLazyMemoize, nameLazyMemoizeTarget )
 import Common.Syntax( isDefFun, ParamInfo(..) )
 import qualified Common.Syntax as Syntax
@@ -291,7 +291,7 @@ elabJoin expr
       C.Case _ _ -> failE "case with multiple scrutinees after matching"
       -- an identity external changes only effects: the tails of its argument are coerced to `result`
       _ | Just g <- identityCast expr, not (isValue g) -> elabTail g
-      C.App f args | not (isConApp f), isNothing (identityCast expr) -> elabApp f args (typeOf expr)
+      C.App f args | not (isConApp f), isNothing (identityCast expr), isNothing (rawLiteral expr) -> elabApp f args (typeOf expr)
       _ -> do (k,v,t) <- elabValT expr
               k <$> retAt t v
 
@@ -761,6 +761,7 @@ elabValOf expr
       C.Var (TName x tp) info -> Just (elabVar x tp info [])
       C.TypeApp (C.Var (TName x tp) info) tys -> Just (elabVar x tp info tys)
       C.Lit lit -> Just (return (id, Lit (elabLit lit)))
+      _ | Just l <- rawLiteral expr -> Just (return (id, Lit l))
       _ | isConApp expr -> Just $ case expandSyn (typeOf expr) of
                                     TFun pars eff _ -> etaCon expr pars eff
                                     TForall tvs _ -> generalize [typevarId tv | tv <- tvs, tvarStar tv] (elabCon expr []) (typeOf expr)
@@ -849,10 +850,22 @@ stripForallV :: VType -> VType
 stripForallV (VPtr (AForall _ a)) = VPtr a
 stripForallV t = t
 
+-- the conversion of an integer literal to a raw type, in its range, is a raw literal
+rawLiteral :: C.Expr -> Maybe Lit
+rawLiteral expr
+  = case expr of
+      C.App f [C.Lit (C.LitInt i)]
+        | r:_ <- [r | (n,r) <- conversions, isPrim n f], Just (lo,hi) <- rawRange r, lo <= i, i <= hi
+        -> Just (LitRaw r i)
+      _ -> Nothing
+  where
+    conversions = [(nameInt32,RInt32),(nameInternalInt32,RInt32),(nameInt64,RInt64),(nameSSizeT,RSSize)
+                  ,(nameInternalSSizeT,RSSize),(nameIntPtrT,RIntPtr),(nameByte,RUInt8)]
+
 elabLit :: C.Lit -> Lit
 elabLit lit
   = case lit of
-      C.LitInt i    -> LitInt i
+      C.LitInt i    -> litInt i
       C.LitFloat d  -> LitFloat d
       C.LitChar c   -> LitChar c
       C.LitString s -> LitString s

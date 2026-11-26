@@ -11,7 +11,7 @@
 -- Keep inference in sync with the typing rules in Syntax.
 module Lidar.Query( Gamma, noJoins, bindAll, checkE, inferE, inferA, inferV, signature
                           , inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma
-                          , lamGamma, tokenTy
+                          , lamGamma, tokenTy, litType
                           ) where
 
 import qualified Data.Map as M
@@ -117,7 +117,7 @@ inferExpr env g js expr
                                        return r
                        _ -> Left ("applying a non-function: " ++ ppr ft)
       CaseLit v alts def -> do vt <- inferV env g v
-                               mapM_ (\(l,_) -> expect vt (litType l)) alts
+                               mapM_ (\(l,_) -> checkLit l >> expect vt (litType l)) alts
                                branches env (inferE env g js def : [inferE env g js e | (_,e) <- alts])
       Drop x e -> do t <- inferVar g x
                      case t of
@@ -387,10 +387,24 @@ checkArgs env g ps vs
 litType :: Lit -> VType
 litType lit
   = case lit of
-      LitInt _    -> vtInt
-      LitString _ -> vtString
-      LitChar _   -> vtChar
-      LitFloat _  -> vtFloat
+      LitSmallInt _ -> vtInt
+      LitBigInt _   -> vtInt
+      LitRaw r _    -> VRaw r
+      LitString _   -> vtString
+      LitChar _     -> vtChar
+      LitFloat _    -> vtFloat
+
+-- an integer literal has the form and range that `litInt` and `rawRange` give it
+checkLit :: Lit -> Q ()
+checkLit lit
+  = case lit of
+      LitSmallInt n -> unless (litInt n == lit) bad
+      LitBigInt n -> unless (litInt n == lit) bad
+      LitRaw r n | Just (lo,hi) <- rawRange r -> unless (lo <= n && n <= hi) bad
+                 | otherwise -> bad
+      _ -> return ()
+  where
+    bad = Left ("literal out of the range of its form: " ++ show lit)
 
 checkA :: Env -> Gamma -> AVal -> AType -> Q ()
 checkA env g val t = inferA env g val >>= expect t
@@ -552,7 +566,7 @@ inferV env g val
                       Just (SigVal tvs t) | length tvs == length tys -> return (inst tvs tys t)
                       _ -> Left ("unknown global value " ++ show x)
       UnitV -> return VUnit
-      Lit l -> return (litType l)
+      Lit l -> checkLit l >> return (litType l)
       NoReuse n p -> do let t = VReuse MaybeEmpty n p
                         checkReuseTy (V t)
                         return t

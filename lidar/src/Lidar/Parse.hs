@@ -52,6 +52,7 @@ unknownV = VPtr unknownA
 -- a name (whether it is in backquotes) with the parts of a path after it, or another token
 data Tok = TName Bool String [String]
          | TInt Integer
+         | TRawInt Integer String   -- an integer with a raw type suffix, `12_int32`
          | TFloat Double
          | TChar Char
          | TString String
@@ -110,7 +111,11 @@ withParts mk n s = let (ps,m,rest) = parts s in (mk ps, n + m, rest)
                   _ -> lexName r
 
 lexNumber :: String -> (Tok,Int,String)
-lexNumber s = (if null frac && null ex then TInt (read txt) else TFloat (read txt), length txt, rest)
+lexNumber s
+  = case rest of
+      '_':r | null frac, null ex, (raw@(_:_),r') <- span (\c -> isAlphaNum c || c == '_') r
+        -> (TRawInt (read txt) raw, length txt + 1 + length raw, r')
+      _ -> (if null frac && null ex then TInt (read txt) else TFloat (read txt), length txt, rest)
   where
     (sign,s1) = case s of
                   '-':r -> ("-",r)
@@ -218,7 +223,8 @@ intP = tokenP (\t -> case t of
 
 litP :: P Lit
 litP = tokenP (\t -> case t of
-                       TInt i -> Just (LitInt i)
+                       TInt i -> Just (litInt i)
+                       TRawInt i r | Just raw <- lookup r rawNames -> Just (LitRaw raw i)
                        TFloat d -> Just (LitFloat d)
                        TChar c -> Just (LitChar c)
                        TString s -> Just (LitString s)
@@ -378,10 +384,11 @@ baseTyP
 
 rawP :: P Raw
 rawP = tokenP (\t -> case t of
-                       TName False n [] -> lookup n raws
+                       TName False n [] -> lookup n rawNames
                        _ -> Nothing) <?> "raw type"
-  where
-    raws = [("char",RChar),("ssize_t",RSSize),("intptr_t",RIntPtr),("float64",RFloat64),("float32",RFloat32)
+
+rawNames :: [(String,Raw)]
+rawNames = [("char",RChar),("ssize_t",RSSize),("intptr_t",RIntPtr),("float64",RFloat64),("float32",RFloat32)
            ,("int64",RInt64),("int32",RInt32),("int16",RInt16),("int8",RInt8)
            ,("uint64",RUInt64),("uint32",RUInt32),("uint16",RUInt16),("uint8",RUInt8),("size_t",RUSize)]
 
