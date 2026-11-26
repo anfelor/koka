@@ -33,7 +33,7 @@ Mono types become IR types as follows.
 -}
 module Lidar.Lean.Decls
   ( Decls(..), Kind(..), CtorInfo(..)
-  , declsOf, worldTypes, leanName, irType, funTypes, typeKind, anyT, resultType, rawOfNat, isBuiltinType
+  , declsOf, worldTypes, leanName, irType, funTypes, takesWorld, typeKind, anyT, resultType, rawOfNat, isBuiltinType
   ) where
 
 import qualified Data.Map as M

@@ -306,18 +306,31 @@ genBox cx tag at v
                          ++ [writeSlot pl b s x | (s,x) <- zip (plSlots pl) tmps]) b)
 
 -- A top-level function as a closure. Lean's closures take objects, so its parameters and
--- result must be objects.
+-- result must be objects. The closure of an action takes Lean's world for its token, which
+-- its C function does not: a wrapper drops it.
 genFun :: Ctx -> Name -> G String
 genFun cx f
   = case M.lookup f (envSigs (cxEnv cx)) of
       Just (SigFun _ ps _ r) ->
-        do pls <- mapM (leavesOf . snd) ps
+        do let own = [t | (_,t) <- ps, t /= VToken]
+           pls <- mapM leavesOf own
            rls <- leavesOf r
            tgt <- target cx f
-           if all (== [LObj]) (rls : pls) && length ps <= closureMaxArgs
-             then return (call "lean_alloc_closure" ["(void*)" ++ tgtName tgt, show (length ps), "0"])
-             else fail ("the function " ++ show f ++ " as a closure")
+           let closure fn = call "lean_alloc_closure" ["(void*)" ++ fn, show (length ps), "0"]
+           if not (all (== [LObj]) (rls : pls) && length ps <= closureMaxArgs)
+             then fail ("the function " ++ show f ++ " as a closure")
+             else if length own == length ps then return (closure (tgtName tgt))
+             else do fn <- fresh "lt_fun"
+                     xs <- mapM (const (fresh "a")) ps
+                     let params = ["lean_object* " ++ (if t == VToken then "_world" else x) | (x,(_,t)) <- zip xs ps]
+                         cargs = [x | (x,(_,t)) <- zip xs ps, t /= VToken]
+                     modify (\st -> st{ stLams = stLams st ++ ["static lean_object*" <+> text (call fn params) <+> block [text ("return " ++ call (tgtName tgt) cargs ++ ";")]] })
+                     return (closure fn)
       _ -> fail ("unknown function " ++ show f)
+
+-- the world that Lean passes to the closure of an action, for its token
+world :: String
+world = "lean_io_mk_world()"
 
 -- the largest number of arguments of a closure that `lean_apply_n` passes one by one
 closureMaxArgs :: Int
@@ -326,13 +339,13 @@ closureMaxArgs = 16
 -- A closure: a C function that takes the captured leaves (boxed, as Lean's closures hold
 -- objects) and the parameters, which are objects, in an array if they are more than a closure
 -- passes one by one. Applying it consumes the closure and passes the captures owned, as the
--- closure's body owns them.
+-- closure's body owns them. A token parameter is Lean's world, which the body ignores.
 genLam :: Ctx -> [(Path,Mode,VType)] -> VType -> VExpr -> G String
 genLam cx ps r e
   = do let caps = S.toList (fvA (Lam ps r e))
        capLeaves <- forM caps $ \x -> do ls <- tyOfName cx x >>= leavesOfTy
                                          return (x,ls)
-       pls <- mapM (\(_,_,t) -> leavesOf t) ps
+       pls <- mapM (\(_,_,t) -> leavesOf t) [p | p@(_,_,t) <- ps, t /= VToken]
        rls <- leavesOf r
        let fixed = [(l,n) | (x,ls) <- capLeaves, (l,n) <- zip ls (leafNames x (length ls))]
            arity = length fixed + length ps
@@ -342,7 +355,7 @@ genLam cx ps r e
          fn <- fresh "lt_lam"
          cs <- mapM (const (fresh "c")) fixed
          body <- genE cx{ cxGamma = M.union (M.fromList [(x,V t) | (x,_,t) <- ps]) (cxGamma cx), cxJoins = M.empty } DReturn e
-         let args = cs ++ [localName x | (x,_,_) <- ps]
+         let args = cs ++ [if t == VToken then "_world" else localName x | (x,_,t) <- ps]
              (params,loadArgs)
                | arity > closureMaxArgs = (["lean_object** _args"], [text ("lean_object* " ++ a ++ " = _args[" ++ show i ++ "];") | (i,a) <- zip [0 :: Int ..] args])
                | otherwise = (["lean_object* " ++ a | a <- args], [])
@@ -452,8 +465,8 @@ genE cx dest expr
              else return ([text (n ++ " = " ++ a ++ ";") | ((_,n),a) <- zip targets args] ++ [goto])
       Call f _ vs -> genCall cx dest f vs
       App f vs ->
-        do A (AFun _ r) <- tyOfName cx f
-           args <- concat <$> mapM (genV cx) vs
+        do A (AFun ps r) <- tyOfName cx f
+           args <- concat <$> zipWithM (\(_,t) v -> if t == VToken then return [world] else genV cx v) ps vs
            rls <- leavesOf r
            let n = length args
                app | n <= closureMaxArgs = return ([], call ("lean_apply_" ++ show n) (localName f : args))
