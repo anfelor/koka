@@ -105,13 +105,15 @@ data ModInit = ModInit { initPhase :: String, initName :: String, initLean :: St
 
 -- | How a constant is linked: its C name, @\@[export]@ name, the C name of its @_boxed@ version (for
 -- the module's declarations), impure signature (parameters with impure types and borrow flags,
--- and the impure result type) and @\@[extern]@ entries.
+-- and the impure result type), @\@[extern]@ entries, and whether it is @\@[never_extract]@ (its calls
+-- are never initialised once for all their uses).
 data Link = Link
   { linkCName  :: String
   , linkExport :: Maybe String
   , linkBoxed  :: Maybe String
   , linkImpure :: Maybe ([Param], Type)
   , linkExtern :: Maybe [ExternEntry]
+  , linkNeverExtract :: Bool
   } deriving (Eq, Show)
 
 data Init = InitFn Name | BuiltinInitFn Name | IOUnitInit | IOUnitBuiltinInit
@@ -337,7 +339,7 @@ rExtern = mapM entry
 
 -- | The link and init attributes after a constant's name, and the items after them.
 rAttrs :: [SExp] -> R (Link, [Init], [SExp])
-rAttrs = go (Link "" Nothing Nothing Nothing Nothing) []
+rAttrs = go (Link "" Nothing Nothing Nothing Nothing False) []
   where
     go l is es = case es of
       SList [SSym "cname", SStr c] : rest -> go l { linkCName = c } is rest
@@ -347,6 +349,7 @@ rAttrs = go (Link "" Nothing Nothing Nothing Nothing) []
         ps' <- rParams ps; t' <- rType t; go l { linkImpure = Just (ps', t') } is rest
       SList (SSym "extern" : xs) : rest -> do
         xs' <- rExtern xs; go l { linkExtern = Just xs' } is rest
+      SSym "never-extract" : rest -> go l { linkNeverExtract = True } is rest
       SList [SSym "init-fn", SStr f] : rest -> go l (is ++ [InitFn f]) rest
       SList [SSym "builtin-init-fn", SStr f] : rest -> go l (is ++ [BuiltinInitFn f]) rest
       SSym "io-unit-init" : rest -> go l (is ++ [IOUnitInit]) rest
@@ -493,12 +496,13 @@ sExtern es = SList (SSym "extern" : map entry es)
         entry Opaque = SSym "opaque"
 
 sAttrs :: Link -> [Init] -> [SExp]
-sAttrs (Link c ex bx imp ext) is =
+sAttrs (Link c ex bx imp ext ne) is =
   [SList [SSym "cname", SStr c]]
   ++ [ SList [SSym "export", SStr x] | Just x <- [ex] ]
   ++ [ SList [SSym "boxed-cname", SStr x] | Just x <- [bx] ]
   ++ [ SList [SSym "impure", sParams ps, sType t] | Just (ps, t) <- [imp] ]
   ++ [ sExtern xs | Just xs <- [ext] ]
+  ++ [ SSym "never-extract" | ne ]
   ++ map sInit is
   where sInit (InitFn f) = SList [SSym "init-fn", SStr f]
         sInit (BuiltinInitFn f) = SList [SSym "builtin-init-fn", SStr f]

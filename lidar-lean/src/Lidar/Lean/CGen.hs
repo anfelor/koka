@@ -119,7 +119,8 @@ type G a = M () St a
 -- recursive (its jumps then assign the parameters in parallel); `cxBeats`: the static values
 -- whose reads count a heartbeat (see `beatsOf`)
 data Ctx = Ctx{ cxEnv :: Env, cxTargets :: M.Map Name Target, cxGamma :: Gamma
-              , cxJoins :: M.Map Name (String,[(Path,VType)],Bool), cxBeats :: S.Set Name }
+              , cxJoins :: M.Map Name (String,[(Path,VType)],Bool), cxBeats :: S.Set Name
+              , cxOnDemand :: S.Set Name }   -- the values initialised on demand
 
 fresh :: String -> G String
 fresh s = state (\st -> ("_" ++ s ++ show (stUniq st), st{ stUniq = stUniq st + 1 }))
@@ -245,7 +246,10 @@ genV cx val
       Glob x _ -> do ls <- tyOf cx val >>= leavesOf
                      tgt <- target cx x
                      let beat e = if S.member x (cxBeats cx) then "(lean_inc_heartbeat(), " ++ e ++ ")" else e
-                     return [beat (tgtName tgt) | _ <- ls]
+                         n = tgtName tgt
+                         value | S.member x (cxOnDemand cx) = call "lean_obj_once" ['&' : n, '&' : n ++ "_once", "_init_" ++ n]
+                               | otherwise = n
+                     return [beat value | _ <- ls]
       DupV v -> do es <- genV cx v
                    ls <- tyOf cx v >>= leavesOf
                    return [if l == LObj then call "lt_dup" [e] else e | (l,e) <- zip ls es]
@@ -696,8 +700,8 @@ expand pat args = go pat
 
 -- The prototype and definition of a definition, and its initialisation (for a value). A
 -- definition has the C name of its declaration, even if calls go to its `@[extern]` entry.
-genDef :: Env -> M.Map Name Target -> M.Map Name String -> S.Set Name -> Def -> G (C,C,[C])
-genDef env tgts cnames beats def
+genDef :: Env -> M.Map Name Target -> M.Map Name String -> S.Set Name -> S.Set Name -> Def -> G (C,C,[C])
+genDef env tgts cnames beats onDemand def
   = case def of
       DefFun f _ args _ res body _ ->
         do name <- cname f
@@ -708,18 +712,24 @@ genDef env tgts cnames beats def
            ss <- genE cx DReturn body
            let sig = "LEAN_EXPORT" <+> text rt <+> text (call name params)
            return (sig <> ";", sig <+> block ss, [])
-      DefVal x _ _ t body ->
+      DefVal x _ ini t body ->
         do name <- cname x
            ls <- leavesOf t
            rt <- resultType ls
            ss <- genE cx0 DReturn body
-           let initf = "_init_" ++ name
-           return ("LEAN_EXPORT" <+> text rt <+> text name <> ";",
-                   "static" <+> text rt <+> text initf <> "(void)" <+> block ss,
-                   [text (name ++ " = " ++ initf ++ "();")]
-                   ++ [text ("if (!lean_is_scalar(" ++ name ++ ")) lean_mark_persistent(" ++ name ++ ");") | ls == [LObj]])
+           let initf = "static" <+> text rt <+> text ("_init_" ++ name) <> "(void)"
+           case ini of
+             AtLoad -> return ("LEAN_EXPORT" <+> text rt <+> text name <> ";", initf <+> block ss,
+                               [text (name ++ " = _init_" ++ name ++ "();")]
+                               ++ [text ("if (!lean_is_scalar(" ++ name ++ ")) lean_mark_persistent(" ++ name ++ ");") | ls == [LObj]])
+             -- as Lean's `EmitC` writes a closed term (`lean_obj_once` marks it persistent)
+             OnDemand | ls == [LObj] -> return (vsep [ text ("static lean_object* " ++ name ++ ";")
+                                                     , text ("static lean_once_cell_t " ++ name ++ "_once = LEAN_ONCE_CELL_INITIALIZER;")
+                                                     , initf <> ";" ],
+                                                initf <+> block ss, [])
+             OnDemand -> fail "a value initialised on demand that is not an object"
   where
-    cx0 = Ctx env tgts M.empty M.empty beats
+    cx0 = Ctx env tgts M.empty M.empty beats onDemand
     cname f = maybe (fail ("no C name for " ++ show f)) return (M.lookup f cnames)
 
 -- the prototypes of the functions and values of other modules that the module uses, and the
@@ -1005,6 +1015,7 @@ cgenModule d prog
     -- the functions that lowering made (`Passes.LiftLams`, `Passes.TailRec`) get names of that form
     made = M.union closed (M.fromList [(f, "_lt_" ++ encode (show f)) | DefFun{ defName = f } <- progDefs prog, not (M.member f dumpNames)])
     dumpNames = M.fromList [(leanName (D.declName x), ()) | x <- D.dumpDecls d]
+    onDemand = S.fromList [x | DefVal x _ OnDemand _ _ <- progDefs prog]
     tgts = M.union (targetsOf d) (M.map (\n -> Target n Direct Nothing) made)
     declInits = [(x, declInitCode tgts x) | x <- D.dumpDecls d]
     cnames = M.union (M.fromList [(leanName (D.declName x), D.linkCName (D.declLink x)) | x <- D.dumpDecls d]) made
@@ -1019,7 +1030,7 @@ cgenModule d prog
     genOne :: Def -> G (Either String (C,C,[C]))
     genOne def | Just (p,c) <- M.lookup (defName def) gvals = return (Right (text p, text c, []))
     genOne def = do st <- get
-                    case runM (genDef env tgts cnames (beatsOf d prog (M.keysSet closed)) def) () st of
+                    case runM (genDef env tgts cnames (beatsOf d prog (M.keysSet closed)) onDemand def) () st of
                       Left err -> return (Left (show (defName def) ++ ": " ++ err))
                       Right (r,st') -> do put st'
                                           return (Right r)

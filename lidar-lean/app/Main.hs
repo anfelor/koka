@@ -27,6 +27,7 @@ import Lidar.Lean.Dump
 import Lidar.Lean.Elab
 import Lidar.Lean.CGen
 import Lidar.Lean.CGen.Ground( foldable )
+import Lidar.Lean.Decls( leanName )
 
 usage :: String
 usage = unlines
@@ -71,6 +72,13 @@ main = do
         Right c -> writeFile out c
     _ -> do hPutStrLn stderr usage; exitFailure
 
+-- the constants whose calls with ground arguments `Passes.Closed` may initialise once, on
+-- demand: those that are not @[never_extract], as for Lean's `extractClosed`
+extractableOf :: Dump -> S.Set Lidar.Name
+extractableOf d
+  = S.fromList ([leanName (declName x) | x <- dumpDecls d, not (linkNeverExtract (declLink x))]
+                ++ [leanName (constName c) | c <- dumpConsts d, not (linkNeverExtract (constLink c))])
+
 -- prints the errors, labeled by the phase that produced them, and fails if there are any
 report :: [(String,String)] -> IO ()
 report errs = do
@@ -96,7 +104,8 @@ lowerDump flags d = do
   where
     opts = Options{ optReuse = True, optPeephole = True, optLazies = Lazies M.empty S.empty M.empty
                   , optFips = M.empty, optRecGroups = [], optCheckBetween = checkAll flags
-                  , optFoldable = foldable, optExtractable = const False }
+                  , optFoldable = foldable, optExtractable = (`S.member` extractable) }
+    extractable = extractableOf d
     lowerProgram' prog
       | timings flags = do ((final,errs,_),times) <- lowerProgramTimed opts prog
                            mapM_ (uncurry printTime) times
