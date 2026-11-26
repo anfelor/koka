@@ -39,6 +39,7 @@ library
       Lidar.Passes.Inline
       Lidar.Passes.JoinArgs
       Lidar.Passes.Lazy
+      Lidar.Passes.LiftLams
       Lidar.Passes.Match
       Lidar.Passes.Paths
       Lidar.Passes.Peephole

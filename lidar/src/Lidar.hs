@@ -54,6 +54,7 @@ import Lidar.Passes.ExpandReuse( expandReuseProgram )
 import Lidar.Passes.FillCredits( fillCreditsProgram )
 import Lidar.Passes.Inline( inlineProgram )
 import Lidar.Passes.JoinArgs( joinArgsProgram )
+import Lidar.Passes.LiftLams( liftLamsProgram )
 import Lidar.Passes.Lazy( lazyProgram )
 import Lidar.Passes.Match( matchProgram )
 import Lidar.Passes.Paths( pathsProgram )
@@ -107,6 +108,7 @@ pipeline opts
     , Pass "anf" anfProgram
     , Pass "simplify" simplifyProgram
     , purePass "yields" yieldsProgram
+    , purePass "liftlams" liftLamsProgram
     , Require "linear" checkLinear
     , Pass "perceus" perceusProgram
     , purePass "tailrec" (tailRecProgram fips)

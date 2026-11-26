@@ -580,3 +580,55 @@ typedChildren f expr
 prefixes :: Path -> [Path]
 prefixes (Path x ss) = [Path x (take k ss) | k <- [0 .. length ss - 1]]
 
+-- the type variables that are not bound
+outside :: S.Set TVar -> [TVar] -> [TVar]
+outside bound = filter (`S.notMember` bound)
+
+-- the type variables that the annotations mention and that are not bound, by the given ones or
+-- inside (by `gen`, `unpack` and join points), with repetitions
+tvarsE :: S.Set TVar -> VExpr -> [TVar]
+tvarsE bound expr
+  = case expr of
+      Unpack v tvs _ e  -> tvarsV bound v ++ tvarsE (with tvs) e
+      Gen tvs e           -> tvarsE (with tvs) e
+      Join _ tvs ps e1 e2 -> joinDef tvs ps e1 ++ tvarsE bound e2
+      JoinRec t ds e -> outside bound (ftv t) ++ concat [joinDef tvs ps e1 | JoinDef _ tvs ps e1 <- ds] ++ tvarsE bound e
+      _ -> outside bound annotations ++ getConst (descendE (const (Const [])) (Const . tvarsV bound) (\_ e -> Const (tvarsE bound e)) expr)
+  where
+    with tvs = S.union bound (S.fromList tvs)
+    joinDef tvs ps e1 = outside (with tvs) (concat [ftv t | (_,_,t) <- ps]) ++ tvarsE (with tvs) e1
+    annotations = case expr of
+      Let _ t _ _        -> ftv t
+      CastEv u t _       -> ftv u ++ ftv t
+      Unreachable t      -> ftv t
+      Call _ ts _        -> concatMap ftv ts
+      Jump _ ts _        -> concatMap ftv ts
+      _                  -> []
+
+tvarsV :: S.Set TVar -> VVal -> [TVar]
+tvarsV bound val
+  = outside bound annotations ++ getConst (descendV (Const . tvarsA bound) (Const . tvarsV bound) val)
+  where
+    annotations = case val of
+      Glob _ ts   -> concatMap ftv ts
+      Inj _ t _   -> ftv t
+      Ptr a _     -> ftv a
+      Pack t ts _ -> ftv t ++ concatMap ftv ts
+      TyApp _ ts  -> concatMap ftv ts
+      Down b _    -> ftv b
+      Context b _ -> ftv b
+      Null t      -> ftv t
+      NoReuse _ c -> maybe [] (\(Contents _ p t) -> tvarsV bound p ++ ftv t) c
+      _           -> []
+
+tvarsA :: S.Set TVar -> AVal -> [TVar]
+tvarsA bound val
+  = case val of
+      Lam ps r e -> outside bound (concat [ftv t | (_,_,t) <- ps] ++ ftv r) ++ tvarsE bound e
+      _ -> outside bound annotations ++ getConst (descendA (const (Const [])) (Const . tvarsA bound) (Const . tvarsV bound) val)
+  where
+    annotations = case val of
+      InjA _ a _      -> ftv a
+      Roll a _        -> ftv a
+      OpenCon _ ts _  -> concatMap ftv ts
+      _               -> []
