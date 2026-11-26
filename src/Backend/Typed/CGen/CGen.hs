@@ -533,6 +533,13 @@ shareAlias cx y x
   | S.member y (cxShared cx) = cx{ cxShared = S.insert x (cxShared cx) }
   | otherwise = cx
 
+-- `shareAlias` for a destructuring of a value, whose binder is an alias only of a variable
+shareValAlias :: Ctx -> VVal -> Path -> Ctx
+shareValAlias cx v x
+  = case v of
+      Var y -> shareAlias cx y x
+      _ -> cx
+
 genAlias :: Ctx -> Dest -> Doc -> Path -> Ty -> VExpr -> G [Doc]
 genAlias cx dest ve x t e
   = do s <- genE (bindVar cx x t) dest e
@@ -954,10 +961,10 @@ genE cx dest expr
       Deref v x e
         -> do VPtr a <- tyOf cx v
               ve <- genV cx v
-              let cx' = case v of
-                          Var y -> shareAlias cx y x
-                          _ -> cx
-              genAlias cx' dest ve x (A a) e
+              genAlias (shareValAlias cx v x) dest ve x (A a) e
+      LetCast v b x e
+        -> do ve <- genV cx v
+              genRead (shareValAlias cx v x) dest x (VPtr b) ve e
       Unroll v x e
         -> do A t <- tyOfName cx v
               a <- liftC (dataBody (cxEnv cx) t)

@@ -135,6 +135,7 @@ renE global ren expr
       Join j tvs ps e1 e2 -> Join j tvs (params ps) e1 e2
       JoinRec t ds e -> JoinRec (replaceVType sub t) [d{ joinParams = params (joinParams d) } | d <- ds] e
       Jump j ts vs -> Jump j (map (replaceAType sub) ts) vs
+      LetCast v b x e -> LetCast v (replaceAType sub b) x e
       _ -> expr
     params ps = [(x,m,replaceVType sub t) | (x,m,t) <- ps]
 

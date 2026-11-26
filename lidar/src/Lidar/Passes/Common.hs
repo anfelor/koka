@@ -121,6 +121,7 @@ mentionedE e = annotations ++ getConst (descendE (Const . (:[])) (Const . mentio
           Unreachable t -> mentionedT t
           Call _ ts _ -> concatMap (mentionedT . VPtr) ts
           Jump _ ts _ -> concatMap (mentionedT . VPtr) ts
+          LetCast _ b _ _ -> mentionedT (VPtr b)
           Join _ _ ps _ _ -> concatMap mentionedT [t | (_,_,t) <- ps]
           JoinRec t ds _ -> concatMap mentionedT (t : [t' | d <- ds, (_,_,t') <- joinParams d])
           _ -> []
@@ -263,6 +264,7 @@ substTypesE sub expr
       Join j tvs ps e1 e2   -> Join j tvs [(x,m,subst sub t) | (x,m,t) <- ps] e1 e2
       JoinRec t ds e        -> JoinRec (subst sub t) [d{ joinParams = [(x,m,subst sub t') | (x,m,t') <- joinParams d] } | d <- ds] e
       Jump j ts vs          -> Jump j (map (subst sub) ts) vs
+      LetCast v b x e       -> LetCast v (subst sub b) x e
       _                     -> expr
 
 substTypesV :: Sub -> VVal -> VVal
@@ -460,6 +462,7 @@ substStepWith renameRoot recur scope sub expr
       Unreachable t -> Unreachable (substVType sub t)
       Call f ts vs -> Call f (map (substAType sub) ts) vs
       Jump j ts vs -> Jump j (map (substAType sub) ts) vs
+      LetCast v b x e -> LetCast v (substAType sub b) x e
       Join j tvs ps e1 e2 -> Join j tvs (params ps) e1 e2
       JoinRec t ds e -> JoinRec (substVType sub t) [d{ joinParams = params (joinParams d) } | d <- ds] e
       _ -> expr
@@ -603,6 +606,7 @@ tvarsE bound expr
       Unreachable t      -> ftv t
       Call _ ts _        -> concatMap ftv ts
       Jump _ ts _        -> concatMap ftv ts
+      LetCast _ b _ _    -> ftv b
       _                  -> []
 
 tvarsV :: S.Set TVar -> VVal -> [TVar]

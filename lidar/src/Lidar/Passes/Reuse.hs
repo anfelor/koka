@@ -211,6 +211,7 @@ ruE expr
       SplitA{} -> plain
       IfWhnf{} -> plain
       Deref{} -> plain
+      LetCast{} -> plain
       Unroll{} -> plain
       Unbox{} -> plain
       Unscalar{} -> plain

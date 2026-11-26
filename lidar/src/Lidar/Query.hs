@@ -282,6 +282,7 @@ altTypes env t expr
           (Left "incomplete boxed case")
         return ([[A t] | i <- indices, Just t <- [lookup i ts]] ++ maybe [] (const [[A (ASum rest)]]) def)
       (Deref{}, V (VPtr a)) -> return [[A a]]
+      (LetCast _ b _ _, V a) | isPtr a -> checkTy (V (VPtr b)) >> return [[V (VPtr b)]]
       (Unroll{}, A a) -> do b <- dataBody env a
                             return [[A b]]
       (Unbox{}, A (ABox s)) -> return [[V s]]

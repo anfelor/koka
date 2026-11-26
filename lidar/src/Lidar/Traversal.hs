@@ -121,6 +121,7 @@ descendB fn fv fb expr
       SplitA v k (x,e1) (y,e2) -> SplitA <$> fn v <*> pure k <*> one x [SLo] e1 <*> one y [SHi] e2
       IfWhnf v (x,e1) (y,e2) -> IfWhnf <$> fn v <*> one x [SWhnf] e1 <*> one y [SDelay] e2
       Deref v x e           -> (\v' (x',e') -> Deref v' x' e') <$> fv v <*> one x [SDeref] e
+      LetCast v b x e       -> (\v' (x',e') -> LetCast v' b x' e') <$> fv v <*> one x [SCast] e
       Unroll v x e          -> (\v' (x',e') -> Unroll v' x' e') <$> fn v <*> one x [SRoll] e
       Unbox v x e           -> (\v' (x',e') -> Unbox v' x' e') <$> fn v <*> one x [SContents] e
       Unscalar v x e        -> (\v' (x',e') -> Unscalar v' x' e') <$> fn v <*> one x [] e
@@ -380,6 +381,7 @@ destructAOf expr
       Proj{} -> Nothing
       CaseV{} -> Nothing
       Deref{} -> Nothing
+      LetCast{} -> Nothing
       Unpack{} -> Nothing
       IsNull{} -> Nothing
       Ret{} -> Nothing
@@ -415,6 +417,7 @@ destructVOf expr
       Proj v i x e          -> Just (Destruct v [([x],e)] (\v' es -> Proj v' i x (head es)))
       CaseV v alts          -> Just (Destruct v [([x],e) | (_,x,e) <- alts] (\v' es -> CaseV v' [(i,x,e) | ((i,x,_),e) <- zip alts es]))
       Deref v x e           -> Just (Destruct v [([x],e)] (\v' es -> Deref v' x (head es)))
+      LetCast v b x e       -> Just (Destruct v [([x],e)] (\v' es -> LetCast v' b x (head es)))
       Unpack v tvs x e      -> Just (Destruct v [([x],e)] (\v' es -> Unpack v' tvs x (head es)))
       IsNull v n (x,e)      -> Just (Destruct v [([],n),([x],e)] (\v' es -> IsNull v' (head es) (x,last es)))
       CaseA{} -> Nothing

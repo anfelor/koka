@@ -91,6 +91,7 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
                      JoinRec t ds _ -> t : [t' | d <- ds, (_,_,t') <- joinParams d]
                      Jump _ ts _ -> concatMap at ts
                      Call _ ts _ -> concatMap at ts
+                     LetCast _ b _ _ -> at b
                      Gen vs _ -> map (VPtr . AVar) vs
                      Unpack _ vs _ _ -> map (VPtr . AVar) vs
                      _ -> []

@@ -12,7 +12,7 @@
   The pass works bottom-up: each expression is processed with the set of variables that are
   used after it (`Live`), and returns the variables that it uses besides those. Both sets are
   closed under `needs`: an alias of `z` (its pointer at a boxed type, from `[deref]`,
-  `[unroll]`, `[case-a]` or `[split-a]`) is `z` at run time, so a use of it needs `z`.
+  `[unroll]`, `[case-a]` or `[split-a]`, or at another pointer type, from `[let-cast]`) is `z` at run time, so a use of it needs `z`.
 
   At each point, the topmost variables that are still used hold the references (`held`), and
   the variables below them (the paths that pass through them: see `Syntax.Path`) are borrowed
@@ -193,6 +193,7 @@ keepsPtr :: Step -> Bool
 keepsPtr s
   = case s of
       SDeref -> True
+      SCast -> True
       SRoll -> True
       SInjA _ _ -> True
       SRest -> True

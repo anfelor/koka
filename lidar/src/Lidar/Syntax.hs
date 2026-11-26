@@ -56,7 +56,7 @@
       parent, and the parent is consumed once all of its children are: all fields of a product,
       the contents `z.contents` and the block `z.credit` of a box (which are not binders, see
       `[unbox-ru]`), or the single binder of any other destructuring. The binders of `[case-a]`, `[split-a]`, `[if-whnf]`, `[deref]`,
-      `[unroll]` and `[unpack]` stand for the parent itself (or its pointer): consuming or
+      `[let-cast]`, `[unroll]` and `[unpack]` stand for the parent itself (or its pointer): consuming or
       testing them consumes or tests the parent.
     - Γ is a multiset: `[dup]` adds another owned reference under the same name. A reference
       held by a child outlives its parent, as consuming the parent consumes one reference of
@@ -381,6 +381,7 @@ data Step = SField Int Field       -- [proj]
           | SInjV Int Con          -- [case]
           | SPack                  -- [unpack]
           | SDeref                 -- [deref]
+          | SCast                  -- [let-cast]
           | SRoll                  -- [unroll]
           | SInjA Int Con | SRest  -- [case-a]: an alternative or the default
           | SLo | SHi              -- [split-a]
@@ -399,6 +400,7 @@ instance Show Step where
              SInjV _ c -> show c
              SPack     -> "pack"
              SDeref    -> "deref"
+             SCast     -> "cast"
              SRoll     -> "roll"
              SInjA _ c -> show c
              SRest     -> "rest"
@@ -603,8 +605,8 @@ data VVal
   -- Casts to and from Koka's top type `any`, for front ends whose typing the IR cannot express
   -- (such as erased dependent types). No-ops at run time that keep the mode. `[up]` is safe;
   -- `[down]` is unchecked and trusts the front end, so a destructuring of its result must not
-  -- move above the test that justifies it. To match on a downcast with reuse, bind it first
-  -- (`let x : B* = ret (down[B] z)`): a destructuring of `down[B] z` binds roots that borrow z.
+  -- move above the test that justifies it. To match on a downcast, use `[let-cast]`, whose
+  -- binder keeps the mode of a variable scrutinee.
   | Up VVal
   | Down AType VVal
 
@@ -793,6 +795,19 @@ data VExpr
   --  ───────────────────────────────────── [deref]
   --   Γ₁, Γ₂ ⊢ let ptr x = v in e : W
   | Deref VVal Path VExpr
+
+  --   Γ₁ ⊢ v :^ A*    Γ₂, x :^ B* ⊢ e : W
+  --  ───────────────────────────────────── [let-cast]
+  --   Γ₁, Γ₂ ⊢ let cast[B] x = v in e : W
+  --
+  -- A pointer cast, for front ends whose typing the IR cannot express (such as Lean's two types
+  -- of an object with computed fields). It is unchecked: nothing relates A to B, so a
+  -- destructuring of x must not move above the test that justifies the cast. For a variable
+  -- scrutinee z, the binder is z.cast, an alias of z (its pointer at another type), which is
+  -- owned and unique where z is. Unlike the binders of other destructurings, it has a pointer
+  -- type, so it is a value. Paths name the binders of two casts of z in one scope alike, so a
+  -- front end casts a variable to one type in a scope.
+  | LetCast VVal AType Path VExpr
 
   --   data T⟨ā⟩ := A ∈ Σ    Γ₁ ⊢ v :^ T⟨B̄⟩    Γ₂, x :^ A[B̄/ā] ⊢ e : W
   --  ──────────────────────────────────────────────────────────────── [unroll]

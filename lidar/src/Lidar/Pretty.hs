@@ -70,7 +70,7 @@ reserved s = null s || "(" `isPrefixOf` s || s `elem` keywords || "box@" `isPref
     numbered p = p `isPrefixOf` s && not (null (drop (length p) s)) && all isDigit (drop (length p) s)
     keywords = words ("ret let in of case split at if-whnf whnf delay ptr roll box const scalar pack dup drop free"
                       ++ " if-unique if-full then else join rec and jump fn gen forall exists unreachable"
-                      ++ " cast-ev total memoize ctx ctx-copy hole some null is-null if-yielding yield up down lock @ @copy _"
+                      ++ " cast cast-ev total memoize ctx ctx-copy hole some null is-null if-yielding yield up down lock @ @copy _"
                       ++ " module data con inline noinline fun val ondemand extern foreign Box Scalar I KCtx NaN Infinity"
                       ++ " char ssize_t intptr_t float64 float32 int64 int32 int16 int8 uint8")
 
@@ -322,6 +322,7 @@ prettyExpr pp expr
       CaseA v alts def -> caseOf "case" (pp v)
                               ([("inj-a" <> pretty i <+> pp x, e) | (i,x,e) <- alts] ++ [("_" <+> pp x, e) | Just (x,e) <- [def]])
       Deref v x e -> letIn emptyDoc ("ptr" <+> pp x) (prettyVal pp v) e
+      LetCast v b x e -> letIn emptyDoc ("cast" <> tyArgs pp [b] <+> pp x) (prettyVal pp v) e
       Unroll v x e -> letIn emptyDoc ("roll" <+> pp x) (pp v) e
       Unbox v x e -> letIn emptyDoc ("box" <+> pp x) (pp v) e
       Unscalar v x e -> letIn emptyDoc ("scalar" <+> pp x) (pp v) e
