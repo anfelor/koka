@@ -258,7 +258,6 @@ genV cx val
       NoReuse _ _ -> return ["NULL"]
       TyApp v _ -> genV cx v
       Up v -> genV cx v
-      Down _ v -> genV cx v
       Some v -> genV cx v
       Pack _ _ v -> genV cx v
       Inj i t UnitV | [l] <- either (const []) (:[]) (leafOf t) -> return ["((" ++ cType l ++ ")" ++ show i ++ ")"]

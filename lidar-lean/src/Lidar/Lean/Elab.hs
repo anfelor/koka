@@ -26,7 +26,7 @@ argument, the state of the world, and returns it beside its result; applying it 
 an action. Where code without a token calls an action, the call is a `[total]` region.
 
 Where the type of a value and the type it is used at differ, elaboration converts through
-@any*@: @up@ and @down@ for pointers, @Scalar@ boxes for raw values, and boxed sums for
+@any*@: @up@ and @let cast@ for pointers (or a @let cast@ between them), @Scalar@ boxes for raw values, and boxed sums for
 enumerations, as Lean boxes them. Closures take and return @any*@; a partial application of a
 constant is a closure that converts the remaining arguments and the result.
 -}

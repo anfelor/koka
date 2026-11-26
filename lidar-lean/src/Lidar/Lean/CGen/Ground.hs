@@ -172,7 +172,6 @@ genVal val
                     return (leavesOnly [GObj o])
       TyApp v _ -> genVal v
       Up v -> genVal v
-      Down _ v -> genVal v
       Some v -> genVal v
       Pack _ _ v -> genVal v
       _ -> fail ("not a static value: " ++ show val)
