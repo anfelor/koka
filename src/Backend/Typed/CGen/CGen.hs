@@ -748,20 +748,15 @@ genLam cx ps r e
        let loads = [cty ct <+> localName (caps !! i) <+> "= _self->c" <.> int i <.> ";" | (i,ct) <- fields]
            dups = [x <+> "=" <+> dupExpr ct x <.> ";" | (i,ct) <- fields, needsRC ct, let x = localName (caps !! i)]
            sig = "static" <+> cty rct <+> fname <.> "(kk_function_t _fself" <.> hcat [", " <.> cty ct <+> localName x | ((x,_),ct) <- zip cps pcts] <.> ", kk_context_t* _ctx)"
-           prologue | null caps = "kk_function_static_drop(_fself,_ctx);" : tokens
-                    | otherwise = (sname <.> "* _self = kk_function_as(" <.> sname <.> "*,_fself,_ctx);") : loads
-                                  ++ ["kk_drop_match(_self,{" <+> hsep dups <+> "},{},_ctx);"] ++ tokens
-       emitDecl (vcat ([structDef | not (null caps)] ++ [sig <+> block (prologue ++ body)]))
+           prologue = (sname <.> "* _self = kk_function_as(" <.> sname <.> "*,_fself,_ctx);") : loads
+                      ++ ["kk_drop_match(_self,{" <+> hsep dups <+> "},{},_ctx);"] ++ tokens
+       emitDecl (vcat [structDef, sig <+> block (prologue ++ body)])
        x <- fresh "c"
        let capVals = map localName caps
-       -- A capture-free closure can share a static function block.
-       if null caps
-         then return (stmtExpr ["kk_define_static_function(" <.> x <.> "," <.> fname <.> ",_ctx);"]
-                               ("kk_datatype_box(kk_function_static_dup(" <.> x <.> ",_ctx))"))
-         else return (stmtExpr ([sname <.> "*" <+> x <+> "= kk_function_alloc_as(" <.> sname <.> "," <.> int scan <.> ",_ctx);",
-                                 x <.> "->_base.fun = kk_kkfun_ptr_box(&" <.> fname <.> ",_ctx);"]
-                                ++ [x <.> "->c" <.> int i <+> "=" <+> (capVals !! i) <.> ";" | (i,_) <- fields])
-                               ("kt_box_from_block(&" <.> x <.> "->_base._block,_ctx)"))
+       return (stmtExpr ([sname <.> "*" <+> x <+> "= kk_function_alloc_as(" <.> sname <.> "," <.> int scan <.> ",_ctx);",
+                          x <.> "->_base.fun = kk_kkfun_ptr_box(&" <.> fname <.> ",_ctx);"]
+                         ++ [x <.> "->c" <.> int i <+> "=" <+> (capVals !! i) <.> ";" | (i,_) <- fields])
+                        ("kt_box_from_block(&" <.> x <.> "->_base._block,_ctx)"))
 
 lamFree :: [(Path,Mode,VType)] -> VExpr -> S.Set Path
 lamFree ps e = fvA (Lam ps VUnit e)
