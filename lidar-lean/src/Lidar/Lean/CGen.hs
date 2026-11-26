@@ -41,7 +41,7 @@ import Lidar.Layout( leaves, shapeIsHeap )
 import qualified Lidar.Lean.Dump as D
 import Lidar.Lean.Decls( leanName, rawTypes, rawOfNat, worldTypes )
 import Lidar.Lean.CGen.Layout
-import Lidar.Lean.CGen.Ground( groundDecls, cString )
+import Lidar.Lean.CGen.Ground( groundDecls, closureInit, cString )
 
 type C = Doc ()
 
@@ -109,8 +109,9 @@ convert from to e
 -- The generation monad
 ------------------------------------------------------------------------------
 
--- the next fresh number, and the definitions of closures
-data St = St{ stUniq :: Int, stLams :: [C] }
+-- the next fresh number, the definitions of closures, and the static closure object of each C
+-- function that a closure without captures calls
+data St = St{ stUniq :: Int, stLams :: [C], stClosures :: M.Map String String }
 
 type G a = M () St a
 
@@ -305,9 +306,9 @@ genBox cx tag at v
                          ++ allocSpills pl b
                          ++ [writeSlot pl b s x | (s,x) <- zip (plSlots pl) tmps]) b)
 
--- A top-level function as a closure. Lean's closures take objects, so its parameters and
--- result must be objects. The closure of an action takes Lean's world for its token, which
--- its C function does not: a wrapper drops it.
+-- A top-level function as a closure, which captures nothing and is static. Lean's closures
+-- take objects, so its parameters and result must be objects. The closure of an action takes
+-- Lean's world for its token, which its C function does not: a wrapper drops it.
 genFun :: Ctx -> Name -> G String
 genFun cx f
   = case M.lookup f (envSigs (cxEnv cx)) of
@@ -316,21 +317,34 @@ genFun cx f
            pls <- mapM leavesOf own
            rls <- leavesOf r
            tgt <- target cx f
-           let closure fn = call "lean_alloc_closure" ["(void*)" ++ fn, show (length ps), "0"]
            if not (all (== [LObj]) (rls : pls) && length ps <= closureMaxArgs)
              then fail ("the function " ++ show f ++ " as a closure")
-             else if length own == length ps then return (closure (tgtName tgt))
+             else if length own == length ps then staticClosure (tgtName tgt) (length ps)
              else do fn <- fresh "lt_fun"
                      xs <- mapM (const (fresh "a")) ps
                      let params = ["lean_object* " ++ (if t == VToken then "_world" else x) | (x,(_,t)) <- zip xs ps]
                          cargs = [x | (x,(_,t)) <- zip xs ps, t /= VToken]
                      modify (\st -> st{ stLams = stLams st ++ ["static lean_object*" <+> text (call fn params) <+> block [text ("return " ++ call (tgtName tgt) cargs ++ ";")]] })
-                     return (closure fn)
+                     staticClosure fn (length ps)
       _ -> fail ("unknown function " ++ show f)
 
 -- the world that Lean passes to the closure of an action, for its token
 world :: String
 world = "lean_io_mk_world()"
+
+-- The closure without captures of a C function with an arity: a static closure object with
+-- reference count 0, which the runtime never counts or frees, as Lean writes closed closures.
+-- Each C function has one.
+staticClosure :: String -> Int -> G String
+staticClosure fn arity
+  = do known <- M.lookup fn . stClosures <$> get
+       case known of
+         Just o -> return o
+         Nothing -> do n <- fresh "lt_clo"
+                       let o = "((lean_object*)&" ++ n ++ ")"
+                       modify (\st -> st{ stLams = stLams st ++ [text ("static const lean_closure_object " ++ n ++ " = " ++ closureInit fn arity ++ ";")]
+                                        , stClosures = M.insert fn o (stClosures st) })
+                       return o
 
 -- the largest number of arguments of a closure that `lean_apply_n` passes one by one
 closureMaxArgs :: Int
@@ -339,7 +353,8 @@ closureMaxArgs = 16
 -- A closure: a C function that takes the captured leaves (boxed, as Lean's closures hold
 -- objects) and the parameters, which are objects, in an array if they are more than a closure
 -- passes one by one. Applying it consumes the closure and passes the captures owned, as the
--- closure's body owns them. A token parameter is Lean's world, which the body ignores.
+-- closure's body owns them. A token parameter is Lean's world, which the body ignores. A
+-- closure without captures is static.
 genLam :: Ctx -> [(Path,Mode,VType)] -> VType -> VExpr -> G String
 genLam cx ps r e
   = do let caps = S.toList (fvA (Lam ps r e))
@@ -361,9 +376,10 @@ genLam cx ps r e
                | otherwise = (["lean_object* " ++ a | a <- args], [])
              loads = loadArgs ++ [text (cType l ++ " " ++ n ++ " = " ++ convert LObj l c ++ ";") | ((l,n),c) <- zip fixed cs]
          modify (\st -> st{ stLams = stLams st ++ ["static lean_object*" <+> text (call fn params) <+> block (loads ++ body)] })
-         c <- fresh "clo"
-         return (stmtExpr (("lean_object* " ++ c ++ " = " ++ call "lean_alloc_closure" ["(void*)" ++ fn, show arity, show (length fixed)] ++ ";")
-                           : [call "lean_closure_set" [c, show i, convert l LObj n] ++ ";" | (i,(l,n)) <- zip [0 :: Int ..] fixed]) c)
+         if null fixed then staticClosure fn arity else do
+           c <- fresh "clo"
+           return (stmtExpr (("lean_object* " ++ c ++ " = " ++ call "lean_alloc_closure" ["(void*)" ++ fn, show arity, show (length fixed)] ++ ";")
+                             : [call "lean_closure_set" [c, show i, convert l LObj n] ++ ";" | (i,(l,n)) <- zip [0 :: Int ..] fixed]) c)
 
 ------------------------------------------------------------------------------
 -- Expressions
@@ -937,7 +953,7 @@ prelude
 -- definitions that could not be generated.
 cgenModule :: D.Dump -> Program -> Either [String] String
 cgenModule d prog
-  = case runM (mapM genOne (progDefs prog)) () (St 0 []) of
+  = case runM (mapM genOne (progDefs prog)) () (St 0 [] M.empty) of
       Left err -> Left [err]
       Right (rs,st)
         | errs@(_:_) <- [e | Left e <- rs] ++ [D.declName x ++ ": " ++ e | (x,Left e) <- declInits] -> Left errs

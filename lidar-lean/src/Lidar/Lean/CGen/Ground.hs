@@ -16,7 +16,7 @@ names, with the hashes that Lean computes (@Name.hash@), and the conversions of 
 scalars (@UInt32.ofNat@) into the scalars. Empty arrays (@Array.mkEmpty@) are extracted too,
 but not written statically: they are initialised once.
 -}
-module Lidar.Lean.CGen.Ground( foldable, groundDecls, cString ) where
+module Lidar.Lean.CGen.Ground( foldable, groundDecls, closureInit, cString ) where
 
 import Control.Monad( foldM )
 import qualified Data.Map as M
@@ -253,11 +253,16 @@ closureObject f
            do pls <- liftE (mapM (mapM leafOf . leaves . snd) ps)
               rls <- liftE (mapM leafOf (leaves r))
               if all (== [LObj]) (rls : pls) && length ps <= 16
-                then object "lean_closure_object"
-                       ("{.m_header = " ++ header "sizeof(lean_closure_object)" 0 245 ++ ", .m_fun = (void*)" ++ cname
-                        ++ ", .m_arity = " ++ show (length ps) ++ ", .m_num_fixed = 0, .m_objs = {}}")
+                then object "lean_closure_object" (closureInit cname (length ps))
                 else fail ("the function " ++ show f ++ " as a closure")
          _ -> fail ("unknown function " ++ show f)
+
+-- | The initialiser of a static closure object without arguments, given its C function and
+-- its arity.
+closureInit :: String -> Int -> String
+closureInit fn arity
+  = "{.m_header = " ++ header "sizeof(lean_closure_object)" 0 245 ++ ", .m_fun = (void*)" ++ fn
+    ++ ", .m_arity = " ++ show arity ++ ", .m_num_fixed = 0, .m_objs = {}}"
 
 stringObject :: String -> G String
 stringObject s
