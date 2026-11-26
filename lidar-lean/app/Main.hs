@@ -96,7 +96,7 @@ lowerDump flags d = do
   where
     opts = Options{ optReuse = True, optPeephole = True, optLazies = Lazies M.empty S.empty M.empty
                   , optFips = M.empty, optRecGroups = [], optCheckBetween = checkAll flags
-                  , optFoldable = foldable, optFresh = const False }
+                  , optFoldable = foldable }
     lowerProgram' prog
       | timings flags = do ((final,errs,_),times) <- lowerProgramTimed opts prog
                            mapM_ (uncurry printTime) times
