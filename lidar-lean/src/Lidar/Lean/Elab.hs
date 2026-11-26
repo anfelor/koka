@@ -17,6 +17,14 @@ A trivial structure is its relevant field: its constructor is the field, a @case
 the field to the scrutinee (and the other fields to erased values), and projecting the field is
 the value itself.
 
+An action (`funTypes`) takes lidar's effect token for the state of the world and returns it
+beside its result. Elaboration keeps the current token, which stands for every local of the
+state (`lcVoid`, bound to `()`): a call of an action takes it and gives the next one, and
+returning a result of an action returns the token beside it. Join points in an action take the
+token as their last parameter. The closure of an action takes the token for its last
+argument, the state of the world, and returns it beside its result; applying it is a call of
+an action. Where code without a token calls an action, the call is a `[total]` region.
+
 Where the type of a value and the type it is used at differ, elaboration converts through
 @any*@: @up@ and @down@ for pointers, @Scalar@ boxes for raw values, and boxed sums for
 enumerations, as Lean boxes them. Closures take and return @any*@; a partial application of a
@@ -32,7 +40,7 @@ import Data.List( sortOn )
 import Lidar
 import Lidar.Build( K, compose, prodVal )
 import Lidar.Env( M, evalM, asks, local, get, put )
-import Lidar.Types( Types(alphaEq), vtInt, vtString )
+import Lidar.Types( Types(alphaEq), vtInt, vtString, withToken, unToken, tokenParam )
 import Lidar.Layout( isEnum )
 import Lidar.Traversal( child )
 import Lidar.Elab.Representation( boxA, shapeLeaves, leafCons, injA, caseSum, conValue )
@@ -41,9 +49,9 @@ import Lidar.Lean.Decls
 
 -- the declarations, the IR variable and type of each local, the parameter types of each
 -- join point in scope, the default binder in scope of a case on a local (see `elabCases`),
--- and the borrowed locals (see `closedJoin`)
+-- the borrowed locals (see `closedJoin`), and the current token in an action
 data Ctx = Ctx{ cDecls :: Decls, cLocals :: M.Map D.Var (Path,VType), cJoins :: M.Map D.Var (Name,[D.Var],[VType])
-              , cRests :: M.Map D.Var Rest, cBorrowed :: S.Set D.Var }
+              , cRests :: M.Map D.Var Rest, cBorrowed :: S.Set D.Var, cToken :: Maybe Path }
 
 -- A `cases` on a local inside the default of a `[case-a]` on it scrutinizes the default
 -- binder instead, whose sum lacks the tags of the alternatives before it: binding the local's
@@ -63,7 +71,7 @@ elabDump d
   = (Program (newModuleName (D.dumpModule d)) (dTypes ds) (dSigs ds) M.empty (Foreign [] [] []) defs, errs)
   where
     ds = declsOf d
-    results = [(x, evalM (elabDecl x) (Ctx ds M.empty M.empty M.empty S.empty) 0) | x <- D.dumpDecls d]
+    results = [(x, evalM (elabDecl x) (Ctx ds M.empty M.empty M.empty S.empty Nothing) 0) | x <- D.dumpDecls d]
     defs = [def | (_,Right (Just def)) <- results]
     errs = [D.declName x ++ ": " ++ err | (x,Left err) <- results]
 
@@ -76,10 +84,13 @@ elabDecl x
            case M.lookup name sigs of
              Just (SigVal _ t) -> Just . DefVal name [] t <$> elabCode t code
              Just (SigFun _ ps _ r) ->
-               do let args = [(p,varPath (D.paramVar p) (D.paramName p),m,t) | (p,(m,t)) <- zip (D.declParams x) ps]
+               do let (ps',token) = tokenParam ps
+                      args = [(p,varPath (D.paramVar p) (D.paramName p),m,t) | (p,(m,t)) <- zip (D.declParams x) ps']
+                  (tparam,withTok) <- tokenBinder token
                   body <- local (\c -> c{ cBorrowed = S.fromList [D.paramVar p | (p,_,Borrowed,_) <- args] })
-                            (withLocals [(D.paramVar p,(v,t)) | (p,v,_,t) <- args] (elabCode r code))
-                  return (Just (DefFun name [] [(v,m,t) | (_,v,m,t) <- args] Owned r body InlineAuto))
+                            (withLocals [(D.paramVar p,(v,t)) | (p,v,_,t) <- args]
+                               (withTok (worlds (drop (length ps') (D.declParams x)) (elabCode r code))))
+                  return (Just (DefFun name [] ([(v,m,t) | (_,v,m,t) <- args] ++ tparam) Owned r body InlineAuto))
              _ -> fail "no signature"
   where
     name = leanName (D.declName x)
@@ -112,6 +123,25 @@ withLocals xs = local (\c -> c{ cLocals = M.union (M.fromList xs) (cLocals c) })
 bindLocal :: D.Var -> D.Name -> VType -> (Path -> E a) -> E a
 bindLocal x n t k = withLocals [(x,(v,t))] (k v)
   where v = varPath x n
+
+-- the token parameter of an action (if it is one), and the elaboration of its body with that
+-- token
+tokenBinder :: Bool -> E ([(Path,Mode,VType)], E a -> E a)
+tokenBinder False = return ([], tokenIn Nothing)
+tokenBinder True = do k <- fresh "k"
+                      return ([(k,Owned,VToken)], tokenIn (Just k))
+
+tokenIn :: Maybe Path -> E a -> E a
+tokenIn k = local (\c -> c{ cToken = k })
+
+-- the current token, as an argument (none outside of actions)
+tokenArgs :: E [VVal]
+tokenArgs = maybe [] (\k -> [Var k]) <$> asks cToken
+
+-- locals of the state of the world, which the token stands for, bound to `()`
+worlds :: [D.Param] -> E VExpr -> E VExpr
+worlds ps m = foldr world m ps
+  where world p k = bindLocal (D.paramVar p) (D.paramName p) VUnit $ \v -> Let v VUnit (Ret UnitV) <$> k
 
 inds :: E (M.Map D.Name D.Inductive)
 inds = asks (dInductives . cDecls)
@@ -183,6 +213,8 @@ localType x = do ls <- asks cLocals
 
 -- an argument at type `t`
 argVal :: D.Arg -> VType -> E (K,VVal)
+argVal _ VToken = do k <- asks cToken
+                     maybe (fail "an action called without a token") (\p -> return (id, Var p)) k
 argVal a t
   = case a of
       D.AVar x -> localVal x t
@@ -205,13 +237,24 @@ elabCode res code
   = case code of
       D.Let x n t v k ->
         do tx <- irT t
-           (kv,e,te) <- elabValue tx v
-           bindLocal x n tx $ \p ->
-             do body <- elabCode res k
-                if alphaEq te tx then return (kv (Let p tx e body))
-                  else do tmp <- fresh "v"
-                          (kc,w) <- coerce te tx (Var tmp)
-                          return (kv (Let tmp te e (kc (Let p tx (Ret w) body))))
+           action <- callsAction t v
+           tok <- asks cToken
+           case tok of
+             Nothing | action ->
+               do k0 <- fresh "k"
+                  (kv,e,te) <- tokenIn (Just k0) (elabValue action tx v)
+                  te0 <- maybe (fail "an action without a token in its result") return (unToken te)
+                  kv <$> bindValue x n tx (Total k0 e) te0 (elabCode res k)
+             _ ->
+               do (kv,e,te) <- elabValue action tx v
+                  case (unToken te, k) of
+                    (Just _, D.Return y) | y == x, alphaEq te res -> return (kv e)
+                    (Just te0, _) ->
+                      do p <- fresh "p"
+                         let field i = child p (SField i (posField i))
+                         body <- bindValue x n tx (Ret (Var (field 0))) te0 (tokenIn (Just (field 1)) (elabCode res k))
+                         return (kv (Let p te e (Proj (Var p) 0 (field 0) (Proj (Var p) 1 (field 1) body))))
+                    (Nothing, _) -> kv <$> bindValue x n tx e te (elabCode res k)
       D.Fun f k ->
         do lam <- elabLam f
            bindLocal (D.funVar f) (D.funName f) anyT $ \p ->
@@ -231,18 +274,64 @@ elabCode res code
              Just (name,captured,ts) | length ts == length as ->
                do (kc,cvs) <- args (map D.AVar captured) =<< mapM localType captured
                   (k,vs) <- args as ts
-                  return (kc (k (Jump name [] (cvs ++ vs))))
+                  tvs <- tokenArgs
+                  return (kc (k (Jump name [] (cvs ++ vs ++ tvs))))
              _ -> fail ("jump to unknown join point " ++ j)
       D.Cases tname _ x alts -> elabCases res tname x alts
-      D.Return x -> do (k,v) <- localVal x res
-                       return (k (Ret v))
+      D.Return x -> case unToken res of
+                      Just r0 -> do (k,v) <- localVal x r0
+                                    tvs <- tokenArgs
+                                    if null tvs then fail "a result of an action without a token"
+                                      else return (k (Ret (Tuple (v : tvs))))
+                      Nothing -> do (k,v) <- localVal x res
+                                    return (k (Ret v))
       D.Unreach _ -> return (Unreachable res)
       D.Unsupported -> fail "unsupported code"
 
+-- `let x : tx = e in m`, for an expression `e : te`
+bindValue :: D.Var -> D.Name -> VType -> VExpr -> VType -> E VExpr -> E VExpr
+bindValue x n tx e te m
+  = bindLocal x n tx $ \p ->
+      do body <- m
+         if alphaEq te tx then return (Let p tx e body)
+           else do tmp <- fresh "v"
+                   (kc,w) <- coerce te tx (Var tmp)
+                   return (Let tmp te e (kc (Let p tx (Ret w) body)))
+
+-- whether a `let` value of type `t` runs an action: a call of an action with all its
+-- arguments, or the application of a closure (see `appliesAction`)
+callsAction :: D.Type -> D.LetValue -> E Bool
+callsAction t v
+  = case v of
+      D.VConst c as -> do sigs <- asks (dSigs . cDecls)
+                          ctors <- asks (dCtors . cDecls)
+                          case M.lookup (leanName c) sigs of
+                            _ | M.member c ctors -> return False
+                            Just (SigFun _ ps _ _)
+                              | length as == length ps -> return (snd (tokenParam ps))
+                              | length as > length ps -> appliesAction t (drop (length ps) as)
+                            Just (SigVal _ _) -> appliesAction t as
+                            _ -> return False
+      D.VFVar _ as -> appliesAction t as
+      _ -> return False
+
+-- whether the application of a closure to arguments, at type `t`, runs an action: whether the
+-- last argument is the state of the world and `t` the result of an action
+appliesAction :: D.Type -> [D.Arg] -> E Bool
+appliesAction _ [] = return False
+appliesAction t as
+  = do is <- inds
+       w <- case last as of
+              D.AVar x -> (== VUnit) <$> localType x
+              D.AErased -> return True
+              D.AType _ -> return False
+       return (w && takesWorld is t)
+
 -- The value of a `let` with type `t`, before its conversion to `t`: the code that binds its
--- operands, an expression, and the type of the expression.
-elabValue :: VType -> D.LetValue -> E (K,VExpr,VType)
-elabValue t v
+-- operands, an expression, and the type of the expression. If `action` holds, an application
+-- of a closure runs an action (see `appliesAction`).
+elabValue :: Bool -> VType -> D.LetValue -> E (K,VExpr,VType)
+elabValue action t v
   = case v of
       D.VLit (D.LNat n) -> return (id, Ret (intLit n), vtInt)
       D.VLit (D.LStr s) -> return (id, Ret (stringLit s), vtString)
@@ -254,14 +343,14 @@ elabValue t v
       D.VErased -> do (k,w) <- erased t
                       return (k, Ret w, t)
       D.VProj tname i x -> elabProj tname (fromInteger i) x
-      D.VConst c as -> elabConst c as
+      D.VConst c as -> elabConst action c as
       D.VFVar f [] -> do ls <- asks cLocals
                          case M.lookup f ls of
                            Just (p,s) -> return (id, Ret (Var p), s)
                            Nothing -> fail ("unknown local " ++ f)
       D.VFVar f as -> do (k1,fv) <- localVal f anyT
-                         (k2,e) <- apply fv as
-                         return (k1 . k2, e, anyT)
+                         (k2,e,te) <- apply action fv as
+                         return (k1 . k2, e, te)
       D.VLit l -> fail ("literal " ++ show l)
       D.VUnsupported -> fail "unsupported let value"
   where
@@ -274,20 +363,25 @@ elabValue t v
                  D.LNat _ -> Nothing
                  D.LStr _ -> Nothing
 
--- the application of a closure `fv : any*` to arguments, with result `any*`; it is cast to a
--- function of that arity, as Lean's `lean_apply_n` checks the arity at run time
-apply :: VVal -> [D.Arg] -> E (K,VExpr)
-apply fv as
-  = do (k,vs) <- args as (map (const anyT) as)
+-- The application of a closure `fv : any*` to arguments, with result `any*`, and its type; it
+-- is cast to a function of that arity, as Lean's `lean_apply_n` checks the arity at run time.
+-- The closure of an action takes the token for its last argument, the state of the world,
+-- and returns it beside its result.
+apply :: Bool -> VVal -> [D.Arg] -> E (K,VExpr,VType)
+apply action fv as
+  = do let ts = [anyT | _ <- as]
+           (ts',r) | action = (init ts ++ [VToken], withToken anyT)
+                   | otherwise = (ts, anyT)
+       (k,vs) <- args as ts'
        s <- fresh "f"
-       let ft = AFun [(Owned,anyT) | _ <- as] anyT
+       let ft = AFun [(Owned,t) | t <- ts'] r
            g = child s SDeref
-       return (k, Let s (VPtr ft) (Ret (Down ft fv)) (Deref (Var s) g (App g vs)))
+       return (k, Let s (VPtr ft) (Ret (Down ft fv)) (Deref (Var s) g (App g vs)), r)
 
 -- a constant applied to arguments: a constructor value, a call, a closure for a partial
 -- application, or a call whose result is applied to the remaining arguments
-elabConst :: D.Name -> [D.Arg] -> E (K,VExpr,VType)
-elabConst c as
+elabConst :: Bool -> D.Name -> [D.Arg] -> E (K,VExpr,VType)
+elabConst action c as
   = do ds <- asks cDecls
        case (M.lookup c (dCtors ds), M.lookup (leanName c) (dSigs ds)) of
          (Just ci, _) | not (isBuiltinType (ciType ci)) -> elabCon ci (drop (ciNumParams ci) as)
@@ -299,44 +393,69 @@ elabConst c as
            | otherwise -> do (k1,vs) <- args (take (length ps) as) (map snd ps)
                              x <- fresh "r"
                              (k2,fv) <- coerce r anyT (Var x)
-                             (k3,e) <- apply fv (drop (length ps) as)
-                             return (k1 . Let x r (Call (leanName c) [] vs) . k2 . k3, e, anyT)
+                             (k3,e,te) <- apply action fv (drop (length ps) as)
+                             return (k1 . Let x r (Call (leanName c) [] vs) . k2 . k3, e, te)
          (_, Just (SigVal _ t))
            | null as -> return (id, Ret (Glob (leanName c) []), t)
            | otherwise -> do (k1,fv) <- coerce t anyT (Glob (leanName c) [])
-                             (k2,e) <- apply fv as
-                             return (k1 . k2, e, anyT)
+                             (k2,e,te) <- apply action fv as
+                             return (k1 . k2, e, te)
          _ -> fail ("unknown constant " ++ c)
 
 -- The partial application of `f` to `as`: a closure that takes the remaining arguments at
--- `any*`, converts them, calls `f` and converts its result to `any*`.
+-- `any*`, converts them, calls `f` and converts its result to `any*` (see `resultAny`). That of
+-- an action takes the token for the state of the world.
 closure :: Name -> [(Mode,VType)] -> VType -> [D.Arg] -> E (K,VVal)
 closure f ps r as
   = do let (given,rest) = splitAt (length as) (map snd ps)
+           (rest',token) = tokenParam [((),t) | t <- rest]
        (k,vs) <- args as given
-       xs <- mapM (const (fresh "a")) rest
-       cs <- zipWithM (\x t -> coerce anyT t (Var x)) xs rest
-       y <- fresh "r"
-       (kr,w) <- coerce r anyT (Var y)
-       let body = compose (map fst cs) (Let y r (Call f [] (vs ++ map snd cs)) (kr (Ret w)))
-           ft = AFun [(Owned,anyT) | _ <- rest] anyT
-       return (k, Up (Ptr ft (Lam [(x,Owned,anyT) | x <- xs] anyT body)))
+       xs <- mapM (const (fresh "a")) rest'
+       cs <- zipWithM (\x (_,t) -> coerce anyT t (Var x)) xs rest'
+       (tparam,_) <- tokenBinder token
+       body <- resultAny r (Call f [] (vs ++ map snd cs ++ [Var t | (t,_,_) <- tparam]))
+       return (k, lambda ([(x,Owned,anyT) | x <- xs] ++ tparam) (anyResult r) (compose (map fst cs) body))
 
--- a local function: a closure that converts its arguments from `any*` and its result to `any*`
+-- A local function: a closure that converts its arguments from `any*` and its result to
+-- `any*`. That of an action takes the token for the state of the world.
 elabLam :: D.FunDecl -> E VVal
 elabLam (D.FunDecl _ _ ps t b)
-  = do ts <- mapM (irT . D.paramType) ps
-       r <- irT (resultType (length ps) t)
-       xs <- mapM (const (fresh "a")) ps
-       let vs = [varPath (D.paramVar p) (D.paramName p) | p <- ps]
-       cs <- zipWithM (\x s -> coerce anyT s (Var x)) xs ts
-       body <- local (\c -> c{ cRests = M.empty, cBorrowed = S.empty }) (withLocals (zip (map D.paramVar ps) (zip vs ts)) (elabCode r b))
-       y <- fresh "r"
-       (kr,w) <- coerce r anyT (Var y)
-       let binds = [Let v s (Ret c) | (v,s,(_,c)) <- zip3 vs ts cs]
-           ft = AFun [(Owned,anyT) | _ <- ps] anyT
-       return (Up (Ptr ft (Lam [(x,Owned,anyT) | x <- xs] anyT
-                             (compose (map fst cs ++ binds) (Let y r body (kr (Ret w)))))))
+  = do is <- inds
+       let (ts0,r) = funTypes is (map D.paramType ps) (resultType (length ps) t)
+           (ts,token) = tokenParam [((),s) | s <- ts0]
+           (own,world) = splitAt (length ts) ps
+       xs <- mapM (const (fresh "a")) own
+       let vs = [varPath (D.paramVar p) (D.paramName p) | p <- own]
+       cs <- zipWithM (\x (_,s) -> coerce anyT s (Var x)) xs ts
+       (tparam,withTok) <- tokenBinder token
+       body <- local (\c -> c{ cRests = M.empty, cBorrowed = S.empty })
+                 (withLocals (zip (map D.paramVar own) (zip vs (map snd ts))) (withTok (worlds world (elabCode r b))))
+       body' <- resultAny r body
+       let binds = [Let v s (Ret c) | (v,(_,s),(_,c)) <- zip3 vs ts cs]
+       return (lambda ([(x,Owned,anyT) | x <- xs] ++ tparam) (anyResult r) (compose (map fst cs ++ binds) body'))
+
+-- a closure with parameters and result, as a value of type `any*`
+lambda :: [(Path,Mode,VType)] -> VType -> VExpr -> VVal
+lambda ps r e = Up (Ptr (AFun [(m,t) | (_,m,t) <- ps] r) (Lam ps r e))
+
+-- the result type of a closure for a function with result `r`: `any*`, beside the token for
+-- an action
+anyResult :: VType -> VType
+anyResult r = maybe anyT (const (withToken anyT)) (unToken r)
+
+-- an expression with type `r` as one with type `anyResult r`
+resultAny :: VType -> VExpr -> E VExpr
+resultAny r e
+  = case unToken r of
+      Just r0 | alphaEq r0 anyT -> return e
+      Just r0 -> do p <- fresh "p"
+                    let field i = child p (SField i (posField i))
+                    (kr,w) <- coerce r0 anyT (Var (field 0))
+                    return (Let p r e (Proj (Var p) 0 (field 0) (Proj (Var p) 1 (field 1) (kr (Ret (Tuple [w, Var (field 1)]))))))
+      Nothing | alphaEq r anyT -> return e
+      Nothing -> do y <- fresh "r"
+                    (kr,w) <- coerce r anyT (Var y)
+                    return (Let y r e (kr (Ret w)))
 
 -- a constructor applied to its fields (without its parameters); that of a trivial structure
 -- is its relevant field
@@ -542,7 +661,8 @@ defaultBranch res n dflt
       code:_ | n > 1 -> do j <- freshName "default"
                            (captured,params,e) <- closedJoin res [] code
                            let jump = do (k,vs) <- args (map D.AVar captured) =<< mapM localType captured
-                                         return (k (Jump j [] vs))
+                                         tvs <- tokenArgs
+                                         return (k (Jump j [] (vs ++ tvs)))
                            return (Join j [] params e, jump)
              | otherwise -> return (id, elabCode res code)
       [] -> return (id, return (Unreachable res))
@@ -553,7 +673,8 @@ defaultBranch res n dflt
 -- jumps pass them (first in the returned list). A borrowed local (a borrowed parameter of the
 -- function, or a capture of one) is captured borrowed, as the join point runs in the frame
 -- that borrows it: captured owned, each jump would duplicate it and the body drop it after a
--- tail call, which then no longer is one (`String.fromUTF8Lossy.go`).
+-- tail call, which then no longer is one (`String.fromUTF8Lossy.go`). In an action, a join
+-- point takes the token as its last parameter.
 closedJoin :: VType -> [(Path,(D.Var,VType))] -> D.Code -> E ([D.Var],[(Path,Mode,VType)],VExpr)
 closedJoin res own code
   = do ls <- asks cLocals
@@ -564,9 +685,10 @@ closedJoin res own code
            captured = [(y,t) | y <- S.toList used, y `notElem` map (fst . snd) own, Just (_,t) <- [M.lookup y ls]]
            mode y = if S.member y bs then Borrowed else Owned
        cs <- mapM (const (fresh "capture")) captured
+       (tparam,withTok) <- tokenBinder . maybe False (const True) =<< asks cToken
        let params = [(c,mode y,t) | (c,(y,t)) <- zip cs captured] ++ [(p,Owned,t) | (p,(_,t)) <- own]
-       body <- withLocals (zip (map fst captured ++ map (fst . snd) own) [(p,t) | (p,_,t) <- params]) (elabCode res code)
-       return (map fst captured, params, body)
+       body <- withLocals (zip (map fst captured ++ map (fst . snd) own) [(p,t) | (p,_,t) <- params]) (withTok (elabCode res code))
+       return (map fst captured, params ++ tparam, body)
 
 -- the free locals of code (and the join points it jumps to)
 freeVars :: D.Code -> S.Set D.Var

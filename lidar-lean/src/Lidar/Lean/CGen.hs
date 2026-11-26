@@ -39,7 +39,7 @@ import Lidar.Query( Gamma, inferV, inferVar, altTypes, unboxRuGamma, copyRuGamma
 import Lidar.Traversal( child, boxTag, fvA, descendA, descendV, descendE )
 import Lidar.Layout( leaves, shapeIsHeap )
 import qualified Lidar.Lean.Dump as D
-import Lidar.Lean.Decls( leanName, rawTypes, rawOfNat )
+import Lidar.Lean.Decls( leanName, rawTypes, rawOfNat, worldTypes )
 import Lidar.Lean.CGen.Layout
 import Lidar.Lean.CGen.Ground( groundDecls, cString )
 
@@ -115,9 +115,10 @@ data St = St{ stUniq :: Int, stLams :: [C] }
 type G a = M () St a
 
 -- `cxJoins`: the label and the parameters of each join point in scope, and whether it is
--- recursive (its jumps then assign the parameters in parallel)
+-- recursive (its jumps then assign the parameters in parallel); `cxBeats`: the static values
+-- whose reads count a heartbeat (see `beatsOf`)
 data Ctx = Ctx{ cxEnv :: Env, cxTargets :: M.Map Name Target, cxGamma :: Gamma
-              , cxJoins :: M.Map Name (String,[(Path,VType)],Bool) }
+              , cxJoins :: M.Map Name (String,[(Path,VType)],Bool), cxBeats :: S.Set Name }
 
 fresh :: String -> G String
 fresh s = state (\st -> ("_" ++ s ++ show (stUniq st), st{ stUniq = stUniq st + 1 }))
@@ -242,7 +243,8 @@ genV cx val
                   return (leafNames x (length ls))
       Glob x _ -> do ls <- tyOf cx val >>= leavesOf
                      tgt <- target cx x
-                     return [tgtName tgt | _ <- ls]
+                     let beat e = if S.member x (cxBeats cx) then "(lean_inc_heartbeat(), " ++ e ++ ")" else e
+                     return [beat (tgtName tgt) | _ <- ls]
       DupV v -> do es <- genV cx v
                    ls <- tyOf cx v >>= leavesOf
                    return [if l == LObj then call "lt_dup" [e] else e | (l,e) <- zip ls es]
@@ -304,18 +306,31 @@ genBox cx tag at v
                          ++ [writeSlot pl b s x | (s,x) <- zip (plSlots pl) tmps]) b)
 
 -- A top-level function as a closure. Lean's closures take objects, so its parameters and
--- result must be objects.
+-- result must be objects. The closure of an action takes Lean's world for its token, which
+-- its C function does not: a wrapper drops it.
 genFun :: Ctx -> Name -> G String
 genFun cx f
   = case M.lookup f (envSigs (cxEnv cx)) of
       Just (SigFun _ ps _ r) ->
-        do pls <- mapM (leavesOf . snd) ps
+        do let own = [t | (_,t) <- ps, t /= VToken]
+           pls <- mapM leavesOf own
            rls <- leavesOf r
            tgt <- target cx f
-           if all (== [LObj]) (rls : pls) && length ps <= closureMaxArgs
-             then return (call "lean_alloc_closure" ["(void*)" ++ tgtName tgt, show (length ps), "0"])
-             else fail ("the function " ++ show f ++ " as a closure")
+           let closure fn = call "lean_alloc_closure" ["(void*)" ++ fn, show (length ps), "0"]
+           if not (all (== [LObj]) (rls : pls) && length ps <= closureMaxArgs)
+             then fail ("the function " ++ show f ++ " as a closure")
+             else if length own == length ps then return (closure (tgtName tgt))
+             else do fn <- fresh "lt_fun"
+                     xs <- mapM (const (fresh "a")) ps
+                     let params = ["lean_object* " ++ (if t == VToken then "_world" else x) | (x,(_,t)) <- zip xs ps]
+                         cargs = [x | (x,(_,t)) <- zip xs ps, t /= VToken]
+                     modify (\st -> st{ stLams = stLams st ++ ["static lean_object*" <+> text (call fn params) <+> block [text ("return " ++ call (tgtName tgt) cargs ++ ";")]] })
+                     return (closure fn)
       _ -> fail ("unknown function " ++ show f)
+
+-- the world that Lean passes to the closure of an action, for its token
+world :: String
+world = "lean_io_mk_world()"
 
 -- the largest number of arguments of a closure that `lean_apply_n` passes one by one
 closureMaxArgs :: Int
@@ -324,13 +339,13 @@ closureMaxArgs = 16
 -- A closure: a C function that takes the captured leaves (boxed, as Lean's closures hold
 -- objects) and the parameters, which are objects, in an array if they are more than a closure
 -- passes one by one. Applying it consumes the closure and passes the captures owned, as the
--- closure's body owns them.
+-- closure's body owns them. A token parameter is Lean's world, which the body ignores.
 genLam :: Ctx -> [(Path,Mode,VType)] -> VType -> VExpr -> G String
 genLam cx ps r e
   = do let caps = S.toList (fvA (Lam ps r e))
        capLeaves <- forM caps $ \x -> do ls <- tyOfName cx x >>= leavesOfTy
                                          return (x,ls)
-       pls <- mapM (\(_,_,t) -> leavesOf t) ps
+       pls <- mapM (\(_,_,t) -> leavesOf t) [p | p@(_,_,t) <- ps, t /= VToken]
        rls <- leavesOf r
        let fixed = [(l,n) | (x,ls) <- capLeaves, (l,n) <- zip ls (leafNames x (length ls))]
            arity = length fixed + length ps
@@ -340,7 +355,7 @@ genLam cx ps r e
          fn <- fresh "lt_lam"
          cs <- mapM (const (fresh "c")) fixed
          body <- genE cx{ cxGamma = M.union (M.fromList [(x,V t) | (x,_,t) <- ps]) (cxGamma cx), cxJoins = M.empty } DReturn e
-         let args = cs ++ [localName x | (x,_,_) <- ps]
+         let args = cs ++ [if t == VToken then "_world" else localName x | (x,_,t) <- ps]
              (params,loadArgs)
                | arity > closureMaxArgs = (["lean_object** _args"], [text ("lean_object* " ++ a ++ " = _args[" ++ show i ++ "];") | (i,a) <- zip [0 :: Int ..] args])
                | otherwise = (["lean_object* " ++ a | a <- args], [])
@@ -450,8 +465,8 @@ genE cx dest expr
              else return ([text (n ++ " = " ++ a ++ ";") | ((_,n),a) <- zip targets args] ++ [goto])
       Call f _ vs -> genCall cx dest f vs
       App f vs ->
-        do A (AFun _ r) <- tyOfName cx f
-           args <- concat <$> mapM (genV cx) vs
+        do A (AFun ps r) <- tyOfName cx f
+           args <- concat <$> zipWithM (\(_,t) v -> if t == VToken then return [world] else genV cx v) ps vs
            rls <- leavesOf r
            let n = length args
                app | n <= closureMaxArgs = return ([], call ("lean_apply_" ++ show n) (localName f : args))
@@ -661,8 +676,8 @@ expand pat args = go pat
 
 -- The prototype and definition of a definition, and its initialisation (for a value). A
 -- definition has the C name of its declaration, even if calls go to its `@[extern]` entry.
-genDef :: Env -> M.Map Name Target -> M.Map Name String -> Def -> G (C,C,[C])
-genDef env tgts cnames def
+genDef :: Env -> M.Map Name Target -> M.Map Name String -> S.Set Name -> Def -> G (C,C,[C])
+genDef env tgts cnames beats def
   = case def of
       DefFun f _ args _ res body _ ->
         do name <- cname f
@@ -684,7 +699,7 @@ genDef env tgts cnames def
                    [text (name ++ " = " ++ initf ++ "();")]
                    ++ [text ("if (!lean_is_scalar(" ++ name ++ ")) lean_mark_persistent(" ++ name ++ ");") | ls == [LObj]])
   where
-    cx0 = Ctx env tgts M.empty M.empty
+    cx0 = Ctx env tgts M.empty M.empty beats
     cname f = maybe (fail ("no C name for " ++ show f)) return (M.lookup f cnames)
 
 -- the prototypes of the functions and values of other modules that the module uses, and the
@@ -708,6 +723,17 @@ prototypes d
             let kept = [p | p <- ps, impureLeaf p /= Nothing, not (isStandard c && isErased p)]
             in Just (ctype r ++ " " ++ tgtName tgt ++ "(" ++ intercalate ", " (map ctype kept) ++ ");")
     ctype t = maybe "lean_object*" cType (impureLeaf t)
+
+-- | The static values (of the given ones) that stand for results of @IO@ actions: values of a
+-- type whose constructors take the state of the world (@EST.Out@), which `Passes.Closed`
+-- extracted as the state is @𝟙@ in lidar. Lean allocates such a value in every run of an
+-- action, as the state is a variable, and every allocation counts a heartbeat, which loops that
+-- call @checkSystem@ rely on to run out of heartbeats. Each read of one of these values (a
+-- result that Lean would have allocated) counts the heartbeat explicitly instead
+-- (@lean_inc_heartbeat@); a result that is allocated counts its own.
+beatsOf :: D.Dump -> Program -> S.Set Name -> S.Set Name
+beatsOf d prog closed
+  = S.fromList [x | DefVal x _ (VPtr (ACon t _)) _ <- progDefs prog, S.member x closed, worldTypes d t]
 
 -- | The boxed version of a declaration (Lean's `mkBoxedVersion`), which Lean's closures and
 -- other modules call instead of the declaration if its impure signature has a scalar, borrowed
@@ -971,7 +997,7 @@ cgenModule d prog
     genOne :: Def -> G (Either String (C,C,[C]))
     genOne def | Just (p,c) <- M.lookup (defName def) gvals = return (Right (text p, text c, []))
     genOne def = do st <- get
-                    case runM (genDef env tgts cnames def) () st of
+                    case runM (genDef env tgts cnames (beatsOf d prog (M.keysSet closed)) def) () st of
                       Left err -> return (Left (show (defName def) ++ ": " ++ err))
                       Right (r,st') -> do put st'
                                           return (Right r)

@@ -26,6 +26,7 @@ import Data.Maybe( fromMaybe, isJust )
 import qualified Numeric
 import Control.Monad( forM, foldM, when )
 import Lib.PPrint( Doc, text, string, int, integer, empty, isEmptyDoc, line, nest, align, vcat, hcat, hsep, punctuate, (<.>), (<+>), (<->) )
+import Backend.Typed.CGen.Doc()
 import qualified Common.Name as K
 import Lidar.Name
 import Backend.Typed.LidarName( fromLidar )

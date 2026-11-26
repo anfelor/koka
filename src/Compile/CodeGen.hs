@@ -314,26 +314,25 @@ codeGenC sourceFile newtypes borrowed0 imported unique0 term flags sequential en
           mbEntry       = case entry of
                             Just (name,tp) -> Just (name,isAsyncFunction tp)
                             _              -> Nothing
-      -- generate C (the typed backend generated its own C in `codeGenTyped`)
-      bcore <- if typedC flags then return core0 else
-               do let (cdoc,hdoc,_,bcore) = cFromCore False
-                                                      (buildType flags) sourceDir (prettyEnvFromFlags flags) (platformFromFlags flags)
-                                                      newtypes borrowed0 unique0 (parcReuse flags) (parcSpecialize flags) (parcReuseSpec flags)
-                                                      (parcBorrowInference flags) (optEagerPatBind flags) (stackSize flags) mbEntry
-                                                      (if null (outputEntryName flags) then "main" else outputEntryName flags)
-                                                      core0
-                      bcoreDoc  = Core.Pretty.prettyCore (prettyEnvFromFlags flags){ coreIface = False, coreShowDef = True } (targetPlatformFromFlags flags) [] bcore
+      -- generate C (unless the typed backend generated its own C in `codeGenTyped`)
+      let oldC = not (typedC flags)
+          (cdoc,hdoc,_,bcore) = cFromCore False
+                                          (buildType flags) sourceDir (prettyEnvFromFlags flags) (platformFromFlags flags)
+                                          newtypes borrowed0 unique0 (parcReuse flags) (parcSpecialize flags) (parcReuseSpec flags)
+                                          (parcBorrowInference flags) (optEagerPatBind flags) (stackSize flags) mbEntry
+                                          (if null (outputEntryName flags) then "main" else outputEntryName flags)
+                                          core0
+          bcoreDoc  = Core.Pretty.prettyCore (prettyEnvFromFlags flags){ coreIface = False, coreShowDef = True } (targetPlatformFromFlags flags) [] bcore
 
-                  -- writeDocW 120 (outBase ++ ".c.kkc") bcoreDoc
-                  when (showFinalCore flags) $
-                    do termInfo term bcoreDoc
+      -- writeDocW 120 (outBase ++ ".c.kkc") bcoreDoc
+      when (showFinalCore flags && oldC) $
+        do termInfo term bcoreDoc
 
-                  -- termTrace term ( "generate c: " ++ outBase )
-                  writeDocW 120 outC (cdoc <.> linebreak)
-                  writeDocW 120 outH (hdoc <.> linebreak)
-                  termTrace term ( "generated c: " ++ outBase )
-                  when (showAsmC flags) (termInfo term (hdoc <//> cdoc))
-                  return bcore
+      -- termTrace term ( "generate c: " ++ outBase )
+      when oldC $ writeDocW 120 outC (cdoc <.> linebreak)
+      when oldC $ writeDocW 120 outH (hdoc <.> linebreak)
+      when oldC $ termTrace term ( "generated c: " ++ outBase )
+      when (showAsmC flags && oldC) (termInfo term (hdoc <//> cdoc))
 
       -- copy libraries
       -- Multiple modules can declare the same `extern import { c { library="..." } }`
@@ -341,7 +340,7 @@ codeGenC sourceFile newtypes borrowed0 imported unique0 term flags sequential en
       -- given library is copied/linked only once instead of once per declaring
       -- module, which also silences "ignoring duplicate libraries" linker warnings.
       let importcores = map (fromJust . modCore) imported
-          cores = bcore:importcores
+          cores = (if oldC then bcore else core0):importcores
           cc       = ccomp flags
           eimports = nub $ concatMap (externalImportsFromCore) cores
           clibs    = nub $ concatMap (clibsFromCore flags) cores
@@ -350,7 +349,7 @@ codeGenC sourceFile newtypes borrowed0 imported unique0 term flags sequential en
       -- return the C compilation and final link as a separate IO action to increase concurrency
       return $ \fullImports ->
                do -- compile the generated C
-                  csource <- if typedC flags then typedCSource flags entry progName outBase else return outC
+                  csource <- if oldC then return outC else typedCSource flags entry progName outBase
                   ccompile term flags cc outBase extraIncDirs [csource]
                   case entry of
                     Nothing -> return LinkDone

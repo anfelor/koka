@@ -19,9 +19,7 @@
   values share one global. Ground `let`s that only extracted values used are removed.
 
   Ground values cannot have effects or diverge, so no call is moved except the folded ones,
-  which the client declares pure. Nor is a value of a datatype that the client declares fresh,
-  or a value built from one: those must be allocated every time (Lean's results of `IO`, which
-  carry the state of the world, as each allocation counts a heartbeat). Perceus then treats the globals as borrowed values,
+  which the client declares pure. Perceus then treats the globals as borrowed values,
   duplicated where they are consumed: the first consumer that needs a value unique copies it,
   so extraction never adds an allocation.
 
@@ -45,16 +43,16 @@ import Lidar.Traversal( descendA, descendV, descendAll, descendE, fvE, fvV )
 import Lidar.Ground( GroundBind(..), groundV )
 
 -- | Extract the closed ground values of the functions of a program, given the functions whose
--- calls the client folds and the datatypes whose values it builds afresh.
-closedProgram :: (Name -> Bool) -> (Name -> Bool) -> Program -> Program
-closedProgram foldable fresh prog
+-- calls the client folds.
+closedProgram :: (Name -> Bool) -> Program -> Program
+closedProgram foldable prog
   = prog{ progSigs = M.union (progSigs prog) (M.fromList [(x,SigVal [] t) | DefVal x _ t _ <- new])
         , progDefs = new ++ defs }
   where
     (defs,(_,newRev,_)) = runState (mapM closedDef (progDefs prog)) (M.empty,[],0)
     new = reverse newRev
     closedDef def = case def of
-                      DefFun{} -> do body <- closedBody foldable fresh (defName def) (defBody def)
+                      DefFun{} -> do body <- closedBody foldable (defName def) (defBody def)
                                      return def{ defBody = body }
                       DefVal{} -> return def
 
@@ -64,8 +62,8 @@ type St = (M.Map String Name, [Def], Int)
 -- the ground `let`s of a function: their types, values, and index in the order of binding
 type Grounds = M.Map Path (VType,GroundBind,Int)
 
-closedBody :: (Name -> Bool) -> (Name -> Bool) -> Name -> VExpr -> State St VExpr
-closedBody foldable fresh f body
+closedBody :: (Name -> Bool) -> Name -> VExpr -> State St VExpr
+closedBody foldable f body
   = do -- the ground lets used by non-ground code, the extracted ones first
        letNames <- foldM (\m x -> do g <- global f (chain gs m [x] (Var x)) (fst3 (gs M.! x))
                                      return (M.insert x g m))
@@ -74,9 +72,9 @@ closedBody foldable fresh f body
        let opMap = M.fromList (zip placeholders opNames)
        return (rewrite gs used letNames opMap body')
   where
-    gs = groundLets foldable fresh body
+    gs = groundLets foldable body
     index x = let (_,_,i) = gs M.! x in i
-    (body',operands) = extractOperands fresh gs body
+    (body',operands) = extractOperands gs body
     placeholders = map placeholder [0 .. length operands - 1]
     used = usedClosure gs (S.filter (`M.member` gs) (S.map rootOf (fvE (strip gs body'))))
 
@@ -87,13 +85,13 @@ rootOf :: Path -> Path
 rootOf (Path x _) = root x
 
 -- The ground lets of a body, in the order of binding (with lambdas): a let is ground if its
--- value is and builds no fresh value, or if it calls a folded function with ground arguments,
+-- value is, or if it calls a folded function with ground arguments,
 -- given those bound before.
-groundLets :: (Name -> Bool) -> (Name -> Bool) -> VExpr -> Grounds
-groundLets foldable fresh body = foldl add M.empty (zip [0..] (lets body))
+groundLets :: (Name -> Bool) -> VExpr -> Grounds
+groundLets foldable body = foldl add M.empty (zip [0..] (lets body))
   where
     add gs (i,(x,t,e1))
-      = let ground v = groundV S.empty (M.keysSet gs) v && not (buildsFresh fresh v)
+      = let ground v = groundV S.empty (M.keysSet gs) v
         in case e1 of
              Ret v | ground v -> M.insert x (t,GValue v,i) gs
              Call g tys vs | foldable g && all ground vs -> M.insert x (t,GCall g tys vs,i) gs
@@ -153,15 +151,6 @@ allocates gs val
                      Constant _ -> True
                      _ -> getAny (getConst (descendA (const (Const (Any False))) (Const . Any . allocatesA) (Const . Any . allocates gs) a))
 
--- whether a value builds a block of a fresh datatype
-buildsFresh :: (Name -> Bool) -> VVal -> Bool
-buildsFresh fresh = fv
-  where
-    fv val = case val of
-               Ptr (ACon t _) _ | fresh t -> True
-               _ -> getAny (getConst (descendV (Const . Any . fa) (Const . Any . fv) val))
-    fa a = getAny (getConst (descendA (const (Const (Any False))) (Const . Any . fa) (Const . Any . fv) a))
-
 -- The body of an extracted value: the ground lets it is built from (in the order of binding,
 -- those extracted already as their globals), then its result.
 chain :: Grounds -> M.Map Path Name -> [Path] -> VVal -> VExpr
@@ -214,11 +203,11 @@ canonical body = rename M.empty (0 :: Int) body
 placeholder :: Int -> Name
 placeholder i = newHiddenName ("closed-operand" ++ show i)
 
--- The maximal ground operands of non-ground code that allocate, build no fresh value and have a
+-- The maximal ground operands of non-ground code that allocate and have a
 -- closed pointer type (a string, or a pointer to a block), replaced by placeholders, in order,
 -- with their types.
-extractOperands :: (Name -> Bool) -> Grounds -> VExpr -> (VExpr,[(VVal,VType)])
-extractOperands fresh gs body = (body',reverse ops)
+extractOperands :: Grounds -> VExpr -> (VExpr,[(VVal,VType)])
+extractOperands gs body = (body',reverse ops)
   where
     (body',ops) = runState (goE body) []
     goE :: VExpr -> State [(VVal,VType)] VExpr
@@ -227,7 +216,7 @@ extractOperands fresh gs body = (body',reverse ops)
               _ -> descendE pure goV (\_ e' -> goE e') e
     goV :: VVal -> State [(VVal,VType)] VVal
     goV v = case operandType v of
-              Just t | groundV S.empty (M.keysSet gs) v && not (buildsFresh fresh v)
+              Just t | groundV S.empty (M.keysSet gs) v
                        && allocates gs v && closed v t
                 -> state (\os -> (Glob (placeholder (length os)) [], (v,t) : os))
               _ -> descendV goA goV v

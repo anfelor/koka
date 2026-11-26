@@ -17,6 +17,7 @@ module Backend.Typed.CGen.Koka( kokaName, kokaTypeName, kokaLocal, kkTag
 
 import Data.Char( isAlphaNum, isDigit )
 import Lib.PPrint( Doc, text, empty, (<.>) )
+import Backend.Typed.CGen.Doc()
 import qualified Common.Name as K
 import Common.NamePrim
 import Lidar.Name

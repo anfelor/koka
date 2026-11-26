@@ -14,7 +14,10 @@ Mono types become IR types as follows.
 * @lcAny@, @lcErased@, type variables and function types are @any*@. Mono types give no reliable
   arity for closures, so a closure is an @any*@ that is cast to a function type where it is
   applied (as @lean_apply_n@ checks the arity at run time).
-* @lcVoid@, the state of @IO@, is @𝟙@.
+* @lcVoid@, the state of @IO@, is @𝟙@. An action, a function whose last parameter is the state
+  and whose result takes the state (such as @EST.Out@), takes lidar's effect token @KCtx@ for
+  the state instead and returns it beside its result (`funTypes`): passes then keep the order
+  of actions. The token has no representation, so the C code is the same.
 * @Nat@ and @String@ are the builtin types @int*@ and @string*@ of literals. The unsigned
   scalars, @USize@ and the floats are raw types. The other types that Lean's runtime implements
   itself (@Int@, @Array@, ...) are abstract.
@@ -30,7 +33,7 @@ Mono types become IR types as follows.
 -}
 module Lidar.Lean.Decls
   ( Decls(..), Kind(..), CtorInfo(..)
-  , declsOf, worldTypes, leanName, irType, typeKind, anyT, resultType, rawTypes, rawOfNat, isBuiltinType
+  , declsOf, worldTypes, leanName, irType, funTypes, takesWorld, typeKind, anyT, resultType, rawTypes, rawOfNat, isBuiltinType
   ) where
 
 import qualified Data.Map as M
@@ -38,7 +41,7 @@ import qualified Data.Set as S
 import Data.List( sortOn )
 import Data.Maybe( mapMaybe )
 import Lidar
-import Lidar.Types( prodFields, vtInt, vtString )
+import Lidar.Types( prodFields, vtInt, vtString, withToken )
 import Lidar.Elab.Representation( sumOf )
 import qualified Lidar.Lean.Dump as D
 
@@ -153,6 +156,28 @@ irType inds t
                 KEnum cs -> VSum [(Con (leanName c), VUnit) | c <- cs]
                 KRef -> VPtr (ACon (leanName n) [])
 
+-- | The IR types of the parameters and the result of a function with parameters and result of
+-- the given mono types. An action takes the token for its last parameter, the state of the
+-- world, and returns it beside its result.
+funTypes :: M.Map D.Name D.Inductive -> [D.Type] -> D.Type -> ([VType],VType)
+funTypes inds ps r
+  = case reverse ps of
+      D.TConst "lcVoid" : rest | takesWorld inds r -> (map (irType inds) (reverse rest) ++ [VToken], withToken (irType inds r))
+      _ -> (map (irType inds) ps, irType inds r)
+
+-- whether a mono type is an inductive type whose constructors take the state of the world
+takesWorld :: M.Map D.Name D.Inductive -> D.Type -> Bool
+takesWorld inds t
+  = case t of
+      D.TConst n -> world n
+      D.TApp (D.TConst n) _ -> world n
+      _ -> False
+  where
+    world n = maybe False (any ctorTakesWorld . D.indCtors) (M.lookup n inds)
+
+ctorTakesWorld :: D.Ctor -> Bool
+ctorTakesWorld c = D.FVoid `elem` maybe [] D.layoutFields (D.ctorLayout c)
+
 -- | The type of field i of a constructor, from its mono type.
 ctorFieldType :: D.Ctor -> Int -> Maybe D.Type
 ctorFieldType c i
@@ -206,9 +231,9 @@ enumDef n cs
 signature :: M.Map D.Name D.Inductive -> D.Link -> [D.Param] -> D.Type -> Sig
 signature inds link ps t
   | null ps = SigVal [] (irType inds t)
-  | otherwise = SigFun [] [(mode b, irType inds (D.paramType p)) | (p,b) <- zip ps borrows] Owned
-                       (irType inds (resultType (length ps) t))
+  | otherwise = SigFun [] (zip (map mode borrows) pts) Owned r
   where
+    (pts,r) = funTypes inds (map D.paramType ps) (resultType (length ps) t)
     borrows = case D.linkImpure link of
                 Just (ips,_) | length ips == length ps -> map D.paramBorrow ips
                 _ -> map D.paramBorrow ps
@@ -229,14 +254,11 @@ constSig c
     arrows _ = []
 
 -- | The types whose constructors take the state of the world (@EST.Out@, the result of an
--- @IO@ action). Lean builds their values afresh in every run of an action, as the state is a
--- variable, and every allocation counts a heartbeat, which loops that call @checkSystem@ rely on
--- to run out of heartbeats.
+-- @IO@ action), whose static values count heartbeats (`CGen.beatsOf`).
 worldTypes :: D.Dump -> Name -> Bool
 worldTypes d = (`S.member` types)
   where
-    types = S.fromList [leanName (D.indName i) | i <- D.dumpInductives d, any takesWorld (D.indCtors i)]
-    takesWorld c = D.FVoid `elem` maybe [] D.layoutFields (D.ctorLayout c)
+    types = S.fromList [leanName (D.indName i) | i <- D.dumpInductives d, any ctorTakesWorld (D.indCtors i)]
 
 declsOf :: D.Dump -> Decls
 declsOf d
