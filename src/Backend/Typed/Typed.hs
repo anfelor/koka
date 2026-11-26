@@ -14,9 +14,11 @@ import qualified Data.Set as S
 import Data.List( isPrefixOf )
 import Common.Failure( assertion )
 import Common.Unique
-import Common.NamePrim( nameCoreDebug )
+import Common.Name( isHiddenName, newModuleName )
+import Common.NamePrim( nameCoreDebug, nameCoreHnd )
 import qualified Common.Syntax as Syntax
 import Kind.Newtypes
+import Type.Type( splitFunScheme, splitFunType, expandSyn, isTypeTotal )
 import qualified Core.Core as C
 import Lidar( Name, Program(..), Foreign, Fip(..), FipAlloc(..), Options(..), checkTypes, lowerProgram )
 import Backend.Typed.LidarName( toLidar, lidarNamesAgree )
@@ -30,6 +32,7 @@ typedFromCore enableReuse checkAll nt ffi imports uniq core
   = assertion "Backend.Typed.Typed: lidar names differ from Koka's" lidarNamesAgree $
     let (acore,_)              = runUnique uniq (matchCore nt core)
         (eprog,elabErrs,notes) = elabProgram nt ffi imports acore
+        extractable            = extractableOf (core:imports)
         opts                   = Options{ optReuse     = enableReuse
                                         , optPeephole  = null elabErrs
                                         , optLazies    = lazyFuns nt (progTypes eprog)
@@ -37,7 +40,7 @@ typedFromCore enableReuse checkAll nt ffi imports uniq core
                                         , optRecGroups = groupsOf core
                                         , optCheckBetween = checkAll
                                         , optFoldable  = const False
-                                        , optExtractable = const False }
+                                        , optExtractable = (`S.member` extractable) }
         -- Elaboration does not name paths (Paths does), so only its types are checked.
         typeErrs               = label "check after elab" (checkTypes eprog)
         (final,errs,warnings)  = if null typeErrs then lowerProgram opts eprog else (eprog,typeErrs,[])
@@ -64,6 +67,25 @@ elabFip fip
                 Syntax.AllocAtMost i  -> AllocAtMost i
                 Syntax.AllocFinitely  -> AllocFinitely
                 Syntax.AllocUnlimited -> AllocUnlimited
+
+-- The functions whose calls `Passes.Closed` can initialise on demand: those whose type is total
+-- (not `div`), with total function parameters, unlike `unsafe-total` and `delay`, which run
+-- an effectful argument under a total type. Some primitives have a total type but read the
+-- context or the identity of their arguments (`@evv-at`, `fresh-marker`, `yielding`,
+-- `unsafe-ptr-eq`, the primitives of `std/core/lazy`, `@cctx-hole-create`): the modules of the
+-- runtime are excluded, and so are the externals with internal names.
+extractableOf :: [C.Core] -> S.Set Name
+extractableOf cores
+  = S.fromList ([toLidar (C.defName d) | c <- cores, ordinary c, d <- C.flattenDefGroups (C.coreProgDefs c), pureFun (C.defType d)]
+                ++ [toLidar (C.externalName x) | c <- cores, ordinary c, x@(C.External{}) <- C.coreProgExternals c
+                                               , not (isHiddenName (C.externalName x)), pureFun (C.externalType x)])
+  where
+    ordinary c = C.coreProgName c `notElem` (nameCoreHnd : map newModuleName ["std/core/undiv","std/core/unsafe","std/core/lazy"])
+    pureFun tp = case splitFunScheme tp of
+                   Just (_,pars,eff,_) -> total eff && all (totalArg . snd) pars
+                   Nothing -> False
+    totalArg tp = maybe True (\(_,eff,_) -> total eff) (splitFunType (expandSyn tp))
+    total eff = isTypeTotal (expandSyn eff)
 
 -- the recursive groups of the module
 groupsOf :: C.Core -> [S.Set Name]

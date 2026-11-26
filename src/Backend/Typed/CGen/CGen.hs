@@ -50,8 +50,9 @@ data CEnv = CEnv{ ceModName   :: Name
 -- generation monad
 
 -- `stLocal`: whether the current definition uses declarations of the C file (static functions)
+-- `stOnDemand`: the values of the module initialised on demand (`kt_once`)
 data St = St{ stUniq :: Int, stStructs :: M.Map String String, stOrder :: [String], stDecls :: [Doc], stWrappers :: S.Set Name
-            , stLocal :: Bool }
+            , stLocal :: Bool, stOnDemand :: S.Set Name }
 
 -- `cxJoins`: the label and the parameters of each join point in scope, and whether it is
 -- recursive (its jumps then assign the parameters in parallel)
@@ -198,7 +199,10 @@ genV :: Ctx -> VVal -> G Doc
 genV cx val
   = case val of
       Var x -> return (localName x)
-      Glob x _ -> return (text (cName x))
+      Glob x _ -> do onDemand <- gets (S.member x . stOnDemand)
+                     if onDemand then do modify (\st -> st{ stLocal = True })
+                                         return (onceRead x)
+                                 else return (text (cName x))
       DupV v -> do t <- tyOf cx v
                    ct <- ctype t
                    e <- genV cx v
@@ -1259,15 +1263,51 @@ genDef env cenv def
               ss <- genE cx DReturn body
               let sig = cty rct <+> text (cName f) <.> "(" <.> hcat [cty ct <+> localName x <.> ", " | ((x,_),ct) <- zip cps pcts] <.> "kk_context_t* _ctx)"
               return (sig <.> ";", sig <+> block (tokens ++ ss), empty)
-      DefVal x _ _ t body
+      DefVal x _ ini t body
         -> do ct <- ctype t
               let cx = Ctx env cenv M.empty M.empty S.empty
               ss <- genE cx DReturn body
               let name  = text (cName x)
-                  initf = name <.> "_init"
-              return ("extern" <+> cty ct <+> name <.> ";",
-                      vcat [cty ct <+> name <.> ";", "static" <+> cty ct <+> initf <.> "(kk_context_t* _ctx)" <+> block ss],
-                      name <+> "=" <+> initf <.> "(_ctx);")
+                  initf = "static" <+> cty ct <+> name <.> "_init(kk_context_t* _ctx)" <+> block ss
+              case ini of
+                AtLoad -> return ("extern" <+> cty ct <+> name <.> ";", vcat [cty ct <+> name <.> ";", initf],
+                                  name <+> "=" <+> name <.> "_init(_ctx);")
+                OnDemand | ct == CBox -> return (empty, initf, empty)
+                OnDemand -> failG "a value initialised on demand that is not a pointer"
+
+-- The read of a value initialised on demand: initialises it at its first read (`onceHelpers`).
+onceRead :: Name -> Doc
+onceRead x = let name = text (cName x) in "kt_once(&" <.> name <.> ", &" <.> name <.> "_init, _ctx)"
+
+-- The once-cell of a value initialised on demand and the prototype of its initialisation,
+-- before all definitions of the C file
+onceDecl :: Name -> Doc
+onceDecl x = let name = text (cName x)
+             in "static kt_once_t" <+> name <.> ";" <+> "static kk_box_t" <+> name <.> "_init(kk_context_t* _ctx);"
+
+-- The once-cells of the values initialised on demand, for a C file that has any: `state` is 0
+-- before, 1 during and 2 after the initialisation, which the first reader does. As the value
+-- can then be read by any thread, it is marked as thread-shared.
+onceHelpers :: Doc
+onceHelpers = vcat
+  [ "typedef struct kt_once_s { kk_box_t value; _Atomic(int32_t) state; } kt_once_t;"
+  , "static kk_decl_noinline kk_box_t kt_once_cold(kt_once_t* once, kk_box_t (*init)(kk_context_t*), kk_context_t* _ctx) {"
+  , "  int32_t expected = 0;"
+  , "  if (kk_atomic_cas_strong_acq_rel(&once->state, &expected, 1)) {"
+  , "    kk_box_t value = init(_ctx);"
+  , "    kk_box_mark_shared(value, _ctx);"
+  , "    once->value = value;"
+  , "    kk_atomic_store_release(&once->state, 2);"
+  , "  }"
+  , "  else {"
+  , "    while (kk_atomic_load_acquire(&once->state) != 2) { kk_atomic_yield(); }"
+  , "  }"
+  , "  return once->value;"
+  , "}"
+  , "static inline kk_box_t kt_once(kt_once_t* once, kk_box_t (*init)(kk_context_t*), kk_context_t* _ctx) {"
+  , "  if kk_likely(kk_atomic_load_acquire(&once->state) == 2) return once->value;"
+  , "  return kt_once_cold(once, init, _ctx);"
+  , "}" ]
 
 -- wrappers for top-level functions used as values
 genWrapper :: Env -> CEnv -> Name -> G (Doc,Doc)
@@ -1432,7 +1472,8 @@ cgenModule cenv prog
                     ws <- gets (S.toList . stWrappers)
                     wdefs <- mapM (genWrapper env cenv) ws
                     return (rs,wdefs)
-    in case runM genAll () (St 0 M.empty [] [] S.empty False) of
+        onDemand = S.fromList [x | DefVal x _ OnDemand _ _ <- progDefs prog]
+    in case runM genAll () (St 0 M.empty [] [] S.empty False onDemand) of
          Left err -> ("","",[err])
          Right ((rs,wdefs),st)
            -> let ok    = [x | Right x <- rs]
@@ -1459,6 +1500,8 @@ cgenModule cenv prog
                                 ++ [initf <.> ";", donef <.> ";", "#endif"])
                   csrc  = vcat ([include (modulePath modName ++ ".h")]
                                 ++ map string (forSource ffi)
+                                ++ [onceHelpers | not (S.null onDemand)]
+                                ++ map onceDecl (S.toList onDemand)
                                 ++ map fst wdefs
                                 ++ stDecls st
                                 ++ [d | (_,_,d,_) <- ok]
