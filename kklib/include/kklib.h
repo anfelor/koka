@@ -746,6 +746,7 @@ kk_decl_export kk_decl_cold void        kk_block_check_drop(kk_block_t* b, kk_re
 kk_decl_export kk_decl_cold void        kk_block_check_decref(kk_block_t* b, kk_refcount_t rc, kk_context_t* ctx);
 kk_decl_export kk_decl_cold void        kk_block_check_decref_small(kk_block_t* b, kk_refcount_t rc, kk_context_t* ctx);
 kk_decl_export kk_decl_cold kk_block_t* kk_block_check_dup(kk_block_t* b, kk_refcount_t rc);
+kk_decl_export kk_decl_cold kk_block_t* kk_block_check_dup_n(kk_block_t* b, kk_refcount_t rc, uint64_t n);
 kk_decl_export kk_decl_cold kk_reuse_t  kk_block_check_drop_reuse(kk_block_t* b, kk_refcount_t rc0, kk_context_t* ctx);
 
 // Dup a reference.
@@ -759,6 +760,17 @@ static inline kk_block_t* kk_block_dup(kk_block_t* b) {
     kk_block_refcount_set(b, kk_refcount_inc(rc));
     return b;
   }
+}
+
+// Add n references, stopping at the same sticky count as repeated single dups.
+static inline kk_block_t* kk_block_dup_n(kk_block_t* b, uint64_t n) {
+  kk_assert_internal(kk_block_is_valid(b));
+  const kk_refcount_t rc = kk_block_refcount(b);
+  if kk_unlikely(kk_refcount_is_thread_shared(rc)) {
+    return kk_block_check_dup_n(b, rc, n);
+  }
+  kk_block_refcount_set(b, n > (uint32_t)(INT32_MAX - rc) ? INT32_MIN : rc + (kk_refcount_t)n);
+  return b;
 }
 
 // Drop a reference: decrement the reference count, and if it was 0 drop the children recursively

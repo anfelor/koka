@@ -256,7 +256,7 @@ fipE expr
         -> do full <- isFull r
               when full (require mayDealloc ("freeing the reuse credit " ++ show r ++ " causes deallocation"))
               fipE e
-      Dup x e
+      Dup _ x e
         -> do t <- typeOfVar x
               u <- untracked t
               b <- isBorrowed x

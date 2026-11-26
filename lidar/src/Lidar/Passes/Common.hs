@@ -537,7 +537,7 @@ subGammas env g expr
       Gen _ _ -> return [M.filter (not . tokenTy) g]
       Join _ _ ps _ _ -> return [bindAll [(x,V t) | (x,_,t) <- ps] g, g]
       JoinRec _ ds _ -> return ([bindAll [(x,V t) | (x,_,t) <- joinParams d] g | d <- ds] ++ [g])
-      Dup _ _ -> return [g]
+      Dup{} -> return [g]
       IsUnique x _ _ -> return [uniqueGamma g x, g]
       IfFull r _ _ -> do t <- inferV env g (Var r)
                          case t of

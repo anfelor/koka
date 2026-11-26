@@ -221,6 +221,11 @@ intP = tokenP (\t -> case t of
                        TInt i -> Just (fromInteger i)
                        _ -> Nothing) <?> "number"
 
+dupCountP :: P Int
+dupCountP = tokenP (\t -> case t of
+                            TInt i | 0 < i && i <= toInteger (maxBound :: Int) -> Just (fromInteger i)
+                            _ -> Nothing) <?> "positive dup count"
+
 -- an immediate
 litP :: P Lit
 litP = tokenP (\t -> case t of
@@ -515,7 +520,7 @@ exprP
       , kw "if-whnf" >> ifWhnfP
       , kw "is-null" >> isNullP
       , kw "if-yielding" >> ifYieldingP
-      , kw "dup" >> (Dup <$> localP <* sym ";" <*> exprP)
+      , kw "dup" >> (Dup <$> option 1 (bracketsP dupCountP) <*> localP <* sym ";" <*> exprP)
       , kw "drop" >> (Drop <$> localP <* sym ";" <*> exprP)
       , kw "free" >> (Free <$> localP <* sym ";" <*> exprP)
       , kw "if-unique" >> (IsUnique <$> localP <*> (kw "then" >> exprP) <*> (kw "else" >> exprP))

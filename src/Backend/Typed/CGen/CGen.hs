@@ -135,8 +135,13 @@ pointerShape env t
 -- The statement of `dup x`, if `x` needs one. Like aggregate dup helpers, keep field dups
 -- inline: a call can spill another live field and enlarge even the unique path's stack frame.
 -- Root dups may be tail calls, so leave their inlining to the C compiler.
-dupStmt :: Ctx -> Path -> Ty -> CT -> Doc -> Doc
-dupStmt cx x t CBox ve
+dupStmt :: Ctx -> Int -> Path -> Ty -> CT -> Doc -> Doc
+dupStmt cx n _ t ct ve
+  | n > 1 = case (ct, pointerShape (cxEnv cx) t >>= shapeIsHeap) of
+      (CBox, Just False) -> empty
+      (CBox, Just True) -> "kk_block_dup_n(kt_box_as_ptr(" <.> ve <.> ",_ctx)," <.> int n <.> ");"
+      _ -> maybe empty (\f -> text f <.> "_n(" <.> ve <.> "," <.> int n <.> ",_ctx);") (dupFun ct)
+dupStmt cx _ x t CBox ve
   | Just a <- pointerShape (cxEnv cx) t
   = case shapeIsHeap a of
       Just False -> empty
@@ -149,7 +154,7 @@ dupStmt cx x t CBox ve
                    else f <.> "(kk_datatype_unbox(" <.> ve <.> "),_ctx);"
   | field = "kt_box_dup_inline(" <.> ve <.> ",_ctx);"
   where field = case canonical x of { Path _ (_:_) -> True; _ -> False }
-dupStmt _ _ _ ct ve = maybe empty (\f -> text f <.> "(" <.> ve <.> ",_ctx);") (dupFun ct)
+dupStmt _ _ _ _ ct ve = maybe empty (\f -> text f <.> "(" <.> ve <.> ",_ctx);") (dupFun ct)
 
 dropStmt :: CT -> Doc -> Doc
 dropStmt ct e = maybe empty (\f -> text f <.> "(" <.> e <.> ",_ctx);") (dropFun ct)
@@ -879,11 +884,11 @@ genE cx dest expr
                            V (VReuse Full _ _) -> "kt_reuse_free(" <.> localName r <.> ",_ctx);"
                            _ -> dropStmt CReuse (localName r)
               return (free : s)
-      Dup x e
+      Dup n x e
         -> do t <- tyOfName cx x
               ct <- ctOf t
               s <- genE cx dest e
-              return (dupStmt cx x t ct (localName x) : s)
+              return (dupStmt cx n x t ct (localName x) : s)
       IsUnique x e1 e2
         -> do t <- liftC (inferVar (cxGamma cx) x)
               s1 <- genE cx{ cxGamma = uniqueGamma (cxGamma cx) x } dest e1

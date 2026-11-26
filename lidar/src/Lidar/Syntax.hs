@@ -907,14 +907,14 @@ data VExpr
   -- Frees the block of a credit, if it has one. A full credit needs no test.
   | Free Path VExpr
 
-  --   Γ, x : t ⊢ e : W    t is not a credit or a cell
+  --   Γ, xⁿ : t ⊢ e : W    n ≥ 1    t is not a credit or a cell
   --  ──────────────────────────────── [dup]
-  --   Γ, x :^ t ⊢ dup x; e : W
+  --   Γ, x :^ t ⊢ dup[n] x; e : W
   --
-  -- x gains an owned reference under the same name, so it is still a child of its parent.
+  -- x gains n owned references under the same name, so it is still a child of its parent.
   -- With `[contract]`, x also stays available borrowed. A boxed operand is duplicated through
   -- its pointer.
-  | Dup Path VExpr
+  | Dup Int Path VExpr
 
   --   Γ, x :! Box V ⊢ e₁ : W    Γ, x : Box V ⊢ e₂ : W    |V| defined
   --  ────────────────────────────────────────────────────────────────── [if-unique]

@@ -202,7 +202,7 @@ ruE expr
       CastEv{} -> plain
       Total k e -> Total k <$> bind [(k,V VToken)] (ruE e)
       Memoize{} -> plain
-      Dup x e -> Dup x <$> ruE e
+      Dup n x e -> Dup n x <$> ruE e
       -- destructuring forms are handled above
       Proj{} -> plain
       CaseV{} -> plain
@@ -255,7 +255,7 @@ branches alts = branchActions [bind bs (ruE e) | (bs,e) <- alts]
 -- DropSpec's shared arm only duplicates fields before releasing the tested box. Duplication cannot make that box unique, so do not offer its block for reuse.
 -- Stop at any other operation: a release or call could change its reference count.
 sharedDrop :: Path -> VExpr -> R VExpr
-sharedDrop z (Dup x e) = Dup x <$> sharedDrop z e
+sharedDrop z (Dup n x e) = Dup n x <$> sharedDrop z e
 sharedDrop z (Drop x e) | x == z = Drop x <$> ruE e
 sharedDrop _ e = ruE e
 

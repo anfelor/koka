@@ -328,7 +328,7 @@ prettyExpr pp expr
       IfYielding v (k3,e3) (k2,e2) -> caseOf "if-yielding" (prettyVal pp v) [("yield" <+> pp k3, e3), (pp k2, e2)]
       Unpack v vs x e -> letIn emptyDoc ("pack" <> brackets (commaSep (map tv vs)) <+> pp x) (prettyVal pp v) e
       CaseLit v alts def -> caseOf "case" (prettyVal pp v) ([(prettyLit l, e) | (l,e) <- alts] ++ [("_", def)])
-      Dup x e -> stmt ("dup" <+> pp x) e
+      Dup n x e -> stmt (("dup" <> (if n == 1 then emptyDoc else brackets (pretty n))) <+> pp x) e
       Drop x e -> stmt ("drop" <+> pp x) e
       Free r e -> stmt ("free" <+> pp r) e
       IsUnique x e1 e2 -> ifThen ("if-unique" <+> pp x) e1 e2

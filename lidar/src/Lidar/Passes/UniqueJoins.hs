@@ -125,7 +125,7 @@ facts env js expr
                       | JoinDef j _ ps body <- ds]
               <> facts env js' e
       Let x t e1 _ -> bound x t e1 <> sub
-      Dup x _ -> demote [Var x] <> sub
+      Dup _ x _ -> demote [Var x] <> sub
       Call f _ vs -> demote (borrowed (paramModes env f (length vs)) vs)
       Jump j _ vs -> demote (borrowed (M.findWithDefault [] j js) vs)
       _ -> sub

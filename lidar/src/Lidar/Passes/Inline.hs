@@ -90,7 +90,7 @@ valuesE expr = here <> getConst (descendAll (\_ e -> Const (valuesE e)) expr)
     here = case expr of
              Let x _ (Ret v) _ | structural v -> (M.singleton x v,S.empty)
              Deref (Var x) _ _ -> (M.empty,S.singleton x)
-             Dup x _ -> (M.empty,S.singleton x)
+             Dup _ x _ -> (M.empty,S.singleton x)
              _ -> mempty
 
 -- remove the lets of the inlined values, and the forms that use them as a whole

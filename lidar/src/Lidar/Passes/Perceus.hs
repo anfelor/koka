@@ -281,7 +281,7 @@ settle pe live z body
                  body' <- case [p | x <- xs, Just p <- [contentsOn x]] of
                             (Path r ss:_) -> return (Drop (Path r (init ss)) body)
                             [] -> dropNames pe [z] body
-                 return (compose (map Dup ys) body')
+                 return (compose (map (Dup 1) ys) body')
   where
     contentsOn x = case break (not . keepsPtr) (stepsFrom z x) of
                      (as,SContents:_) -> Just (foldl child z (as ++ [SContents]))
@@ -457,7 +457,7 @@ percRead pe live x expr
 hoistDups :: (VExpr -> VExpr) -> VExpr -> VExpr
 hoistDups k expr
   = case expr of
-      Dup x e -> Dup x (hoistDups k e)
+      Dup n x e -> Dup n x (hoistDups k e)
       _ -> k expr
 
 -- branches
@@ -525,7 +525,7 @@ consume pe live mvs
            moving = movers pe (S.union live uses) during owned
        ys <- dupsOf pe (concat [topBelow (aliased x) during | x <- M.keys moving])
        (k,vs) <- useVals pe moving mvs
-       return (uses, compose (map Dup ys) . k, vs, [x | x <- S.toList borrowed, S.notMember x live, held pe during x])
+       return (uses, compose (map (Dup 1) ys) . k, vs, [x | x <- S.toList borrowed, S.notMember x live, held pe during x])
 
 -- The owned occurrence (by its index) that moves the reference of each variable that holds one
 -- before a node (live set `before`) and is not used during or after it (`during`). A use of an
@@ -564,7 +564,7 @@ useVal pe moving Owned i val
   = case val of
       Var x | M.lookup x moving == Just i -> return (id,i+1,val)
             | otherwise -> do ys <- dupsOf pe [x]
-                              return (compose (map Dup ys),i+1,val)
+                              return (compose (map (Dup 1) ys),i+1,val)
       Glob _ _ -> do t <- typeOfV pe val
                      return (id,i,if trivialTy (peEnv pe) (V t) then val else DupV val)
       DupV _ -> return (id,i,val)
@@ -582,7 +582,7 @@ useA pe moving i val
                   own = [x | x <- caps, not (trivialVar pe x)]
               ys <- dupsOf pe [x | (x,j) <- zip caps [i..], M.lookup x moving /= Just j]
               e' <- closed inner (ownedParams (peEnv pe) ps ++ own) e
-              return (compose (map Dup ys), i + length caps, Lam ps r e')
+              return (compose (map (Dup 1) ys), i + length caps, Lam ps r e')
       _ -> useChildren pe moving i (descendA stepName (stepA pe moving) (stepV pe moving) val)
   where
     stepName :: Path -> StateT (K,Int) (M () NameSupply) Path

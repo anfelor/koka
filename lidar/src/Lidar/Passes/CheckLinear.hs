@@ -414,10 +414,6 @@ inspect, readVar :: Env -> Gamma -> Path -> L Use
 inspect env g = useVar env g Borrowed 0 True
 readVar env g = useVar env g Borrowed 0 False
 
--- `dup x` borrows `x` and gives it another reference
-dupVar :: Env -> Gamma -> Path -> L Use
-dupVar env g = useVar env g Borrowed (-1) True
-
 -- values
 
 ownedV :: Env -> Gamma -> VVal -> L Use
@@ -577,8 +573,8 @@ checkE env g js q expr
       Gen _ e -> checkE env g M.empty Owned e
       Drop x e -> before (consume env g x) (checkE env g js q e)
       Free r e -> before (consume env g r) (checkE env g js q e)
-      Dup x e -> do liftE (inferVar g x >>= checkDupType)
-                    before (dupVar env g x) (checkE env g js q e)
+      Dup n x e -> do liftE (inferVar g x >>= checkDupType)
+                      before (useVar env g Borrowed (-n) True x) (checkE env g js q e)
       -- the test reads the variable without borrowing it, which is unique in the first branch
       IsUnique x e1 e2 -> do m <- ownerMode x
                              when (m == Borrowed) (fail ("uniqueness test of a variable that is not owned: " ++ show x))

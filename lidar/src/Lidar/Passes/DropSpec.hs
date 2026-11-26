@@ -64,7 +64,7 @@ dsE expr
   = do (_,g) <- ask
        case transferOf g expr of
          Just (others,inside,z,s,n,e) | Just ways <- mapM (wayTo (child z SContents) inside) inside
-           -> compose (map Dup others) <$> specialize (zip inside ways) z s n e
+           -> compose (map (Dup 1) others) <$> specialize (zip inside ways) z s n e
          _ -> typedChildren dsE expr
 
 -- The dups of descendants of the contents of a box `z` (among other dups) that Perceus makes
@@ -78,7 +78,7 @@ transferOf g expr
        n <- either (const Nothing) Just (reuseSize s)
        return (others,inside,z,s,n,e)
   where
-    dupsThenDrop (Dup x e) = (\(xs,z,r) -> (x:xs,z,r)) <$> dupsThenDrop e
+    dupsThenDrop (Dup 1 x e) = (\(xs,z,r) -> (x:xs,z,r)) <$> dupsThenDrop e
     dupsThenDrop (Drop z e) = Just ([],z,e)
     dupsThenDrop _ = Nothing
 
@@ -112,13 +112,13 @@ specialize ways z s n e
            t = VReuse MaybeEmpty n payload
            moved = [x | (x,Moved) <- ways]
            unders = [(q,b) | (_,Under q b) <- ways]
-           covered = [Dup x | (x,Covered) <- ways]
-           dups b = [Dup x | (x,Under _ b') <- ways, b' == b]
+           covered = [Dup 1 x | (x,Covered) <- ways]
+           dups b = [Dup 1 x | (x,Under _ b') <- ways, b' == b]
        g' <- liftE (unboxRuGamma g z)
        taken <- withGamma g' (dropExcept (moved ++ nub (map fst unders)) p s
                   (compose covered (compose [compose (dups b) . Drop b | b <- nub (map snd unders)] (Jump j [] [Var r']))))
        unique <- dsE (UnboxRu z taken)
-       let shared = compose (map (Dup . fst) ways) (Drop z (Jump j [] [NoReuse n payload]))
+       let shared = compose (map (Dup 1 . fst) ways) (Drop z (Jump j [] [NoReuse n payload]))
        body <- bind [(r,V t)] (dsE (Free r e))
        return (Join j [] [(r,Owned,t)] body (IsUnique z unique shared))
 

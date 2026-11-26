@@ -166,6 +166,11 @@ static inline kk_box_t kk_box_dup(kk_box_t b, kk_context_t* ctx) {
   return b;
 }
 
+static inline kk_box_t kk_box_dup_n(kk_box_t b, uint64_t n, kk_context_t* ctx) {
+  if (kk_box_is_ptr(b)) { kk_block_dup_n(kk_ptr_unbox(b, ctx), n); }
+  return b;
+}
+
 static inline void kk_box_drop(kk_box_t b, kk_context_t* ctx) {
   if (kk_box_is_ptr(b)) { kk_block_drop(kk_ptr_unbox(b, ctx), ctx); }
 }

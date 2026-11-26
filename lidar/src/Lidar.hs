@@ -47,6 +47,7 @@ import Lidar.Passes.Anf( anfProgram )
 import Lidar.Passes.CheckFip( checkFip )
 import Lidar.Passes.CheckLinear( checkLinear )
 import Lidar.Passes.CheckTypes( checkProgram, checkTypes )
+import Lidar.Passes.CoalesceRC( coalesceRCProgram )
 import Lidar.Passes.Closed( closedProgram )
 import Lidar.Passes.Contify( contifyProgram )
 import Lidar.Passes.DropSpec( dropSpecProgram )
@@ -134,6 +135,7 @@ pipeline opts
        ]
     ++ [Pass "inline" inlineProgram]
     ++ [Pass "peephole" peepholeProgram | optPeephole opts]
+    ++ [purePass "coalesce-rc" coalesceRCProgram]
   where
     purePass name pass = Pass name (\p -> (pass p,[]))
     whenReuse steps = if optReuse opts then steps else []

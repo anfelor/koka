@@ -118,7 +118,7 @@ annE c expr w
                      _ -> unknown ("generalization at " ++ ppr w) expr
       Drop x e -> Drop x <$> annE c e w
       Free r e -> Free r <$> annE c e w
-      Dup x e -> Dup x <$> annE c e w
+      Dup n x e -> Dup n x <$> annE c e w
       IsUnique x e1 e2 -> IsUnique x <$> annE c{ ctxGamma = uniqueGamma gamma x } e1 w <*> annE c e2 w
       IfFull r e1 e2 -> let full = case M.lookup r gamma of
                                      Just (V (VReuse _ n p)) -> bindVars [(r,V (VReuse Full n p))] c

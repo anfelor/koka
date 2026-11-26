@@ -86,7 +86,7 @@ groundBody foldable globals body
                 -- a cast binds its scrutinee at the target type
                 LetCast v b x e' -> do (b2,r2) <- chain e'
                                        Just ((x,VPtr b,GValue v) : b2, r2)
-                Dup _ e' -> chain e'
+                Dup _ _ e' -> chain e'
                 _ -> Nothing
     -- each binding uses only the variables bound before it
     checkBinds bound binds

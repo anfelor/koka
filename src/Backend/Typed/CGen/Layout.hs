@@ -110,6 +110,9 @@ dupDropDefs name fs
   = "static inline __attribute__((always_inline)) " ++ name ++ " " ++ name ++ "_dup(" ++ name ++ " x, kk_context_t* _ctx) {\n"
     ++ concat ["  " ++ dupExpr ct f ++ ";\n" | (f,ct) <- fs]
     ++ "  return x;\n}\n"
+    ++ "static inline __attribute__((always_inline)) void " ++ name ++ "_dup_n(" ++ name ++ " x, uint64_t n, kk_context_t* _ctx) {\n"
+    ++ concat ["  " ++ dup ++ "_n(" ++ f ++ ",n,_ctx);\n" | (f,ct) <- fs, Just dup <- [dupFun ct]]
+    ++ "}\n"
     ++ "static inline void " ++ name ++ "_drop(" ++ name ++ " x, kk_context_t* _ctx) {\n"
     ++ concat ["  " ++ dropStmt ct f ++ "\n" | (f,ct) <- fs]
     ++ "}\n"

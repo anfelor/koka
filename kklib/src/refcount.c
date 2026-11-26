@@ -189,12 +189,23 @@ kk_decl_noinline kk_block_t* kk_block_check_dup(kk_block_t* b, kk_refcount_t rc0
   return b;
 }
 
+// A bulk decrement of a shared count can span the entire sticky range.
+// Recompute from the current count on contention so concurrent dups cannot wrap it.
+kk_decl_noinline kk_block_t* kk_block_check_dup_n(kk_block_t* b, kk_refcount_t rc, uint64_t n) {
+  kk_assert_internal(kk_refcount_is_thread_shared(rc));
+  while (rc > RC_STICKY) {
+    const kk_refcount_t next = (n >= (uint32_t)(rc - RC_STICKY) ? RC_STICKY : rc - (kk_refcount_t)n);
+    if (kk_atomic_cas_weak_relaxed(&b->header.refcount, &rc, next)) break;
+  }
+  return b;
+}
+
 // Check if a reference drop caused the block to be free, or needs atomic operations
 // Currently compiles without register spills (on x64) which is important for performance.
 // Be careful when adding more code to not induce stack usage.
 kk_decl_noinline void kk_block_check_drop(kk_block_t* b, kk_refcount_t rc0, kk_context_t* ctx) {
   kk_assert_internal(b!=NULL);
-  kk_assert_internal(kk_block_refcount(b) == rc0);
+  kk_assert_internal(rc0 < 0 || kk_block_refcount(b) == rc0);
   kk_assert_internal(rc0 == 0 || kk_refcount_is_thread_shared(rc0));
   if kk_likely(rc0==0) {
     kk_block_drop_free(b, ctx);  // no more references, free it.
@@ -209,14 +220,14 @@ kk_decl_noinline void kk_block_check_drop(kk_block_t* b, kk_refcount_t rc0, kk_c
       kk_block_refcount_set(b,0);    // no longer shared
       kk_block_drop_free(b, ctx);    // no more references, free it.
     }
-    kk_assert_internal(rc > RC_STICKY);
+    kk_assert_internal(rc < 0);  // a concurrent counted dup may have made it sticky
   }
 }
 
 // Check if a reference decrement caused the block to be reused or needs atomic operations
 kk_decl_noinline kk_reuse_t kk_block_check_drop_reuse(kk_block_t* b, kk_refcount_t rc0, kk_context_t* ctx) {
   kk_assert_internal(b!=NULL);
-  kk_assert_internal(kk_block_refcount(b) == rc0);
+  kk_assert_internal(rc0 < 0 || kk_block_refcount(b) == rc0);
   kk_assert_internal(rc0 == 0 || kk_refcount_is_thread_shared(rc0));
   if kk_likely(rc0==0) {
     // no more references, reuse it.
@@ -238,7 +249,7 @@ kk_decl_noinline kk_reuse_t kk_block_check_drop_reuse(kk_block_t* b, kk_refcount
 kk_decl_noinline void kk_block_check_decref(kk_block_t* b, kk_refcount_t rc0, kk_context_t* ctx) {
   kk_unused(ctx);
   kk_assert_internal(b!=NULL);
-  kk_assert_internal(kk_block_refcount(b) == rc0);
+  kk_assert_internal(rc0 < 0 || kk_block_refcount(b) == rc0);
   kk_assert_internal(rc0 == 0 || kk_refcount_is_thread_shared(rc0));
   if kk_likely(rc0==0) {
     kk_free(b,ctx);  // no more references, free it (without dropping children!)
@@ -259,7 +270,7 @@ kk_decl_noinline void kk_block_check_decref(kk_block_t* b, kk_refcount_t rc0, kk
 kk_decl_noinline void kk_block_check_decref_small(kk_block_t* b, kk_refcount_t rc0, kk_context_t* ctx) {
   kk_unused(ctx);
   kk_assert_internal(b!=NULL);
-  kk_assert_internal(kk_block_refcount(b) == rc0);
+  kk_assert_internal(rc0 < 0 || kk_block_refcount(b) == rc0);
   kk_assert_internal(rc0 == 0 || kk_refcount_is_thread_shared(rc0));
   if kk_likely(rc0==0) {
     kk_free_small(b,ctx);  // no more references, free it (without dropping children!)
