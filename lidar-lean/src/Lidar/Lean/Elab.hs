@@ -246,11 +246,11 @@ elabValue t v
   = case v of
       D.VLit (D.LNat n) -> return (id, Ret (Lit (litInt n)), vtInt)
       D.VLit (D.LStr s) -> return (id, Ret (Lit (LitString s)), vtString)
-      D.VLit l | Just (n,r) <- rawLit l, Just (lo,hi) <- rawRange r, lo <= n, n <= hi
-               -> return (id, Ret (Lit (LitRaw r n)), VRaw r)
+      D.VLit l | Just (n,t) <- rawLit l, let (lo,hi) = intRange t, lo <= n, n <= hi
+               -> return (id, Ret (Lit (LitInt t n)), VRaw (RInt t))
       -- out of the range that the IR gives the type on every platform (a big `USize`)
-      D.VLit l | Just (n,r) <- rawLit l, Just f <- rawOfNat r
-               -> return (id, Call (leanName f) [] [Lit (litInt n)], VRaw r)
+      D.VLit l | Just (n,t) <- rawLit l, Just f <- rawOfNat (RInt t)
+               -> return (id, Call (leanName f) [] [Lit (litInt n)], VRaw (RInt t))
       D.VErased -> do (k,w) <- erased t
                       return (k, Ret w, t)
       D.VProj tname i x -> elabProj tname (fromInteger i) x
@@ -266,11 +266,11 @@ elabValue t v
       D.VUnsupported -> fail "unsupported let value"
   where
     rawLit l = case l of
-                 D.LU8 n -> Just (n,RUInt8)
-                 D.LU16 n -> Just (n,RUInt16)
-                 D.LU32 n -> Just (n,RUInt32)
-                 D.LU64 n -> Just (n,RUInt64)
-                 D.LUSize n -> Just (n,RUSize)
+                 D.LU8 n -> Just (n,IntType Unsigned W8)
+                 D.LU16 n -> Just (n,IntType Unsigned W16)
+                 D.LU32 n -> Just (n,IntType Unsigned W32)
+                 D.LU64 n -> Just (n,IntType Unsigned W64)
+                 D.LUSize n -> Just (n,IntType Unsigned WSize)
                  D.LNat _ -> Nothing
                  D.LStr _ -> Nothing
 

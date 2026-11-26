@@ -30,7 +30,7 @@ Mono types become IR types as follows.
 -}
 module Lidar.Lean.Decls
   ( Decls(..), Kind(..), CtorInfo(..)
-  , declsOf, worldTypes, leanName, irType, typeKind, anyT, resultType, rawOfNat, isBuiltinType
+  , declsOf, worldTypes, leanName, irType, typeKind, anyT, resultType, rawTypes, rawOfNat, isBuiltinType
   ) where
 
 import qualified Data.Map as M
@@ -79,8 +79,10 @@ anyT = VPtr AAny
 
 -- the scalars of Lean's runtime, by the name of their type
 rawTypes :: [(D.Name,Raw)]
-rawTypes = [ ("UInt8",RUInt8), ("UInt16",RUInt16), ("UInt32",RUInt32), ("UInt64",RUInt64)
-           , ("USize",RUSize), ("Float",RFloat64), ("Float32",RFloat32) ]
+rawTypes = [ ("UInt8",uint W8), ("UInt16",uint W16), ("UInt32",uint W32), ("UInt64",uint W64)
+           , ("USize",uint WSize), ("Float",RFloat64), ("Float32",RFloat32) ]
+  where
+    uint w = RInt (IntType Unsigned w)
 
 -- the types that Lean's runtime implements itself (`isRuntimeBultinType`), apart from scalars
 builtinTypes :: [(D.Name,Kind)]

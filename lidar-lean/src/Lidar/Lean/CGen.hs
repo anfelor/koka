@@ -39,7 +39,7 @@ import Lidar.Query( Gamma, inferV, inferVar, altTypes, unboxRuGamma, copyRuGamma
 import Lidar.Traversal( child, boxTag, fvA, descendA, descendV, descendE )
 import Lidar.Layout( leaves, shapeIsHeap )
 import qualified Lidar.Lean.Dump as D
-import Lidar.Lean.Decls( leanName, rawOfNat )
+import Lidar.Lean.Decls( leanName, rawTypes, rawOfNat )
 import Lidar.Lean.CGen.Layout
 import Lidar.Lean.CGen.Ground( groundDecls, cString )
 
@@ -91,13 +91,7 @@ impureLeaf :: D.Type -> Maybe Leaf
 impureLeaf t
   = case t of
       D.TConst "lcVoid" -> Nothing
-      D.TConst "UInt8" -> Just (LScalar RUInt8)
-      D.TConst "UInt16" -> Just (LScalar RUInt16)
-      D.TConst "UInt32" -> Just (LScalar RUInt32)
-      D.TConst "UInt64" -> Just (LScalar RUInt64)
-      D.TConst "USize" -> Just (LScalar RUSize)
-      D.TConst "Float" -> Just (LScalar RFloat64)
-      D.TConst "Float32" -> Just (LScalar RFloat32)
+      D.TConst n | Just r <- lookup n rawTypes -> Just (LScalar r)
       _ -> Just LObj
 
 isErased :: D.Type -> Bool
@@ -225,15 +219,15 @@ strLit :: String -> String
 strLit s = let (lit,size,len) = cString s in call "lean_mk_string_unchecked" [lit, show size, show len]
 
 -- a literal of an unsigned raw type
-rawLit :: Raw -> Integer -> String
-rawLit r n = "((" ++ cType (LScalar r) ++ ")" ++ show n ++ "ULL)"
+rawLit :: IntType -> Integer -> String
+rawLit t n = "((" ++ cType (LScalar (RInt t)) ++ ")" ++ show n ++ "ULL)"
 
 genLit :: Lit -> G String
 genLit lit
   = case lit of
       LitSmallInt n | n >= 0 -> return (natLit n)
       LitBigInt n | n >= 0 -> return (natLit n)
-      LitRaw r n | n >= 0 -> return (rawLit r n)
+      LitInt t n | n >= 0 -> return (rawLit t n)
       LitString s -> return (strLit s)
       LitChar c -> return (show (ord c) ++ "u")
       _ -> fail ("literal " ++ show lit)
@@ -616,8 +610,8 @@ genCall cx dest f vs
        tgt <- target cx f
        case (vs, r) of
          -- the conversion of a literal (`Decls.rawOfNat`) is a C literal
-         ([Lit l], VRaw raw) | Just n <- litInteger l, n >= 0, fmap leanName (rawOfNat raw) == Just f
-           -> assignTo dest [rawLit raw n]
+         ([Lit l], VRaw raw@(RInt t)) | Just n <- litInteger l, n >= 0, fmap leanName (rawOfNat raw) == Just f
+           -> assignTo dest [rawLit t n]
          _ -> do args <- mapM (\v -> do es <- genV cx v
                                         ls <- tyOf cx v >>= leavesOf
                                         return (zip ls es)) vs

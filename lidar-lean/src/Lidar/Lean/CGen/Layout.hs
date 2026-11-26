@@ -56,21 +56,18 @@ leafOf t
 -- the scalar of an enumeration with n constructors, as Lean's `toImpureType`
 enumRaw :: Int -> Raw
 enumRaw n
-  | n < 256   = RUInt8
-  | n < 65536 = RUInt16
-  | otherwise = RUInt32
+  | n < 256   = RInt (IntType Unsigned W8)
+  | n < 65536 = RInt (IntType Unsigned W16)
+  | otherwise = RInt (IntType Unsigned W32)
 
 -- Lean's scalar of a raw type: its C type, its size as a field of a constructor (Nothing for a
 -- `usize` field), and the suffix of its accessors (`lean_ctor_get_uint32`)
 leanScalar :: Raw -> Maybe (String, Maybe Int, String)
 leanScalar r
   = case r of
-      RUInt8   -> Just ("uint8_t", Just 1, "uint8")
-      RUInt16  -> Just ("uint16_t", Just 2, "uint16")
-      RUInt32  -> Just ("uint32_t", Just 4, "uint32")
+      RInt (IntType Unsigned WSize) -> Just ("size_t", Nothing, "usize")
+      RInt (IntType Unsigned w) | w /= WPtr -> Just (rawName r ++ "_t", Just (widthBits w `div` 8), rawName r)
       RChar    -> Just ("uint32_t", Just 4, "uint32")
-      RUInt64  -> Just ("uint64_t", Just 8, "uint64")
-      RUSize   -> Just ("size_t", Nothing, "usize")
       RFloat64 -> Just ("double", Just 8, "float")
       RFloat32 -> Just ("float", Just 4, "float32")
       _        -> Nothing
@@ -124,7 +121,7 @@ payload ls
     usizes = [i | (i,LScalar r) <- indexed, scalarSize r == Nothing]
     -- by decreasing size, each size in leaf order
     scalars = [(i,n) | n <- [8,4,2,1], (i,LScalar r) <- indexed, scalarSize r == Just n]
-    scalarRaw i = case ls !! i of { LScalar r -> r; _ -> RUInt8 }
+    scalarRaw i = case ls !! i of { LScalar r -> r; _ -> RInt (IntType Unsigned W8) }
     slots = M.fromList (zip objs (map objSlot [0..]) ++ zip usizes (map SUSize [0..])
                         ++ [(i,SScalar (scalarRaw i) off) | ((i,_),off) <- zip scalars (scanl (+) 0 (map snd scalars))])
 

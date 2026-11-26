@@ -44,7 +44,7 @@ foldable f = S.member f (S.fromList (M.keys ofNats ++ mkStrs ++ emptyArrays ++ [
 
 -- the conversions of literals to scalars (`Decls.rawOfNat`)
 ofNats :: M.Map Name Raw
-ofNats = M.fromList [(leanName f, r) | r <- [RUInt8, RUInt16, RUInt32, RUInt64, RUSize], Just f <- [rawOfNat r]]
+ofNats = M.fromList [(leanName f, r) | r <- [RInt (IntType Unsigned w) | w <- [W8, W16, W32, W64, WSize]], Just f <- [rawOfNat r]]
 
 mkStrs :: [Name]
 mkStrs = [leanName ("Lean.Name.mkStr" ++ show i) | i <- [1..8 :: Int]]
@@ -168,7 +168,7 @@ genVal val
       DupV v -> genVal v
       UnitV -> return (leavesOnly [])
       Lit (LitSmallInt n) | n >= 0 -> return (leavesOnly [GObj (tagged n)])
-      Lit (LitRaw _ n) | n >= 0 -> return (leavesOnly [GScalar n])
+      Lit (LitInt _ n) | n >= 0 -> return (leavesOnly [GScalar n])
       Lit (LitString s) -> do o <- stringObject s
                               return (Val [GObj o] (Just s) Nothing)
       Lit (LitChar c) -> return (leavesOnly [GScalar (toInteger (ord c))])
@@ -297,7 +297,7 @@ foldCall t f vs
              _ -> fail "a name component that is not static"
     name tag pv g h
       = case valLeaves pv of
-          [p] -> do o <- ctorObject tag [LObj, LObj, LScalar RUInt64] [p, g, GScalar (toInteger h)]
+          [p] -> do o <- ctorObject tag [LObj, LObj, LScalar (RInt (IntType Unsigned W64))] [p, g, GScalar (toInteger h)]
                     return (Val [GObj o] Nothing (Just h))
           _ -> fail "a name prefix that is not an object"
 
