@@ -42,7 +42,7 @@ import Lidar.Build( K, compose, prodVal )
 import Lidar.Env( M, evalM, asks, local, get, put )
 import Lidar.Types( Types(alphaEq), vtInt, vtString, withToken, unToken, tokenParam )
 import Lidar.Layout( isEnum )
-import Lidar.Traversal( child )
+import Lidar.Traversal( child, within )
 import Lidar.Elab.Representation( boxA, shapeLeaves, leafCons, injA, caseSum, conValue )
 import qualified Lidar.Lean.Dump as D
 import Lidar.Lean.Decls
@@ -58,10 +58,6 @@ data Ctx = Ctx{ cDecls :: Decls, cLocals :: M.Map D.Var (Path,VType), cJoins :: 
 -- default path again would bind it twice in its scope. `Rest p d tags`: the local at path `p`,
 -- the binder `d` and the tags it lacks.
 data Rest = Rest Path Path [Int]
-
--- the sum of the local at a path, as `unrollLocal` binds it
-unrolled :: Path -> Path
-unrolled p = child (child p SDeref) SRoll
 
 type E a = M Ctx Int a
 
@@ -158,6 +154,7 @@ irT t = do is <- inds
 coerce :: VType -> VType -> VVal -> E (K,VVal)
 coerce from to v
   | alphaEq from to = return (id, v)
+  | VPtr _ <- from, VPtr b <- to, b /= AAny = fmap Var <$> castTo b v
   | otherwise = do (k1,a) <- toAny from v
                    (k2,w) <- fromAny to a
                    return (k1 . k2, w)
@@ -184,20 +181,29 @@ fromAny :: VType -> VVal -> E (K,VVal)
 fromAny t a
   = case t of
       VPtr AAny -> return (id, a)
-      VPtr b -> return (id, Down b a)
+      VPtr b -> fmap Var <$> castTo b a
       VUnit -> return (id, UnitV)
       VRaw r ->
-        do s <- fresh "s"
+        do (k,s) <- castTo (AScalar r) a
            x <- fresh "x"
            let d = child s SDeref
-           return (Let s (VPtr (AScalar r)) (Ret (Down (AScalar r) a)) . Deref (Var s) d . Unscalar d x, Var x)
+           return (k . Deref (Var s) d . Unscalar d x, Var x)
       VSum ts | isEnum t ->
-        do s <- fresh "s"
+        do (k,s) <- castTo (boxA t) a
            r <- fresh "e"
            let d = child s SDeref
            body <- caseSum (leafCons ts) (shapeLeaves t) d (\i _ -> return (Ret (Inj i t UnitV)))
-           return (Let s (VPtr (boxA t)) (Ret (Down (boxA t) a)) . Deref (Var s) d . Let r t body, Var r)
+           return (k . Deref (Var s) d . Let r t body, Var r)
       _ -> fail ("cannot convert any* to " ++ ppr t)
+
+-- `let cast[b] y = v`, which binds `y : b*`: the child `p.cast` of a variable `p`, so that it
+-- keeps the mode of `p`
+castTo :: AType -> VVal -> E (K,Path)
+castTo b v
+  = do y <- case v of
+              Var p -> return (child p SCast)
+              _ -> fresh "c"
+       return (LetCast v b y, y)
 
 -- a local at type `t`
 localVal :: D.Var -> VType -> E (K,VVal)
@@ -373,10 +379,10 @@ apply action fv as
            (ts',r) | action = (init ts ++ [VToken], withToken anyT)
                    | otherwise = (ts, anyT)
        (k,vs) <- args as ts'
-       s <- fresh "f"
        let ft = AFun [(Owned,t) | t <- ts'] r
-           g = child s SDeref
-       return (k, Let s (VPtr ft) (Ret (Down ft fv)) (Deref (Var s) g (App g vs)), r)
+       (kf,s) <- castTo ft fv
+       let g = child s SDeref
+       return (k, kf (Deref (Var s) g (App g vs)), r)
 
 -- a constant applied to arguments: a constructor value, a call, a closure for a partial
 -- application, or a call whose result is applied to the remaining arguments
@@ -502,7 +508,7 @@ refAlts tname
                            _ -> [(0,body)])
          _ -> fail ("destructuring a value of " ++ tname ++ ", which is not a datatype")
 
--- `let ptr d = x in let roll r = d in k r`, for `x : T*` (converted to `T*` first if needed)
+-- `let ptr d = x in let roll r = d in k r`, for `x : T*` (cast to `T*` first if needed)
 unrollLocal :: D.Var -> D.Name -> (Path -> E VExpr) -> E VExpr
 unrollLocal x tname k
   = do t <- irT (D.TConst tname)
@@ -642,7 +648,7 @@ elabCases res tname x alts
                   (ASum _, Just (Rest p d excl), Just p') | p == p' -> caseSum (Just p) d excl
                   _ -> unrollLocal x tname $ \r ->
                          case (body, sortOn fst explicit) of
-                           (ASum _, _) -> caseSum (mfilter ((== r) . unrolled) p0) r []
+                           (ASum _, _) -> caseSum (mfilter (r `within`) p0) r []
                            (_, [a]) -> alt r a
                            (_, []) | code:_ <- dflt -> elabCode res code
                            _ -> fail ("a case on " ++ tname ++ " with several alternatives")

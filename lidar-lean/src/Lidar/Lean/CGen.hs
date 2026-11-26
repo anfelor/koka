@@ -513,6 +513,10 @@ genE cx dest expr
            [ve] <- genV cx v
            body <- genE (bindVar cx x (A a)) dest e
            return (declare x [LObj] [ve] ++ body)
+      LetCast v b x e ->
+        do [ve] <- genV cx v
+           body <- genE (bindVar cx x (V (VPtr b))) dest e
+           return (declare x [LObj] [ve] ++ body)
       Unroll v x e ->
         do A t <- tyOfName cx v
            a <- liftQ (dataBody (cxEnv cx) t)
