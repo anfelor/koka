@@ -9,16 +9,17 @@
 {- Ground values: the top-level values of a lowered program that C generation can write as
   static data, without code that runs when the module is initialised.
 
-  A value is *ground* if it is built only from literals (strings, characters, and integers that
-  every runtime holds without an allocation), units, injections, tuples, boxes, top-level
-  functions and other ground globals, through the run-time no-ops (`ptr`, `roll`, `up`, ...).
+  A value is *ground* if it is built only from literals (strings, characters and integers),
+  units, injections, tuples, boxes, top-level functions and other ground globals, through the run-time no-ops (`ptr`, `roll`, `up`, ...).
   The body of a ground `DefVal` is a chain of `let`s of ground values, or of calls that the
   client folds at compile time (`Lean`'s `Name.mkStr`, for instance), ending in a ground value.
   The dups of the chain are left out: static data is never freed, so its reference counts are
   stuck, and a value shared by several fields is written once. A ground value cannot have
   effects or diverge, so writing it statically never changes the meaning of a program.
 
-  Each C generator writes the bindings in order, in its runtime's format.
+  Each C generator writes the bindings in order, in its runtime's format. A value that a client
+  cannot write statically (a big integer, for instance) it initialises when the module is
+  initialised.
 -}
 module Lidar.Ground
   ( Ground(..), GroundBind(..)
@@ -123,8 +124,7 @@ groundV globals bound = gv
              Roll _ v -> ga v
              InjLazy _ _ v -> ga v
              Box v -> gv v
-             Constant (ConstString _) -> True
-             Constant (ConstInt _) -> False
+             Constant _ -> True
              Scalar _ -> False
              OpenCon{} -> False
              Lam{} -> False
