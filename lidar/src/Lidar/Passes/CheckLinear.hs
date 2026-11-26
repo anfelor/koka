@@ -461,6 +461,7 @@ ownedA env g val
       Roll _ v -> ownedA env g v
       InjLazy _ _ v -> ownedA env g v
       Box v -> ownedV env g v
+      Constant _ -> return noUse
       Scalar v -> ownedV env g v
       OpenCon _ _ vs -> uses (map (ownedV env g) vs)
       -- the value is evaluated before the block is written
@@ -472,9 +473,7 @@ uniqueV env g val
   = case val of
       Var x -> uniqueName env g x
       UnitV -> return noUse
-      Lit _ -> do t <- V <$> liftE (inferV env g val)
-                  unless (trivialTy env t) (fail ("unique use of a shared literal: " ++ show val))
-                  return noUse
+      Lit _ -> return noUse
       Inj _ _ w -> uniqueV env g w
       Tuple vs -> uses (map (uniqueV env g) vs)
       Pack _ _ w -> uniqueV env g w
@@ -490,7 +489,7 @@ borrowedV env g val
   = case val of
       Var x -> inspect env g x
       Glob _ _ -> return noUse
-      Lit l | not (litAllocates l) -> return noUse
+      Lit _ -> return noUse
       UnitV -> return noUse
       TyApp v _ -> borrowedV env g v
       Inj _ _ w -> borrowedV env g w

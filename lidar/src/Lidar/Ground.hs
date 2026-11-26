@@ -123,15 +123,15 @@ groundV globals bound = gv
              Roll _ v -> ga v
              InjLazy _ _ v -> ga v
              Box v -> gv v
+             Constant (ConstString _) -> True
+             Constant (ConstInt _) -> False
              Scalar _ -> False
              OpenCon{} -> False
              Lam{} -> False
              BoxAt{} -> False
     groundLit lit = case lit of
                       LitSmallInt _ -> True
-                      LitBigInt _ -> False
                       LitInt _ _ -> True
-                      LitString _ -> True
                       LitChar _ -> True
                       LitFloat _ -> False
 

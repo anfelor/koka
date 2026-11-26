@@ -275,6 +275,7 @@ synthA c val
                  Just (SigFun tvs ps _ r) -> done (forallA tvs (AFun ps r))
                  _ -> Nothing
       UnitA -> done AUnit
+      Constant k -> done (APrim (constPrim k))
       Box v -> do (t,mv) <- synthV c v
                   Just (ABox t, Box <$> mv)
       BoxAt r v -> do (t,mv) <- synthV c v

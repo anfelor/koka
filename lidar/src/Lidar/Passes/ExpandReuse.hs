@@ -238,6 +238,7 @@ allocates :: AVal -> Bool
 allocates val
   = case val of
       Box _ -> True
+      Constant _ -> True
       BoxAt _ _ -> True
       OpenCon{} -> True
       Lam{} -> True

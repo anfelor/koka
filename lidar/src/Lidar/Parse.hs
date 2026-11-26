@@ -221,16 +221,27 @@ intP = tokenP (\t -> case t of
                        TInt i -> Just (fromInteger i)
                        _ -> Nothing) <?> "number"
 
+-- an immediate
 litP :: P Lit
 litP = tokenP (\t -> case t of
-                       TInt i -> Just (litInt i)
+                       TInt i | isSmallInt i -> Just (LitSmallInt i)
                        TRawInt i r | Just (RInt t) <- lookup r rawNames -> Just (LitInt t i)
                        TFloat d -> Just (LitFloat d)
                        TChar c -> Just (LitChar c)
-                       TString s -> Just (LitString s)
                        TName False "NaN" [] -> Just (LitFloat (0/0))
                        TName False "Infinity" [] -> Just (LitFloat (1/0))
                        _ -> Nothing) <?> "literal"
+
+constantP :: P Constant
+constantP = tokenP (\t -> case t of
+                             TInt i -> Just (ConstInt i)
+                             TString s -> Just (ConstString s)
+                             _ -> Nothing) <?> "constant"
+
+-- a literal value: an immediate, or a pointer to a constant, printed as the bare constant
+-- (`Pretty.prettyVal`)
+litValP :: P VVal
+litValP = try (Lit <$> litP) <|> (constVal <$> constantP)
 
 modeP :: P Mode
 modeP = option Owned ((Unique <$ sym "!") <|> (Borrowed <$ sym "^"))
@@ -452,7 +463,7 @@ atomValP = baseValP >>= tyApps
 baseValP :: P VVal
 baseValP
   = choice
-      [ Lit <$> litP
+      [ litValP
       , Hole <$ kw "hole"
       , Null unknownV <$ kw "null"
       , do n <- numbered "no-reuse"; NoReuse n <$> optionMaybe contentsP
@@ -479,6 +490,7 @@ aValP
       , kw "whnf" >> (InjLazy Whnf unknownA <$> atomAValP)
       , kw "delay" >> (InjLazy Delay unknownA <$> atomAValP)
       , kw "box" >> (Box <$> atomValP)
+      , kw "const" >> (Constant <$> constantP)
       , kw "scalar" >> (Scalar <$> atomValP)
       , kw "fn" >> (do ps <- paramsP; sym ":"; r <- vP; sym "->"; Lam ps r <$> exprP)
       , sym "box@" >> (do r <- localP; BoxAt r <$> atomValP)

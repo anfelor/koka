@@ -367,6 +367,7 @@ genAIn cx tag val
       InjA _ _ _ -> failG "injection into a non-sum"
       InjLazy _ _ v -> genAIn cx tag v
       Box v -> genBox cx tag Fresh v
+      Constant c -> genConstant c
       BoxAt r v -> genBox cx tag (At r) v
       Scalar v -> genScalar cx v
       OpenCon c tys vs -> genOpenCon cx c tys vs
@@ -664,20 +665,26 @@ genLit :: Lit -> G Doc
 genLit lit
   = case lit of
       LitSmallInt i -> return ("kt_box_integer(kk_integer_from_small(" <.> integer i <.> "))")
-      LitBigInt i -> return ("kt_box_integer(" <.> intLit i <.> ")")
       LitInt t i -> return (rawLit t i)
       LitFloat d -> return (text (showHFloat d ""))
       LitChar c -> return ("((kk_char_t)" <.> int (fromEnum c) <.> ")")
-      LitString "" -> return "kt_box_string(kk_string_empty())"
-      LitString s -> do x <- fresh "s"
-                        let (cstr,clen) = cstring s
-                        return (stmtExpr ["kk_define_string_literal(static," <.> x <.> "," <.> int clen <.> "," <.> text cstr <.> ",_ctx);"]
-                                         ("kt_box_string(kk_string_dup(" <.> x <.> ",_ctx))"))
+
+-- A constant is an owned reference: a fresh big integer, or a static string (whose reference
+-- count stays fixed, so a reference to it need not be dropped).
+genConstant :: Constant -> G Doc
+genConstant c
+  = case c of
+      ConstInt i -> return ("kt_box_integer(" <.> bigIntLit i <.> ")")
+      ConstString "" -> return "kt_box_string(kk_string_empty())"
+      ConstString s -> do x <- fresh "s"
+                          let (cstr,clen) = cstring s
+                          return (stmtExpr ["kk_define_string_literal(static," <.> x <.> "," <.> int clen <.> "," <.> text cstr <.> ",_ctx);"]
+                                           ("kt_box_string(kk_string_dup(" <.> x <.> ",_ctx))"))
 
 -- Use a C literal when it fits; exclude the signed minimum, which is not a valid C literal.
--- a big integer (`LitBigInt`)
-intLit :: Integer -> Doc
-intLit i
+-- a big integer (`ConstInt`)
+bigIntLit :: Integer -> Doc
+bigIntLit i
   | abs i < 2^63 = "kk_integer_from_int64(KK_I64(" <.> integer i <.> "),_ctx)"
   | otherwise = "kk_integer_from_str(\"" <.> integer i <.> "\",_ctx)"
 
@@ -1180,10 +1187,8 @@ ifChain ((test,s):rest) other = "if (" <.> test <.> ")" <+> block s <+> "else" <
 litTest :: Doc -> Lit -> Doc
 litTest ve lit
   = case lit of
-      LitSmallInt i -> "kk_integer_eq_borrow(kt_unbox_integer(" <.> ve <.> "),kk_integer_from_small(" <.> integer i <.> "),_ctx)"
-      LitBigInt i -> "kk_integer_eq_borrow(kt_unbox_integer(" <.> ve <.> ")," <.> intLit i <.> ",_ctx)"
+      LitSmallInt _ -> error "Backend.Typed.CGen.CGen.litTest: a case on an int* (only raw types)"
       LitInt t i -> "(" <.> ve <+> "==" <+> rawLit t i <.> ")"
-      LitString s -> "(kk_string_cmp_cstr_borrow(kt_unbox_string(" <.> ve <.> ")," <.> text (fst (cstring s)) <.> ",_ctx) == 0)"
       LitChar c -> "(" <.> ve <+> "==" <+> int (fromEnum c) <.> ")"
       LitFloat d -> "(" <.> ve <+> "==" <+> text (showHFloat d "") <.> ")"
 
@@ -1344,12 +1349,12 @@ staticLeaves sc blocks val
       Lit (LitSmallInt i) -> return (["((kk_intb_t)" <.> integer (4*i + 1) <.> ")"],blocks)   -- `kk_integer_from_small`
       Lit (LitInt t i) -> return ([rawLit t i],blocks)
       Lit (LitChar c) -> return (["((kk_char_t)" <.> int (fromEnum c) <.> ")"],blocks)
-      Lit (LitString "") -> return (["kk_datatype_tag_init(1)"],blocks)                   -- `kk_string_empty`
+      Ptr _ (Constant (ConstString "")) -> return (["kk_datatype_tag_init(1)"],blocks)    -- `kk_string_empty`
       -- as `kk_string_alloc_from_utf8n` leaves it, which converts invalid UTF-8 (a NUL is `C0 80`)
-      Lit (LitString str) | all validChar str
-                          -> let (cstr,clen) = cstring str
-                             in block ("struct { struct kk_bytes_s _base; kk_ssize_t length; uint8_t buf[" <.> int (clen+1) <.> "]; }")
-                                      ("{ { { KK_HEADER_STATIC(0,KK_TAG_STRING) } }," <+> int clen <.> "," <+> text cstr <+> "}") "._base._block"
+      Ptr _ (Constant (ConstString str))
+        | all validChar str -> let (cstr,clen) = cstring str
+                               in block ("struct { struct kk_bytes_s _base; kk_ssize_t length; uint8_t buf[" <.> int (clen+1) <.> "]; }")
+                                        ("{ { { KK_HEADER_STATIC(0,KK_TAG_STRING) } }," <+> int clen <.> "," <+> text cstr <+> "}") "._base._block"
       Inj i t UnitV | isEnum t -> return ([int i],blocks)
       Tuple vs -> foldM (\(ls,bs) v -> do (ls',bs') <- staticLeaves sc bs v
                                           return (ls ++ ls',bs')) ([],blocks) vs

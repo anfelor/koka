@@ -760,7 +760,7 @@ elabValOf expr
       C.App f [] | isPrim nameCCtxHoleCreate f -> Just (return (id, Hole))
       C.Var (TName x tp) info -> Just (elabVar x tp info [])
       C.TypeApp (C.Var (TName x tp) info) tys -> Just (elabVar x tp info tys)
-      C.Lit lit -> Just (return (id, Lit (elabLit lit)))
+      C.Lit lit -> Just (return (id, elabLit lit))
       _ | Just l <- rawLiteral expr -> Just (return (id, Lit l))
       _ | isConApp expr -> Just $ case expandSyn (typeOf expr) of
                                     TFun pars eff _ -> etaCon expr pars eff
@@ -865,13 +865,21 @@ rawLiteral expr
     int32 = IntType Signed W32
     ssize = IntType Signed WSize
 
-elabLit :: C.Lit -> Lit
+elabLit :: C.Lit -> VVal
 elabLit lit
   = case lit of
-      C.LitInt i    -> litInt i
-      C.LitFloat d  -> LitFloat d
-      C.LitChar c   -> LitChar c
-      C.LitString s -> LitString s
+      C.LitInt i    -> intLit i
+      C.LitFloat d  -> Lit (LitFloat d)
+      C.LitChar c   -> Lit (LitChar c)
+      C.LitString s -> stringLit s
+
+-- a literal of a raw type, as a pattern of `CaseLit`
+rawPattern :: C.Lit -> E Lit
+rawPattern lit
+  = case lit of
+      C.LitFloat d -> return (LitFloat d)
+      C.LitChar c  -> return (LitChar c)
+      _ -> failE ("a literal pattern of a type that is not raw: " ++ show lit)
 
 elabVar :: Name -> Type -> C.VarInfo -> [Type] -> E (K,VVal)
 elabVar x tp info tys
@@ -1084,7 +1092,7 @@ elabCase scrut brs
        expect <- vt scrutTp
        (k,v) <- elabValAt expect scrut
        body <- case [p | C.Branch [p] _ <- brs] of
-                 (C.PatLit _ : _) -> elabLitCase v brs
+                 (C.PatLit _ : _) -> elabLitCase expect v brs
                  _ | all isWild [p | C.Branch [p] _ <- brs] -> branchBody (head brs)
                  _ -> elabConCase scrutTp v brs
        return (k body)
@@ -1098,13 +1106,42 @@ branchBody :: C.Branch -> E VExpr
 branchBody (C.Branch _ [C.Guard _ e]) = branch (elabTail e)
 branchBody _ = failE "unexpected guards after matching"
 
-elabLitCase :: VVal -> [C.Branch] -> E VExpr
-elabLitCase v brs
-  = do alts <- mapM (\b@(C.Branch [C.PatLit l] _) -> (,) (elabLit l) <$> branchBody b) [b | b@(C.Branch [C.PatLit _] _) <- brs]
-       def  <- case [b | b@(C.Branch [C.PatWild] _) <- brs] of
-                 (b:_) -> branchBody b
-                 []    -> failE "literal match without default"
-       return (CaseLit v alts def)
+-- A match on literals of a raw type is a `CaseLit`. One on `int` or `string` literals compares
+-- the scrutinee with each pattern in turn, by a call of the type's `(==)`.
+elabLitCase :: VType -> VVal -> [C.Branch] -> E VExpr
+elabLitCase t v brs
+  = do let pats = [(l,b) | b@(C.Branch [C.PatLit l] _) <- brs]
+           def  = case [b | b@(C.Branch [C.PatWild] _) <- brs] of
+                    (b:_) -> branchBody b
+                    []    -> failE "literal match without default"
+       case pats of
+         (C.LitInt _,_) : _ -> eqChain nameIntEq pats def
+         (C.LitString _,_) : _ -> eqChain nameStringEq pats def
+         _ -> do alts <- mapM (\(l,b) -> (,) <$> rawPattern l <*> branchBody b) pats
+                 CaseLit v alts <$> def
+  where
+    eqChain eq pats def
+      = do sig <- do e <- env
+                     maybe (failE ("no signature for " ++ show eq)) return (M.lookup eq (envSigs e))
+           recordSig eq sig
+           tbool <- vt typeBool
+           (bind,s) <- case v of
+                         Var _ -> return (id, v)
+                         _ -> do s <- fresh "s"
+                                 return (Let s t (Ret v), Var s)
+           let test (l,b) rest
+                 = do x <- fresh "eq"
+                      yes <- branchBody b
+                      no <- rest
+                      return (Let x tbool (Call (toLidar eq) [] [s, elabLit l])
+                                (CaseV (Var x) [(0, child x (SInjV 0 (Con (toLidar nameFalse))), no)
+                                               ,(1, child x (SInjV 1 (Con (toLidar nameTrue))), yes)]))
+           bind <$> foldr test def pats
+
+-- the equality functions of `int` and `string`, which compare literal patterns
+nameIntEq, nameStringEq :: Name
+nameIntEq = newQualified "std/core/int" "=="
+nameStringEq = newQualified "std/core/string" "=="
 
 elabConCase :: Type -> VVal -> [C.Branch] -> E VExpr
 elabConCase scrutTp v brs

@@ -117,6 +117,9 @@ inferExpr env g js expr
                                        return r
                        _ -> Left ("applying a non-function: " ++ ppr ft)
       CaseLit v alts def -> do vt <- inferV env g v
+                               case vt of
+                                 VRaw _ -> return ()
+                                 _ -> Left ("a case on literals of a type that is not raw: " ++ ppr vt)
                                mapM_ (\(l,_) -> checkLit l >> expect vt (litType l)) alts
                                branches env (inferE env g js def : [inferE env g js e | (_,e) <- alts])
       Drop x e -> do t <- inferVar g x
@@ -388,22 +391,26 @@ litType :: Lit -> VType
 litType lit
   = case lit of
       LitSmallInt _ -> vtInt
-      LitBigInt _   -> vtInt
       LitInt t _    -> VRaw (RInt t)
-      LitString _   -> vtString
       LitChar _     -> vtChar
       LitFloat _    -> vtFloat
 
--- an integer literal has the form and range that `litInt` and `intRange` give it
+-- an integer literal is in the range of its form (`isSmallInt`, `intRange`)
 checkLit :: Lit -> Q ()
 checkLit lit
   = case lit of
-      LitSmallInt n -> unless (litInt n == lit) bad
-      LitBigInt n -> unless (litInt n == lit) bad
+      LitSmallInt n -> unless (isSmallInt n) bad
       LitInt t n -> let (lo,hi) = intRange t in unless (lo <= n && n <= hi) bad
       _ -> return ()
   where
     bad = Left ("literal out of the range of its form: " ++ show lit)
+
+-- `type(c)`; a big integer is not small (`intLit` builds it)
+constantType :: Constant -> Q AType
+constantType c
+  = case c of
+      ConstInt n | isSmallInt n -> Left ("a small integer as a constant: " ++ show n)
+      _ -> return (APrim (constPrim c))
 
 checkA :: Env -> Gamma -> AVal -> AType -> Q ()
 checkA env g val t = inferA env g val >>= expect t
@@ -526,6 +533,7 @@ inferA env g val
       Box v -> do t <- inferV env g v
                   noHeapCredit t
                   return (ABox t)
+      Constant c -> constantType c
       Scalar v -> do t <- inferV env g v
                      case t of
                        VRaw r -> return (AScalar r)

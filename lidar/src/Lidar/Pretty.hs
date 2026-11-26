@@ -68,7 +68,7 @@ reserved :: String -> Bool
 reserved s = null s || "(" `isPrefixOf` s || s `elem` keywords || "box@" `isPrefixOf` s || any numbered ["v","inj","inj-a","reuse","no-reuse","cell"]
   where
     numbered p = p `isPrefixOf` s && not (null (drop (length p) s)) && all isDigit (drop (length p) s)
-    keywords = words ("ret let in of case split at if-whnf whnf delay ptr roll box scalar pack dup drop free"
+    keywords = words ("ret let in of case split at if-whnf whnf delay ptr roll box const scalar pack dup drop free"
                       ++ " if-unique if-full then else join rec and jump fn gen forall exists unreachable"
                       ++ " cast-ev total memoize ctx ctx-copy hole some null is-null if-yielding yield up down lock @ @copy _"
                       ++ " module data con inline noinline fun val extern foreign Box Scalar I KCtx NaN Infinity"
@@ -233,6 +233,7 @@ prettyAVal pp val
       Roll _ v   -> "roll" <+> atomAVal pp v
       InjLazy d _ v -> side d <+> atomAVal pp v
       Box v      -> "box" <+> atomVal pp v
+      Constant c -> "const" <+> prettyConstant c
       Scalar v   -> "scalar" <+> atomVal pp v
       OpenCon c ts vs -> nm c <> tyArgs pp ts <> args pp vs
       Lam ps r e -> "fn" <> params pp ps <+> colon <+> prettyV pp r <+> "->" <> line <> indent 2 (prettyExpr pp e)
@@ -249,6 +250,7 @@ prettyVal pp val
       Inj i _ v  -> "inj" <> pretty i <+> atomVal pp v
       Tuple [v]  -> parens (prettyVal pp v <> comma)   -- not a value in parentheses
       Tuple vs   -> parens (commaSep (map (prettyVal pp) vs))
+      Ptr _ (Constant c) -> prettyConstant c   -- the bare literal (`Parse.litValP`)
       Ptr _ v    -> "ptr" <+> atomAVal pp v
       Pack _ ts v -> "pack" <> tyArgs pp ts <+> atomVal pp v
       TyApp v@(Glob _ _) ts -> parens (prettyVal pp v) <> tyArgs pp ts   -- not `Glob x ts`
@@ -276,6 +278,7 @@ atomVal :: PP ann -> VVal -> Doc ann
 atomVal pp v
   = case v of
       Inj _ _ _   -> parens (prettyVal pp v)
+      Ptr _ (Constant _) -> prettyVal pp v
       Ptr _ _     -> parens (prettyVal pp v)
       Pack _ _ _  -> parens (prettyVal pp v)
       DupV _      -> parens (prettyVal pp v)
@@ -289,11 +292,15 @@ prettyLit :: Lit -> Doc ann
 prettyLit lit
   = case lit of
       LitSmallInt i -> viaShow i
-      LitBigInt i -> viaShow i
       LitInt t i  -> viaShow i <> "_" <> prettyRaw (RInt t)
       LitFloat d  -> viaShow d
       LitChar c   -> viaShow c
-      LitString s -> viaShow s
+
+prettyConstant :: Constant -> Doc ann
+prettyConstant c
+  = case c of
+      ConstInt i    -> viaShow i
+      ConstString s -> viaShow s
 
 --------------------------------------------------------------------------
 -- Expressions

@@ -145,12 +145,12 @@ allocates gs val
                  Just (_,GValue v,_) -> allocates gs v
                  Just (_,GCall{},_) -> True
                  Nothing -> False
-      Lit (LitString _) -> True
       Ptr _ a -> allocatesA a
       _ -> getAny (getConst (descendV (Const . Any . allocatesA) (Const . Any . allocates gs) val))
   where
     allocatesA a = case a of
                      Box _ -> True
+                     Constant _ -> True
                      _ -> getAny (getConst (descendA (const (Const (Any False))) (Const . Any . allocatesA) (Const . Any . allocates gs) a))
 
 -- whether a value builds a block of a fresh datatype
@@ -239,7 +239,6 @@ extractOperands fresh gs body = (body',reverse ops)
 
 operandType :: VVal -> Maybe VType
 operandType v = case v of
-                  Lit (LitString _) -> Just (VPtr (APrim PString))
                   Ptr t _ -> Just (VPtr t)
                   _ -> Nothing
 

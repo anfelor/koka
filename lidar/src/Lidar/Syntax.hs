@@ -321,42 +321,51 @@ data ConLabel = ConLabel{ lblCon :: Name, lblFields :: [Field], lblDecls :: [May
 
 type TypeDefs = M.Map Name TypeDef
 
--- the type of a literal, `type(l)` (`Query.litType`): `int*` and `string*` (builtin
--- abstract types, `APrim`), and raw types. A small `int*` literal (`isSmallInt`) is an
--- immediate; a big one and a string allocate (`litAllocates`). A raw integer literal is in the
--- range of its type (`intRange`). `litInt` picks the form of an `int*` literal.
+-- Immediates: the literals of raw types, and the small integers of `int*` (`isSmallInt`). The
+-- type of a literal, `type(l)` (`Query.litType`), is `int*` (a builtin abstract type, `APrim`)
+-- or a raw type. A raw integer literal is in the range of its type (`intRange`).
 data Lit = LitSmallInt Integer
-         | LitBigInt Integer
          | LitInt IntType Integer
-         | LitFloat Double
          | LitChar Char
-         | LitString String
+         | LitFloat Double
          deriving (Eq,Show)
 
--- an `int*` literal
-litInt :: Integer -> Lit
-litInt n = if isSmallInt n then LitSmallInt n else LitBigInt n
+-- Constants: the literals that allocate, a big integer (not `isSmallInt`) or a string. A
+-- constant is a fresh block of a builtin abstract type, `type(c)` (`Query.constType`).
+data Constant = ConstInt Integer
+           | ConstString String
+           deriving (Eq,Show)
 
 -- Integers that every runtime holds in an `int*` without an allocation (on 32-bit platforms
 -- too).
 isSmallInt :: Integer -> Bool
 isSmallInt n = -(2^(29::Int)) <= n && n < 2^(29::Int)
 
--- the literals that allocate, which are owned values; the others are immediates
-litAllocates :: Lit -> Bool
-litAllocates lit
-  = case lit of
-      LitBigInt _ -> True
-      LitString _ -> True
-      _ -> False
+-- an `int*` literal: an immediate if it is small, otherwise a constant
+intLit :: Integer -> VVal
+intLit n = if isSmallInt n then Lit (LitSmallInt n) else constVal (ConstInt n)
 
--- the value of an integer literal of any type
-litInteger :: Lit -> Maybe Integer
-litInteger lit
-  = case lit of
-      LitSmallInt n -> Just n
-      LitBigInt n -> Just n
-      LitInt _ n -> Just n
+-- a `string*` literal
+stringLit :: String -> VVal
+stringLit s = constVal (ConstString s)
+
+-- a pointer to a constant
+constVal :: Constant -> VVal
+constVal c = Ptr (APrim (constPrim c)) (Constant c)
+
+constPrim :: Constant -> Prim
+constPrim c
+  = case c of
+      ConstInt _ -> PInt
+      ConstString _ -> PString
+
+-- the integer of an integer literal value: an immediate, or a pointer to a constant
+intValue :: VVal -> Maybe Integer
+intValue val
+  = case val of
+      Lit (LitSmallInt n) -> Just n
+      Lit (LitInt _ n) -> Just n
+      Ptr _ (Constant (ConstInt n)) -> Just n
       _ -> Nothing
 
 -- Variables are paths, as in the paper: a root followed by the steps of the destructurings
@@ -444,10 +453,10 @@ nameHole :: Path
 nameHole = root (newHiddenName "hole")
 
 -- Values `Γ ⊢ v :q t`. As in the paper, a borrowed value is structural: a variable, global,
--- literal that does not allocate, `()`, `null` or function, or a type application, tuple,
--- injection, pack, `some` or cast of borrowed values. A unique value is a variable, a context `ctx K`, `()`, `null`, a
--- literal of a trivial type, or a tuple, injection, pack, `some` or cast of unique values. All
--- other values are owned.
+-- literal, `()`, `null` or function, or a type application, tuple, injection, pack, `some` or
+-- cast of borrowed values. A unique value is a variable, a context `ctx K`, `()`, `null`, a
+-- literal, or a tuple, injection, pack, `some` or cast of unique values. All other values are
+-- owned.
 --
 -- Boxed values `Γ ⊢ a :q A`. Boxed variables are only operands (see `[var]`).
 data AVal
@@ -488,6 +497,13 @@ data AVal
   --
   -- A fresh allocation (the paper's `alloc_n; box v`).
   | Box VVal
+
+  --  ─────────────────────── [const]
+  --   ∅ ⊢ const c : type(c)
+  --
+  -- A fresh allocation of a constant, as `[box]` (an owned pointer to it is printed as the
+  -- bare literal, `"abc"`). A code generator may share one static block among all uses.
+  | Constant Constant
 
   --   Γ ⊢ v : raw
   --  ────────────────────────────── [scalar]
@@ -543,11 +559,10 @@ data VVal
   --   ∅ ⊢ () :q 𝟙
   | UnitV
 
-  --  ──────────────────── [lit]
-  --   ∅ ⊢ l : type(l)
+  --  ───────────────────── [lit]
+  --   ∅ ⊢ l :q type(l)
   --
-  -- A literal that allocates (`litAllocates`: a big `int` or a `string`) is owned, like a box.
-  -- The others are immediates, also borrowed; at a trivial type also unique.
+  -- An immediate, at any mode.
   | Lit Lit
 
   --   Γ ⊢ v :q Vᵢ
@@ -836,9 +851,11 @@ data VExpr
   -- the result is null" is broken. The yielding branch passes on the dummy as `ret (null, k₃)`.
   | IfYielding VVal (Path,VExpr) (Path,VExpr)
 
-  --   Γ₁ ⊢ v :^ V    lᵢ : V    Γ₂ ⊢ eᵢ : W    Γ₂ ⊢ e : W
-  --  ────────────────────────────────────────────────────── [case-lit]
+  --   Γ₁ ⊢ v :^ raw    type(lᵢ) = raw    Γ₂ ⊢ eᵢ : W    Γ₂ ⊢ e : W
+  --  ──────────────────────────────────────────────────────────────── [case-lit]
   --   Γ₁, Γ₂ ⊢ case v of { lᵢ -> eᵢ; _ -> e } : W
+  --
+  -- Only on raw types: a front end compares `int*` and `string*` values by calls.
   | CaseLit VVal [(Lit,VExpr)] VExpr
 
   --   Γ₁ ⊢ v :^ T⟨B̄⟩    Cᵢ : ∀ā. V̄ᵢ -> T⟨ā⟩ ∈ Σ    Γ₂, x̄ᵢ :^ V̄ᵢ[B̄/ā] ⊢ eᵢ : W    Γ₂ ⊢ e : W

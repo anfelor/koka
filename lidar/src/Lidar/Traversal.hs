@@ -41,6 +41,7 @@ descendA fn fa fv val
       BoxAt r v      -> BoxAt <$> fn r <*> fv v
       Fun _          -> pure val
       UnitA          -> pure val
+      Constant _     -> pure val
       Lam _ _ _      -> pure val
 
 descendV :: Applicative f => (AVal -> f AVal) -> (VVal -> f VVal) -> VVal -> f VVal

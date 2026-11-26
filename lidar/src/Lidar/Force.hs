@@ -34,6 +34,7 @@ deriving stock instance Generic TypeDef
 deriving stock instance Generic TypeBody
 deriving stock instance Generic ConLabel
 deriving stock instance Generic Lit
+deriving stock instance Generic Constant
 deriving stock instance Generic Path
 deriving stock instance Generic Step
 deriving stock instance Generic Con
@@ -68,6 +69,7 @@ deriving anyclass instance NFData TypeDef
 deriving anyclass instance NFData TypeBody
 deriving anyclass instance NFData ConLabel
 deriving anyclass instance NFData Lit
+deriving anyclass instance NFData Constant
 deriving anyclass instance NFData Path
 deriving anyclass instance NFData Step
 deriving anyclass instance NFData Con
