@@ -107,7 +107,6 @@ pipeline opts
     , Pass "anf" anfProgram
     , Pass "simplify" simplifyProgram
     , purePass "yields" yieldsProgram
-    , purePass "closed" (closedProgram (optFoldable opts))
     , Require "linear" checkLinear
     , Pass "perceus" perceusProgram
     , purePass "tailrec" (tailRecProgram fips)
@@ -119,7 +118,9 @@ pipeline opts
        [ Advise "fip" (checkFip fips groups)
        , Pass "reuse" reuseProgram
        ]
-    ++ [ Pass "match" matchProgram
+    -- Only the allocations that reuse leaves fresh are extracted, so before `expandreuse`.
+    ++ [ Pass "closed" (closedProgram (optFoldable opts))
+       , Pass "match" matchProgram
        , purePass "sinkjoins" sinkJoinsProgram
        , purePass "joinargs" joinArgsProgram
        ]
