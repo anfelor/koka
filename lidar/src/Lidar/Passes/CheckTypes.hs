@@ -99,7 +99,6 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
       where here = case v of
                      Glob _ ts -> concatMap at ts
                      TyApp _ ts -> concatMap at ts
-                     Down b _ -> at b
                      Context a _ -> at a
                      Ptr a _ -> at a
                      Inj _ t _ -> [t]

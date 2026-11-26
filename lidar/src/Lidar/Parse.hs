@@ -448,7 +448,6 @@ valP
       , kw "ptr" >> (Ptr unknownA <$> atomAValP)
       , kw "pack" >> (do ts <- tyArgsP; Pack unknownV ts <$> atomValP)
       , kw "up" >> (Up <$> atomValP)
-      , kw "down" >> (do b <- bracketsP aP; Down b <$> atomValP)
       , kw "dup" >> (DupV <$> atomValP)
       , kw "ctx" >> (Context unknownA <$> atomValP)
       , kw "some" >> (Some <$> atomValP)

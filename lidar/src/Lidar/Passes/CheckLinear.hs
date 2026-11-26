@@ -437,7 +437,6 @@ ownedV env g val
       Pack _ _ _ -> children
       TyApp _ _ -> children
       Up _ -> children
-      Down _ _ -> children
       Hole -> return noUse
       Context _ k -> ownedV env g k
       Some v -> ownedV env g v
@@ -481,7 +480,6 @@ uniqueV env g val
       Some w -> uniqueV env g w
       Null _ -> return noUse
       Up w -> uniqueV env g w
-      Down _ w -> uniqueV env g w
       _ -> fail ("unique use of a value that is not unique: " ++ show val)
 
 borrowedV :: Env -> Gamma -> VVal -> L Use
@@ -498,7 +496,6 @@ borrowedV env g val
       Some w -> borrowedV env g w
       Null _ -> return noUse
       Up w -> borrowedV env g w
-      Down _ w -> borrowedV env g w
       _ -> fail ("borrowed use of a value that is not structural: " ++ show val)
 
 -- closures only have owned parameters

@@ -114,7 +114,6 @@ groundV globals bound = gv
                Pack _ _ v -> gv v
                TyApp v _ -> gv v
                Up v -> gv v
-               Down _ v -> gv v
                Some v -> gv v
                Hole -> False
                Context _ _ -> False
@@ -150,7 +149,6 @@ globsV val
       Pack _ _ v -> globsV v
       TyApp v _ -> globsV v
       Up v -> globsV v
-      Down _ v -> globsV v
       Some v -> globsV v
       _ -> []
   where

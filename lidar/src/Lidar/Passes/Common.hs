@@ -135,7 +135,6 @@ mentionedV v = annotations ++ getConst (descendV (Const . mentionedA) (Const . m
           Ptr a _ -> mentionedT (VPtr a)
           Pack t ts _ -> mentionedT t ++ concatMap (mentionedT . VPtr) ts
           TyApp _ ts -> concatMap (mentionedT . VPtr) ts
-          Down b _ -> mentionedT (VPtr b)
           Context a _ -> mentionedT (VPtr a)
           Null t -> mentionedT t
           NoReuse _ p -> case p of Nothing -> []; Just (Contents _ w t) -> mentionedV w ++ mentionedT t
@@ -277,7 +276,6 @@ substTypesV sub val
       Ptr a v     -> Ptr (subst sub a) v
       Pack t ts v -> Pack (subst sub t) (map (subst sub) ts) v
       TyApp v ts  -> TyApp v (map (subst sub) ts)
-      Down b v    -> Down (subst sub b) v
       Context b v -> Context (subst sub b) v
       Null t      -> Null (subst sub t)
       NoReuse n c -> NoReuse n ((\(Contents k p t) -> Contents k (substTypesV sub p) (subst sub t)) <$> c)
@@ -364,7 +362,6 @@ substVWith renameRoot recur scope sub val
       Ptr a v -> Ptr (substAType sub a) (goA v)
       Pack t ts v -> Pack (substVType sub t) (map (substAType sub) ts) (goV v)
       TyApp v ts -> TyApp (goV v) (map (substAType sub) ts)
-      Down b v -> Down (substAType sub b) (goV v)
       Context b v -> Context (substAType sub b) (goV v)
       Null t -> Null (substVType sub t)
       NoReuse n p -> NoReuse n (fmap (substContents sub) p)
@@ -619,7 +616,6 @@ tvarsV bound val
       Ptr a _     -> ftv a
       Pack t ts _ -> ftv t ++ concatMap ftv ts
       TyApp _ ts  -> concatMap ftv ts
-      Down b _    -> ftv b
       Context b _ -> ftv b
       Null t      -> ftv t
       NoReuse _ c -> maybe [] (\(Contents _ p t) -> tvarsV bound p ++ ftv t) c

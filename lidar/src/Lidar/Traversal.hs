@@ -53,7 +53,6 @@ descendV fa fv val
       Pack t ts v    -> Pack t ts <$> fv v
       TyApp v ts     -> (`TyApp` ts) <$> fv v
       Up v           -> Up <$> fv v
-      Down b v       -> Down b <$> fv v
       DupV v         -> DupV <$> fv v
       Context b v    -> Context b <$> fv v
       Some v         -> Some <$> fv v

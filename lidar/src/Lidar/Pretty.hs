@@ -256,7 +256,6 @@ prettyVal pp val
       TyApp v@(Glob _ _) ts -> parens (prettyVal pp v) <> tyArgs pp ts   -- not `Glob x ts`
       TyApp v ts  -> atomVal pp v <> tyArgs pp ts
       Up v        -> "up" <+> atomVal pp v
-      Down b v    -> "down" <> tyArgs pp [b] <+> atomVal pp v
       DupV v      -> "dup" <+> atomVal pp v
       NoReuse n p -> "no-reuse" <> pretty n <> prettyContents pp p
       Hole        -> "hole"
@@ -285,7 +284,6 @@ atomVal pp v
       Context _ _ -> parens (prettyVal pp v)
       Some _      -> parens (prettyVal pp v)
       Up _        -> parens (prettyVal pp v)
-      Down _ _    -> parens (prettyVal pp v)
       _           -> prettyVal pp v
 
 prettyLit :: Lit -> Doc ann

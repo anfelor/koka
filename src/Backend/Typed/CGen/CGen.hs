@@ -213,7 +213,6 @@ genV cx val
       TyApp v _ -> genV cx v
       -- every pointer is a `kk_box_t`, `any*` included
       Up v -> genV cx v
-      Down _ v -> genV cx v
       -- the representation of `V?` is that of `V`
       Some v -> genV cx v
       Null t -> ctype t >>= yieldedValue
@@ -1404,7 +1403,6 @@ staticLeaves sc blocks val
       Ptr _ a -> staticBox sc blocks 0 a
       TyApp v _ -> staticLeaves sc blocks v
       Up v -> staticLeaves sc blocks v
-      Down _ v -> staticLeaves sc blocks v
       Some v -> staticLeaves sc blocks v
       Pack _ _ v -> staticLeaves sc blocks v
       _ -> failG ("not a static value: " ++ show val)

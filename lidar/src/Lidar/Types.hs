@@ -97,7 +97,7 @@ prodFields []      = VUnit
 prodFields [(_,t)] = t
 prodFields fs      = VProd fs
 
--- the top type `any` of `[up]` and `[down]`, which also instantiates unconstrained type variables
+-- the top type `any` of `[up]`, which also instantiates unconstrained type variables
 atAny :: AType
 atAny = AAny
 
@@ -222,7 +222,6 @@ substContents sub (Contents k p t) = Contents k (go p) (substV sub t)
       Pack s ts x -> Pack (substV sub s) (map (substA sub) ts) (go x)
       TyApp x ts -> TyApp (go x) (map (substA sub) ts)
       Up x -> Up (go x)
-      Down b x -> Down (substA sub b) (go x)
       _ -> v
 
 ftvContents :: Contents -> [TVar]
@@ -234,7 +233,6 @@ ftvContents (Contents _ p t) = go p ++ ftvV t
       Pack s ts x -> ftvV s ++ concatMap ftvA ts ++ go x
       TyApp x ts -> go x ++ concatMap ftvA ts
       Up x -> go x
-      Down b x -> ftvA b ++ go x
       _ -> []
 
 eqContentsMaybe :: Maybe Contents -> Maybe Contents -> Bool
@@ -252,7 +250,6 @@ eqContents p0 q0 = go (collapse p0) (collapse q0)
       (Pack t ts x, Pack u us y) -> eqV t u && eqAs ts us && go x y
       (TyApp x ts, TyApp y us) -> go x y && eqAs ts us
       (Up x, Up y) -> go x y
-      (Down a x, Down b y) -> eqA a b && go x y
       _ -> p == q
 
 -- The normal form of a description: a value built from the children of a variable is that
@@ -268,7 +265,6 @@ collapse v
       Pack t ts w -> let w' = collapse w in maybe (Pack t ts w') Var (parentAt SPack w')
       TyApp w ts -> TyApp (collapse w) ts
       Up w -> Up (collapse w)
-      Down b w -> Down b (collapse w)
       _ -> v
   where
     parentAt s (Var (Path x ss@(_:_))) | last ss == s = Just (Path x (init ss))

@@ -482,7 +482,6 @@ checkReuseTy ty = case ty of
       Pack _ _ x -> structural x
       TyApp x _ -> structural x
       Up x -> structural x
-      Down _ x -> structural x
       _ -> Left "reuse contents must be a structural value"
 
 -- Look up a named operand; boxed eliminations and `drop` require A.
@@ -611,7 +610,3 @@ inferV env g val
       Up v -> do t <- inferV env g v
                  unless (isPtr t) (Left ("upcast of a value that is not a pointer: " ++ ppr t))
                  return (VPtr atAny)
-      Down b v -> do checkV env g v (VPtr atAny)
-                     let t = VPtr b
-                     checkTy (V t)
-                     return t

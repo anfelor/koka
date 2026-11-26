@@ -171,7 +171,7 @@ data AType = ABox VType                 -- Box V
            | AVar TVar                  -- a
            | AApp TVar [AType]          -- a⟨B̄⟩, an applied higher-kinded variable
            | ACon Name [AType]          -- T⟨B̄⟩, a named type
-           | AAny                       -- any, the top type of `[up]` and `[down]`
+           | AAny                       -- any, the top type of `[up]`
            | APrim Prim                 -- int, string: the builtin abstract reference types
            | ALam [TVar] AType          -- λā. A, a partially applied type
            deriving (Eq,Show)
@@ -598,17 +598,14 @@ data VVal
   -- The paper's `[inst]`, on pointers so that it keeps the memory layout.
   | TyApp VVal [AType]
 
-  --   Γ ⊢ v :q A*                    Γ ⊢ v :q any*
-  --  ──────────────────── [up]       ───────────────────── [down]
-  --   Γ ⊢ up v :q any*                Γ ⊢ down[B] v :q B*
+  --   Γ ⊢ v :q A*
+  --  ──────────────────── [up]
+  --   Γ ⊢ up v :q any*
   --
-  -- Casts to and from Koka's top type `any`, for front ends whose typing the IR cannot express
-  -- (such as erased dependent types). No-ops at run time that keep the mode. `[up]` is safe;
-  -- `[down]` is unchecked and trusts the front end, so a destructuring of its result must not
-  -- move above the test that justifies it. To match on a downcast, use `[let-cast]`, whose
-  -- binder keeps the mode of a variable scrutinee.
+  -- A cast to Koka's top type `any`, for front ends whose typing the IR cannot express (such
+  -- as erased dependent types). A no-op at run time that keeps the mode. The cast back is
+  -- `[let-cast]`.
   | Up VVal
-  | Down AType VVal
 
   --   x : ∀ā. V ∈ Σ
   --  ────────────────────────────── [dup-glob]
@@ -805,8 +802,7 @@ data VExpr
   -- destructuring of x must not move above the test that justifies the cast. For a variable
   -- scrutinee z, the binder is z.cast, an alias of z (its pointer at another type), which is
   -- owned and unique where z is. Unlike the binders of other destructurings, it has a pointer
-  -- type, so it is a value. Paths name the binders of two casts of z in one scope alike, so a
-  -- front end casts a variable to one type in a scope.
+  -- type, so it is a value. A cast of z while z.cast is in scope casts z.cast (`Paths`).
   | LetCast VVal AType Path VExpr
 
   --   data T⟨ā⟩ := A ∈ Σ    Γ₁ ⊢ v :^ T⟨B̄⟩    Γ₂, x :^ A[B̄/ā] ⊢ e : W

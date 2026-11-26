@@ -74,7 +74,6 @@ childrenV v = case v of
   Pack t ts w -> [(w,Pack t ts)]
   TyApp w ts -> [(w,\x -> TyApp x ts)]
   Up w -> [(w,Up)]
-  Down b w -> [(w,Down b)]
   DupV w -> [(w,DupV)]
   _ -> []
 

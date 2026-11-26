@@ -188,7 +188,6 @@ checkV c val t
       (Some v, VOrNull s) -> Some <$> checkV c v s
       (Null _, VOrNull s) -> return (Null s)
       (DupV v, _) -> DupV <$> checkV c v t
-      (Down b v, _) -> Down b <$> checkV c v (VPtr atAny)
       (NoReuse n p, _) -> NoReuse n <$> traverse (annContents c) p
       _ | not (annotated val) -> return val
         | Just (_,mv) <- synthV c val -> mv
@@ -225,7 +224,6 @@ synthV c val
                    Just (orNull t, Some <$> mv)
       Null{} -> Nothing
       Up v -> Just (VPtr atAny, Up <$> synthOrKeep c v)
-      Down b v -> Just (VPtr b, Down b <$> checkV c v (VPtr atAny))
       Inj{} -> Nothing
       Pack{} -> Nothing
       Context{} -> Nothing
