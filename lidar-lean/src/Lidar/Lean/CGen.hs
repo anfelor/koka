@@ -308,7 +308,8 @@ genBox cx tag at v
 
 -- A top-level function as a closure, which captures nothing and is static. Lean's closures
 -- take objects, so its parameters and result must be objects. The closure of an action takes
--- Lean's world for its token, which its C function does not: a wrapper drops it.
+-- Lean's world for its token, which its C function does not, and the closure of a function with
+-- more parameters than a closure passes one by one takes them in an array: a wrapper adapts both.
 genFun :: Ctx -> Name -> G String
 genFun cx f
   = case M.lookup f (envSigs (cxEnv cx)) of
@@ -317,14 +318,14 @@ genFun cx f
            pls <- mapM leavesOf own
            rls <- leavesOf r
            tgt <- target cx f
-           if not (all (== [LObj]) (rls : pls) && length ps <= closureMaxArgs)
+           if not (all (== [LObj]) (rls : pls))
              then fail ("the function " ++ show f ++ " as a closure")
-             else if length own == length ps then staticClosure (tgtName tgt) (length ps)
+             else if length own == length ps && length ps <= closureMaxArgs then staticClosure (tgtName tgt) (length ps)
              else do fn <- fresh "lt_fun"
                      xs <- mapM (const (fresh "a")) ps
-                     let params = ["lean_object* " ++ (if t == VToken then "_world" else x) | (x,(_,t)) <- zip xs ps]
+                     let (params,loads) = closureParams [if t == VToken then "_world" else x | (x,(_,t)) <- zip xs ps]
                          cargs = [x | (x,(_,t)) <- zip xs ps, t /= VToken]
-                     modify (\st -> st{ stLams = stLams st ++ ["static lean_object*" <+> text (call fn params) <+> block [text ("return " ++ call (tgtName tgt) cargs ++ ";")]] })
+                     modify (\st -> st{ stLams = stLams st ++ ["static lean_object*" <+> text (call fn params) <+> block (loads ++ [text ("return " ++ call (tgtName tgt) cargs ++ ";")])] })
                      staticClosure fn (length ps)
       _ -> fail ("unknown function " ++ show f)
 
@@ -350,11 +351,18 @@ staticClosure fn arity
 closureMaxArgs :: Int
 closureMaxArgs = 16
 
+-- the parameters of the C function of a closure with these arguments, which are objects, and the
+-- loads of the arguments if they are more than a closure passes one by one, so in an array
+closureParams :: [String] -> ([String],[C])
+closureParams args
+  | length args > closureMaxArgs = (["lean_object** _args"], [text ("lean_object* " ++ a ++ " = _args[" ++ show i ++ "];") | (i,a) <- zip [0 :: Int ..] args])
+  | otherwise = (["lean_object* " ++ a | a <- args], [])
+
 -- A closure: a C function that takes the captured leaves (boxed, as Lean's closures hold
 -- objects) and the parameters, which are objects, in an array if they are more than a closure
 -- passes one by one. Applying it consumes the closure and passes the captures owned, as the
--- closure's body owns them. A token parameter is Lean's world, which the body ignores. A
--- closure without captures is static.
+-- closure's body owns them. A token parameter is Lean's world, which the body ignores. The
+-- lambdas without captures are functions (`Passes.LiftLams`), except polymorphic ones.
 genLam :: Ctx -> [(Path,Mode,VType)] -> VType -> VExpr -> G String
 genLam cx ps r e
   = do let caps = S.toList (fvA (Lam ps r e))
@@ -370,16 +378,12 @@ genLam cx ps r e
          fn <- fresh "lt_lam"
          cs <- mapM (const (fresh "c")) fixed
          body <- genE cx{ cxGamma = M.union (M.fromList [(x,V t) | (x,_,t) <- ps]) (cxGamma cx), cxJoins = M.empty } DReturn e
-         let args = cs ++ [if t == VToken then "_world" else localName x | (x,_,t) <- ps]
-             (params,loadArgs)
-               | arity > closureMaxArgs = (["lean_object** _args"], [text ("lean_object* " ++ a ++ " = _args[" ++ show i ++ "];") | (i,a) <- zip [0 :: Int ..] args])
-               | otherwise = (["lean_object* " ++ a | a <- args], [])
+         let (params,loadArgs) = closureParams (cs ++ [if t == VToken then "_world" else localName x | (x,_,t) <- ps])
              loads = loadArgs ++ [text (cType l ++ " " ++ n ++ " = " ++ convert LObj l c ++ ";") | ((l,n),c) <- zip fixed cs]
          modify (\st -> st{ stLams = stLams st ++ ["static lean_object*" <+> text (call fn params) <+> block (loads ++ body)] })
-         if null fixed then staticClosure fn arity else do
-           c <- fresh "clo"
-           return (stmtExpr (("lean_object* " ++ c ++ " = " ++ call "lean_alloc_closure" ["(void*)" ++ fn, show arity, show (length fixed)] ++ ";")
-                             : [call "lean_closure_set" [c, show i, convert l LObj n] ++ ";" | (i,(l,n)) <- zip [0 :: Int ..] fixed]) c)
+         c <- fresh "clo"
+         return (stmtExpr (("lean_object* " ++ c ++ " = " ++ call "lean_alloc_closure" ["(void*)" ++ fn, show arity, show (length fixed)] ++ ";")
+                           : [call "lean_closure_set" [c, show i, convert l LObj n] ++ ";" | (i,(l,n)) <- zip [0 :: Int ..] fixed]) c)
 
 ------------------------------------------------------------------------------
 -- Expressions
