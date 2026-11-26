@@ -100,8 +100,8 @@ perceusDef env def
        case def of
          DefFun{ defArgs = args }
            -> (\b -> def{ defBody = b }) <$> closed (paramEnv env args M.empty) (ownedParams env args) body
-         DefVal x tvs t _
-           -> DefVal x tvs t <$> closed (PEnv env M.empty M.empty S.empty) [] body
+         DefVal x tvs ini t _
+           -> DefVal x tvs ini t <$> closed (PEnv env M.empty M.empty S.empty) [] body
 
 -- Bind what the pass would otherwise rewrite and process again: a borrowed argument of a call
 -- that is not `borrowable` and the scrutinee of a value destructuring that is not a variable or

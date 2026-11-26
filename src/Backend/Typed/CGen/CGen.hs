@@ -1259,7 +1259,7 @@ genDef env cenv def
               ss <- genE cx DReturn body
               let sig = cty rct <+> text (cName f) <.> "(" <.> hcat [cty ct <+> localName x <.> ", " | ((x,_),ct) <- zip cps pcts] <.> "kk_context_t* _ctx)"
               return (sig <.> ";", sig <+> block (tokens ++ ss), empty)
-      DefVal x _ t body
+      DefVal x _ _ t body
         -> do ct <- ctype t
               let cx = Ctx env cenv M.empty M.empty S.empty
               ss <- genE cx DReturn body
@@ -1309,7 +1309,7 @@ staticValues prog
   where
     env = envOf prog
     grounds = groundValues (const False) prog
-    types = M.fromList [(x,t) | DefVal x _ t _ <- progDefs prog]
+    types = M.fromList [(x,t) | DefVal x _ _ t _ <- progDefs prog]
     one :: (M.Map Name Doc,M.Map Name [Doc],[Doc]) -> Name -> G (M.Map Name Doc,M.Map Name [Doc],[Doc])
     one acc@(inits,globals,blocks) x
       = do st <- get

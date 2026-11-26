@@ -71,7 +71,7 @@ reserved s = null s || "(" `isPrefixOf` s || s `elem` keywords || "box@" `isPref
     keywords = words ("ret let in of case split at if-whnf whnf delay ptr roll box const scalar pack dup drop free"
                       ++ " if-unique if-full then else join rec and jump fn gen forall exists unreachable"
                       ++ " cast-ev total memoize ctx ctx-copy hole some null is-null if-yielding yield up down lock @ @copy _"
-                      ++ " module data con inline noinline fun val extern foreign Box Scalar I KCtx NaN Infinity"
+                      ++ " module data con inline noinline fun val ondemand extern foreign Box Scalar I KCtx NaN Infinity"
                       ++ " char ssize_t intptr_t float64 float32 int64 int32 int16 int8 uint8")
 
 -- a path with all its steps
@@ -374,7 +374,7 @@ prettyDef :: PP ann -> Def -> Doc ann
 prettyDef pp def
   = case def of
       DefFun f vs ps q r e inl -> inline inl <> "fun" <+> nm f <> tyParams vs <> params pp ps <+> colon <+> mode q <> prettyV pp r <+> "=" `body` e
-      DefVal x vs t e          -> "val" <+> nm x <> tyParams vs <+> colon <+> prettyV pp t <+> "=" `body` e
+      DefVal x vs ini t e      -> (if ini == OnDemand then "ondemand val" else "val") <+> nm x <> tyParams vs <+> colon <+> prettyV pp t <+> "=" `body` e
   where
     hd `body` e = vsep [hd, indent 2 (prettyExpr pp e)]
 

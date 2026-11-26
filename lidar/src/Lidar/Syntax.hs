@@ -1061,9 +1061,14 @@ data Def
   --  ───────────────────────── [defval]
   --   ⊢ val x⟨ā⟩ : V = e
   --
-  -- A top-level value, initialized when the module is loaded. It may be polymorphic.
-  | DefVal{ defName :: Name, defParams :: [TVar], defType :: VType, defBody :: VExpr }
+  -- A top-level value. It may be polymorphic. It is initialised when the module is loaded, or
+  -- on demand (`defInit`): at its first use, once, if its body is pure (`Passes.Closed`).
+  | DefVal{ defName :: Name, defParams :: [TVar], defInit :: ValInit, defType :: VType, defBody :: VExpr }
   deriving (Show)
+
+-- when a top-level value is initialised
+data ValInit = AtLoad | OnDemand
+             deriving (Eq,Show)
 
 -- Koka's inlining annotation of a definition (as `Common.Syntax.DefInline`)
 data DefInline = InlineNever | InlineAlways | InlineAuto

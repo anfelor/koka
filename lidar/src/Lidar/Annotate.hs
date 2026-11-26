@@ -54,7 +54,7 @@ annDef env def
       DefFun f tvs ps q r e inl -> do ps' <- annParams c0 ps
                                       e' <- annE (bindVars [(x,V t) | (x,_,t) <- ps'] c0) e r
                                       return (DefFun f tvs ps' q r e' inl)
-      DefVal x tvs t e -> DefVal x tvs t <$> annE c0 e t
+      DefVal x tvs ini t e -> DefVal x tvs ini t <$> annE c0 e t
   where
     c0 = Ctx env M.empty M.empty
 

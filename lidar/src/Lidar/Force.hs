@@ -45,6 +45,7 @@ deriving stock instance Generic JoinDef
 deriving stock instance Generic VExpr
 deriving stock instance Generic Def
 deriving stock instance Generic DefInline
+deriving stock instance Generic ValInit
 deriving stock instance Generic Fip
 deriving stock instance Generic FipAlloc
 deriving stock instance Generic Sig
@@ -80,6 +81,7 @@ deriving anyclass instance NFData JoinDef
 deriving anyclass instance NFData VExpr
 deriving anyclass instance NFData Def
 deriving anyclass instance NFData DefInline
+deriving anyclass instance NFData ValInit
 deriving anyclass instance NFData Fip
 deriving anyclass instance NFData FipAlloc
 deriving anyclass instance NFData Sig

@@ -71,7 +71,7 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
       BodyAbstract -> []
     def d = case d of
       DefFun _ vs ps _ r e _ -> vars vs ++ (r : map (\(_,_,t) -> t) ps ++ et e)
-      DefVal _ vs t e -> vars vs ++ (t : et e)
+      DefVal _ vs _ t e -> vars vs ++ (t : et e)
     at a = case a of
       ABox t -> [t]
       ASum ts -> concatMap (at . snd) ts
@@ -199,4 +199,4 @@ checkDef env def
       DefFun _ _ _ Borrowed _ _ _ -> Left "borrowed result"
       DefFun _ _ args _ res body _ -> do signature [t | (_,_,t) <- args] res
                                          checkE env (M.fromList [(x,V t) | (x,_,t) <- args]) noJoins body res
-      DefVal _ _ t body          -> signature [] t >> checkE env M.empty noJoins body t
+      DefVal _ _ _ t body        -> signature [] t >> checkE env M.empty noJoins body t

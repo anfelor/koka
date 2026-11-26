@@ -137,7 +137,7 @@ elabValDef def
   = do e <- env
        (tvs,t) <- tr (elabScheme (envNT e) (typeOf (C.defExpr def)))
        body <- withTVars tvs (tokenIn Nothing (elabExprAt t (stripTypeLam (C.defExpr def))))
-       return (DefVal (toLidar (C.defName def)) tvs t body, SigVal tvs t)
+       return (DefVal (toLidar (C.defName def)) tvs AtLoad t body, SigVal tvs t)
 
 importSigs :: [C.Core] -> M.Map Name (Type,Bool,[Mode])
 importSigs cores

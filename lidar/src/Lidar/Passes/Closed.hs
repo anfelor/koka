@@ -53,7 +53,7 @@ import Lidar.Passes.Common( paramModes, trivialTy, defGamma, typedChildren, Name
 -- calls the client folds.
 closedProgram :: (Name -> Bool) -> Program -> (Program,[String])
 closedProgram foldable prog
-  = ( prog{ progSigs = M.union (progSigs prog) (M.fromList [(x,SigVal [] t) | DefVal x _ t _ <- new])
+  = ( prog{ progSigs = M.union (progSigs prog) (M.fromList [(x,SigVal [] t) | DefVal x _ _ t _ <- new])
           , progDefs = new ++ map fst results }
     , concatMap snd results )
   where
@@ -204,7 +204,7 @@ global f body t
       case M.lookup key keys of
         Just g -> (g,(keys,defs,n))
         Nothing -> let g = makeHiddenName ("closed" ++ show n) f
-                   in (g,(M.insert key g keys, DefVal g [] t body : defs, n + 1))
+                   in (g,(M.insert key g keys, DefVal g [] AtLoad t body : defs, n + 1))
   where
     key = show body ++ show t
 

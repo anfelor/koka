@@ -131,7 +131,7 @@ checkDef env def
   = case def of
       DefFun _ _ args q _ body _
         -> run (M.fromList [(x,V t) | (x,_,t) <- args]) (params env args) q body
-      DefVal _ _ _ body -> run M.empty [] Owned body
+      DefVal _ _ _ _ body -> run M.empty [] Owned body
   where
     run g ps q body = evalM (closed ps (checkE env g M.empty q body)) M.empty (Children S.empty M.empty)
 

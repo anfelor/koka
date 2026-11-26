@@ -47,7 +47,7 @@ data GroundBind = GValue VVal               -- ^ a ground value
 groundValues :: (Name -> Bool) -> Program -> M.Map Name Ground
 groundValues foldable prog = go M.empty
   where
-    vals = [(x,body) | DefVal x _ _ body <- progDefs prog]
+    vals = [(x,body) | DefVal x _ _ _ body <- progDefs prog]
     go found
       = let found' = M.union found (M.fromList (mapMaybe (ground found) vals))
         in if M.size found' == M.size found then found else go found'

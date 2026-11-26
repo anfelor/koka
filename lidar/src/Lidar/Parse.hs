@@ -720,7 +720,7 @@ sigOf :: Def -> Sig
 sigOf def
   = case def of
       DefFun _ tvs ps q r _ _ -> SigFun tvs [(m,t) | (_,m,t) <- ps] q r
-      DefVal _ tvs t _ -> SigVal tvs t
+      DefVal _ tvs _ t _ -> SigVal tvs t
 
 programP :: P (Name,[Item])
 programP = do kw "module"
@@ -751,12 +751,15 @@ funP = do inl <- option InlineAuto ((InlineAlways <$ kw "inline") <|> (InlineNev
     unnamed (m,mx,t) = maybe (return (m,t)) (const (fail "a named parameter of a function without a body")) mx
 
 valDefP :: P Item
-valDefP = do kw "val"
+valDefP = do ini <- option AtLoad (OnDemand <$ kw "ondemand")
+             kw "val"
              n <- globalName <$> nameP
              tvs <- tyParamsP
              sym ":"
              t <- vP
-             (do sym "="; IDef . DefVal n tvs t <$> exprP) <|> return (ISig n (SigVal tvs t))
+             (do sym "="; e <- exprP; return (IDef (DefVal n tvs ini t e)))
+               <|> (do when (ini == OnDemand) (fail "an on-demand value without a body")
+                       return (ISig n (SigVal tvs t)))
 
 externP :: P Item
 externP = do kw "extern"

@@ -69,8 +69,8 @@ renDef global def
                   sub = described global ren
               body' <- renE global ren body
               return def{ defArgs = [(x',m,replaceVType sub t) | (x',(_,m,t)) <- zip xs args], defRes = replaceVType sub res, defBody = body' }
-      DefVal x tvs t body
-        -> DefVal x tvs (replaceVType (described global M.empty) t) <$> renE global M.empty body
+      DefVal x tvs ini t body
+        -> DefVal x tvs ini (replaceVType (described global M.empty) t) <$> renE global M.empty body
 
 -- the substitution for descriptions: the variables in scope, and the others by their binders
 described :: Global -> Ren -> M.Map Path VVal
