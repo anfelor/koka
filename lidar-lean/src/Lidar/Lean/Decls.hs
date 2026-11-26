@@ -227,9 +227,7 @@ constSig c
     arrows _ = []
 
 -- | The types whose constructors take the state of the world (@EST.Out@, the result of an
--- @IO@ action). Lean builds their values afresh in every run of an action, as the state is a
--- variable, and every allocation counts a heartbeat, which loops that call @checkSystem@ rely on
--- to run out of heartbeats.
+-- @IO@ action), whose static values count heartbeats (`CGen.beatsOf`).
 worldTypes :: D.Dump -> Name -> Bool
 worldTypes d = (`S.member` types)
   where

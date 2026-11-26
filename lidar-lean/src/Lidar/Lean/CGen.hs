@@ -39,7 +39,7 @@ import Lidar.Query( Gamma, inferV, inferVar, altTypes, unboxRuGamma, copyRuGamma
 import Lidar.Traversal( child, boxTag, fvA, descendA, descendV, descendE )
 import Lidar.Layout( leaves, shapeIsHeap )
 import qualified Lidar.Lean.Dump as D
-import Lidar.Lean.Decls( leanName, rawOfNat )
+import Lidar.Lean.Decls( leanName, rawOfNat, worldTypes )
 import Lidar.Lean.CGen.Layout
 import Lidar.Lean.CGen.Ground( groundDecls, cString )
 
@@ -121,9 +121,10 @@ data St = St{ stUniq :: Int, stLams :: [C] }
 type G a = M () St a
 
 -- `cxJoins`: the label and the parameters of each join point in scope, and whether it is
--- recursive (its jumps then assign the parameters in parallel)
+-- recursive (its jumps then assign the parameters in parallel); `cxBeats`: the static values
+-- whose reads count a heartbeat (see `beatsOf`)
 data Ctx = Ctx{ cxEnv :: Env, cxTargets :: M.Map Name Target, cxGamma :: Gamma
-              , cxJoins :: M.Map Name (String,[(Path,VType)],Bool) }
+              , cxJoins :: M.Map Name (String,[(Path,VType)],Bool), cxBeats :: S.Set Name }
 
 fresh :: String -> G String
 fresh s = state (\st -> ("_" ++ s ++ show (stUniq st), st{ stUniq = stUniq st + 1 }))
@@ -244,7 +245,8 @@ genV cx val
                   return (leafNames x (length ls))
       Glob x _ -> do ls <- tyOf cx val >>= leavesOf
                      tgt <- target cx x
-                     return [tgtName tgt | _ <- ls]
+                     let beat e = if S.member x (cxBeats cx) then "(lean_inc_heartbeat(), " ++ e ++ ")" else e
+                     return [beat (tgtName tgt) | _ <- ls]
       DupV v -> do es <- genV cx v
                    ls <- tyOf cx v >>= leavesOf
                    return [if l == LObj then call "lt_dup" [e] else e | (l,e) <- zip ls es]
@@ -661,8 +663,8 @@ expand pat args = go pat
 
 -- The prototype and definition of a definition, and its initialisation (for a value). A
 -- definition has the C name of its declaration, even if calls go to its `@[extern]` entry.
-genDef :: Env -> M.Map Name Target -> M.Map Name String -> Def -> G (C,C,[C])
-genDef env tgts cnames def
+genDef :: Env -> M.Map Name Target -> M.Map Name String -> S.Set Name -> Def -> G (C,C,[C])
+genDef env tgts cnames beats def
   = case def of
       DefFun f _ args _ res body _ ->
         do name <- cname f
@@ -684,7 +686,7 @@ genDef env tgts cnames def
                    [text (name ++ " = " ++ initf ++ "();")]
                    ++ [text ("if (!lean_is_scalar(" ++ name ++ ")) lean_mark_persistent(" ++ name ++ ");") | ls == [LObj]])
   where
-    cx0 = Ctx env tgts M.empty M.empty
+    cx0 = Ctx env tgts M.empty M.empty beats
     cname f = maybe (fail ("no C name for " ++ show f)) return (M.lookup f cnames)
 
 -- the prototypes of the functions and values of other modules that the module uses, and the
@@ -708,6 +710,17 @@ prototypes d
             let kept = [p | p <- ps, impureLeaf p /= Nothing, not (isStandard c && isErased p)]
             in Just (ctype r ++ " " ++ tgtName tgt ++ "(" ++ intercalate ", " (map ctype kept) ++ ");")
     ctype t = maybe "lean_object*" cType (impureLeaf t)
+
+-- | The static values (of the given ones) that stand for results of @IO@ actions: values of a
+-- type whose constructors take the state of the world (@EST.Out@), which `Passes.Closed`
+-- extracted as the state is @𝟙@ in lidar. Lean allocates such a value in every run of an
+-- action, as the state is a variable, and every allocation counts a heartbeat, which loops that
+-- call @checkSystem@ rely on to run out of heartbeats. Each read of one of these values (a
+-- result that Lean would have allocated) counts the heartbeat explicitly instead
+-- (@lean_inc_heartbeat@); a result that is allocated counts its own.
+beatsOf :: D.Dump -> Program -> S.Set Name -> S.Set Name
+beatsOf d prog closed
+  = S.fromList [x | DefVal x _ (VPtr (ACon t _)) _ <- progDefs prog, S.member x closed, worldTypes d t]
 
 -- | The boxed version of a declaration (Lean's `mkBoxedVersion`), which Lean's closures and
 -- other modules call instead of the declaration if its impure signature has a scalar, borrowed
@@ -971,7 +984,7 @@ cgenModule d prog
     genOne :: Def -> G (Either String (C,C,[C]))
     genOne def | Just (p,c) <- M.lookup (defName def) gvals = return (Right (text p, text c, []))
     genOne def = do st <- get
-                    case runM (genDef env tgts cnames def) () st of
+                    case runM (genDef env tgts cnames (beatsOf d prog (M.keysSet closed)) def) () st of
                       Left err -> return (Left (show (defName def) ++ ": " ++ err))
                       Right (r,st') -> do put st'
                                           return (Right r)
