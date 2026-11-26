@@ -25,48 +25,65 @@
   occurrences were all in replaced values is removed, any other gets a `drop` in place of the
   consumption (on a static block if it was extracted).
 
-  Ground values cannot have effects or diverge, so no call is moved except the folded ones,
-  which the client declares pure. The extracted values refer to no global but each other, and
-  come first in the program, so a client that cannot write one statically can initialise it
-  before any other value.
+  Ground values cannot have effects or diverge. The pass also extracts closed calls: calls with
+  ground arguments of functions that the client declares extractable (pure; an action takes
+  the effect token, which is never ground). Such a global is initialised on demand, at its
+  first use, as is every global built from one; its body passes an extracted argument as
+  `dup g` to an owned parameter and as `g` to a borrowed one. A call that refers to the
+  recursive group of its function, directly or through its arguments, is not extracted, as
+  its initialisation could need itself. The extracted values refer to no global but each other
+  and the functions they call, and come first in the program, so a client that cannot write
+  one statically can initialise it before any other value.
 -}
 module Lidar.Passes.Closed( closedProgram ) where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Control.Monad( foldM )
+import Control.Monad( foldM, zipWithM )
 import Control.Monad.State( State, runState, state )
 import Data.Functor.Const( Const(..) )
+import Data.Graph( flattenSCC, stronglyConnComp )
 import Data.Functor.Identity( Identity(..) )
 import Data.List( sortOn )
 import Data.Monoid( Any(..) )
 import Lidar.Name
 import Lidar.Syntax
 import Lidar.Types( Types(ftv), isPtr )
-import Lidar.Traversal( descendA, descendV, descendAll, descendE, fvE, fvV, mapA, mapV )
+import Lidar.Traversal( descendA, descendV, descendAll, descendE, fvE, fvV, globalsE, globalsV, mapA, mapV )
 import Lidar.Ground( GroundBind(..), groundV )
 import Lidar.Env( Env, envOf, M, ask, evalM )
 import Lidar.Query( Gamma )
 import Lidar.Passes.Common( paramModes, trivialTy, defGamma, typedChildren, NameSupply, dropValue, freshFor, freshPathFrom, scopeOf )
 
--- | Extract the closed ground values of the functions of a program, given the functions whose
--- calls the client folds.
-closedProgram :: (Name -> Bool) -> Program -> (Program,[String])
-closedProgram foldable prog
+-- | Extract the closed ground values and calls of the functions of a program, given the
+-- functions whose calls the client folds and those whose calls it can initialise on demand.
+closedProgram :: (Name -> Bool) -> (Name -> Bool) -> Program -> (Program,[String])
+closedProgram foldable extractable prog
   = ( prog{ progSigs = M.union (progSigs prog) (M.fromList [(x,SigVal [] t) | DefVal x _ _ t _ <- new])
           , progDefs = new ++ map fst results }
     , concatMap snd results )
   where
-    (results,(_,newRev,_)) = runState (mapM closedDef (progDefs prog)) (M.empty,[],0)
-    new = reverse newRev
+    (results,st) = runState (mapM closedDef (progDefs prog)) (St M.empty [] 0 S.empty)
+    new = reverse (stDefs st)
+    groups = recGroups prog
     closedDef def = case def of
-                      DefFun{} -> do r <- closedBody (envOf prog) foldable def
+                      DefFun{} -> do let group = M.findWithDefault S.empty (defName def) groups
+                                     r <- closedBody (envOf prog) foldable (closedCall group) group def
                                      return (either (\err -> (def,[show (defName def) ++ ": " ++ err]))
                                                     (\body -> (def{ defBody = body },[])) r)
                       DefVal{} -> return (def,[])
+    closedCall group g tys = extractable g && not (S.member g group) && all (null . ftv) tys
 
--- the globals made so far by their bodies, the new definitions (last first), and the next number
-type St = (M.Map String Name, [Def], Int)
+-- the recursive group of each definition: its strongly connected component in the graph of
+-- the globals that definitions refer to
+recGroups :: Program -> M.Map Name (S.Set Name)
+recGroups prog
+  = M.fromList [ (f,group) | scc <- stronglyConnComp [(d,defName d,S.toList (globalsE (defBody d))) | d <- progDefs prog]
+                           , let group = S.fromList (map defName (flattenSCC scc)), f <- S.toList group ]
+
+-- the globals made so far by their bodies, the new definitions (last first), the next number,
+-- and the new globals initialised on demand
+data St = St{ stKeys :: M.Map String Name, stDefs :: [Def], stNext :: Int, stOnDemand :: S.Set Name }
 
 -- the ground `let`s of a function: their types, values, and index in the order of binding
 type Grounds = M.Map Path (VType,GroundBind,Int)
@@ -74,22 +91,22 @@ type Grounds = M.Map Path (VType,GroundBind,Int)
 -- the variables that the ground `let`s of folded calls drop after the call
 type Dropped = M.Map Path [Path]
 
-closedBody :: Env -> (Name -> Bool) -> Def -> State St (Either String VExpr)
-closedBody env foldable def
+closedBody :: Env -> (Name -> Bool) -> (Name -> [AType] -> Bool) -> S.Set Name -> Def -> State St (Either String VExpr)
+closedBody env foldable closedCall group def
   = do -- the extracted lets, in the order of binding, so that each finds its dependencies
-       letNames <- foldM (\m x -> case letBody gs m x of
-                                    Just b -> do g <- global f b (fst3 (gs M.! x))
+       letNames <- foldM (\m x -> case letBody env foldable gs m x of
+                                    Just b -> do g <- global foldable f b (fst3 (gs M.! x))
                                                  return (M.insert x g m)
                                     Nothing -> return m)
                          M.empty (sortOn index (filter (extractable gs) (M.keys gs)))
        let (body',operands) = extractOperands gs letNames (defBody def)
-       opNames <- mapM (\(_,v,t) -> global f (Ret v) t) operands
+       opNames <- mapM (\(_,v,t) -> global foldable f (Ret v) t) operands
        let ops = M.fromList (zip (map placeholder [0 ..]) (zip opNames [v | (v,_,_) <- operands]))
            kept = keptLets gs letNames body'
        return (evalM (rewrite env gs dropped kept letNames ops body') (env,defGamma def) (freshFor def))
   where
     f = defName def
-    (gs,dropped) = groundLets foldable (defBody def)
+    (gs,dropped) = groundLets foldable closedCall group (defBody def)
     index x = let (_,_,i) = gs M.! x in i
 
 fst3 :: (a,b,c) -> a
@@ -100,17 +117,24 @@ rootOf (Path x _) = root x
 
 -- The ground lets of a body, in the order of binding (with lambdas): a let is ground if its
 -- value is, or if it calls a folded function with ground arguments (then drops the arguments
--- that it passes to borrowed parameters), given those bound before.
-groundLets :: (Name -> Bool) -> VExpr -> (Grounds,Dropped)
-groundLets foldable body = foldl add (M.empty,M.empty) (zip [0..] (lets body))
+-- that it passes to borrowed parameters), given those bound before. A closed call (of an
+-- extractable function, given its type arguments) counts as a folded call unless its arguments
+-- refer to the recursive group, also through the values of the ground lets they use.
+groundLets :: (Name -> Bool) -> (Name -> [AType] -> Bool) -> S.Set Name -> VExpr -> (Grounds,Dropped)
+groundLets foldable closedCall group body = (grounds,drops)
   where
-    add (gs,ds) (i,(x,t,e1))
+    (grounds,drops,_) = foldl add (M.empty,M.empty,S.empty) (zip [0..] (lets body))
+    -- the ground lets so far, their drops, and those that refer to the recursive group
+    add (gs,ds,recs) (i,(x,t,e1))
       = let ground v = groundV S.empty (M.keysSet gs) v
+            refers v = not (S.disjoint group (globalsV v)) || any (`S.member` recs) (S.toList (fvV v))
+            mark vs = if any refers vs then S.insert x recs else recs
         in case e1 of
-             Ret v | ground v -> (M.insert x (t,GValue v,i) gs,ds)
-             _ | Just (g,tys,vs,zs) <- callThenDrops e1, foldable g && all ground vs && all (`M.member` gs) zs
-                 -> (M.insert x (t,GCall g tys vs,i) gs, M.insert x zs ds)
-             _ -> (gs,ds)
+             Ret v | ground v -> (M.insert x (t,GValue v,i) gs,ds,mark [v])
+             _ | Just (g,tys,vs,zs) <- callThenDrops e1, all ground vs && all (`M.member` gs) zs
+               , foldable g || (closedCall g tys && not (any refers vs))
+                 -> (M.insert x (t,GCall g tys vs,i) gs, M.insert x zs ds, mark vs)
+             _ -> (gs,ds,recs)
     lets e = case e of
                Let x t e1 e2 | Just _ <- callThenDrops e1 -> (x,t,e1) : lets e2
                Let x t e1 _ -> (x,t,e1) : descend e
@@ -189,22 +213,39 @@ expand gs names = go
                _ -> descendV goA go val
     goA = descendA pure goA go
 
--- the body of the global of a ground let, given the globals of the lets extracted before
-letBody :: Grounds -> M.Map Path Name -> Path -> Maybe VExpr
-letBody gs names x
+-- The body of the global of a ground let, given the globals of the lets extracted before. A
+-- closed call passes an extracted value to a borrowed parameter as its global (without `dup`),
+-- and to a unique one nothing that allocates; Nothing if it cannot.
+letBody :: Env -> (Name -> Bool) -> Grounds -> M.Map Path Name -> Path -> Maybe VExpr
+letBody env foldable gs names x
   = case gs M.! x of
       (_,GValue v,_) -> Ret <$> expand gs names v
-      (_,GCall g tys vs,_) -> Call g tys <$> mapM (expand gs names) vs
+      (_,GCall g tys vs,_)
+        | foldable g -> Call g tys <$> mapM (expand gs names) vs
+        | otherwise -> Call g tys <$> zipWithM arg (paramModes env g (length vs)) vs
+  where
+    arg m v = case (m,v) of
+                (Owned,_) -> expand gs names v
+                _ | not (allocates gs v) -> expand gs names v
+                (Borrowed,Var y) | Just g <- M.lookup y names -> Just (Glob g [])
+                _ -> Nothing
 
 -- The global of an extracted value with a body and a type: an existing one with the same body,
--- or a new one.
-global :: Name -> VExpr -> VType -> State St Name
-global f body t
-  = state $ \(keys,defs,n) ->
-      case M.lookup key keys of
-        Just g -> (g,(keys,defs,n))
-        Nothing -> let g = makeHiddenName ("closed" ++ show n) f
-                   in (g,(M.insert key g keys, DefVal g [] AtLoad t body : defs, n + 1))
+-- or a new one, initialised on demand if its body calls a function that is not folded or reads
+-- a global initialised on demand.
+global :: (Name -> Bool) -> Name -> VExpr -> VType -> State St Name
+global foldable f body t
+  = state $ \st ->
+      case M.lookup key (stKeys st) of
+        Just g -> (g,st)
+        Nothing -> let g = makeHiddenName ("closed" ++ show (stNext st)) f
+                       onDemand = case body of
+                                    Call h _ _ | not (foldable h) -> True
+                                    _ -> not (S.disjoint (stOnDemand st) (globalsE body))
+                   in (g, st{ stKeys = M.insert key g (stKeys st)
+                            , stDefs = DefVal g [] (if onDemand then OnDemand else AtLoad) t body : stDefs st
+                            , stNext = stNext st + 1
+                            , stOnDemand = (if onDemand then S.insert g else id) (stOnDemand st) })
   where
     key = show body ++ show t
 

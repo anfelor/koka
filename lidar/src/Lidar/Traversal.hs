@@ -298,6 +298,27 @@ fvV val
 fvE :: VExpr -> S.Set Path
 fvE expr = getConst (descendE (Const . S.singleton) (Const . fvV) (\xs e -> Const (fvE e `S.difference` S.fromList xs)) expr)
 
+-- the top-level functions and values that an expression refers to: those it calls, and its
+-- globals and functions as values
+globalsE :: VExpr -> S.Set Name
+globalsE expr = here <> getConst (descendE (const (Const S.empty)) (Const . globalsV) (\_ e -> Const (globalsE e)) expr)
+  where here = case expr of
+                 Call f _ _ -> S.singleton f
+                 _ -> S.empty
+
+globalsV :: VVal -> S.Set Name
+globalsV val
+  = case val of
+      Glob x _ -> S.singleton x
+      _ -> getConst (descendV (Const . globalsA) (Const . globalsV) val)
+
+globalsA :: AVal -> S.Set Name
+globalsA val
+  = case val of
+      Fun f -> S.singleton f
+      Lam _ _ e -> globalsE e
+      _ -> getConst (descendA (const (Const S.empty)) (Const . globalsA) (Const . globalsV) val)
+
 -- The free variables of an expression, given those of its subexpressions in the order of
 -- `descendE`. A pass that rebuilds an expression bottom-up can keep them as it goes, rather
 -- than calling `fvE`, which is quadratic in the length of a `let` chain.

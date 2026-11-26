@@ -78,6 +78,8 @@ data Options = Options
                                         --   after the last one (to find the pass that breaks them)
   , optFoldable  :: Name -> Bool        -- ^ the functions whose calls with ground arguments the
                                         --   client folds at compile time (`Passes.Closed`)
+  , optExtractable :: Name -> Bool      -- ^ the pure functions whose calls with ground arguments
+                                        --   may be initialised on demand, once (`Passes.Closed`)
   }
 
 type Lowered = (Program,[(String,String)],[(String,String)])
@@ -121,7 +123,7 @@ pipeline opts
        , Pass "reuse" reuseProgram
        ]
     -- Only the allocations that reuse leaves fresh are extracted, so before `expandreuse`.
-    ++ [ Pass "closed" (closedProgram (optFoldable opts))
+    ++ [ Pass "closed" (closedProgram (optFoldable opts) (optExtractable opts))
        , Pass "match" matchProgram
        , purePass "sinkjoins" sinkJoinsProgram
        , purePass "joinargs" joinArgsProgram
