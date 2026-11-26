@@ -998,10 +998,12 @@ cgenModule d prog
     env = envOf prog
     -- the values that lowering extracted (`Passes.Closed`) are static globals of their own
     closed = M.fromList [(x, "_lt_" ++ encode (show x)) | DefVal x _ _ _ <- progDefs prog, not (M.member x dumpNames)]
+    -- the functions that lowering made (`Passes.LiftLams`, `Passes.TailRec`) get names of that form
+    made = M.union closed (M.fromList [(f, "_lt_" ++ encode (show f)) | DefFun{ defName = f } <- progDefs prog, not (M.member f dumpNames)])
     dumpNames = M.fromList [(leanName (D.declName x), ()) | x <- D.dumpDecls d]
-    tgts = M.union (targetsOf d) (M.map (\n -> Target n Direct Nothing) closed)
+    tgts = M.union (targetsOf d) (M.map (\n -> Target n Direct Nothing) made)
     declInits = [(x, declInitCode tgts x) | x <- D.dumpDecls d]
-    cnames = M.union (M.fromList [(leanName (D.declName x), D.linkCName (D.declLink x)) | x <- D.dumpDecls d]) closed
+    cnames = M.union (M.fromList [(leanName (D.declName x), D.linkCName (D.declLink x)) | x <- D.dumpDecls d]) made
     -- the static objects of the values written as static data, and their prototypes and definitions
     (gdecls,gvals) = groundDecls env (fmap tgtName . (`M.lookup` tgts)) cnames (`M.member` closed) prog
     -- the declarations that have a C function: the externs, and the functions that lowering kept
