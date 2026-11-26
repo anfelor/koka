@@ -1,0 +1,3 @@
+[2,1,3]
+[5,4]
+test/cgen/fip-unreachable@kk(5, 9): warning: fip fun swap-head: binding a wildcard pattern of type list<int> causes deallocation

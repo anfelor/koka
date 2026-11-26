@@ -81,6 +81,10 @@ noinline extern unsafe-abort( msg : string ) : a
 pub noinline fip fun impossible( message : string = "?", ?kk-file-line : string ) : a
   unsafe-abort(kk-file-line ++ ": impossible:" ++ message)
 
+// A branch that cannot be reached. FIP checking ignores the paths that end in it.
+pub noinline fip fun unreachable() : a
+  unsafe-abort("unreachable")
+
 pub fip fun assert( message : string, condition : bool, ?kk-file-line : string ) : ()   // Compiler removes assert calls in optimized builds
   if !condition then unsafe-abort(kk-file-line ++ ": assertion failed: " ++ message)
 
