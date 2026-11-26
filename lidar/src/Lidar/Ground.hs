@@ -11,7 +11,7 @@
 
   A value is *ground* if it is built only from literals (strings, characters and integers),
   units, injections, tuples, boxes, top-level functions and other ground globals, through the run-time no-ops (`ptr`, `roll`, `up`, ...).
-  The body of a ground `DefVal` is a chain of `let`s of ground values, or of calls that the
+  The body of a ground `DefVal` is a chain of `let`s and `let cast`s of ground values, or of calls that the
   client folds at compile time (`Lean`'s `Name.mkStr`, for instance), ending in a ground value.
   The dups of the chain are left out: static data is never freed, so its reference counts are
   stuck, and a value shared by several fields is written once. A ground value cannot have
@@ -83,6 +83,9 @@ groundBody foldable globals body
                 Let x t e1 e2 -> do (b1,r1) <- chain e1
                                     (b2,r2) <- chain e2
                                     Just (b1 ++ [(x,t,r1)] ++ b2, r2)
+                -- a cast binds its scrutinee at the target type
+                LetCast v b x e' -> do (b2,r2) <- chain e'
+                                       Just ((x,VPtr b,GValue v) : b2, r2)
                 Dup _ e' -> chain e'
                 _ -> Nothing
     -- each binding uses only the variables bound before it
