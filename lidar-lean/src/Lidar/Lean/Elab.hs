@@ -244,13 +244,13 @@ elabCode res code
 elabValue :: VType -> D.LetValue -> E (K,VExpr,VType)
 elabValue t v
   = case v of
-      D.VLit (D.LNat n) -> return (id, Ret (Lit (litInt n)), vtInt)
-      D.VLit (D.LStr s) -> return (id, Ret (Lit (LitString s)), vtString)
+      D.VLit (D.LNat n) -> return (id, Ret (intLit n), vtInt)
+      D.VLit (D.LStr s) -> return (id, Ret (stringLit s), vtString)
       D.VLit l | Just (n,t) <- rawLit l, let (lo,hi) = intRange t, lo <= n, n <= hi
                -> return (id, Ret (Lit (LitInt t n)), VRaw (RInt t))
       -- out of the range that the IR gives the type on every platform (a big `USize`)
       D.VLit l | Just (n,t) <- rawLit l, Just f <- rawOfNat (RInt t)
-               -> return (id, Call (leanName f) [] [Lit (litInt n)], VRaw (RInt t))
+               -> return (id, Call (leanName f) [] [intLit n], VRaw (RInt t))
       D.VErased -> do (k,w) <- erased t
                       return (k, Ret w, t)
       D.VProj tname i x -> elabProj tname (fromInteger i) x

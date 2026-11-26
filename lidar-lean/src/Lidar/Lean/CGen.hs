@@ -226,9 +226,7 @@ genLit :: Lit -> G String
 genLit lit
   = case lit of
       LitSmallInt n | n >= 0 -> return (natLit n)
-      LitBigInt n | n >= 0 -> return (natLit n)
       LitInt t n | n >= 0 -> return (rawLit t n)
-      LitString s -> return (strLit s)
       LitChar c -> return (show (ord c) ++ "u")
       _ -> fail ("literal " ++ show lit)
 
@@ -273,6 +271,8 @@ genA cx tag val
       Roll _ v -> genA cx tag v
       InjA i _ v -> genA cx i v
       Box v -> genBox cx tag Nothing v
+      Constant (ConstInt n) | n >= 0 -> return (natLit n)
+      Constant (ConstString s) -> return (strLit s)
       BoxAt r v -> genBox cx tag (Just r) v
       Scalar v -> do VRaw r <- tyOf cx v
                      [e] <- genV cx v
@@ -610,7 +610,7 @@ genCall cx dest f vs
        tgt <- target cx f
        case (vs, r) of
          -- the conversion of a literal (`Decls.rawOfNat`) is a C literal
-         ([Lit l], VRaw raw@(RInt t)) | Just n <- litInteger l, n >= 0, fmap leanName (rawOfNat raw) == Just f
+         ([v], VRaw raw@(RInt t)) | Just n <- intValue v, n >= 0, fmap leanName (rawOfNat raw) == Just f
            -> assignTo dest [rawLit t n]
          _ -> do args <- mapM (\v -> do es <- genV cx v
                                         ls <- tyOf cx v >>= leavesOf

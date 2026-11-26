@@ -169,11 +169,11 @@ genVal val
       UnitV -> return (leavesOnly [])
       Lit (LitSmallInt n) | n >= 0 -> return (leavesOnly [GObj (tagged n)])
       Lit (LitInt _ n) | n >= 0 -> return (leavesOnly [GScalar n])
-      Lit (LitString s) -> do o <- stringObject s
-                              return (Val [GObj o] (Just s) Nothing)
       Lit (LitChar c) -> return (leavesOnly [GScalar (toInteger (ord c))])
       Inj i t UnitV | Right (LScalar _) <- leafOf t -> return (leavesOnly [GScalar (toInteger i)])
       Tuple vs -> leavesOnly . concatMap valLeaves <$> mapM genVal vs
+      Ptr _ (Constant (ConstString s)) -> do o <- stringObject s
+                                             return (Val [GObj o] (Just s) Nothing)
       Ptr _ a -> do o <- genObj 0 a
                     return (leavesOnly [GObj o])
       TyApp v _ -> genVal v
@@ -269,7 +269,7 @@ stringObject s
 -- object holds its prefix, its last component and its hash.
 foldCall :: VType -> Name -> [VVal] -> G Val
 foldCall t f vs
-  | Just _ <- M.lookup f ofNats, [Lit l] <- vs, Just n <- litInteger l, VRaw r <- t
+  | Just _ <- M.lookup f ofNats, [v] <- vs, Just n <- intValue v, VRaw r <- t
   = return (leavesOnly [GScalar (n `mod` (2 ^ (8 * maybe 8 id (scalarSize r))))])
   | f `elem` mkStrs
   = do ss <- mapM genVal vs
@@ -278,7 +278,7 @@ foldCall t f vs
   = do pv <- genVal p
        sv <- genVal s
        strName pv sv
-  | f == nameNum, [p, Lit l] <- vs, Just n <- litInteger l
+  | f == nameNum, [p, v] <- vs, Just n <- intValue v
   = do pv <- genVal p
        h <- prefixHash pv
        name 2 pv (GObj (tagged n)) (mixHash h (if n < 2^(64 :: Int) then fromInteger n else 17))
