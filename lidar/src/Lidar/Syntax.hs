@@ -224,11 +224,55 @@ data VType = VPtr AType                 -- A*
            deriving (Eq,Show)
 
 -- raw types: unboxed primitive values, named by their C type (Koka's `TypeInfo.rawType`; the
--- unsigned types wider than `uint8` are only Lean's)
-data Raw = RChar | RSSize | RIntPtr | RFloat64 | RFloat32
-         | RInt64 | RInt32 | RInt16 | RInt8
-         | RUInt64 | RUInt32 | RUInt16 | RUInt8 | RUSize
+-- unsigned integer types wider than `uint8` are only Lean's)
+data Raw = RInt IntType | RChar | RFloat64 | RFloat32
          deriving (Eq,Show)
+
+-- a raw integer type: `int8` .. `int64`, `uint8` .. `uint64`, `ssize_t`, `size_t`, `intptr_t`
+data IntType = IntType{ intSign :: Sign, intWidth :: Width }
+             deriving (Eq,Show)
+
+data Sign = Signed | Unsigned
+          deriving (Eq,Show)
+
+-- the width of a raw integer type: WSize is that of `size_t`, WPtr that of `intptr_t`
+data Width = W8 | W16 | W32 | W64 | WSize | WPtr
+           deriving (Eq,Show)
+
+-- the literals of a raw integer type (those of a width that depends on the platform fit in
+-- 32 bits)
+intRange :: IntType -> (Integer,Integer)
+intRange (IntType sign w)
+  = case sign of
+      Signed   -> (-(2^(b-1)), 2^(b-1) - 1)
+      Unsigned -> (0, 2^b - 1)
+  where
+    b :: Int
+    b = case w of { W8 -> 8; W16 -> 16; W32 -> 32; W64 -> 64; WSize -> 32; WPtr -> 32 }
+
+-- the name of a raw type in the IR (that of its C type, as in `int32_t`, without `_t`, except
+-- for the types of a width that depends on the platform)
+rawName :: Raw -> String
+rawName r
+  = case r of
+      RChar    -> "char"
+      RFloat64 -> "float64"
+      RFloat32 -> "float32"
+      RInt (IntType Signed WSize)   -> "ssize_t"
+      RInt (IntType Unsigned WSize) -> "size_t"
+      RInt (IntType Signed WPtr)    -> "intptr_t"
+      RInt (IntType Unsigned WPtr)  -> "uintptr_t"
+      RInt (IntType Signed w)       -> "int" ++ show (widthBits w)
+      RInt (IntType Unsigned w)     -> "uint" ++ show (widthBits w)
+
+-- the raw types
+allRaws :: [Raw]
+allRaws = [RChar, RFloat64, RFloat32]
+          ++ [RInt (IntType s w) | s <- [Signed,Unsigned], w <- [W8, W16, W32, W64, WSize, WPtr]]
+
+-- the bits of a width on a 64-bit platform
+widthBits :: Width -> Int
+widthBits w = case w of { W8 -> 8; W16 -> 16; W32 -> 32; W64 -> 64; WSize -> 64; WPtr -> 64 }
 
 -- The description `k; p : V` of a credit's block: the tag k in its header and its contents p,
 -- an unevaluated value of type V with |V| = n. A description carries no ownership: its names
@@ -280,10 +324,10 @@ type TypeDefs = M.Map Name TypeDef
 -- the type of a literal, `type(l)` (`Query.litType`): `int*` and `string*` (builtin
 -- abstract types, `APrim`), and raw types. A small `int*` literal (`isSmallInt`) is an
 -- immediate; a big one and a string allocate (`litAllocates`). A raw integer literal is in the
--- range of its type (`rawRange`). `litInt` picks the form of an `int*` literal.
+-- range of its type (`intRange`). `litInt` picks the form of an `int*` literal.
 data Lit = LitSmallInt Integer
          | LitBigInt Integer
-         | LitRaw Raw Integer
+         | LitInt IntType Integer
          | LitFloat Double
          | LitChar Char
          | LitString String
@@ -306,38 +350,13 @@ litAllocates lit
       LitString _ -> True
       _ -> False
 
--- the literals of an integer raw type (those of a size that depends on the platform fit in
--- 32 bits)
-rawRange :: Raw -> Maybe (Integer,Integer)
-rawRange r
-  = case r of
-      RInt64  -> signed 64
-      RInt32  -> signed 32
-      RInt16  -> signed 16
-      RInt8   -> signed 8
-      RSSize  -> signed 32
-      RIntPtr -> signed 32
-      RUInt64 -> unsigned 64
-      RUInt32 -> unsigned 32
-      RUInt16 -> unsigned 16
-      RUInt8  -> unsigned 8
-      RUSize  -> unsigned 32
-      RChar   -> Nothing
-      RFloat64 -> Nothing
-      RFloat32 -> Nothing
-  where
-    signed :: Int -> Maybe (Integer,Integer)
-    signed b = Just (-(2^(b-1)), 2^(b-1) - 1)
-    unsigned :: Int -> Maybe (Integer,Integer)
-    unsigned b = Just (0, 2^b - 1)
-
 -- the value of an integer literal of any type
 litInteger :: Lit -> Maybe Integer
 litInteger lit
   = case lit of
       LitSmallInt n -> Just n
       LitBigInt n -> Just n
-      LitRaw _ n -> Just n
+      LitInt _ n -> Just n
       _ -> Nothing
 
 -- Variables are paths, as in the paper: a root followed by the steps of the destructurings

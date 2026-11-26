@@ -185,16 +185,16 @@ valueDecl nt tp
 rawType :: Name -> Tr Raw
 rawType n
   | n == nameTpChar    = Right RChar
-  | n == nameTpSSizeT  = Right RSSize
-  | n == nameTpIntPtrT = Right RIntPtr
+  | n == nameTpSSizeT  = Right (RInt (IntType Signed WSize))
+  | n == nameTpIntPtrT = Right (RInt (IntType Signed WPtr))
   | n == nameTpFloat   = Right RFloat64
   | n == nameTpFloat32 = Right RFloat32
   | n == nameTpFloat16 = Right RFloat32
-  | n == nameTpInt64   = Right RInt64
-  | n == nameTpInt32 || n == nameTpMarker = Right RInt32
-  | n == nameTpInt16   = Right RInt16
-  | n == nameTpInt8    = Right RInt8
-  | n == nameTpByte    = Right RUInt8
+  | n == nameTpInt64   = Right (RInt (IntType Signed W64))
+  | n == nameTpInt32 || n == nameTpMarker = Right (RInt (IntType Signed W32))
+  | n == nameTpInt16   = Right (RInt (IntType Signed W16))
+  | n == nameTpInt8    = Right (RInt (IntType Signed W8))
+  | n == nameTpByte    = Right (RInt (IntType Unsigned W8))
   | otherwise          = Left ("unknown raw type " ++ show n)
 
 conValueFields :: Newtypes -> [AType] -> ConInfo -> Tr VType

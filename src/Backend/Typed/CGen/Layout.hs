@@ -164,20 +164,19 @@ primName :: Raw -> String
 primName r
   = case r of
       RChar    -> "kk_char_t"
-      RSSize   -> "kk_ssize_t"
-      RIntPtr  -> "intptr_t"
       RFloat64 -> "double"
       RFloat32 -> "float"
-      RInt64   -> "int64_t"
-      RInt32   -> "int32_t"
-      RInt16   -> "int16_t"
-      RInt8    -> "int8_t"
-      RUInt8   -> "uint8_t"
-      _        -> noKokaRaw r
+      RInt t -> case kokaWidth t of
+                  WSize -> "kk_ssize_t"
+                  WPtr  -> "intptr_t"
+                  _     -> rawName r ++ "_t"
 
--- the unsigned raw types wider than `uint8` are Lean's; Koka's elaboration never produces them
-noKokaRaw :: Raw -> a
-noKokaRaw r = error ("Backend.Typed.CGen.Layout: no Koka type for the raw type " ++ show r)
+-- the width of a raw integer type of Koka: the signed ones and `uint8`; the unsigned types wider
+-- than `uint8` are Lean's, and Koka's elaboration never produces them
+kokaWidth :: IntType -> Width
+kokaWidth t@(IntType sign w)
+  | sign == Signed || w == W8 = w
+  | otherwise         = error ("Backend.Typed.CGen.Layout: no Koka type for the raw type " ++ show t)
 
 -- immediate boxing of raw values (as in Koka)
 -- the largest `KK_INTF_SIZE` at which Koka's box of a scalar may be a heap block (kklib's
@@ -185,33 +184,27 @@ noKokaRaw r = error ("Backend.Typed.CGen.Layout: no Koka type for the raw type "
 scalarHeapSize :: Raw -> Maybe Int
 scalarHeapSize r
   = case r of
-      RInt8    -> Just 0
-      RUInt8   -> Just 0
-      RInt16   -> Just 2
-      RInt32   -> Just 4
       RFloat32 -> Just 4
       RChar    -> Just 4
-      RInt64   -> Just 8
       RFloat64 -> Just 8
-      RSSize   -> Nothing
-      RIntPtr  -> Nothing
-      _        -> noKokaRaw r
+      RInt t -> case kokaWidth t of
+                  W8  -> Just 0
+                  W16 -> Just 2
+                  W32 -> Just 4
+                  W64 -> Just 8
+                  _   -> Nothing
 
 primBox :: Raw -> (String,String)
 primBox r
   = (\base -> (base ++ "_box", base ++ "_unbox")) $
     case r of
       RChar    -> "kk_char"
-      RSSize   -> "kk_ssize"
-      RIntPtr  -> "kk_intptr"
       RFloat64 -> "kk_double"
       RFloat32 -> "kk_float"
-      RInt64   -> "kk_int64"
-      RInt32   -> "kk_int32"
-      RInt16   -> "kk_int16"
-      RInt8    -> "kk_int8"
-      RUInt8   -> "kk_uint8"
-      _        -> noKokaRaw r
+      RInt t -> case kokaWidth t of
+                  WSize -> "kk_ssize"
+                  WPtr  -> "kk_intptr"
+                  _     -> "kk_" ++ rawName r
 
 -- The small free path requires a fixed allocation of at most 128 words and a kklib tag (`kkTag`)
 -- of at most 0xFFC0, excluding runtime objects such as strings, vectors and arbitrary opaque boxes.

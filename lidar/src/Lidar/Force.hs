@@ -24,6 +24,9 @@ deriving stock instance Generic Prim
 deriving stock instance Generic Side
 deriving stock instance Generic VType
 deriving stock instance Generic Raw
+deriving stock instance Generic IntType
+deriving stock instance Generic Sign
+deriving stock instance Generic Width
 deriving stock instance Generic Contents
 deriving stock instance Generic Fill
 deriving stock instance Generic Ty
@@ -55,6 +58,9 @@ deriving anyclass instance NFData Prim
 deriving anyclass instance NFData Side
 deriving anyclass instance NFData VType
 deriving anyclass instance NFData Raw
+deriving anyclass instance NFData IntType
+deriving anyclass instance NFData Sign
+deriving anyclass instance NFData Width
 deriving anyclass instance NFData Contents
 deriving anyclass instance NFData Fill
 deriving anyclass instance NFData Ty

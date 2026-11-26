@@ -855,12 +855,15 @@ rawLiteral :: C.Expr -> Maybe Lit
 rawLiteral expr
   = case expr of
       C.App f [C.Lit (C.LitInt i)]
-        | r:_ <- [r | (n,r) <- conversions, isPrim n f], Just (lo,hi) <- rawRange r, lo <= i, i <= hi
-        -> Just (LitRaw r i)
+        | t:_ <- [t | (n,t) <- conversions, isPrim n f], let (lo,hi) = intRange t, lo <= i, i <= hi
+        -> Just (LitInt t i)
       _ -> Nothing
   where
-    conversions = [(nameInt32,RInt32),(nameInternalInt32,RInt32),(nameInt64,RInt64),(nameSSizeT,RSSize)
-                  ,(nameInternalSSizeT,RSSize),(nameIntPtrT,RIntPtr),(nameByte,RUInt8)]
+    conversions = [(nameInt32,int32),(nameInternalInt32,int32),(nameInt64,IntType Signed W64)
+                  ,(nameSSizeT,ssize),(nameInternalSSizeT,ssize),(nameIntPtrT,IntType Signed WPtr)
+                  ,(nameByte,IntType Unsigned W8)]
+    int32 = IntType Signed W32
+    ssize = IntType Signed WSize
 
 elabLit :: C.Lit -> Lit
 elabLit lit

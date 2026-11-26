@@ -194,22 +194,7 @@ infixes op [d] = parens (d <+> pretty op)
 infixes op ds  = parens (hsep (punctuate (pretty (" " ++ op)) ds))
 
 prettyRaw :: Raw -> Doc ann
-prettyRaw r
-  = case r of
-      RChar    -> "char"
-      RSSize   -> "ssize_t"
-      RIntPtr  -> "intptr_t"
-      RFloat64 -> "float64"
-      RFloat32 -> "float32"
-      RInt64   -> "int64"
-      RInt32   -> "int32"
-      RInt16   -> "int16"
-      RInt8    -> "int8"
-      RUInt64  -> "uint64"
-      RUInt32  -> "uint32"
-      RUInt16  -> "uint16"
-      RUInt8   -> "uint8"
-      RUSize   -> "size_t"
+prettyRaw r = pretty (rawName r)
 
 prettyT :: PP ann -> Ty -> Doc ann
 prettyT pp (A a) = prettyA pp a
@@ -305,7 +290,7 @@ prettyLit lit
   = case lit of
       LitSmallInt i -> viaShow i
       LitBigInt i -> viaShow i
-      LitRaw r i  -> viaShow i <> "_" <> prettyRaw r
+      LitInt t i  -> viaShow i <> "_" <> prettyRaw (RInt t)
       LitFloat d  -> viaShow d
       LitChar c   -> viaShow c
       LitString s -> viaShow s

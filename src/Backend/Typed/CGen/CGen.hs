@@ -665,7 +665,7 @@ genLit lit
   = case lit of
       LitSmallInt i -> return ("kt_box_integer(kk_integer_from_small(" <.> integer i <.> "))")
       LitBigInt i -> return ("kt_box_integer(" <.> intLit i <.> ")")
-      LitRaw r i -> return (rawLit r i)
+      LitInt t i -> return (rawLit t i)
       LitFloat d -> return (text (showHFloat d ""))
       LitChar c -> return ("((kk_char_t)" <.> int (fromEnum c) <.> ")")
       LitString "" -> return "kt_box_string(kk_string_empty())"
@@ -682,16 +682,16 @@ intLit i
   | otherwise = "kk_integer_from_str(\"" <.> integer i <.> "\",_ctx)"
 
 -- a literal of a raw integer type; the minimum of a signed type is not a C literal
-rawLit :: Raw -> Integer -> Doc
-rawLit r i
-  | Just (lo,_) <- rawRange r, i == lo, lo < 0 = "(" <.> rawLit r (i+1) <+> "- 1)"
+rawLit :: IntType -> Integer -> Doc
+rawLit t i
+  | (lo,_) <- intRange t, i == lo, lo < 0 = "(" <.> rawLit t (i+1) <+> "- 1)"
   | otherwise
-  = case r of
-      RInt32 -> "KK_I32(" <.> integer i <.> ")"
-      RInt64 -> "KK_I64(" <.> integer i <.> ")"
-      RSSize -> "KK_IZ(" <.> integer i <.> ")"
-      RIntPtr -> "KK_IP(" <.> integer i <.> ")"
-      _ -> "((" <.> text (ctName (CPrim r)) <.> ")" <.> integer i <.> ")"
+  = case t of
+      IntType Signed W32 -> "KK_I32(" <.> integer i <.> ")"
+      IntType Signed W64 -> "KK_I64(" <.> integer i <.> ")"
+      IntType Signed WSize -> "KK_IZ(" <.> integer i <.> ")"
+      IntType Signed WPtr -> "KK_IP(" <.> integer i <.> ")"
+      _ -> "((" <.> text (ctName (CPrim (RInt t))) <.> ")" <.> integer i <.> ")"
 
 cstring :: String -> (String,Int)
 cstring s
@@ -1182,7 +1182,7 @@ litTest ve lit
   = case lit of
       LitSmallInt i -> "kk_integer_eq_borrow(kt_unbox_integer(" <.> ve <.> "),kk_integer_from_small(" <.> integer i <.> "),_ctx)"
       LitBigInt i -> "kk_integer_eq_borrow(kt_unbox_integer(" <.> ve <.> ")," <.> intLit i <.> ",_ctx)"
-      LitRaw r i -> "(" <.> ve <+> "==" <+> rawLit r i <.> ")"
+      LitInt t i -> "(" <.> ve <+> "==" <+> rawLit t i <.> ")"
       LitString s -> "(kk_string_cmp_cstr_borrow(kt_unbox_string(" <.> ve <.> ")," <.> text (fst (cstring s)) <.> ",_ctx) == 0)"
       LitChar c -> "(" <.> ve <+> "==" <+> int (fromEnum c) <.> ")"
       LitFloat d -> "(" <.> ve <+> "==" <+> text (showHFloat d "") <.> ")"
@@ -1342,7 +1342,7 @@ staticLeaves sc blocks val
       DupV v -> staticLeaves sc blocks v
       UnitV -> return ([],blocks)
       Lit (LitSmallInt i) -> return (["((kk_intb_t)" <.> integer (4*i + 1) <.> ")"],blocks)   -- `kk_integer_from_small`
-      Lit (LitRaw r i) -> return ([rawLit r i],blocks)
+      Lit (LitInt t i) -> return ([rawLit t i],blocks)
       Lit (LitChar c) -> return (["((kk_char_t)" <.> int (fromEnum c) <.> ")"],blocks)
       Lit (LitString "") -> return (["kk_datatype_tag_init(1)"],blocks)                   -- `kk_string_empty`
       -- as `kk_string_alloc_from_utf8n` leaves it, which converts invalid UTF-8 (a NUL is `C0 80`)

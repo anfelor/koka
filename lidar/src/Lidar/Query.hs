@@ -389,19 +389,18 @@ litType lit
   = case lit of
       LitSmallInt _ -> vtInt
       LitBigInt _   -> vtInt
-      LitRaw r _    -> VRaw r
+      LitInt t _    -> VRaw (RInt t)
       LitString _   -> vtString
       LitChar _     -> vtChar
       LitFloat _    -> vtFloat
 
--- an integer literal has the form and range that `litInt` and `rawRange` give it
+-- an integer literal has the form and range that `litInt` and `intRange` give it
 checkLit :: Lit -> Q ()
 checkLit lit
   = case lit of
       LitSmallInt n -> unless (litInt n == lit) bad
       LitBigInt n -> unless (litInt n == lit) bad
-      LitRaw r n | Just (lo,hi) <- rawRange r -> unless (lo <= n && n <= hi) bad
-                 | otherwise -> bad
+      LitInt t n -> let (lo,hi) = intRange t in unless (lo <= n && n <= hi) bad
       _ -> return ()
   where
     bad = Left ("literal out of the range of its form: " ++ show lit)

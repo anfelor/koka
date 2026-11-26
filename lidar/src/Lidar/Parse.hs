@@ -224,7 +224,7 @@ intP = tokenP (\t -> case t of
 litP :: P Lit
 litP = tokenP (\t -> case t of
                        TInt i -> Just (litInt i)
-                       TRawInt i r | Just raw <- lookup r rawNames -> Just (LitRaw raw i)
+                       TRawInt i r | Just (RInt t) <- lookup r rawNames -> Just (LitInt t i)
                        TFloat d -> Just (LitFloat d)
                        TChar c -> Just (LitChar c)
                        TString s -> Just (LitString s)
@@ -388,9 +388,7 @@ rawP = tokenP (\t -> case t of
                        _ -> Nothing) <?> "raw type"
 
 rawNames :: [(String,Raw)]
-rawNames = [("char",RChar),("ssize_t",RSSize),("intptr_t",RIntPtr),("float64",RFloat64),("float32",RFloat32)
-           ,("int64",RInt64),("int32",RInt32),("int16",RInt16),("int8",RInt8)
-           ,("uint64",RUInt64),("uint32",RUInt32),("uint16",RUInt16),("uint8",RUInt8),("size_t",RUSize)]
+rawNames = [(rawName r, r) | r <- allRaws]
 
 contentsP :: P Contents
 contentsP = bracketsP (do k <- (Nothing <$ kw "_") <|> (Just <$> intP)

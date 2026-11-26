@@ -130,7 +130,7 @@ groundV globals bound = gv
     groundLit lit = case lit of
                       LitSmallInt _ -> True
                       LitBigInt _ -> False
-                      LitRaw _ _ -> True
+                      LitInt _ _ -> True
                       LitString _ -> True
                       LitChar _ -> True
                       LitFloat _ -> False
