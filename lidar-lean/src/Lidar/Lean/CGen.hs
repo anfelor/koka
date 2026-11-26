@@ -708,7 +708,7 @@ genDef env tgts cnames beats def
            ss <- genE cx DReturn body
            let sig = "LEAN_EXPORT" <+> text rt <+> text (call name params)
            return (sig <> ";", sig <+> block ss, [])
-      DefVal x _ t body ->
+      DefVal x _ _ t body ->
         do name <- cname x
            ls <- leavesOf t
            rt <- resultType ls
@@ -753,7 +753,7 @@ prototypes d
 -- (@lean_inc_heartbeat@); a result that is allocated counts its own.
 beatsOf :: D.Dump -> Program -> S.Set Name -> S.Set Name
 beatsOf d prog closed
-  = S.fromList [x | DefVal x _ (VPtr (ACon t _)) _ <- progDefs prog, S.member x closed, worldTypes d t]
+  = S.fromList [x | DefVal x _ _ (VPtr (ACon t _)) _ <- progDefs prog, S.member x closed, worldTypes d t]
 
 -- | The boxed version of a declaration (Lean's `mkBoxedVersion`), which Lean's closures and
 -- other modules call instead of the declaration if its impure signature has a scalar, borrowed
@@ -1001,7 +1001,7 @@ cgenModule d prog
   where
     env = envOf prog
     -- the values that lowering extracted (`Passes.Closed`) are static globals of their own
-    closed = M.fromList [(x, "_lt_" ++ encode (show x)) | DefVal x _ _ _ <- progDefs prog, not (M.member x dumpNames)]
+    closed = M.fromList [(x, "_lt_" ++ encode (show x)) | DefVal{ defName = x } <- progDefs prog, not (M.member x dumpNames)]
     -- the functions that lowering made (`Passes.LiftLams`, `Passes.TailRec`) get names of that form
     made = M.union closed (M.fromList [(f, "_lt_" ++ encode (show f)) | DefFun{ defName = f } <- progDefs prog, not (M.member f dumpNames)])
     dumpNames = M.fromList [(leanName (D.declName x), ()) | x <- D.dumpDecls d]

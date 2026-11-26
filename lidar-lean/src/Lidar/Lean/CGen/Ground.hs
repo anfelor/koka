@@ -122,7 +122,7 @@ groundDecls :: Env -> (Name -> Maybe String) -> M.Map Name String -> (Name -> Bo
 groundDecls env funName cnames local prog = go (groundOrder grounds) (St [] 0 M.empty M.empty M.empty) M.empty
   where
     grounds = groundValues foldable prog
-    types = M.fromList [(x,t) | DefVal x _ t _ <- progDefs prog]
+    types = M.fromList [(x,t) | DefVal x _ _ t _ <- progDefs prog]
     go [] st protos = (reverse (stDecls st), protos)
     go (x:xs) st protos
       = case M.lookup x cnames of

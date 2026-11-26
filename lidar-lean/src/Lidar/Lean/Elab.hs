@@ -82,7 +82,7 @@ elabDecl x
       D.Body code ->
         do sigs <- asks (dSigs . cDecls)
            case M.lookup name sigs of
-             Just (SigVal _ t) -> Just . DefVal name [] t <$> elabCode t code
+             Just (SigVal _ t) -> Just . DefVal name [] AtLoad t <$> elabCode t code
              Just (SigFun _ ps _ r) ->
                do let (ps',token) = tokenParam ps
                       args = [(p,varPath (D.paramVar p) (D.paramName p),m,t) | (p,(m,t)) <- zip (D.declParams x) ps']
