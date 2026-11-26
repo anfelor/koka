@@ -17,7 +17,8 @@
 
   A path denotes one value, so it is bound at most once in a scope (`Check`): a destructuring
   of a variable whose binders in one of its alternatives are already in scope is that
-  alternative. The default alternative of `[case-a]` is only that if the default binder in
+  alternative. A cast of a variable `z` while `z.cast` is in scope casts `z.cast` instead,
+  since that binder may have another type. The default alternative of `[case-a]` is only that if the default binder in
   scope comes from a `[case-a]` with the same alternatives, since its type depends on them.
 
   The names in a description need not be in scope (see `Contents`). A name out of scope is
@@ -101,16 +102,21 @@ bindRoot x
 renE :: Global -> Ren -> VExpr -> R VExpr
 renE global ren expr
   = do rests <- gets rsRests
-       case known rests of
-         Just (bs,e) -> do mapM_ (uncurry record) bs
-                           renE global (M.union (M.fromList bs) ren) e
-         Nothing -> descendB (pure . look ren) (renV global ren) alt annotated
+       case (expr, known rests) of
+         (LetCast (Var z) b x e, _) -> do x' <- record x (child (lastCast (look ren z)) SCast)
+                                          LetCast (Var (lastCast (look ren z))) (replaceAType sub b) x'
+                                            <$> renE global (M.insert x x' ren) e
+         (_, Just (bs,e)) -> do mapM_ (uncurry record) bs
+                                renE global (M.union (M.fromList bs) ren) e
+         _ -> descendB (pure . look ren) (renV global ren) alt annotated
   where
+    inScope = S.fromList (M.elems ren)
+    -- a cast of `z` while `z.cast` is in scope (at another type, perhaps) casts that cast
+    lastCast z = if child z SCast `S.member` inScope then lastCast (child z SCast) else z
     -- an alternative whose binders are in scope
     known rests
           = do z <- scrut
-               let inScope = S.fromList (M.elems ren)
-                   alts = getConst (descendB (const (Const [])) (const (Const [])) (\bs e -> Const [(bs,e)]) expr)
+               let alts = getConst (descendB (const (Const [])) (const (Const [])) (\bs e -> Const [(bs,e)]) expr)
                listToMaybe [(zip (map fst bs) ps, e) | (bs@(_:_),e) <- alts
                            , let ss = map snd bs, all (not . null) ss
                            , [SRest] `notElem` ss || M.lookup (child z SRest) rests == Just indices
@@ -135,7 +141,7 @@ renE global ren expr
       Join j tvs ps e1 e2 -> Join j tvs (params ps) e1 e2
       JoinRec t ds e -> JoinRec (replaceVType sub t) [d{ joinParams = params (joinParams d) } | d <- ds] e
       Jump j ts vs -> Jump j (map (replaceAType sub) ts) vs
-      LetCast v b x e -> LetCast v (replaceAType sub b) x e
+      LetCast v b x e -> LetCast v (replaceAType sub b) x e   -- of a value that is not a variable
       _ -> expr
     params ps = [(x,m,replaceVType sub t) | (x,m,t) <- ps]
 

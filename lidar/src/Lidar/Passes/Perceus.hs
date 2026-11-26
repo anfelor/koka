@@ -291,15 +291,12 @@ settle pe live z body
 -- aggregate whose children are bound is discarded by discarding its children. A product
 -- may have only one projection in scope, so expand its drop to cover all fields. A pointer
 -- is discarded through its longest bound alias that is not trivial, whose type shows the most
--- of it. A pointer that is cast to a trivial type holds no references, and is not discarded
--- (a trivial alternative is discarded as a whole, so that it consumes as much as its siblings).
+-- of it.
 dropNames :: PEnv -> [Path] -> VExpr -> P VExpr
-dropNames pe xs e = foldM (\body x -> if any (trivialVar pe) (casts x) then return body else step body (longestAlias x)) e (reverse xs)
+dropNames pe xs e = foldM (\body x -> step body (longestAlias x)) e (reverse xs)
   where
-    aliases x = [y | (y,_) <- takeWhile ((`within` x) . fst) (M.toAscList (M.dropWhileAntitone (<= x) (peGamma pe)))
-                   , all keepsPtr (stepsFrom x y)]
-    casts x = [y | y <- aliases x, take 1 (stepsFrom x y) == [SCast]]
-    longestAlias x = last (x : filter (not . trivialVar pe) (aliases x))
+    longestAlias x = last (x : [y | (y,_) <- takeWhile ((`within` x) . fst) (M.toAscList (M.dropWhileAntitone (<= x) (peGamma pe)))
+                                  , all keepsPtr (stepsFrom x y), not (trivialVar pe y)])
     step body x = do t <- tyOfVar pe x
                      case t of
                        V (VCell _ _) -> fail ("a cell that is not filled: " ++ show x)
