@@ -490,7 +490,7 @@ borrowedV env g val
   = case val of
       Var x -> inspect env g x
       Glob _ _ -> return noUse
-      Lit _ -> return noUse
+      Lit l | not (litAllocates l) -> return noUse
       UnitV -> return noUse
       TyApp v _ -> borrowedV env g v
       Inj _ _ w -> borrowedV env g w

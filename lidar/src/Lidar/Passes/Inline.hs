@@ -9,8 +9,8 @@
 
 {- Inlining of structural values (the last pass).
 
-  A structural value (variables, pairs, injections, `()` and literals) is rebuilt from its
-  children at no cost, so `let x = ret v` becomes `e[x := v]`, at any type and however often `x`
+  A structural value (variables, pairs, injections, `()` and literals that do not allocate) is
+  rebuilt from its children at no cost, so `let x = ret v` becomes `e[x := v]`, at any type and however often `x`
   is used: a destructuring of `x` is that of `v`, which selects its alternative. A descendant of `x` is the descendant of `v` at its steps
   (`valueAt`). A name denotes the same value in the whole definition, so the substitution
   applies everywhere, including the descriptions that name `x` out of its scope.
@@ -81,7 +81,7 @@ structural v
       Tuple ws -> all structural ws
       Inj _ _ w -> structural w
       UnitV -> True
-      Lit _ -> True
+      Lit l -> not (litAllocates l)
       _ -> False
 
 valuesE :: VExpr -> (Values,S.Set Path)

@@ -425,8 +425,8 @@ nameHole :: Path
 nameHole = root (newHiddenName "hole")
 
 -- Values `Γ ⊢ v :q t`. As in the paper, a borrowed value is structural: a variable, global,
--- literal, `()`, `null` or function, or a type application, tuple, injection, pack, `some` or
--- cast of borrowed values. A unique value is a variable, a context `ctx K`, `()`, `null`, a
+-- literal that does not allocate, `()`, `null` or function, or a type application, tuple,
+-- injection, pack, `some` or cast of borrowed values. A unique value is a variable, a context `ctx K`, `()`, `null`, a
 -- literal of a trivial type, or a tuple, injection, pack, `some` or cast of unique values. All
 -- other values are owned.
 --
@@ -527,7 +527,8 @@ data VVal
   --  ──────────────────── [lit]
   --   ∅ ⊢ l : type(l)
   --
-  -- A literal of a trivial type is also unique; `int` and `string` literals may be shared.
+  -- A literal that allocates (`litAllocates`: a big `int` or a `string`) is owned, like a box.
+  -- The others are immediates, also borrowed; at a trivial type also unique.
   | Lit Lit
 
   --   Γ ⊢ v :q Vᵢ

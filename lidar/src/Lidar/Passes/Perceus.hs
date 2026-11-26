@@ -104,8 +104,8 @@ perceusDef env def
            -> DefVal x tvs t <$> closed (PEnv env M.empty M.empty S.empty) [] body
 
 -- Bind what the pass would otherwise rewrite and process again: a borrowed argument of a call
--- that is not `borrowable` and the scrutinee of a value destructuring that is not a variable or
--- global; and name the binders of a value destructuring by their paths. A closure that captures
+-- and the scrutinee of a literal test that are not `borrowable`, and the scrutinee of a value
+-- destructuring that is not a variable or global; and name the binders of a value destructuring by their paths. A closure that captures
 -- a variable and a path below it (`v` and `v.f`) captures a new variable bound to `v.f` instead,
 -- so that the body holds a reference to each capture: otherwise `v.f` would be borrowed from `v`
 -- there, and the body would drop the reference of `v.f` and duplicate it again where it is used.
@@ -122,6 +122,8 @@ prepare env g expr
       Call f tys vs
         | ((i,v):_) <- [(i,v) | (i,(Borrowed,v)) <- zip [0..] (zip (paramModes env f (length vs)) vs), not (borrowable v)]
         -> bindVal "a" v (\s -> Call f tys (take i vs ++ [Var s] ++ drop (i+1) vs))
+      CaseLit v alts def
+        | not (borrowable v) -> bindVal "s" v (\s -> CaseLit (Var s) alts def)
       _ | Just ds <- destructVOf expr
         -> case dsScrut ds of
              Var _ -> next (nameChildren expr)
@@ -608,13 +610,13 @@ stepA pe occ v
        put (k . k',j)
        return w
 
--- a borrowed argument that needs no binding: an atom, or an upcast of one (the same pointer, as
--- an argument of type `any`), which stays borrowed: binding it would own it, so a call of
--- Lean's `isExclusiveUnsafe` would see the extra reference
+-- a borrowed argument that needs no binding: an atom (but not a literal that allocates), or an
+-- upcast of one (the same pointer, as an argument of type `any`), which stays borrowed: binding
+-- it would own it, so a call of Lean's `isExclusiveUnsafe` would see the extra reference
 borrowable :: VVal -> Bool
 borrowable (Var _) = True
 borrowable (Glob _ _) = True
-borrowable (Lit _) = True
+borrowable (Lit l) = not (litAllocates l)
 borrowable UnitV = True
 borrowable (Up v) = borrowable v
 borrowable _ = False
