@@ -45,7 +45,7 @@ import Data.Functor.Const( Const(..) )
 import Data.Graph( flattenSCC, stronglyConnComp )
 import Data.Functor.Identity( Identity(..) )
 import Data.List( sortOn )
-import Data.Monoid( Any(..) )
+import Data.Monoid( All(..), Any(..) )
 import Lidar.Name
 import Lidar.Syntax
 import Lidar.Types( Types(ftv), isPtr )
@@ -215,7 +215,8 @@ expand gs names = go
 
 -- The body of the global of a ground let, given the globals of the lets extracted before. A
 -- closed call passes an extracted value to a borrowed parameter as its global (without `dup`),
--- and to a unique one nothing that allocates; Nothing if it cannot.
+-- another value only without a `ptr` (which is owned, as a nullary constructor is), and to a
+-- unique one nothing that allocates; Nothing if it cannot.
 letBody :: Env -> (Name -> Bool) -> Grounds -> M.Map Path Name -> Path -> Maybe VExpr
 letBody env foldable gs names x
   = case gs M.! x of
@@ -226,9 +227,17 @@ letBody env foldable gs names x
   where
     arg m v = case (m,v) of
                 (Owned,_) -> expand gs names v
-                _ | not (allocates gs v) -> expand gs names v
                 (Borrowed,Var y) | Just g <- M.lookup y names -> Just (Glob g [])
+                (Borrowed,_) | not (allocates gs v), Just v' <- expand gs names v, noPtr v' -> Just v'
+                (Unique,_) | not (allocates gs v) -> expand gs names v
                 _ -> Nothing
+
+-- whether a value has no `ptr`
+noPtr :: VVal -> Bool
+noPtr val
+  = case val of
+      Ptr _ _ -> False
+      _ -> getAll (getConst (descendV (const (Const (All True))) (Const . All . noPtr) val))
 
 -- The global of an extracted value with a body and a type: an existing one with the same body,
 -- or a new one, initialised on demand if its body calls a function that is not folded or reads
