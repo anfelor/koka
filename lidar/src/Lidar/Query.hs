@@ -20,7 +20,7 @@ import Control.Monad( zipWithM_, unless, when, forM_ )
 import Lidar.Name
 import Prettyprinter( Pretty )
 import Lidar.Syntax
-import Lidar.Traversal( bindersE, boxTag, child, destructAOf, destructVOf, dsAlts, dsScrut, fvA, fvE, fvV, holes, isGlob, jumpTargets, within )
+import Lidar.Traversal( bindersE, boxTag, child, destructAOf, destructVOf, dsAlts, dsScrut, fvA, fvE, fvV, holes, jumpTargets, within )
 import Lidar.Types
 import Lidar.Pretty( ppr )
 import Lidar.Env( Env(..), Q, funSig, dataBody, lazySides, openFields, boxContents, reuseSize, noHeapCredit )
@@ -579,7 +579,6 @@ inferV env g val
                   case t of
                     V v -> return v
                     A _ -> Left ("variable " ++ show x ++ " at the boxed type " ++ ppr t)
-      Glob x tys -> globType env x tys
       UnitV -> return VUnit
       Lit l -> checkLit l >> return (litType l)
       NoReuse n p -> do let t = VReuse MaybeEmpty n p
@@ -603,8 +602,6 @@ inferV env g val
                         case t of
                           VPtr a -> return (VCtx (if k == Hole then MaybeEmpty else Full) a b)
                           _ -> Left ("context of a non-pointer: " ++ ppr t)
-      DupV v -> do unless (isGlob v) (Left ("dup of a value that is not a global: " ++ ppr val))
-                   inferV env g v
       Some v -> do t <- orNull <$> inferV env g v
                    checkTy (V t)
                    return t

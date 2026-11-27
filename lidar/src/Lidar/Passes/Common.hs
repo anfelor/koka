@@ -131,7 +131,6 @@ mentionedV :: VVal -> [Path]
 mentionedV v = annotations ++ getConst (descendV (Const . mentionedA) (Const . mentionedV) v)
   where annotations = case v of
           Var x -> [x]
-          Glob _ ts -> concatMap (mentionedT . VPtr) ts
           Inj _ t _ -> mentionedT t
           Ptr a _ -> mentionedT (VPtr a)
           Pack t ts _ -> mentionedT t ++ concatMap (mentionedT . VPtr) ts
@@ -273,7 +272,6 @@ substTypesV sub val
   = mapV (substTypesA sub) (substTypesV sub) annotated
   where
     annotated = case val of
-      Glob x ts   -> Glob x (map (subst sub) ts)
       Inj i t v   -> Inj i (subst sub t) v
       Ptr a v     -> Ptr (subst sub a) v
       Pack t ts v -> Pack (subst sub t) (map (subst sub) ts) v
@@ -359,7 +357,6 @@ substVWith :: (Path -> Path) -> SubstExpr -> Scope -> Subst -> VVal -> VVal
 substVWith renameRoot recur scope sub val
   = case val of
       Var x -> maybe val id (sub x)
-      Glob x ts -> Glob x (map (substAType sub) ts)
       Inj i t v -> Inj i (substVType sub t) (goV v)
       Ptr a v -> Ptr (substAType sub a) (goA v)
       Pack t ts v -> Pack (substVType sub t) (map (substAType sub) ts) (goV v)
@@ -629,7 +626,6 @@ tvarsV bound val
   = outside bound annotations ++ getConst (descendV (Const . tvarsA bound) (Const . tvarsV bound) val)
   where
     annotations = case val of
-      Glob _ ts   -> concatMap ftv ts
       Inj _ t _   -> ftv t
       Ptr a _     -> ftv a
       Pack t ts _ -> ftv t ++ concatMap ftv ts

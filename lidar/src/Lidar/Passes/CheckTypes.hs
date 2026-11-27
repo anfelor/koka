@@ -98,7 +98,6 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
                      _ -> []
     vt v = here ++ getConst (descendV (Const . avTypes) (Const . vt) v)
       where here = case v of
-                     Glob _ ts -> concatMap at ts
                      TyApp _ ts -> concatMap at ts
                      Context a _ -> at a
                      Ptr a _ -> at a

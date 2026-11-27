@@ -188,7 +188,6 @@ checkV c val t
       (Context _ k, VCtx _ a b) -> Context b <$> checkV (bindVars [(nameHole,V (VPtr b))] c) k (VPtr a)
       (Some v, VOrNull s) -> Some <$> checkV c v s
       (Null _, VOrNull s) -> return (Null s)
-      (DupV v, _) -> DupV <$> checkV c v t
       (NoReuse n p, _) -> NoReuse n <$> traverse (annContents c) p
       _ | not (annotated val) -> return val
         | Just (_,mv) <- synthV c val -> mv
@@ -202,9 +201,6 @@ synthV c val
       Var x -> case M.lookup x (ctxGamma c) of
                  Just (V t) -> done t
                  _ -> Nothing
-      Glob x ts -> case M.lookup x (envSigs (ctxEnv c)) of
-                     Just (SigVal tvs t) | length tvs == length ts -> done (inst tvs ts t)
-                     _ -> Nothing
       UnitV -> done VUnit
       Lit l -> done (litType l)
       Hole -> case M.lookup nameHole (ctxGamma c) of
@@ -219,8 +215,6 @@ synthV c val
                        case t of
                          VPtr (AForall bs a) | length bs == length ts -> Just (VPtr (inst bs ts a), (`TyApp` ts) <$> mv)
                          _ -> Nothing
-      DupV v -> do (t,mv) <- synthV c v
-                   Just (t, DupV <$> mv)
       Some v -> do (t,mv) <- synthV c v
                    Just (orNull t, Some <$> mv)
       Null{} -> Nothing

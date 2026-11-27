@@ -40,7 +40,7 @@
   whose value is unused and whose null branch is `unreachable` goes away: in `std/core/hnd`, a
   dummy may pass with the flag clear (the result of a final yield's continuation, or of a
   closure at a type variable), and only a used value needs the test. Inlining leaves such cases, mostly on constructors without
-  fields. The bindings of values, pointers and rolls that are then unused are removed.
+  fields. The bindings of values, pointers, rolls and globals that are then unused are removed.
 -}
 module Lidar.Passes.Simplify( simplifyProgram ) where
 
@@ -195,6 +195,7 @@ knownE known expr
            in if isRet e1' && not (usedIn x fv2) then r2 else rebuilt [fv1,fv2] (Let x t e1' e2')
       Deref v x e -> keepIfUsed x (Deref v x) [] (knownE (shadow [x] known) e)
       LetCast v b x e -> keepIfUsed x (LetCast v b x) [] (knownE (shadow [x] known) e)
+      LetGlob x g ts e -> keepIfUsed x (LetGlob x g ts) [] (knownE (shadow [x] known) e)
       Unroll v x e -> keepIfUsed x (Unroll v x) [] (knownE (shadow [x] known) e)
       _ | Just (x,e) <- decided known expr -> taken x e
       IsNull v n@Unreachable{} (x,e) -> keepIfUsed x (\e' -> IsNull v n (x,e')) [S.empty] (knownE (shadow [x] known) e)

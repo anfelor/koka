@@ -158,7 +158,6 @@ renV :: Global -> Ren -> VVal -> R VVal
 renV global ren val
   = case val of
       Var x -> pure (Var (look ren x))
-      Glob x ts -> pure (Glob x (map tyA ts))
       Inj i t v -> Inj i (tyV t) <$> renV global ren v
       Ptr a v -> Ptr (tyA a) <$> renA global ren v
       Pack t ts v -> Pack (tyV t) (map tyA ts) <$> renV global ren v

@@ -461,7 +461,7 @@ root x = Path x []
 nameHole :: Path
 nameHole = root (newHiddenName "hole")
 
--- Values `Γ ⊢ v :q t`. As in the paper, a borrowed value is structural: a variable, global,
+-- Values `Γ ⊢ v :q t`. As in the paper, a borrowed value is structural: a variable,
 -- literal, `()`, `null` or function, or a type application, tuple, injection, pack, `some` or
 -- cast of borrowed values. A unique value is a variable, a context `ctx K`, `()`, `null`, a
 -- literal, or a tuple, injection, pack, `some` or cast of unique values. All other values are
@@ -557,13 +557,6 @@ data VVal
   -- `[drop]`, `[dup]`, `[if-unique]` or `[app]`. It cannot be stored again as a boxed value.
   = Var Path
 
-  --   x : ∀ā. V ∈ Σ
-  --  ───────────────────────── [glob]
-  --   ∅ ⊢ x[B̄] :^ V[B̄/ā]
-  --
-  -- A top-level value is borrowed: an owned use needs `[dup-glob]` (unless it is trivial).
-  | Glob Name [AType]
-
   --  ─────────────── [unit]
   --   ∅ ⊢ () :q 𝟙
   | UnitV
@@ -613,13 +606,6 @@ data VVal
   -- as erased dependent types). A no-op at run time that keeps the mode. The cast back is
   -- `[let-cast]`.
   | Up VVal
-
-  --   x : ∀ā. V ∈ Σ
-  --  ────────────────────────────── [dup-glob]
-  --   ∅ ⊢ dup x[B̄] : V[B̄/ā]
-  --
-  -- An owned reference to a top-level value. Variables are duplicated by `[dup]`.
-  | DupV VVal
 
   --  ────────────────────── [no-reuse]
   --   ∅ ⊢ no-reuse n : ◇n

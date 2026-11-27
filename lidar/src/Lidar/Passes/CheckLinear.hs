@@ -454,10 +454,6 @@ ownedV :: Env -> Gamma -> VVal -> L Use
 ownedV env g val
   = case val of
       Var x -> consume env g x
-      DupV _ -> liftE (inferV env g val) >> return noUse   -- a global
-      Glob _ _ -> do t <- V <$> liftE (inferV env g val)
-                     unless (trivialTy env t) (fail ("owned use of global " ++ show val))
-                     return noUse
       UnitV -> return noUse
       Lit _ -> return noUse
       NoReuse _ _ -> return noUse
@@ -516,7 +512,6 @@ borrowedV :: Env -> Gamma -> VVal -> L Use
 borrowedV env g val
   = case val of
       Var x -> inspect env g x
-      Glob _ _ -> return noUse
       Lit _ -> return noUse
       UnitV -> return noUse
       TyApp v _ -> borrowedV env g v

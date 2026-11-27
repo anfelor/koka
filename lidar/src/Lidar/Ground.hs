@@ -10,7 +10,7 @@
   static data, without code that runs when the module is initialised.
 
   A value is *ground* if it is built only from literals (strings, characters and integers),
-  units, injections, tuples, boxes, top-level functions and other ground globals, through the run-time no-ops (`ptr`, `roll`, `up`, ...).
+  units, injections, tuples, boxes, top-level functions and the variables of the chain, through the run-time no-ops (`ptr`, `roll`, `up`, ...).
   The body of a ground `DefVal` is a chain of `let`s and `let cast`s of ground values, or of calls that the
   client folds at compile time (`Lean`'s `Name.mkStr`, for instance), and of `let glob`s of ground
   globals, ending in a ground value.
@@ -67,10 +67,7 @@ groundOrder gs = reverse (snd (foldl visit (S.empty,[]) (M.keys gs)))
       | S.member x seen = (seen,acc)
       | otherwise = let (seen',acc') = foldl visit (S.insert x seen,acc) (globsOf (gs M.! x))
                     in (seen', x : acc')
-    globsOf g = [y | y <- concatMap bindGlobs (groundBinds g) ++ globsV (groundResult g), M.member y gs]
-    bindGlobs (_,_,b) = case b of
-                          GGlob y _ -> [y]
-                          _ -> concatMap globsV (bindVals b)
+    globsOf g = [y | (_,_,GGlob y _) <- groundBinds g, M.member y gs]
 
 -- the values of a binding
 bindVals :: GroundBind -> [VVal]
@@ -85,7 +82,7 @@ groundBody foldable sigs globals body
   = do (binds,res) <- chain body
        GValue v <- Just res
        _ <- checkBinds S.empty binds
-       if groundV globals (S.fromList [x | (x,_,_) <- binds]) v then Just (Ground binds v) else Nothing
+       if groundV (S.fromList [x | (x,_,_) <- binds]) v then Just (Ground binds v) else Nothing
   where
     chain e = case e of
                 Ret v -> Just ([], GValue v)
@@ -105,17 +102,15 @@ groundBody foldable sigs globals body
     checkBinds bound binds
       = case binds of
           [] -> Just bound
-          (x,_,b):rest | all (groundV globals bound) (bindVals b) -> checkBinds (S.insert x bound) rest
+          (x,_,b):rest | all (groundV bound) (bindVals b) -> checkBinds (S.insert x bound) rest
           _ -> Nothing
 
--- | Whether a value is ground, given the ground globals and the ground variables in scope.
-groundV :: S.Set Name -> S.Set Path -> VVal -> Bool
-groundV globals bound = gv
+-- | Whether a value is ground, given the ground variables in scope.
+groundV :: S.Set Path -> VVal -> Bool
+groundV bound = gv
   where
     gv val = case val of
                Var x -> S.member x bound
-               Glob g _ -> S.member g globals
-               DupV v -> gv v
                UnitV -> True
                Lit lit -> groundLit lit
                Inj _ _ v -> gv v
@@ -146,25 +141,3 @@ groundV globals bound = gv
                       LitInt _ _ -> True
                       LitChar _ -> True
                       LitFloat _ -> False
-
--- the globals that a value refers to
-globsV :: VVal -> [Name]
-globsV val
-  = case val of
-      Glob g _ -> [g]
-      DupV v -> globsV v
-      Inj _ _ v -> globsV v
-      Tuple vs -> concatMap globsV vs
-      Ptr _ a -> globsA a
-      Pack _ _ v -> globsV v
-      TyApp v _ -> globsV v
-      Up v -> globsV v
-      Some v -> globsV v
-      _ -> []
-  where
-    globsA a = case a of
-                 InjA _ _ v -> globsA v
-                 Roll _ v -> globsA v
-                 InjLazy _ _ v -> globsA v
-                 Box v -> globsV v
-                 _ -> []

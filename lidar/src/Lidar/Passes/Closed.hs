@@ -131,7 +131,7 @@ groundLets foldable closedCall group body = (grounds,drops)
     (grounds,drops,_) = foldl add (M.empty,M.empty,S.empty) (zip [0..] (lets body))
     -- the ground lets so far, their drops, and those that refer to the recursive group
     add (gs,ds,recs) (i,(x,t,e1))
-      = let ground v = groundV S.empty (M.keysSet gs) v
+      = let ground v = groundV (M.keysSet gs) v
             refers v = not (S.disjoint group (globalsV v)) || any (`S.member` recs) (S.toList (fvV v))
             mark vs = if any refers vs then S.insert x recs else recs
         in case e1 of
@@ -210,7 +210,6 @@ expand gs names = go
                Var x | Just g <- M.lookup x names -> Just (Var (root g))
                      | Just (_,GValue v,_) <- M.lookup x gs -> go v
                      | otherwise -> Nothing
-               DupV v -> go v
                _ -> descendV goA go val
     goA = descendA pure goA go
 
@@ -285,7 +284,7 @@ extractOperands gs names body = (body',reverse ops)
               _ -> descendE pure goV (\_ e' -> goE e') e
     goV :: VVal -> State [(VVal,VVal,VType)] VVal
     goV v = case operandType v of
-              Just t | groundV S.empty (M.keysSet gs) v
+              Just t | groundV (M.keysSet gs) v
                        && allocates gs v && closed v t
                      , Just v' <- expand gs names v
                 -> state (\os -> (Var (root (placeholder (length os))), (v,v',t) : os))
@@ -336,7 +335,6 @@ consumed :: VVal -> [Path]
 consumed val
   = case val of
       Var x -> [x]
-      DupV _ -> []
       _ -> getConst (descendV (Const . consumedA) (Const . consumed) val)
   where
     consumedA a = getConst (descendA (const (Const [])) (Const . consumedA) (Const . consumed) a)

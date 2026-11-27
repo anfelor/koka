@@ -195,9 +195,6 @@ genV :: Ctx -> VVal -> G Doc
 genV cx val
   = case val of
       Var x -> return (localName x)
-      Glob x _ -> genGlob x
-      -- only globals are dupped, and every global is persistent (`kk_box_mark_persistent`)
-      DupV v -> genV cx v
       UnitV -> return "kk_Unit"
       Lit lit -> genLit lit
       NoReuse _ _ -> return "kk_reuse_null"
@@ -1389,8 +1386,6 @@ staticLeaves :: SCtx -> [Doc] -> VVal -> G ([Doc],[Doc])
 staticLeaves sc blocks val
   = case val of
       Var x -> found (M.lookup x (scLocals sc))
-      Glob g _ -> found (M.lookup g (scGlobals sc))
-      DupV v -> staticLeaves sc blocks v
       UnitV -> return ([],blocks)
       Lit (LitSmallInt i) -> return (["((kk_intb_t)" <.> integer (4*i + 1) <.> ")"],blocks)   -- `kk_integer_from_small`
       Lit (LitInt t i) -> return ([rawLit t i],blocks)

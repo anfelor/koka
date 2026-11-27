@@ -53,13 +53,11 @@ descendV fa fv val
       Pack t ts v    -> Pack t ts <$> fv v
       TyApp v ts     -> (`TyApp` ts) <$> fv v
       Up v           -> Up <$> fv v
-      DupV v         -> DupV <$> fv v
       Context b v    -> Context b <$> fv v
       Some v         -> Some <$> fv v
       Null _         -> pure val
       Hole           -> pure val
       Var _          -> pure val
-      Glob _ _       -> pure val
       UnitV          -> pure val
       Lit _          -> pure val
       NoReuse _ _    -> pure val   -- a description is not an operand
@@ -285,14 +283,6 @@ jumpTargets expr
       JoinRec _ ds e -> S.unions (jumpTargets e : map (jumpTargets . joinBody) ds) `S.difference` S.fromList (map joinName ds)
       _ -> getConst (descendE (const (Const S.empty)) (const (Const S.empty)) (\_ e -> Const (jumpTargets e)) expr)
 
--- a top-level value, possibly instantiated (`[dup-glob]`)
-isGlob :: VVal -> Bool
-isGlob v
-  = case v of
-      Glob _ _ -> True
-      TyApp w _ -> isGlob w
-      _ -> False
-
 -- free variables
 
 fvA :: AVal -> S.Set Path
@@ -320,10 +310,7 @@ globalsE expr = here <> getConst (descendE (const (Const S.empty)) (Const . glob
                  _ -> S.empty
 
 globalsV :: VVal -> S.Set Name
-globalsV val
-  = case val of
-      Glob x _ -> S.singleton x
-      _ -> getConst (descendV (Const . globalsA) (Const . globalsV) val)
+globalsV val = getConst (descendV (Const . globalsA) (Const . globalsV) val)
 
 globalsA :: AVal -> S.Set Name
 globalsA val
