@@ -101,10 +101,17 @@ import Lidar.Query( Gamma, bindAll, inferV, inferA, inferVar, altTypes, unboxRuG
 -- join point the variables it captures
 type Owners = M.Map Path Mode
 
--- the children recorded where a destructuring binds a child of their parent (a path denotes the
--- same child in the whole definition, see `Syntax.Path`): those of a trivial type, and the fields
--- of each product
+-- the children recorded where a destructuring binds a child of their parent: those of a
+-- trivial type, and the fields of each product. A path denotes the same child in the whole
+-- definition (see `Syntax.Path`), except below a cast, which another alternative can cast to
+-- another type, so each destructuring records its children again (`record`).
 data Children = Children{ chTrivial :: S.Set Path, chFields :: M.Map Path [Path] }
+
+-- record whether paths are of a trivial type, and the fields of products
+record :: [(Path,Bool)] -> [(Path,[Path])] -> Children -> Children
+record trivial fields tr
+  = Children (foldl' (\s (p,b) -> (if b then S.insert else S.delete) p s) (chTrivial tr) trivial)
+             (M.union (M.fromList fields) (chFields tr))
 
 -- numbers of references to variables (`key`) that do not overlap, without zeros; a reference
 -- to a variable is one to each of its children (`refine`)
@@ -679,8 +686,8 @@ destruct env g js q nulls v alts
                     alt zc bs e
                       = do let ts = [x | (x,t) <- bs, trivialTy env t]
                                fields = [(p,fieldsAt p t) | Just (p,t) <- [destructed g z bs]]
-                           modify (\tr -> Children (S.unions [chTrivial tr, S.fromList ts, S.fromList [y | (_,fs) <- fields, (y,_,u) <- fs, trivialTy env (V u)]])
-                                                (M.union (chFields tr) (M.fromList [(p,[y | (y,_,_) <- fs]) | (p,fs@(_:_)) <- fields])))
+                           modify (record ([(x,trivialTy env t) | (x,t) <- bs] ++ [(y,trivialTy env (V u)) | (_,fs) <- fields, (y,_,u) <- fs])
+                                          [(p,[y | (y,_,_) <- fs]) | (p,fs@(_:_)) <- fields])
                            tr <- get
                            u <- checkE env (bindAll bs g) js q e
                            tr' <- get
