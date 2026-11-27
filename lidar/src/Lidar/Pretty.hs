@@ -68,7 +68,7 @@ reserved :: String -> Bool
 reserved s = null s || "(" `isPrefixOf` s || s `elem` keywords || "box@" `isPrefixOf` s || any numbered ["v","inj","inj-a","reuse","no-reuse","cell"]
   where
     numbered p = p `isPrefixOf` s && not (null (drop (length p) s)) && all isDigit (drop (length p) s)
-    keywords = words ("ret let in of case split at if-whnf whnf delay ptr roll box const scalar pack dup drop free"
+    keywords = words ("ret let glob in of case split at if-whnf whnf delay ptr roll box const scalar pack dup drop free"
                       ++ " if-unique if-full then else join rec and jump fn gen forall exists unreachable"
                       ++ " cast cast-ev total memoize ctx ctx-copy hole some null is-null if-yielding yield up down lock @ @copy _"
                       ++ " module data con inline noinline fun val ondemand extern foreign Box Scalar I KCtx NaN Infinity"
@@ -243,8 +243,6 @@ prettyVal :: PP ann -> VVal -> Doc ann
 prettyVal pp val
   = case val of
       Var x      -> pp x
-      Glob x []  -> nm x
-      Glob x ts  -> nm x <> tyArgs pp ts
       UnitV      -> "()"
       Lit l      -> prettyLit l
       Inj i _ v  -> "inj" <> pretty i <+> atomVal pp v
@@ -253,10 +251,8 @@ prettyVal pp val
       Ptr _ (Constant c) -> prettyConstant c   -- the bare literal (`Parse.litValP`)
       Ptr _ v    -> "ptr" <+> atomAVal pp v
       Pack _ ts v -> "pack" <> tyArgs pp ts <+> atomVal pp v
-      TyApp v@(Glob _ _) ts -> parens (prettyVal pp v) <> tyArgs pp ts   -- not `Glob x ts`
       TyApp v ts  -> atomVal pp v <> tyArgs pp ts
       Up v        -> "up" <+> atomVal pp v
-      DupV v      -> "dup" <+> atomVal pp v
       NoReuse n p -> "no-reuse" <> pretty n <> prettyContents pp p
       Hole        -> "hole"
       Context _ v -> "ctx" <+> atomVal pp v
@@ -280,7 +276,6 @@ atomVal pp v
       Ptr _ (Constant _) -> prettyVal pp v
       Ptr _ _     -> parens (prettyVal pp v)
       Pack _ _ _  -> parens (prettyVal pp v)
-      DupV _      -> parens (prettyVal pp v)
       Context _ _ -> parens (prettyVal pp v)
       Some _      -> parens (prettyVal pp v)
       Up _        -> parens (prettyVal pp v)
@@ -309,6 +304,7 @@ prettyExpr pp expr
   = case expr of
       Ret v -> "ret" <+> atomVal pp v
       Let x t e1 e2 -> letIn emptyDoc (pp x <+> colon <+> prettyV pp t) (align (prettyExpr pp e1)) e2
+      LetGlob x g ts e -> letIn emptyDoc ("glob" <+> pp x) (if null ts then nm g else nm g <> tyArgs pp ts) e
       Unreachable _ -> "unreachable"
       Call f [] vs -> nm f <> args pp vs
       Call f ts vs -> nm f <> tyArgs pp ts <> args pp vs

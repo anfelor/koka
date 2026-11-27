@@ -35,8 +35,8 @@ import Prettyprinter( Doc, pretty, vsep, hsep, nest, hardline, (<+>), layoutPret
 import Prettyprinter.Render.String( renderString )
 import Lidar
 import Lidar.Env( Env(..), envOf, dataBody, pointerShape, boxContents, M, runM, liftE, state, modify, get, put )
-import Lidar.Query( Gamma, inferV, inferVar, altTypes, unboxRuGamma, copyRuGamma, uniqueGamma )
-import Lidar.Traversal( child, boxTag, fvA, descendA, descendV, descendE )
+import Lidar.Query( Gamma, globType, inferV, inferVar, altTypes, unboxRuGamma, copyRuGamma, uniqueGamma )
+import Lidar.Traversal( child, boxTag, fvA, descendA, descendV, descendE, globalsE )
 import Lidar.Layout( leaves, shapeIsHeap )
 import qualified Lidar.Lean.Dump as D
 import Lidar.Lean.Decls( leanName, rawTypes, rawOfNat, worldTypes, objectTypes )
@@ -283,22 +283,22 @@ genLit lit
 -- Values
 ------------------------------------------------------------------------------
 
+-- the leaves of a global with the given leaves
+genGlob :: Ctx -> Name -> [Leaf] -> G [String]
+genGlob cx x ls
+  = do tgt <- target cx x
+       let beat e = if S.member x (cxBeats cx) then "(lean_inc_heartbeat(), " ++ e ++ ")" else e
+           n = tgtName tgt
+           value | S.member x (cxOnDemand cx) = call "lean_obj_once" ['&' : n, '&' : n ++ "_once", "_init_" ++ n]
+                 | otherwise = n
+       return [beat value | _ <- ls]
+
 -- the leaves of a value
 genV :: Ctx -> VVal -> G [String]
 genV cx val
   = case val of
       Var x -> do ls <- tyOfName cx x >>= leavesOfTy
                   return (leafNames x (length ls))
-      Glob x _ -> do ls <- tyOf cx val >>= leavesOf
-                     tgt <- target cx x
-                     let beat e = if S.member x (cxBeats cx) then "(lean_inc_heartbeat(), " ++ e ++ ")" else e
-                         n = tgtName tgt
-                         value | S.member x (cxOnDemand cx) = call "lean_obj_once" ['&' : n, '&' : n ++ "_once", "_init_" ++ n]
-                               | otherwise = n
-                     return [beat value | _ <- ls]
-      DupV v -> do es <- genV cx v
-                   ls <- tyOf cx v >>= leavesOf
-                   return [if l == LObj then call "lt_dup" [e] else e | (l,e) <- zip ls es]
       UnitV -> return []
       Lit lit -> (:[]) <$> genLit lit
       NoReuse _ _ -> return ["NULL"]
@@ -563,6 +563,13 @@ genE cx dest expr
            [ve] <- genV cx v
            body <- genE (bindVar (shareValAlias cx v x) x (A a)) dest e
            return (declare x [LObj] [ve] ++ body)
+      -- every global is persistent
+      LetGlob x g ts e ->
+        do t <- liftQ (globType (cxEnv cx) g ts)
+           ls <- leavesOf t
+           vs <- genGlob cx g ls
+           body <- genE (bindVar cx x (V t)) dest e
+           return (declare x ls vs ++ body)
       LetCast v b x e ->
         do [ve] <- genV cx v
            body <- genE (bindVar (shareValAlias cx v x) x (V (VPtr b))) dest e
@@ -924,25 +931,6 @@ initOrder roots uses inits = reverse (snd (foldl visit (S.empty,[]) roots))
       | otherwise = let (seen',acc') = foldl visit (S.insert x seen,acc) (S.toList (M.findWithDefault S.empty x uses))
                     in (seen', if S.member x inits then x : acc' else acc')
 
--- the top-level functions and values that an expression uses
-namesE :: VExpr -> S.Set Name
-namesE e = here <> getConst (descendE (const (Const S.empty)) (Const . namesV) (\_ e' -> Const (namesE e')) e)
-  where here = case e of
-                 Call f _ _ -> S.singleton f
-                 _ -> S.empty
-
-namesV :: VVal -> S.Set Name
-namesV v = here <> getConst (descendV (Const . namesA) (Const . namesV) v)
-  where here = case v of
-                 Glob x _ -> S.singleton x
-                 _ -> S.empty
-
-namesA :: AVal -> S.Set Name
-namesA a = case a of
-             Fun f -> S.singleton f
-             Lam _ _ e -> namesE e
-             _ -> getConst (descendA (const (Const S.empty)) (Const . namesA) (Const . namesV) a)
-
 -- the C `main` of a module with `main`, as Lean's `emitMainFn` writes it
 mainFn :: D.Dump -> String -> D.Main -> [C]
 mainFn d leanMain (D.Main n exitCode)
@@ -989,8 +977,7 @@ mainFn d leanMain (D.Main n exitCode)
 -- helpers for the generated code
 prelude :: [C]
 prelude
-  = [ "static inline lean_object* lt_dup(lean_object* o) { lean_inc(o); return o; }"
-    , "// the block of a full credit as a constructor object with a tag and a number of objects"
+  = [ "// the block of a full credit as a constructor object with a tag and a number of objects"
     , "static inline lean_object* lt_reuse_full(lean_object* r, unsigned tag, unsigned objs) {"
     , "  lean_ctor_set_tag(r, tag); r->m_other = objs; return r;"
     , "}"
@@ -1032,7 +1019,7 @@ cgenModule d prog
                           [(defName def, i) | (def,Right (_,_,i)) <- zip (progDefs prog) rs]
                           ++ [(leanName (D.declName x), i) | (x,Right i) <- declInits]
                 roots = map (leanName . D.declName) (D.dumpDecls d) ++ map defName (progDefs prog)
-                uses = M.fromList ([(defName def, namesE (defBody def)) | def <- progDefs prog]
+                uses = M.fromList ([(defName def, globalsE (defBody def)) | def <- progDefs prog]
                                    ++ [(leanName (D.declName x), S.fromList (map leanName (initFnOf x))) | x <- D.dumpDecls d, hasInitFn x])
                 leanMain = maybe "_lean_main" tgtName (M.lookup (leanName "main") tgts)
                 doc = vsep ([ text ("// Lean compiler output (lidar-lean)")

@@ -35,7 +35,7 @@ import Lidar.Syntax
 import Lidar.Traversal( child, TestSide(..), boxTag, canonical, failingTo, fvA, fvE, fvV, holes, testSides, within )
 import Lidar.Types( inst, isToken, unToken )
 import Lidar.Env( Env(..), envOf, dataBody, pointerShape, openFields, boxContents, M, get, gets, liftE, modify, put, runM, state )
-import Lidar.Query( Gamma, inferE, inferV, inferVar, noJoins, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
+import Lidar.Query( Gamma, globType, inferE, inferV, inferVar, noJoins, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 import Lidar.Layout
 import Lidar.Ground( Ground(..), GroundBind(..), groundValues, groundOrder )
 import Backend.Typed.CGen.Layout hiding( dupExpr, dropStmt )
@@ -183,18 +183,18 @@ pointerTest ve left right
 
 -- values
 
+-- a global, read through its initialisation if it is initialised on demand
+genGlob :: Name -> G Doc
+genGlob x
+  = do onDemand <- gets (S.member x . stOnDemand)
+       if onDemand then do modify (\st -> st{ stLocal = True })
+                           return (onceRead x)
+                   else return (text (cName x))
+
 genV :: Ctx -> VVal -> G Doc
 genV cx val
   = case val of
       Var x -> return (localName x)
-      Glob x _ -> do onDemand <- gets (S.member x . stOnDemand)
-                     if onDemand then do modify (\st -> st{ stLocal = True })
-                                         return (onceRead x)
-                                 else return (text (cName x))
-      DupV v -> do t <- tyOf cx v
-                   ct <- ctype t
-                   e <- genV cx v
-                   return (dupExpr ct e)
       UnitV -> return "kk_Unit"
       Lit lit -> genLit lit
       NoReuse _ _ -> return "kk_reuse_null"
@@ -952,6 +952,11 @@ genE cx dest expr
       LetCast v b x e
         -> do ve <- genV cx v
               genRead (shareValAlias cx v x) dest x (VPtr b) ve e
+      -- every global is persistent or static (`kk_box_mark_persistent`)
+      LetGlob x g ts e
+        -> do t <- liftC (globType (cxEnv cx) g ts)
+              ge <- genGlob g
+              genRead cx dest x t ge e
       Unroll v x e
         -> do A t <- tyOfName cx v
               a <- liftC (dataBody (cxEnv cx) t)
@@ -1265,9 +1270,13 @@ genDef env cenv def
                   initf = "static" <+> cty ct <+> name <.> "_init(kk_context_t* _ctx)" <+> block ss
               case ini of
                 AtLoad -> return ("extern" <+> cty ct <+> name <.> ";", vcat [cty ct <+> name <.> ";", initf],
-                                  name <+> "=" <+> name <.> "_init(_ctx);")
+                                  vcat ((name <+> "=" <+> name <.> "_init(_ctx);") : map persist (boxFields ct (cName x))))
                 OnDemand | ct == CBox -> return (empty, initf, empty)
                 OnDemand -> failG "a value initialised on demand that is not a pointer"
+
+-- Marks a box of a global persistent, as it is never dropped: dups of globals are not counted
+persist :: String -> Doc
+persist e = "kk_box_mark_persistent(" <.> text e <.> ",_ctx);"
 
 -- The read of a value initialised on demand: initialises it at its first read (`onceHelpers`).
 onceRead :: Name -> Doc
@@ -1281,7 +1290,8 @@ onceDecl x = let name = text (cName x)
 
 -- The once-cells of the values initialised on demand, for a C file that has any: `state` is 0
 -- before, 1 during and 2 after the initialisation, which the first reader does. As the value
--- can then be read by any thread, it is marked as thread-shared.
+-- can then be read by any thread, it is marked as thread-shared; first as persistent, so that the
+-- marking keeps it persistent and marks its children.
 onceHelpers :: Doc
 onceHelpers = vcat
   [ "typedef struct kt_once_s { kk_box_t value; _Atomic(int32_t) state; } kt_once_t;"
@@ -1289,6 +1299,7 @@ onceHelpers = vcat
   , "  int32_t expected = 0;"
   , "  if (kk_atomic_cas_strong_acq_rel(&once->state, &expected, 1)) {"
   , "    kk_box_t value = init(_ctx);"
+  , "    kk_box_mark_persistent(value, _ctx);"
   , "    kk_box_mark_shared(value, _ctx);"
   , "    once->value = value;"
   , "    kk_atomic_store_release(&once->state, 2);"
@@ -1367,14 +1378,14 @@ staticValue sc0 t (Ground binds res) blocks0
           GValue v -> do (ls,blocks') <- staticLeaves sc blocks v
                          return (sc{ scLocals = M.insert x ls (scLocals sc), scGamma = M.insert x (V tx) (scGamma sc) }, blocks')
           GCall f _ _ -> failG ("cannot fold " ++ show f)
+          GGlob g _ -> do ls <- maybe (failG ("not static: " ++ show g)) return (M.lookup g (scGlobals sc))
+                          return (sc{ scLocals = M.insert x ls (scLocals sc), scGamma = M.insert x (V tx) (scGamma sc) }, blocks)
 
 -- the C constants of the leaves of a ground value, and the blocks written so far with its own
 staticLeaves :: SCtx -> [Doc] -> VVal -> G ([Doc],[Doc])
 staticLeaves sc blocks val
   = case val of
       Var x -> found (M.lookup x (scLocals sc))
-      Glob g _ -> found (M.lookup g (scGlobals sc))
-      DupV v -> staticLeaves sc blocks v
       UnitV -> return ([],blocks)
       Lit (LitSmallInt i) -> return (["((kk_intb_t)" <.> integer (4*i + 1) <.> ")"],blocks)   -- `kk_integer_from_small`
       Lit (LitInt t i) -> return ([rawLit t i],blocks)

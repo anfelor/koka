@@ -83,6 +83,7 @@ anfE env bs g expr
 
 bind :: S.Set Name -> Gamma -> Path -> VType -> VExpr -> VExpr -> P VExpr
 bind bs g x t (Let y s e1 e2) body | not (yields t || yields s) = Let y s e1 <$> bind bs g x t e2 body
+bind bs g x t (LetGlob y h ts e) body = LetGlob y h ts <$> bind bs g x t e body
 bind bs g x t e body
   | tailCount e > 1, joinable t, Just zs <- mapM unboxed captures, all (joinable . snd) zs
   = do j <- fresh "join"

@@ -143,6 +143,7 @@ renE global ren expr
                    Nothing -> bindRoot x
     annotated = case expr of
       Let x t e1 e2 -> Let x (replaceVType sub t) e1 e2
+      LetGlob x g ts e -> LetGlob x g (map (replaceAType sub) ts) e
       CastEv u t e -> CastEv (replaceVType sub u) (replaceVType sub t) e
       Unreachable t -> Unreachable (replaceVType sub t)
       Call f ts vs -> Call f (map (replaceAType sub) ts) vs
@@ -157,7 +158,6 @@ renV :: Global -> Ren -> VVal -> R VVal
 renV global ren val
   = case val of
       Var x -> pure (Var (look ren x))
-      Glob x ts -> pure (Glob x (map tyA ts))
       Inj i t v -> Inj i (tyV t) <$> renV global ren v
       Ptr a v -> Ptr (tyA a) <$> renA global ren v
       Pack t ts v -> Pack (tyV t) (map tyA ts) <$> renV global ren v

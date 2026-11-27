@@ -16,8 +16,10 @@
 
   At each point, the topmost variables that are still used hold the references (`held`), and
   the variables below them (the paths that pass through them: see `Syntax.Path`) are borrowed
-  from them. Borrowed parameters, the binders of destructurings of globals and variables of a
-  trivial type hold no references. So a variable gives up its reference at one of three places:
+  from them. Borrowed parameters and variables of a trivial type hold no references. Nor do
+  the persistent variables of `[let-glob]` (its binder, and the variables below it with the
+  same blocks), whose owned uses need no duplication; the contents of their boxes are borrowed.
+  So a variable gives up its reference at one of three places:
   - where it is consumed and not used later, its last owned occurrence moves the reference
     (`consume`). The live descendants of a variable that moves are duplicated before, and any
     other owned occurrence is duplicated;
@@ -69,10 +71,10 @@ import Data.Functor.Identity( runIdentity )
 import Lidar.Name
 import Lidar.Syntax
 import Lidar.Build( K, compose )
-import Lidar.Traversal( Destruct(..), child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fieldsAt, fvA, fvV, lamsV, scrutVar, stepsFrom, takesContents, usedIn, within )
-import Lidar.Passes.Common( paramModes, prefixes, trivialTy, NameSupply, defGamma, descendTyped, dropValue, freshFor, perDef, freshPathFrom, lamsTyped, nameChildren, projectAll, renamePath, scopeOf )
+import Lidar.Traversal( Destruct(..), child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut, fieldsAt, fvA, fvV, lamsV, sameBlock, scrutVar, stepsFrom, takesContents, usedIn, within )
+import Lidar.Passes.Common( letGlobs, paramModes, prefixes, trivialTy, NameSupply, defGamma, descendTyped, dropValue, freshFor, perDef, freshPathFrom, lamsTyped, nameChildren, projectAll, renamePath, scopeOf )
 import Lidar.Env( Env(..), envOf, M, evalM, get, lift, liftE, put, state, StateT, runStateT )
-import Lidar.Query( Gamma, bindAll, inferV, altTypes, lamGamma, lockGamma, uniqueGamma )
+import Lidar.Query( Gamma, bindAll, globType, inferV, altTypes, lamGamma, lockGamma, uniqueGamma )
 import Lidar.Types( inst, isPtr )
 
 type VarSet = S.Set Path
@@ -81,8 +83,9 @@ type VarSet = S.Set Path
 type Live = VarSet
 
 -- `peJoins`: the parameter modes of the join points in scope; `peBorrowed`: the borrowed roots
--- (borrowed parameters, and the binders of destructurings of globals)
-data PEnv = PEnv{ peEnv :: Env, peGamma :: Gamma, peJoins :: M.Map Name [Mode], peBorrowed :: S.Set Name }
+-- (borrowed parameters, the binders of destructurings of values that are not variables, and
+-- those of `[let-glob]`); `pePersistent`: the binders of `[let-glob]` in the definition
+data PEnv = PEnv{ peEnv :: Env, peGamma :: Gamma, peJoins :: M.Map Name [Mode], peBorrowed :: S.Set Name, pePersistent :: S.Set Name }
 
 type P a = M () NameSupply a
 
@@ -99,13 +102,15 @@ perceusDef env def
   = do body <- prepare env (defGamma def) (defBody def)
        case def of
          DefFun{ defArgs = args }
-           -> (\b -> def{ defBody = b }) <$> closed (paramEnv env args M.empty) (ownedParams env args) body
+           -> (\b -> def{ defBody = b }) <$> closed (paramEnv (PEnv env M.empty M.empty S.empty globs) args M.empty) (ownedParams env args) body
          DefVal x tvs ini t _
-           -> DefVal x tvs ini t <$> closed (PEnv env M.empty M.empty S.empty) [] body
+           -> DefVal x tvs ini t <$> closed (PEnv env M.empty M.empty S.empty globs) [] body
+  where
+    globs = S.fromList [r | Path r _ <- S.toList (letGlobs (defBody def))]
 
 -- Bind what the pass would otherwise rewrite and process again: a borrowed argument of a call
--- that is not `borrowable` and the scrutinee of a value destructuring that is not a variable or
--- global; and name the binders of a value destructuring by their paths. A closure that captures
+-- that is not `borrowable` and the scrutinee of a value destructuring that is not a variable;
+-- and name the binders of a value destructuring by their paths. A closure that captures
 -- a variable and a path below it (`v` and `v.f`) captures a new variable bound to `v.f` instead,
 -- so that the body holds a reference to each capture: otherwise `v.f` would be borrowed from `v`
 -- there, and the body would drop the reference of `v.f` and duplicate it again where it is used.
@@ -125,7 +130,6 @@ prepare env g expr
       _ | Just ds <- destructVOf expr
         -> case dsScrut ds of
              Var _ -> next (nameChildren expr)
-             Glob _ _ -> next (nameChildren expr)
              v -> bindVal "s" v (\s -> dsBuild ds (Var s) (map snd (dsAlts ds)))
       _ -> next expr
   where
@@ -147,9 +151,9 @@ nestedCaptures env g expr
     capss = getConst (descendE (const (Const [])) (lamsV (\ps r e -> Const [S.toList (fvA (Lam ps r e))])) (\_ _ -> Const []) expr)
 
 
--- the environment of the body of a function or join point
-paramEnv :: Env -> [(Path,Mode,VType)] -> M.Map Name [Mode] -> PEnv
-paramEnv env ps js = PEnv env (M.fromList [(x,V t) | (x,_,t) <- ps]) js (S.fromList [r | (Path r _,Borrowed,_) <- ps])
+-- the environment of the body of a function or join point in that of the definition
+paramEnv :: PEnv -> [(Path,Mode,VType)] -> M.Map Name [Mode] -> PEnv
+paramEnv pe ps js = PEnv (peEnv pe) (M.fromList [(x,V t) | (x,_,t) <- ps]) js (S.fromList [r | (Path r _,Borrowed,_) <- ps]) (pePersistent pe)
 
 ownedParams :: Env -> [(Path,Mode,VType)] -> [Path]
 ownedParams env ps = [x | (x,m,t) <- ps, owning m, not (trivialTy env (V t))]
@@ -162,10 +166,15 @@ tyOfVar pe x = maybe (fail ("unknown variable " ++ show x)) return (M.lookup x (
 
 -- ownership
 
--- A variable needs references unless its type is trivial, and it can hold one unless its root
--- is borrowed.
+-- A variable needs references unless its type is trivial or it is persistent, and it can hold
+-- one unless its root is borrowed.
 ownable :: PEnv -> Path -> Bool
-ownable pe x@(Path r _) = S.notMember r (peBorrowed pe) && not (trivialVar pe x)
+ownable pe x@(Path r _) = S.notMember r (peBorrowed pe) && not (trivialVar pe x) && not (persistent pe x)
+
+-- A variable below a binder of `[let-glob]` with the same blocks is persistent: it holds no
+-- reference, and an owned use of it needs no duplication.
+persistent :: PEnv -> Path -> Bool
+persistent pe (Path r ss) = S.member r (pePersistent pe) && all sameBlock ss
 
 trivialVar :: PEnv -> Path -> Bool
 trivialVar pe x = maybe False (trivialTy (peEnv pe)) (M.lookup x (peGamma pe))
@@ -364,6 +373,12 @@ percExpr pe live expr
               let u2' = removeWithin x u2
               (u1,e1') <- percE pe (S.union live u2') e1
               return (S.union u1 u2', hoistDups (\e1'' -> Let x t e1'' e2'') e1')
+      -- a persistent root, which holds no reference
+      LetGlob x@(Path r _) g ts e
+        -> do t <- liftE (globType (peEnv pe) g ts)
+              let pe' = (bind pe [(x,V t)]){ peBorrowed = S.insert r (peBorrowed pe) }
+              (u,e') <- percE pe' live e
+              return (removeWithin x u, LetGlob x g ts e')
       Call f tys vs
         -> do (u,k,vs',ending) <- consume pe live (zip (paramModes (peEnv pe) f (length vs)) vs)
               let call = Call f tys vs'
@@ -380,12 +395,12 @@ percExpr pe live expr
       CtxCopy c -> operation pe live [(Owned,c)] (\[c'] -> CtxCopy c')
       Memoize c d i v -> operation pe live [(Owned,c),(Owned,v)] (\[c',v'] -> Memoize c' d i v')
       Join j tvs ps e1 e2
-        -> do e1' <- closed (paramEnv (peEnv pe) ps (peJoins pe)) (ownedParams (peEnv pe) ps) e1
+        -> do e1' <- closed (paramEnv pe ps (peJoins pe)) (ownedParams (peEnv pe) ps) e1
               fmap (Join j tvs ps e1') <$> percE pe{ peJoins = M.insert j [m | (_,m,_) <- ps] (peJoins pe) } live e2
       -- closed bodies, in which only the group is in scope
       JoinRec t ds e
         -> do let group = M.fromList [(j,[m | (_,m,_) <- ps]) | JoinDef j _ ps _ <- ds]
-              ds' <- mapM (\d -> (\b -> d{ joinBody = b }) <$> closed (paramEnv (peEnv pe) (joinParams d) group) (ownedParams (peEnv pe) (joinParams d)) (joinBody d)) ds
+              ds' <- mapM (\d -> (\b -> d{ joinBody = b }) <$> closed (paramEnv pe (joinParams d) group) (ownedParams (peEnv pe) (joinParams d)) (joinBody d)) ds
               fmap (JoinRec t ds') <$> percE pe{ peJoins = M.union group (peJoins pe) } live e
       Gen tvs e -> fmap (Gen tvs) <$> percE pe live e
       CastEv u t e -> fmap (CastEv u t) <$> percE pe live e
@@ -418,7 +433,7 @@ percExpr pe live expr
               unless (held pe (S.union live uses) (aliased z) && not (usedIn (aliased z) live))
                 (fail ("lock of a box that is not owned: " ++ show z))
               (,) uses . Lock z <$> enter pe' (S.union live u) (ownedOf pe' [(x,t) | x <- children, Just t <- [M.lookup x g']]) e'
-      -- the binders of a destructuring of a global are roots that borrow it
+      -- the binders of a destructuring of a value that is not a variable are roots that borrow it
       _ | Just ds <- destructVOf expr
         -> do let v = dsScrut ds
               t <- typeOfV pe v
@@ -497,7 +512,7 @@ dupsOf pe xs = concat <$> mapM one xs
   where
     one x = do t <- tyOfVar pe x
                case t of
-                 _ | trivialTy (peEnv pe) t -> return []
+                 _ | trivialTy (peEnv pe) t || persistent pe x -> return []
                  V (VCell _ _) -> fail ("duplication of a cell: " ++ show x)
                  _ -> return [x]
 
@@ -549,7 +564,6 @@ useVals pe moving mvs
 occurrences :: VVal -> [Path]
 occurrences val = case val of
   Var x -> [x]
-  DupV _ -> []   -- a global
   _ -> getConst (descendV (Const . occurrencesA) (Const . occurrences) val)
 
 occurrencesA :: AVal -> [Path]
@@ -565,9 +579,6 @@ useVal pe moving Owned i val
       Var x | M.lookup x moving == Just i -> return (id,i+1,val)
             | otherwise -> do ys <- dupsOf pe [x]
                               return (compose (map (Dup 1) ys),i+1,val)
-      Glob _ _ -> do t <- typeOfV pe val
-                     return (id,i,if trivialTy (peEnv pe) (V t) then val else DupV val)
-      DupV _ -> return (id,i,val)
       _ -> useChildren pe moving i (descendV (stepA pe moving) (stepV pe moving) val)
 
 -- A closure captures its free variables, and its body holds references to them and to its
@@ -578,8 +589,8 @@ useA pe moving i val
   = case val of
       Lam ps r e
         -> do let caps = S.toList (fvA val)
-                  inner = PEnv (peEnv pe) (lamGamma ps e (peGamma pe)) M.empty S.empty
-                  own = [x | x <- caps, not (trivialVar pe x)]
+                  inner = PEnv (peEnv pe) (lamGamma ps e (peGamma pe)) M.empty S.empty (pePersistent pe)
+                  own = [x | x <- caps, not (trivialVar pe x), not (persistent pe x)]
               ys <- dupsOf pe [x | (x,j) <- zip caps [i..], M.lookup x moving /= Just j]
               e' <- closed inner (ownedParams (peEnv pe) ps ++ own) e
               return (compose (map (Dup 1) ys), i + length caps, Lam ps r e')
@@ -614,7 +625,6 @@ stepA pe occ v
 -- Lean's `isExclusiveUnsafe` would see the extra reference
 borrowable :: VVal -> Bool
 borrowable (Var _) = True
-borrowable (Glob _ _) = True
 borrowable (Lit _) = True
 borrowable UnitV = True
 borrowable (Up v) = borrowable v

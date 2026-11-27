@@ -42,7 +42,8 @@
 
   In a lambda, a variable is not captured if fields of it are bound outside the lambda:
   substitution names the fields of a captured variable by those paths, and the closure would
-  then capture both the variable and its fields.
+  then capture both the variable and its fields. Nor is a persistent variable (`[let-glob]`)
+  captured, as the body would count it where it counted the parameter.
 -}
 module Lidar.Passes.JoinArgs( joinArgsProgram ) where
 
@@ -54,17 +55,21 @@ import Data.Functor.Identity( Identity(..) )
 import Lidar.Syntax
 import Lidar.Types( Types(..) )
 import Lidar.Traversal( bindersE, descendAll, descendE, fvV, jumpArgs, lamsV, within )
-import Lidar.Passes.Common( mapAll, Scope, bindScope, defScope, scopeOf, substEIn, substJump, valueAt )
+import Lidar.Passes.Common( mapAll, belowAny, letGlobs, Scope, bindScope, defScope, scopeOf, substEIn, substJump, valueAt )
 
 joinArgsProgram :: Program -> Program
 joinArgsProgram prog = prog{ progDefs = [d{ defBody = jaE (declared (defBody d)) S.empty (defScope d) (defBody d) } | d <- progDefs prog] }
 
+
 -- the declared descriptions of the credits that join parameters and `let`s bind in a
--- definition (its binders are fresh)
-type Declared = M.Map Path (Maybe Contents)
+-- definition (its binders are fresh), and its persistent variables
+data Declared = Declared{ dCredits :: M.Map Path (Maybe Contents), dPersistent :: S.Set Path }
 
 declared :: VExpr -> Declared
-declared expr = M.union here (getConst (descendAll (\_ e -> Const (declared e)) expr))
+declared expr = Declared (credited expr) (letGlobs expr)
+
+credited :: VExpr -> M.Map Path (Maybe Contents)
+credited expr = M.union here (getConst (descendAll (\_ e -> Const (credited e)) expr))
   where
     here = case expr of
              Join _ _ ps _ _ -> credits ps
@@ -85,7 +90,7 @@ jaE decl outer scope expr
                bound = S.fromList (concatMap bindersE (e0' : map joinBody ds1))
                args j es = transpose (concatMap (jumpArgs j) es) ++ repeat []
                invariant tvs (x,Borrowed,t1) vs@(Var y : _) ws
-                 | all (== Var y) vs, all (== Var x) ws, M.member y scope, not (readIn scope y), S.notMember y bound, not (fieldsOutside y)
+                 | all (== Var y) vs, all (== Var x) ws, M.member y scope, not (readIn scope y), S.notMember y bound, not (fieldsOutside y), capturable y
                  , all (`notElem` tvs) (ftv t1) = Just y
                invariant _ _ _ _ = Nothing
                yss = [once $ zipWith3 (invariant tvs) ps (args j (e0' : [joinBody d' | d' <- ds1, joinName d' /= j])) (args j [body])
@@ -106,7 +111,7 @@ jaE decl outer scope expr
                bound = S.fromList (bindersE e1' ++ bindersE e2')
                args = transpose (jumpArgs j e2') ++ repeat []
                -- for each parameter, the variable that every jump passes to it
-               invariant (_,Owned,_) vs@(Var y : _) | all (== Var y) vs, M.member y scope', not (readIn scope' y), S.notMember y bound, not (fieldsOutside y) = Just y
+               invariant (_,Owned,_) vs@(Var y : _) | all (== Var y) vs, M.member y scope', not (readIn scope' y), S.notMember y bound, not (fieldsOutside y), capturable y = Just y
                invariant _ _ = Nothing
                ys = once (zipWith invariant ps args)
                -- the description of every credit that the jumps pass to a credit without one
@@ -115,7 +120,7 @@ jaE decl outer scope expr
                  = (x,m,VReuse f n (Just d))
                describe p _ = p
                descOf v = case v of
-                            Var y -> M.findWithDefault Nothing y decl
+                            Var y -> M.findWithDefault Nothing y (dCredits decl)
                             _ -> Nothing
                isNoReuse v = case v of
                                NoReuse _ _ -> True
@@ -127,6 +132,7 @@ jaE decl outer scope expr
       _ -> runIdentity (descendE pure (lamsV (\ps _ e -> Identity (jaE decl (M.keysSet scope) (bindScope expr [x | (x,_,_) <- ps] scope) e)))
                                  (\xs e -> Identity (jaE decl outer (bindScope expr xs scope) e)) expr)
   where
+    capturable y = not (belowAny (dPersistent decl) y)
     -- the descendants of a path follow it in the order of paths
     fieldsOutside y = maybe False (`within` y) (S.lookupGT y outer)
     -- a descendant of `y` is in scope: the body would bind it again when it reads the parameter

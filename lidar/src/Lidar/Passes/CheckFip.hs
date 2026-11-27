@@ -51,7 +51,7 @@ import Lidar.Traversal( descendA, descendE, descendV, destructAOf, destructVOf, 
 import Lidar.Pretty( ppr )
 import Lidar.Passes.Common( trivialTy )
 import Lidar.Env( Env, envOf, M, ask, asks, gets, liftE, local, modify, runM, state )
-import Lidar.Query( Gamma, bindAll, inferVar, inferV, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
+import Lidar.Query( Gamma, bindAll, globType, inferVar, inferV, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 
 -- The allocations of the most allocating path; whether there are allocations, calls to the
 -- recursive group, and both in sequence; and the types of the values boxed for polymorphism.
@@ -245,6 +245,11 @@ fipE expr
               return (c <> c',full)
       Gen _ e -> fipE e
       CastEv _ _ e -> fipE e
+      -- reading a global neither allocates nor frees
+      LetGlob x g ts e
+        -> do env <- asks fEnv
+              t <- liftE (globType env g ts)
+              bind [(x,V t)] (fipE e)
       Total k e -> bind [(k,V VToken)] (fipE e)
       Drop x e
         -> do t <- typeOfVar x

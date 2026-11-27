@@ -34,7 +34,7 @@ import Lidar.Syntax
 import Lidar.Traversal( boxTag, child, descendA, descendE, descendV, fvV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut )
 import Lidar.Passes.Common( trivialTy, defGamma, NameSupply, dropValue, freshFor, freshPathFrom, perBody, reuseChildren, scopeOf )
 import Lidar.Env( Env, envOf, boxContents, reuseSize, dataBody, M, ask, asks, evalM, get, gets, liftE, local, modify, put, state )
-import Lidar.Query( Gamma, bindAll, inferV, lamGamma, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, inferE, noJoins )
+import Lidar.Query( Gamma, bindAll, inferV, globType, lamGamma, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, inferE, noJoins )
 
 -- credits with the size of their block
 type Credits = [(Path,Int)]
@@ -133,6 +133,10 @@ ruE expr
                       VReuse _ _ Nothing -> liftE (inferE (reEnv re) (reGamma re) noJoins e1')
                       _ -> return t
               Let x t' e1' <$> bind [(x,V t')] (ruE e2)
+      LetGlob x g ts e
+        -> do env <- asks reEnv
+              t <- liftE (globType env g ts)
+              LetGlob x g ts <$> bind [(x,V t)] (ruE e)
       IfYielding v (k3,e3) (k2,e2)
         -> do es <- branches [([(k3,V VToken)],e3),([(k2,V VToken)],e2)]
               return (IfYielding v (k3,es !! 0) (k2,es !! 1))

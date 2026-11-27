@@ -85,6 +85,7 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
     et e = here ++ getConst (descendE (const (Const [])) (Const . vt) (\_ b -> Const (et b)) e)
       where here = case e of
                      Let _ t _ _ -> [t]
+                     LetGlob _ _ ts _ -> concatMap at ts
                      CastEv u t _ -> [u,t]
                      Unreachable t -> [t]
                      Join _ _ ps _ _ -> map (\(_,_,t) -> t) ps
@@ -97,7 +98,6 @@ programTypes prog = concatMap sig (M.elems (progSigs prog)) ++ concatMap def (pr
                      _ -> []
     vt v = here ++ getConst (descendV (Const . avTypes) (Const . vt) v)
       where here = case v of
-                     Glob _ ts -> concatMap at ts
                      TyApp _ ts -> concatMap at ts
                      Context a _ -> at a
                      Ptr a _ -> at a

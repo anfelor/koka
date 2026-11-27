@@ -141,6 +141,7 @@ writeValue x t (Ground binds res)
     bind (y,ty,b) = do v <- case b of
                               GValue w -> genVal w
                               GCall f _ vs -> foldCall ty f vs
+                              GGlob g _ -> gets (M.lookup g . stGlobals) >>= maybe (fail ("not static: " ++ show g)) return
                        modify (\st -> st{ stLocals = M.insert y v (stLocals st), stGamma = M.insert y (V ty) (stGamma st) })
 
 leafC :: GLeaf -> String
@@ -157,9 +158,6 @@ genVal val
   = case val of
       Var x -> do v <- gets (M.lookup x . stLocals)
                   maybe (fail ("unbound " ++ show x)) return v
-      Glob g _ -> do v <- gets (M.lookup g . stGlobals)
-                     maybe (fail ("not static: " ++ show g)) return v
-      DupV v -> genVal v
       UnitV -> return (leavesOnly [])
       Lit (LitSmallInt n) | n >= 0 -> return (leavesOnly [GObj (tagged n)])
       Lit (LitInt _ n) | n >= 0 -> return (leavesOnly [GScalar n])

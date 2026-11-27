@@ -10,9 +10,10 @@
   static data, without code that runs when the module is initialised.
 
   A value is *ground* if it is built only from literals (strings, characters and integers),
-  units, injections, tuples, boxes, top-level functions and other ground globals, through the run-time no-ops (`ptr`, `roll`, `up`, ...).
+  units, injections, tuples, boxes, top-level functions and the variables of the chain, through the run-time no-ops (`ptr`, `roll`, `up`, ...).
   The body of a ground `DefVal` is a chain of `let`s and `let cast`s of ground values, or of calls that the
-  client folds at compile time (`Lean`'s `Name.mkStr`, for instance), ending in a ground value.
+  client folds at compile time (`Lean`'s `Name.mkStr`, for instance), and of `let glob`s of ground
+  globals, ending in a ground value.
   The dups of the chain are left out: static data is never freed, so its reference counts are
   stuck, and a value shared by several fields is written once. A ground value cannot have
   effects or diverge, so writing it statically never changes the meaning of a program.
@@ -23,7 +24,7 @@
 -}
 module Lidar.Ground
   ( Ground(..), GroundBind(..)
-  , groundValues, groundOrder, groundV, globsV
+  , groundValues, groundOrder, groundV, bindVals
   ) where
 
 import qualified Data.Map as M
@@ -31,6 +32,7 @@ import qualified Data.Set as S
 import Data.Maybe( mapMaybe )
 import Lidar.Name
 import Lidar.Syntax
+import Lidar.Types( inst )
 
 -- | The body of a ground value: its bindings, in order, and its result. The values of the
 -- bindings and the result only use the variables bound before them.
@@ -39,6 +41,7 @@ data Ground = Ground{ groundBinds :: [(Path,VType,GroundBind)], groundResult :: 
 
 data GroundBind = GValue VVal               -- ^ a ground value
                 | GCall Name [AType] [VVal] -- ^ a call that the client folds, with ground arguments
+                | GGlob Name [AType]        -- ^ a ground global (`[let-glob]`)
                 deriving (Show)
 
 -- | The ground values of a lowered program, given the functions whose calls the client folds.
@@ -54,7 +57,7 @@ groundValues foldable prog = go M.empty
         in if M.size found' == M.size found then found else go found'
     ground found (x,body)
       | M.member x found = Nothing
-      | otherwise = do g <- groundBody foldable (M.keysSet found) body
+      | otherwise = do g <- groundBody foldable (progSigs prog) (M.keysSet found) body
                        return (x,g)
 
 -- | The ground values in an order in which each comes after the ground values it refers to.
@@ -65,18 +68,22 @@ groundOrder gs = reverse (snd (foldl visit (S.empty,[]) (M.keys gs)))
       | S.member x seen = (seen,acc)
       | otherwise = let (seen',acc') = foldl visit (S.insert x seen,acc) (globsOf (gs M.! x))
                     in (seen', x : acc')
-    globsOf g = [y | v <- groundResult g : concatMap bindVals (groundBinds g), y <- globsV v, M.member y gs]
-    bindVals (_,_,b) = case b of
-                         GValue v -> [v]
-                         GCall _ _ vs -> vs
+    globsOf g = [y | (_,_,GGlob y _) <- groundBinds g, M.member y gs]
 
--- the body of a value as a ground chain, given the ground globals
-groundBody :: (Name -> Bool) -> S.Set Name -> VExpr -> Maybe Ground
-groundBody foldable globals body
+-- the values of a binding
+bindVals :: GroundBind -> [VVal]
+bindVals b = case b of
+               GValue v -> [v]
+               GCall _ _ vs -> vs
+               GGlob _ _ -> []
+
+-- the body of a value as a ground chain, given the signatures and the ground globals
+groundBody :: (Name -> Bool) -> Sigs -> S.Set Name -> VExpr -> Maybe Ground
+groundBody foldable sigs globals body
   = do (binds,res) <- chain body
        GValue v <- Just res
        _ <- checkBinds S.empty binds
-       if groundV globals (S.fromList [x | (x,_,_) <- binds]) v then Just (Ground binds v) else Nothing
+       if groundV (S.fromList [x | (x,_,_) <- binds]) v then Just (Ground binds v) else Nothing
   where
     chain e = case e of
                 Ret v -> Just ([], GValue v)
@@ -84,6 +91,9 @@ groundBody foldable globals body
                 Let x t e1 e2 -> do (b1,r1) <- chain e1
                                     (b2,r2) <- chain e2
                                     Just (b1 ++ [(x,t,r1)] ++ b2, r2)
+                LetGlob x g tys e' | S.member g globals, Just (SigVal tvs t) <- M.lookup g sigs
+                  -> do (b2,r2) <- chain e'
+                        Just ((x,inst tvs tys t,GGlob g tys) : b2, r2)
                 -- a cast binds its scrutinee at the target type
                 LetCast v b x e' -> do (b2,r2) <- chain e'
                                        Just ((x,VPtr b,GValue v) : b2, r2)
@@ -93,20 +103,15 @@ groundBody foldable globals body
     checkBinds bound binds
       = case binds of
           [] -> Just bound
-          (x,_,b):rest | all (groundV globals bound) (bindVals b) -> checkBinds (S.insert x bound) rest
+          (x,_,b):rest | all (groundV bound) (bindVals b) -> checkBinds (S.insert x bound) rest
           _ -> Nothing
-    bindVals b = case b of
-                   GValue v -> [v]
-                   GCall _ _ vs -> vs
 
--- | Whether a value is ground, given the ground globals and the ground variables in scope.
-groundV :: S.Set Name -> S.Set Path -> VVal -> Bool
-groundV globals bound = gv
+-- | Whether a value is ground, given the ground variables in scope.
+groundV :: S.Set Path -> VVal -> Bool
+groundV bound = gv
   where
     gv val = case val of
                Var x -> S.member x bound
-               Glob g _ -> S.member g globals
-               DupV v -> gv v
                UnitV -> True
                Lit lit -> groundLit lit
                Inj _ _ v -> gv v
@@ -137,25 +142,3 @@ groundV globals bound = gv
                       LitInt _ _ -> True
                       LitChar _ -> True
                       LitFloat _ -> False
-
--- | The globals that a value reads (not the functions it refers to, nor inside closures).
-globsV :: VVal -> [Name]
-globsV val
-  = case val of
-      Glob g _ -> [g]
-      DupV v -> globsV v
-      Inj _ _ v -> globsV v
-      Tuple vs -> concatMap globsV vs
-      Ptr _ a -> globsA a
-      Pack _ _ v -> globsV v
-      TyApp v _ -> globsV v
-      Up v -> globsV v
-      Some v -> globsV v
-      _ -> []
-  where
-    globsA a = case a of
-                 InjA _ _ v -> globsA v
-                 Roll _ v -> globsA v
-                 InjLazy _ _ v -> globsA v
-                 Box v -> globsV v
-                 _ -> []

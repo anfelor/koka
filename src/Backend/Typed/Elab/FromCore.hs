@@ -908,7 +908,9 @@ elabNamed e x tp info tys
                                                                              else return (tapp (Ptr (forallA tvs (AFun ps r)) (Fun (toLidar x))) tysD)
                                            coerceInst (VPtr a) expect f
                    SigVal _ _     -> do (tysD,t) <- instVal x sig tp tys
-                                        coerceInst t expect (Glob (toLidar x) tysD)
+                                        y <- fresh "g"
+                                        (k,w) <- coerceInst t expect (Var y)
+                                        return (LetGlob y (toLidar x) tysD . k, w)
                    SigCon _ _ _   -> failE ("constructor used as a variable: " ++ show x)
 
 -- closures only have owned parameters ([fun]): wrap a function that borrows (or takes a unique argument)

@@ -335,9 +335,13 @@ localP = do raw <- pathP
 
 valueOf :: RawPath -> P VVal
 valueOf raw = do u <- useP raw
-                 return (case u of
-                           Local x -> Var x
-                           Global n -> Glob n [])
+                 case u of
+                   Local x -> return (Var x)
+                   Global n -> globalValue n
+
+-- a global is read by `let glob`, not used as a value
+globalValue :: Name -> P VVal
+globalValue n = fail ("global " ++ show n ++ " used as a value")
 
 --------------------------------------------------------------------------
 -- Types
@@ -453,7 +457,6 @@ valP
       , kw "ptr" >> (Ptr unknownA <$> atomAValP)
       , kw "pack" >> (do ts <- tyArgsP; Pack unknownV ts <$> atomValP)
       , kw "up" >> (Up <$> atomValP)
-      , kw "dup" >> (DupV <$> atomValP)
       , kw "ctx" >> (Context unknownA <$> atomValP)
       , kw "some" >> (Some <$> atomValP)
       , atomValP ]
@@ -475,7 +478,7 @@ baseValP
            u <- useP raw
            case u of
              Local x -> return (Var x)
-             Global n -> Glob n <$> option [] (try tyArgsP)
+             Global n -> globalValue n
       , sym "(" >> ((UnitV <$ sym ")")
                     <|> (do v <- valP
                             (v <$ sym ")") <|> (do sym ","; vs <- commaSep valP; sym ")"; return (Tuple (v:vs))))) ]
@@ -557,6 +560,9 @@ letP
       [ kw "scalar" >> unscalar
       , kw "ptr" >> (do raw <- pathP; sym "="; v <- valP; kw "in"; x <- childBinder v (const SDeref) raw; Deref v x <$> exprP)
       , kw "cast" >> (do b <- bracketsP aP; raw <- pathP; sym "="; v <- valP; kw "in"; x <- childBinder v (const SCast) raw; LetCast v b x <$> exprP)
+      , kw "glob" >> (do raw <- pathP; sym "="; g <- globalName <$> nameP; ts <- option [] tyArgsP; kw "in"
+                         x <- rootBinder raw
+                         LetGlob x g ts <$> exprP)
       , kw "roll" >> destruct Unroll SRoll
       , kw "box" >> destruct Unbox SContents
       , kw "pack" >> (do vs <- bracketsP (commaSep tvarP); raw <- pathP; sym "="; v <- valP; kw "in"
