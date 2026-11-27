@@ -10,7 +10,7 @@
 -- Struct names are hashes of their canonical layouts so modules agree on them.
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 module Backend.Typed.CGen.Layout( cName, encode, ctName, structDefs, blockName, blockDef, leafSlots
-                            , needsRC, dupExpr, dropStmt, dupFun, dropFun
+                            , needsRC, dupExpr, dropStmt, dupFun, dropFun, boxFields
                             , primBox, scalarHeapSize, shapeIsSmall, fnv
                             ) where
 
@@ -134,6 +134,15 @@ dropFun ct
       CProd _ | needsRC ct -> Just (ctName ct ++ "_drop")
       CSum _  | needsRC ct -> Just (ctName ct ++ "_drop")
       _ -> Nothing
+
+-- the boxed fields of a C value `e` of a C type, as C expressions (those that `_dup` dups)
+boxFields :: CT -> String -> [String]
+boxFields ct e
+  = case ct of
+      CBox -> [e]
+      CProd fs -> concat [boxFields f (e ++ ".f" ++ show i) | (i,f) <- fs]
+      CSum _ -> [e ++ "._cons._fields[" ++ show i ++ "]" | i <- [0..scanOf ct - 2]]
+      _ -> []
 
 dupExpr :: CT -> String -> String
 dupExpr ct e = maybe e (\f -> f ++ "(" ++ e ++ ",_ctx)") (dupFun ct)

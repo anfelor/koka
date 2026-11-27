@@ -811,6 +811,29 @@ kk_decl_export void kk_box_mark_shared_recx(kk_box_t b, kk_context_t* ctx) {
   }
 }
 
+// Mark the block of a value that is kept forever (such as a top-level value) so that it is
+// never counted or freed again: its own reference is never dropped, and dups and drops of it
+// are not counted. Only the block itself is marked; its children keep their counts.
+// - A ref becomes thread-shared and sticky instead, as any thread may read and write it
+//   (and marking never stops at a persistent block, so a cycle of persistent blocks through
+//   a ref would not terminate).
+// - A block that is thread-shared already becomes sticky, as other threads may count it
+//   concurrently; a stuck (static) block stays stuck.
+kk_decl_export void kk_box_mark_persistent(kk_box_t v, kk_context_t* ctx) {
+  if (!kk_box_is_non_null_ptr(v)) return;
+  kk_block_t* b = kk_ptr_unbox(v, ctx);
+  if (kk_block_tag(b) == KK_TAG_REF) {
+    kk_block_mark_shared(b, ctx);
+  }
+  const kk_refcount_t rc = kk_block_refcount(b);
+  if (rc > RC_PERSISTENT) {
+    kk_block_refcount_set(b, RC_PERSISTENT);
+  }
+  else if (rc < 0 && rc > RC_STICKY) {
+    kk_block_refcount_set(b, RC_STICKY);
+  }
+}
+
 
 
 /*--------------------------------------------------------------------------------------

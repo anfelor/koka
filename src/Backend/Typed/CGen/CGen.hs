@@ -191,10 +191,8 @@ genV cx val
                      if onDemand then do modify (\st -> st{ stLocal = True })
                                          return (onceRead x)
                                  else return (text (cName x))
-      DupV v -> do t <- tyOf cx v
-                   ct <- ctype t
-                   e <- genV cx v
-                   return (dupExpr ct e)
+      -- only globals are dupped, and every global is persistent (`kk_box_mark_persistent`)
+      DupV v -> genV cx v
       UnitV -> return "kk_Unit"
       Lit lit -> genLit lit
       NoReuse _ _ -> return "kk_reuse_null"
@@ -1265,9 +1263,13 @@ genDef env cenv def
                   initf = "static" <+> cty ct <+> name <.> "_init(kk_context_t* _ctx)" <+> block ss
               case ini of
                 AtLoad -> return ("extern" <+> cty ct <+> name <.> ";", vcat [cty ct <+> name <.> ";", initf],
-                                  name <+> "=" <+> name <.> "_init(_ctx);")
+                                  vcat ((name <+> "=" <+> name <.> "_init(_ctx);") : map persist (boxFields ct (cName x))))
                 OnDemand | ct == CBox -> return (empty, initf, empty)
                 OnDemand -> failG "a value initialised on demand that is not a pointer"
+
+-- Marks a box of a global persistent, as it is never dropped: dups of globals are not counted
+persist :: String -> Doc
+persist e = "kk_box_mark_persistent(" <.> text e <.> ",_ctx);"
 
 -- The read of a value initialised on demand: initialises it at its first read (`onceHelpers`).
 onceRead :: Name -> Doc
@@ -1281,7 +1283,8 @@ onceDecl x = let name = text (cName x)
 
 -- The once-cells of the values initialised on demand, for a C file that has any: `state` is 0
 -- before, 1 during and 2 after the initialisation, which the first reader does. As the value
--- can then be read by any thread, it is marked as thread-shared.
+-- can then be read by any thread, it is marked as thread-shared; first as persistent, so that the
+-- marking keeps it persistent and marks its children.
 onceHelpers :: Doc
 onceHelpers = vcat
   [ "typedef struct kt_once_s { kk_box_t value; _Atomic(int32_t) state; } kt_once_t;"
@@ -1289,6 +1292,7 @@ onceHelpers = vcat
   , "  int32_t expected = 0;"
   , "  if (kk_atomic_cas_strong_acq_rel(&once->state, &expected, 1)) {"
   , "    kk_box_t value = init(_ctx);"
+  , "    kk_box_mark_persistent(value, _ctx);"
   , "    kk_box_mark_shared(value, _ctx);"
   , "    once->value = value;"
   , "    kk_atomic_store_release(&once->state, 2);"

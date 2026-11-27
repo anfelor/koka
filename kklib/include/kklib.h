@@ -944,12 +944,13 @@ static inline void kk_reuse_drop(kk_reuse_t r, kk_context_t* ctx) {
 #define kk_skip_drop(x,ctx) (x)
 
 /*--------------------------------------------------------------------------------------
-  Thread-shared marking (see `refcount.c`)
+  Thread-shared and persistent marking (see `refcount.c`)
 --------------------------------------------------------------------------------------*/
 
 kk_decl_export void        kk_block_mark_shared(kk_block_t* b, kk_context_t* ctx);
 kk_decl_export void        kk_box_mark_shared(kk_box_t b, kk_context_t* ctx);
 kk_decl_export void        kk_box_mark_shared_recx(kk_box_t b, kk_context_t* ctx);
+kk_decl_export void        kk_box_mark_persistent(kk_box_t b, kk_context_t* ctx);
 
 
 /*--------------------------------------------------------------------------------------
