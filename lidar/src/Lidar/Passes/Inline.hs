@@ -26,7 +26,8 @@
   Bindings that keep a literal dereference named are retained, preserving its operand
   path without introducing a fresh root, and so are those of values that are duplicated as
   a whole (`[dup]` takes a variable). Existentials are not inlined: unpacking a known
-  `pack` would substitute its types.
+  `pack` would substitute its types. Nor is a value that names a persistent variable
+  (`[let-glob]`) or one below it: the variable that it is bound to is counted.
 -}
 module Lidar.Passes.Inline( inlineProgram ) where
 
@@ -35,8 +36,8 @@ import qualified Data.Set as S
 import Data.Maybe( fromMaybe )
 import Data.Functor.Const( Const(..) )
 import Lidar.Syntax
-import Lidar.Traversal( descendA, descendAll, descendV, mapV )
-import Lidar.Passes.Common( mapAll, defGamma, descendTyped, defScope, perBody, project, substEIn, substVType, valueAt )
+import Lidar.Traversal( descendA, descendAll, descendV, fvV, mapV )
+import Lidar.Passes.Common( mapAll, belowAny, letGlobs, defGamma, descendTyped, defScope, perBody, project, substEIn, substVType, valueAt )
 import Lidar.Env( Env, envOf, M, ask, evalM, liftE, local )
 import Lidar.Query( Gamma, inferVar, lamGamma )
 
@@ -60,7 +61,8 @@ inlineDef def
     -- a literal dereference: its operand must remain a path, rather than become
     -- a fresh root. The C compiler can still propagate the literal.
     kept = S.fromList [root n | x@(Path n _) <- S.toList scruts, Just v <- [known allVals x], not (variable v)]
-    vals = M.withoutKeys allVals kept
+    globs = letGlobs (defBody def)
+    vals = M.filter (not . any (belowAny globs) . fvV) (M.withoutKeys allVals kept)
     sub = known vals
     body = substEIn (defScope def) sub (inlineE vals (defBody def))
     variable (Var _) = True

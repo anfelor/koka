@@ -15,21 +15,23 @@
   maximal ground operand of non-ground code, if the value allocates (a box, a string, or a
   folded call) and has a pointer type without type variables. Each becomes a `DefVal`
   `f@closed<n>` whose body is a single value (or folded call): the extracted values it is built
-  from appear as their own globals, the other ground values it is built from as their values.
-  Structurally equal values share one global.
+  from are read from their own globals (`[let-glob]`), the other ground values it is built from
+  appear as their values. Structurally equal values share one global.
 
   The pass runs after `Reuse`, so a construction that takes a reuse credit (`box@r`) is not
   ground and stays: only fresh allocations move, and no allocation moves to a consumer that
-  would have reused it. Every allocating ground value is in an owned position after Perceus, so
-  it becomes `dup g`. The values that it consumed lose a consumption: a ground `let` whose
-  occurrences were all in replaced values is removed, any other gets a `drop` in place of the
-  consumption (on a static block if it was extracted).
+  would have reused it. An extracted `let` becomes a `let glob` of its global, and an extracted
+  operand is read by a `let glob` before the node that uses it. Their variables are persistent,
+  so their owned uses need no `dup`: the pass removes the dups and drops that Perceus gave an
+  extracted `let`, and the uniqueness tests of it (`persist`). The values that an extracted value
+  consumed lose a consumption: a ground `let` whose occurrences were all in replaced values is
+  removed, any other that is not extracted gets a `drop` in place of the consumption.
 
   Ground values cannot have effects or diverge. The pass also extracts closed calls: calls with
   ground arguments of functions that the client declares extractable (pure; an action takes
   the effect token, which is never ground). Such a global is initialised on demand, at its
-  first use, as is every global built from one; its body passes an extracted argument as
-  `dup g` to an owned parameter and as `g` to a borrowed one. A call that refers to the
+  first use, as is every global built from one; its body reads an extracted argument by a
+  `let glob`, for an owned parameter as for a borrowed one. A call that refers to the
   recursive group of its function, directly or through its arguments, is not extracted, as
   its initialisation could need itself. The extracted values refer to no global but each other
   and the functions they call, and come first in the program, so a client that cannot write
@@ -40,7 +42,7 @@ module Lidar.Passes.Closed( closedProgram ) where
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad( foldM, zipWithM )
-import Control.Monad.State( State, runState, state )
+import Control.Monad.State( State, gets, runState, state )
 import Data.Functor.Const( Const(..) )
 import Data.Graph( flattenSCC, stronglyConnComp )
 import Data.Functor.Identity( Identity(..) )
@@ -49,11 +51,11 @@ import Data.Monoid( All(..), Any(..) )
 import Lidar.Name
 import Lidar.Syntax
 import Lidar.Types( Types(ftv), isPtr )
-import Lidar.Traversal( descendA, descendV, descendAll, descendE, fvE, fvV, globalsE, globalsV, mapA, mapV )
-import Lidar.Ground( GroundBind(..), groundV )
-import Lidar.Env( Env, envOf, M, ask, evalM )
+import Lidar.Traversal( descendA, descendV, descendAll, descendE, fvE, fvV, globalsE, globalsV, sameBlock, stepsFrom, within )
+import Lidar.Ground( GroundBind(..), bindVals, groundV )
+import Lidar.Env( Env(..), envOf, M, ask, evalM )
 import Lidar.Query( Gamma )
-import Lidar.Passes.Common( paramModes, trivialTy, defGamma, typedChildren, NameSupply, dropValue, freshFor, freshPathFrom, scopeOf )
+import Lidar.Passes.Common( paramModes, trivialTy, defGamma, typedChildren, NameSupply, dropValue, freshFor, freshPathFrom, mapAll, renameE, renameV, scopeOf )
 
 -- | Extract the closed ground values and calls of the functions of a program, given the
 -- functions whose calls the client folds and those whose calls it can initialise on demand.
@@ -103,7 +105,10 @@ closedBody env foldable closedCall group def
        opNames <- mapM (\(_,v,t) -> global foldable f (Ret v) t) operands
        let ops = M.fromList (zip (map placeholder [0 ..]) (zip opNames [v | (v,_,_) <- operands]))
            kept = keptLets gs letNames body'
-       return (evalM (rewrite env gs dropped kept letNames ops body') (env,defGamma def) (freshFor def))
+       -- the rewritten body reads the new globals
+       sigs <- gets (\st -> M.fromList [(x,SigVal [] t) | DefVal x _ _ t _ <- stDefs st])
+       let env' = env{ envSigs = M.union (envSigs env) sigs }
+       return (evalM (rewrite env' gs dropped kept letNames ops body') (env',defGamma def) (freshFor def))
   where
     f = defName def
     (gs,dropped) = groundLets foldable closedCall group (defBody def)
@@ -157,11 +162,6 @@ callThenDrops e
                      Deref (Var z) y (Drop y' e') | y == y' -> (z:) <$> drops r e'
                      _ -> Nothing
 
-bindVals :: GroundBind -> [VVal]
-bindVals b = case b of
-               GValue v -> [v]
-               GCall _ _ vs -> vs
-
 -- the ground variables of a ground let's value
 depsOf :: Grounds -> Path -> [Path]
 depsOf gs x = let (_,b,_) = gs M.! x in S.toList (S.unions (map fvV (bindVals b)))
@@ -190,6 +190,7 @@ allocates gs val
       Var x -> case M.lookup x gs of
                  Just (_,GValue v,_) -> allocates gs v
                  Just (_,GCall{},_) -> True
+                 Just (_,GGlob{},_) -> False   -- not a ground let (`groundLets`)
                  Nothing -> False
       Ptr _ a -> allocatesA a
       _ -> getAny (getConst (descendV (Const . Any . allocatesA) (Const . Any . allocates gs) val))
@@ -200,23 +201,23 @@ allocates gs val
                      _ -> getAny (getConst (descendA (const (Const (Any False))) (Const . Any . allocatesA) (Const . Any . allocates gs) a))
 
 -- The value of a ground value in the body of a global: the extracted lets it is built from as
--- (owned references to) their globals, the other ground lets as their values. Nothing if it
--- needs a folded call that is not extracted.
+-- variables named after their globals (`readGlobals` reads them), the other ground lets as
+-- their values. Nothing if it needs a folded call that is not extracted.
 expand :: Grounds -> M.Map Path Name -> VVal -> Maybe VVal
 expand gs names = go
   where
     go val = case val of
-               Var x | Just g <- M.lookup x names -> Just (DupV (Glob g []))
+               Var x | Just g <- M.lookup x names -> Just (Var (root g))
                      | Just (_,GValue v,_) <- M.lookup x gs -> go v
                      | otherwise -> Nothing
                DupV v -> go v
                _ -> descendV goA go val
     goA = descendA pure goA go
 
--- The body of the global of a ground let, given the globals of the lets extracted before. A
--- closed call passes an extracted value to a borrowed parameter as its global (without `dup`),
--- another value only without a `ptr` (which is owned, as a nullary constructor is), and to a
--- unique one nothing that allocates; Nothing if it cannot.
+-- The body of the global of a ground let, given the globals of the lets extracted before (see
+-- `expand`). A closed call passes an extracted value to a borrowed parameter, another value
+-- only without a `ptr` (which is owned, as a nullary constructor is), and to a unique one
+-- nothing that allocates; Nothing if it cannot.
 letBody :: Env -> (Name -> Bool) -> Grounds -> M.Map Path Name -> Path -> Maybe VExpr
 letBody env foldable gs names x
   = case gs M.! x of
@@ -224,10 +225,11 @@ letBody env foldable gs names x
       (_,GCall g tys vs,_)
         | foldable g -> Call g tys <$> mapM (expand gs names) vs
         | otherwise -> Call g tys <$> zipWithM arg (paramModes env g (length vs)) vs
+      (_,GGlob{},_) -> Nothing
   where
     arg m v = case (m,v) of
                 (Owned,_) -> expand gs names v
-                (Borrowed,Var y) | Just g <- M.lookup y names -> Just (Glob g [])
+                (Borrowed,Var y) | Just g <- M.lookup y names -> Just (Var (root g))
                 (Borrowed,_) | not (allocates gs v), Just v' <- expand gs names v, noPtr v' -> Just v'
                 (Unique,_) | not (allocates gs v) -> expand gs names v
                 _ -> Nothing
@@ -239,16 +241,16 @@ noPtr val
       Ptr _ _ -> False
       _ -> getAll (getConst (descendV (const (Const (All True))) (Const . All . noPtr) val))
 
--- The global of an extracted value with a body and a type: an existing one with the same body,
--- or a new one, initialised on demand if its body calls a function that is not folded or reads
--- a global initialised on demand.
+-- The global of an extracted value with a body (from `expand`) and a type: an existing one with
+-- the same body, or a new one, initialised on demand if its body calls a function that is not
+-- folded or reads a global initialised on demand.
 global :: (Name -> Bool) -> Name -> VExpr -> VType -> State St Name
-global foldable f body t
+global foldable f marked t
   = state $ \st ->
       case M.lookup key (stKeys st) of
         Just g -> (g,st)
         Nothing -> let g = makeHiddenName ("closed" ++ show (stNext st)) f
-                       onDemand = case body of
+                       onDemand = case marked of
                                     Call h _ _ | not (foldable h) -> True
                                     _ -> not (S.disjoint (stOnDemand st) (globalsE body))
                    in (g, st{ stKeys = M.insert key g (stKeys st)
@@ -256,7 +258,15 @@ global foldable f body t
                             , stNext = stNext st + 1
                             , stOnDemand = (if onDemand then S.insert g else id) (stOnDemand st) })
   where
+    body = readGlobals marked
     key = show body ++ show t
+
+-- The body of a global from a value or call in which `expand` named the extracted values it is
+-- built from after their globals (its only free variables): `let glob`s read them.
+readGlobals :: VExpr -> VExpr
+readGlobals e = foldr (\(y,g) -> LetGlob y g []) (renameE (M.fromList [(root g,y) | (y,g) <- reads]) e) reads
+  where
+    reads = [(root (newHiddenName ("g" ++ show i)),g) | (i,Path g _) <- zip [0 :: Int ..] (S.toList (fvE e))]
 
 -- A placeholder for the global of the i-th extracted operand.
 placeholder :: Int -> Name
@@ -278,7 +288,7 @@ extractOperands gs names body = (body',reverse ops)
               Just t | groundV S.empty (M.keysSet gs) v
                        && allocates gs v && closed v t
                      , Just v' <- expand gs names v
-                -> state (\os -> (Glob (placeholder (length os)) [], (v,v',t) : os))
+                -> state (\os -> (Var (root (placeholder (length os))), (v,v',t) : os))
               _ -> descendV goA goV v
     goA :: AVal -> State [(VVal,VVal,VType)] AVal
     goA a = case a of
@@ -307,7 +317,21 @@ keptLets gs names body = go S.empty (S.toList used)
                 Let x _ _ e2 | M.member x gs -> strip e2
                 _ -> runIdentity (descendAll (\_ e' -> Identity (strip e')) e)
 
--- the variables that a value consumes: those not under a `dup`
+-- The body of a `let glob` that binds `x` in place of an owned variable: without the dups and
+-- drops of `x` and of the variables below it with its blocks, which are persistent, and with each
+-- uniqueness test of one replaced by its shared branch, as a persistent block is never unique.
+-- The dups of the contents of its boxes stay, as these are still counted.
+persist :: Path -> VExpr -> VExpr
+persist x = go
+  where
+    mine p = p `within` x && all sameBlock (stepsFrom x p)
+    go e = case e of
+             Dup _ p e' | mine p -> go e'
+             Drop p e' | mine p -> go e'
+             IsUnique p _ e2 | mine p -> go e2
+             _ -> mapAll (const go) e
+
+-- the variables that a value consumes (those not under a `dup`)
 consumed :: VVal -> [Path]
 consumed val
   = case val of
@@ -318,44 +342,47 @@ consumed val
     consumedA a = getConst (descendA (const (Const [])) (Const . consumedA) (Const . consumed) a)
 
 -- the placeholders in a value, outside lambdas
-placeholdersIn :: VVal -> [Name]
-placeholdersIn val
-  = case val of
-      Glob p [] -> [p]
-      _ -> getConst (descendV (Const . inA) (Const . placeholdersIn) val)
+placeholdersIn :: M.Map Name a -> VVal -> [Name]
+placeholdersIn ops = go
   where
-    inA a = getConst (descendA (const (Const [])) (Const . inA) (Const . placeholdersIn) a)
+    go val = case val of
+               Var (Path p []) | M.member p ops -> [p]
+               _ -> getConst (descendV (Const . inA) (Const . go) val)
+    inA a = getConst (descendA (const (Const [])) (Const . inA) (Const . go) a)
 
 type R = M (Env,Gamma) NameSupply
 
--- The body with the extracted lets binding their globals, the lets that are not kept removed,
--- and the globals of the extracted operands, with a drop of each kept let that lost a
--- consumption before the node that lost it.
+-- The body with the extracted lets reading their globals (`[let-glob]`), the lets that are not
+-- kept removed, and each node with extracted operands reading their globals before it, with a
+-- drop of each kept let that lost a consumption before the node that lost it.
 rewrite :: Env -> Grounds -> Dropped -> S.Set Path -> M.Map Path Name -> M.Map Name (Name,VVal) -> VExpr -> R VExpr
 rewrite env gs dropped kept letNames ops = go
   where
     go e = case e of
-             Let x t _ e2 | Just (_,b,_) <- M.lookup x gs ->
+             Let x _ _ e2 | Just (_,b,_) <- M.lookup x gs ->
                case M.lookup x letNames of
                  _ | not (S.member x kept) -> lose (consumedBy x b) =<< go e2
-                 Just g -> lose (consumedBy x b) =<< typedChildren go (Let x t (Ret (DupV (Glob g []))) e2)
+                 Just g -> lose (consumedBy x b) =<< typedChildren go (LetGlob x g [] (persist x e2))
                  Nothing -> typedChildren go e
              _ -> do let vals = getConst (descendE (const (Const [])) (\v -> Const [v]) (\_ _ -> Const []) e)
-                         lost = [v | p <- concatMap placeholdersIn vals, Just (_,v) <- [M.lookup p ops]]
-                     lose lost =<< typedChildren go (runIdentity (descendE pure (Identity . replaceV) (\_ e' -> Identity e') e))
+                         ps = concatMap (placeholdersIn ops) vals
+                         lost = [v | p <- ps, Just (_,v) <- [M.lookup p ops]]
+                     ys <- mapM (const (state (freshPathFrom "cg"))) ps
+                     let ren = M.fromList (zip (map root ps) ys)
+                         e' = runIdentity (descendE pure (Identity . renameV ren) (\_ e1 -> Identity e1) e)
+                         reads = [(y,fst (ops M.! p)) | (y,p) <- zip ys ps]
+                     lose lost =<< typedChildren go (foldr (\(y,g) -> LetGlob y g []) e' reads)
     -- the values that a ground let consumes: a folded call's arguments at owned parameters and
     -- the variables it drops after the call
     consumedBy x b = case b of
                        GValue v -> [v]
                        GCall g _ vs -> [v | (m,v) <- zip (paramModes env g (length vs)) vs, owning m]
                                        ++ map Var (M.findWithDefault [] x dropped)
-    replaceV v = case v of
-                   Glob p [] | Just (g,_) <- M.lookup p ops -> DupV (Glob g [])
-                   _ -> mapV replaceA replaceV v
-    replaceA = mapA id replaceA replaceV
-    -- drop the kept lets that the removed values consumed
+                       GGlob{} -> []
+    -- drop the kept lets that the removed values consumed, except the extracted ones, which
+    -- are persistent
     lose :: [VVal] -> VExpr -> R VExpr
-    lose vals e = foldM dropLet e [z | z <- concatMap consumed vals, S.member z kept]
+    lose vals e = foldM dropLet e [z | z <- concatMap consumed vals, S.member z kept, M.notMember z letNames]
     -- Drop a let through a fresh variable, as a let can lose several consumptions in one scope.
     dropLet e z
       | trivialTy env (V t) = return e

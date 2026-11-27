@@ -143,6 +143,7 @@ renE global ren expr
                    Nothing -> bindRoot x
     annotated = case expr of
       Let x t e1 e2 -> Let x (replaceVType sub t) e1 e2
+      LetGlob x g ts e -> LetGlob x g (map (replaceAType sub) ts) e
       CastEv u t e -> CastEv (replaceVType sub u) (replaceVType sub t) e
       Unreachable t -> Unreachable (replaceVType sub t)
       Call f ts vs -> Call f (map (replaceAType sub) ts) vs

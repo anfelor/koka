@@ -22,7 +22,7 @@ import Lidar.Syntax
 import Lidar.Types( Sub, Types(..), inst, mapReuseContents, traverseReuseContents )
 import Lidar.Traversal
 import Lidar.Env( Env(..), M, dataBody, ask, local )
-import Lidar.Query( Gamma, bindAll, inferVar, inferV, altTypes, lamGamma, tokenTy, uniqueGamma, unboxRuGamma, copyRuGamma, lockGamma )
+import Lidar.Query( Gamma, bindAll, inferVar, inferV, globType, altTypes, lamGamma, tokenTy, uniqueGamma, unboxRuGamma, copyRuGamma, lockGamma )
 import Lidar.Pretty( ppr )
 import Lidar.Name( Name, newHiddenName )
 
@@ -117,6 +117,7 @@ mentionedE :: VExpr -> [Path]
 mentionedE e = annotations ++ getConst (descendE (Const . (:[])) (Const . mentionedV) (\xs body -> Const (xs ++ mentionedE body)) e)
   where annotations = case e of
           Let _ t _ _ -> mentionedT t
+          LetGlob _ _ ts _ -> concatMap (mentionedT . VPtr) ts
           CastEv u t _ -> mentionedT u ++ mentionedT t
           Unreachable t -> mentionedT t
           Call _ ts _ -> concatMap (mentionedT . VPtr) ts
@@ -257,6 +258,7 @@ substTypesE sub expr
   where
     annotated = case expr of
       Let x t e1 e2         -> Let x (subst sub t) e1 e2
+      LetGlob x g ts e      -> LetGlob x g (map (subst sub) ts) e
       CastEv u t e          -> CastEv (subst sub u) (subst sub t) e
       Unreachable t         -> Unreachable (subst sub t)
       Call f ts vs          -> Call f (map (subst sub) ts) vs
@@ -455,6 +457,7 @@ substStepWith renameRoot recur scope sub expr
   where
     annotated = case expr of
       Let x t e1 e2 -> Let x (substVType sub t) e1 e2
+      LetGlob x g ts e -> LetGlob x g (map (substAType sub) ts) e
       CastEv u t e -> CastEv (substVType sub u) (substVType sub t) e
       Unreachable t -> Unreachable (substVType sub t)
       Call f ts vs -> Call f (map (substAType sub) ts) vs
@@ -532,6 +535,8 @@ subGammas env g expr
   | otherwise
   = case expr of
       Let x t _ _ -> return [g, M.insert x (V t) g]
+      LetGlob x y ts _ -> do t <- globType env y ts
+                             return [M.insert x (V t) g]
       IfYielding _ (k3,_) (k2,_) -> return [M.insert k3 (V VToken) g, M.insert k2 (V VToken) g]
       Total k _ -> return [M.insert k (V VToken) g]
       Gen _ _ -> return [M.filter (not . tokenTy) g]
@@ -576,6 +581,18 @@ typedChildren f expr
        let under g' = local (const (env,g')) . f
        descendTyped env g (lamsTyped g under) under expr
 
+-- the variables that the `[let-glob]`s of an expression bind, also in its lambdas
+letGlobs :: VExpr -> S.Set Path
+letGlobs expr = here <> getConst (descendAll (\_ e -> Const (letGlobs e)) expr)
+  where
+    here = case expr of
+             LetGlob x _ _ _ -> S.singleton x
+             _ -> S.empty
+
+-- whether a variable is one of a set or below one
+belowAny :: S.Set Path -> Path -> Bool
+belowAny xs y = any (`S.member` xs) (y : prefixes y)
+
 -- the variables on the path to a variable, from its root
 prefixes :: Path -> [Path]
 prefixes (Path x ss) = [Path x (take k ss) | k <- [0 .. length ss - 1]]
@@ -599,6 +616,7 @@ tvarsE bound expr
     joinDef tvs ps e1 = outside (with tvs) (concat [ftv t | (_,_,t) <- ps]) ++ tvarsE (with tvs) e1
     annotations = case expr of
       Let _ t _ _        -> ftv t
+      LetGlob _ _ ts _   -> concatMap ftv ts
       CastEv u t _       -> ftv u ++ ftv t
       Unreachable t      -> ftv t
       Call _ ts _        -> concatMap ftv ts

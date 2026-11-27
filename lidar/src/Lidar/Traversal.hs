@@ -110,6 +110,7 @@ descendB fn fv fb expr
   = case expr of
       Ret v                 -> Ret <$> fv v
       Let x t e1 e2         -> (\e1' (x',e2') -> Let x' t e1' e2') <$> plain e1 <*> one x [] e2
+      LetGlob x g ts e      -> (\(x',e') -> LetGlob x' g ts e') <$> one x [] e
       Unreachable _         -> pure expr
       Call f ts vs          -> Call f ts <$> traverse fv vs
       App f vs              -> App <$> fn f <*> traverse fv vs
@@ -210,6 +211,17 @@ canonical (Path x ss) = Path x (reverse (dropWhile (not . hasSibling) (reverse s
                      SField _ _ -> True
                      _ -> isJust (sibling s)
 
+-- Whether the binder at a step from a variable has the same blocks: all but the contents and
+-- the block of a box and the fields of `[case-open]`. Below a persistent variable, these are
+-- persistent (see "Structural rules" in `Syntax`).
+sameBlock :: Step -> Bool
+sameBlock s
+  = case s of
+      SContents -> False
+      SCredit -> False
+      SOpen _ -> False
+      _ -> True
+
 -- `x` is `y` or one of its descendants
 within :: Path -> Path -> Bool
 within (Path x ss) (Path y ts) = x == y && ts `isPrefixOf` ss
@@ -304,6 +316,7 @@ globalsE :: VExpr -> S.Set Name
 globalsE expr = here <> getConst (descendE (const (Const S.empty)) (Const . globalsV) (\_ e -> Const (globalsE e)) expr)
   where here = case expr of
                  Call f _ _ -> S.singleton f
+                 LetGlob _ x _ _ -> S.singleton x
                  _ -> S.empty
 
 globalsV :: VVal -> S.Set Name
@@ -385,6 +398,7 @@ destructAOf expr
       IsNull{} -> Nothing
       Ret{} -> Nothing
       Let{} -> Nothing
+      LetGlob{} -> Nothing
       IfYielding{} -> Nothing
       Unreachable{} -> Nothing
       Call{} -> Nothing
@@ -426,6 +440,7 @@ destructVOf expr
       CaseOpen{} -> Nothing
       Ret{} -> Nothing
       Let{} -> Nothing
+      LetGlob{} -> Nothing
       IfYielding{} -> Nothing
       Unreachable{} -> Nothing
       Call{} -> Nothing

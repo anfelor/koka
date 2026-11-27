@@ -47,6 +47,13 @@
     - A unique variable `x :! t` is owned and holds the only reference to its block. A borrowed
       use of x, or of a variable on its path, demotes it to `x : t`; branches agree on the
       weaker mode.
+    - A persistent variable `x :* t` (bound by `[let-glob]`) refines a borrowed one: its block
+      is never counted or freed, so it needs no `drop`, and an owned use needs no `dup`. It is
+      never dropped, duplicated or tested for uniqueness, and a unique position rejects it.
+      Persistence is shallow: the variables below x with the same blocks (at every step but
+      `contents`, `credit` and the fields of `[case-open]`, `Traversal.sameBlock`) are
+      persistent, but the contents of its boxes are borrowed children, whose owned uses need a
+      `dup`.
     - Borrowing is non-lexical, as in the paper, but the context is not ordered: the IR may
       borrow an owned variable z anywhere before z is consumed. The binders of a destructuring
       of z are its *children*, named by their paths (`z.left`, see `Path`). Borrowed uses of a
@@ -686,6 +693,15 @@ data VExpr
   -- The binder is unique if every tail position of e₁ has a unique result: a unique value, a
   -- call of a function with a unique result, `[ctx-append]` or `[ctx-copy]`.
   | Let Path VType VExpr VExpr
+
+  --   x : ∀ā. V ∈ Σ    Γ, y :* V[B̄/ā] | J ⊢ e : W
+  --  ──────────────────────────────────────────────── [let-glob]
+  --   Γ | J ⊢ let glob y = x[B̄] in e : W
+  --
+  -- Reads a top-level value into a persistent variable (see "Structural rules"): the top
+  -- blocks of every top-level value are never counted (C generation makes them static or
+  -- persistent), so a use of y needs no reference counting. The binder is a root.
+  | LetGlob Path Name [AType] VExpr
 
   --  ───────────────────────── [unreachable]
   --   Γ | J ⊢ unreachable : W

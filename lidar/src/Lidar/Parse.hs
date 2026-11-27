@@ -557,6 +557,9 @@ letP
       [ kw "scalar" >> unscalar
       , kw "ptr" >> (do raw <- pathP; sym "="; v <- valP; kw "in"; x <- childBinder v (const SDeref) raw; Deref v x <$> exprP)
       , kw "cast" >> (do b <- bracketsP aP; raw <- pathP; sym "="; v <- valP; kw "in"; x <- childBinder v (const SCast) raw; LetCast v b x <$> exprP)
+      , kw "glob" >> (do raw <- pathP; sym "="; g <- globalName <$> nameP; ts <- option [] tyArgsP; kw "in"
+                         x <- rootBinder raw
+                         LetGlob x g ts <$> exprP)
       , kw "roll" >> destruct Unroll SRoll
       , kw "box" >> destruct Unbox SContents
       , kw "pack" >> (do vs <- bracketsP (commaSep tvarP); raw <- pathP; sym "="; v <- valP; kw "in"

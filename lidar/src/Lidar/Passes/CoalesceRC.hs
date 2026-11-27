@@ -26,6 +26,7 @@ coalesceRCProgram prog = prog{ progDefs = [d{ defBody = block (defBody d) } | d 
         | otherwise -> (counts, block expr)
         where old = M.findWithDefault 0 x counts
       Let x t rhs e | straight rhs -> next (Let x t (nested rhs)) e
+      LetGlob x g ts e -> next (LetGlob x g ts) e
       Proj v i x e   -> next (Proj (value v) i x) e
       Deref v x e    -> next (Deref (value v) x) e
       LetCast v t x e -> next (LetCast (value v) t x) e

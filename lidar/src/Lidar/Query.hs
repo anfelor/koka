@@ -9,7 +9,7 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- Type inference and typing-context queries shared by typed IR consumers.
 -- Keep inference in sync with the typing rules in Syntax.
-module Lidar.Query( Gamma, noJoins, bindAll, checkE, inferE, inferA, inferV, signature
+module Lidar.Query( Gamma, noJoins, bindAll, checkE, inferE, inferA, inferV, globType, signature
                           , inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma
                           , lamGamma, tokenTy, litType
                           ) where
@@ -105,6 +105,8 @@ inferExpr env g js expr
       Ret v -> inferV env g v
       Let x t e1 e2 -> do checkE env g noJoins e1 t
                           inferE env (M.insert x (V t) g) js e2
+      LetGlob x y tys e -> do t <- globType env y tys
+                              inferE env (M.insert x (V t) g) js e
       IfYielding v (k3,e3) (k2,e2) -> do checkV env g v VToken
                                          branches env [inferE env (M.insert k3 (V VToken) g) js e3, inferE env (M.insert k2 (V VToken) g) js e2]
       Unreachable t -> return t
@@ -563,6 +565,13 @@ inferA env g val
                                 return (ABox tv)
                         _ -> Left ("allocation at " ++ ppr tr ++ " of " ++ ppr tv)
 
+-- the type of a top-level value at type arguments
+globType :: Env -> Name -> [AType] -> Q VType
+globType env x tys
+  = case M.lookup x (envSigs env) of
+      Just (SigVal tvs t) | length tvs == length tys -> return (inst tvs tys t)
+      _ -> Left ("unknown global value " ++ show x)
+
 inferV :: Env -> Gamma -> VVal -> Q VType
 inferV env g val
   = case val of
@@ -570,9 +579,7 @@ inferV env g val
                   case t of
                     V v -> return v
                     A _ -> Left ("variable " ++ show x ++ " at the boxed type " ++ ppr t)
-      Glob x tys -> case M.lookup x (envSigs env) of
-                      Just (SigVal tvs t) | length tvs == length tys -> return (inst tvs tys t)
-                      _ -> Left ("unknown global value " ++ show x)
+      Glob x tys -> globType env x tys
       UnitV -> return VUnit
       Lit l -> checkLit l >> return (litType l)
       NoReuse n p -> do let t = VReuse MaybeEmpty n p

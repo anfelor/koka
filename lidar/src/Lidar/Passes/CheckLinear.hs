@@ -37,6 +37,12 @@
   each of its children (`refine`). After `dup z.left; drop z`, for example, `z.left` still holds
   a reference, and so does `z.left` after a `let` that consumes the other children of `z`.
 
+  The binder of `[let-glob]` is a borrowed root whose blocks are never counted: it and the
+  variables below it with the same blocks are persistent (`persistent`), so their uses need no
+  references (an owned use needs no `dup`), and a dup, a drop or a unique use of them is an
+  error. They are borrowed owners, also in closures and join points that capture them
+  (`ownerOf`), so the contents of their boxes are borrowed children.
+
   A unique variable is owned and holds the only reference to its block, so `UnboxRu` may
   take its contents and keep its block as a credit: it splits `z` into its contents and its
   block `z.credit`, which the body consumes as the children of `z` (`z` itself is out of
@@ -91,11 +97,11 @@ import Control.Monad( unless, when, forM_, foldM )
 import Data.Functor.Const( Const(..) )
 import Lidar.Name
 import Lidar.Syntax
-import Lidar.Traversal( child, descendV, destructAOf, destructVOf, dsAlts, dsScrut, fieldsAt, fvA, fvE, jumpTargets, sibling, within )
+import Lidar.Traversal( child, descendV, destructAOf, destructVOf, dsAlts, dsScrut, fieldsAt, fvA, fvE, jumpTargets, sameBlock, sibling, within )
 import Lidar.Types( checkDupType, prodV )
 import Lidar.Passes.Common( paramModes, prefixes, resultMode, trivialTy )
 import Lidar.Env( Env(..), envOf, M, ask, evalM, get, gets, liftE, local, modify )
-import Lidar.Query( Gamma, bindAll, inferV, inferA, inferVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
+import Lidar.Query( Gamma, bindAll, inferV, globType, inferA, inferVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 
 -- the mode of the variables at and below each owner: the roots in scope, and in the body of a
 -- join point the variables it captures
@@ -104,14 +110,26 @@ type Owners = M.Map Path Mode
 -- the children recorded where a destructuring binds a child of their parent: those of a
 -- trivial type, and the fields of each product. A path denotes the same child in the whole
 -- definition (see `Syntax.Path`), except below a cast, which another alternative can cast to
--- another type, so each destructuring records its children again (`record`).
-data Children = Children{ chTrivial :: S.Set Path, chFields :: M.Map Path [Path] }
+-- another type, so each destructuring records its children again (`record`). Also the roots
+-- bound by `[let-glob]` (see `persistent`).
+data Children = Children{ chTrivial :: S.Set Path, chFields :: M.Map Path [Path], chPersistent :: S.Set Name }
 
 -- record whether paths are of a trivial type, and the fields of products
 record :: [(Path,Bool)] -> [(Path,[Path])] -> Children -> Children
 record trivial fields tr
-  = Children (foldl' (\s (p,b) -> (if b then S.insert else S.delete) p s) (chTrivial tr) trivial)
-             (M.union (M.fromList fields) (chFields tr))
+  = tr{ chTrivial = foldl' (\s (p,b) -> (if b then S.insert else S.delete) p s) (chTrivial tr) trivial
+      , chFields = M.union (M.fromList fields) (chFields tr) }
+
+-- A variable below a root bound by `[let-glob]`, at steps that keep its blocks (`sameBlock`), is
+-- persistent: its uses need no references, and it is never duplicated, dropped or used as
+-- unique. The other variables below such a root are borrowed children (`ownerOf`).
+persistent :: Children -> Path -> Bool
+persistent tr (Path r ss) = S.member r (chPersistent tr) && all sameBlock ss
+
+-- the mode of an owner: a persistent one is borrowed, also where a closure or join point
+-- captures it
+ownerOf :: Children -> Path -> Mode -> Mode
+ownerOf tr p m = if persistent tr p then Borrowed else m
 
 -- numbers of references to variables (`key`) that do not overlap, without zeros; a reference
 -- to a variable is one to each of its children (`refine`)
@@ -140,7 +158,7 @@ checkDef env def
         -> run (M.fromList [(x,V t) | (x,_,t) <- args]) (params env args) q body
       DefVal _ _ _ _ body -> run M.empty [] Owned body
   where
-    run g ps q body = evalM (closed ps (checkE env g M.empty q body)) M.empty (Children S.empty M.empty)
+    run g ps q body = evalM (closed ps (checkE env g M.empty q body)) M.empty (Children S.empty M.empty S.empty)
 
 -- the parameters that are not of a trivial type
 params :: Env -> [(Path,Mode,VType)] -> [(Path,Mode)]
@@ -343,7 +361,7 @@ branches us
 leave :: [(Path,Mode)] -> Use -> L Use
 leave xs u
   = do tr <- get
-       let zs = [(key tr x,m) | (x,m) <- xs]
+       let zs = [(key tr x,ownerOf tr x m) | (x,m) <- xs]
            mine p = any ((p `within`) . fst) zs
            held = fromCounts tr [(z,1) | (z,_) <- zs]
            left = refine tr (M.keys held) (minus tr (uNet u) (fromCounts tr [(z,1) | (z,m) <- zs, owning m]))
@@ -392,7 +410,7 @@ ownerMode :: Path -> L Mode
 ownerMode x
   = do os <- ask
        tr <- get
-       case [childMode tr p m x | p <- x : reverse (prefixes x), Just m <- [M.lookup p os]] of
+       case [childMode tr p (ownerOf tr p m) x | p <- x : reverse (prefixes x), Just m <- [M.lookup p os]] of
          (m:_) -> return m
          [] -> fail ("unbound variable " ++ show x)
 
@@ -400,16 +418,25 @@ trivialVar :: Env -> Gamma -> Path -> Bool
 trivialVar env g x = maybe False (trivialTy env) (M.lookup x g)
 
 -- A use of a reference that is not of a trivial type: it consumes `n` references (as unique
--- if the mode is) and borrows the variable if `b`.
+-- if the mode is) and borrows the variable if `b`. A persistent variable needs none, and is
+-- neither duplicated nor used as unique.
 useVar :: Env -> Gamma -> Mode -> Int -> Bool -> Path -> L Use
 useVar env g m n b x
   | trivialVar env g x = return noUse
   | otherwise
-  = do o <- ownerMode x
-       when (m == Unique && o == Borrowed) (fail ("unique use of a variable that is not unique: " ++ show x))
-       p <- keyOf x
-       return (Use (M.filter (/= 0) (M.singleton p n)) (M.singleton p 1) (if b then S.singleton p else S.empty)
-                   (if m == Unique then S.singleton p else S.empty) False)
+  = do tr <- get
+       if persistent tr x then persistentUse else countedUse
+  where
+    persistentUse
+      = do when (m == Unique) (fail ("unique use of a persistent variable: " ++ show x))
+           when (n < 0) (fail ("duplication of a persistent variable: " ++ show x))
+           return noUse
+    countedUse
+      = do o <- ownerMode x
+           when (m == Unique && o == Borrowed) (fail ("unique use of a variable that is not unique: " ++ show x))
+           p <- keyOf x
+           return (Use (M.filter (/= 0) (M.singleton p n)) (M.singleton p 1) (if b then S.singleton p else S.empty)
+                       (if m == Unique then S.singleton p else S.empty) False)
 
 -- consume a reference
 consume, uniqueName :: Env -> Gamma -> Path -> L Use
@@ -537,6 +564,11 @@ checkE env g js q expr
                           let m = if S.member x (uUnique u2) then Unique else Owned
                           u1 <- checkE env g M.empty m e1
                           andThen u1 =<< leave [(x,m) | not (trivialTy env (V t))] u2
+      -- a persistent root, which holds no reference
+      LetGlob x@(Path r _) y ts e
+        -> do t <- liftE (globType env y ts)
+              modify (\tr -> tr{ chPersistent = S.insert r (chPersistent tr) })
+              roots env Borrowed [(x,V t)] (checkE env (M.insert x (V t) g) js q e)
       -- the test consumes the token, and each branch has a new one
       IfYielding v (k3,e3) (k2,e2)
         -> do notLiveAcrossYield g [e2,e3]
@@ -583,7 +615,9 @@ checkE env g js q expr
                        _ -> fail "unboxed function operand"
                      uses (consume env g f : map (ownedV env g) vs)
       Gen _ e -> checkE env g M.empty Owned e
-      Drop x e -> before (consume env g x) (checkE env g js q e)
+      Drop x e -> do tr <- get
+                     when (persistent tr x) (fail ("drop of a persistent variable: " ++ show x))
+                     before (consume env g x) (checkE env g js q e)
       Free r e -> before (consume env g r) (checkE env g js q e)
       Dup n x e -> do liftE (inferVar g x >>= checkDupType)
                       before (useVar env g Borrowed (-n) True x) (checkE env g js q e)

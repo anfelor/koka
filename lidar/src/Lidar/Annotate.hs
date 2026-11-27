@@ -31,7 +31,7 @@ import Lidar.Syntax
 import Lidar.Types( inst, forallA, orNull, withToken, atAny, traverseReuseContents )
 import Lidar.Traversal( Destruct(..), descendV, destructAOf, destructVOf )
 import Lidar.Env( Env(..), envOf, funSig, dataBody, lazySides )
-import Lidar.Query( Gamma, litType, bindAll, altTypes, lamGamma, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
+import Lidar.Query( Gamma, litType, bindAll, globType, altTypes, lamGamma, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 import Lidar.Pretty( ppr )
 
 -- the environment, the types of the variables, and the type parameters and parameter types of
@@ -94,6 +94,7 @@ annE c expr w
       Let x t e1 e2 -> do t' <- annTy c t
                           e1' <- annE c e1 t'
                           Let x t' e1' <$> annE (bindVars [(x,V t')] c) e2 w
+      LetGlob x g ts e -> LetGlob x g ts <$> within ((\t -> M.insert x (V t) gamma) <$> globType env g ts) e
       IfYielding v (k3,e3) (k2,e2) -> do v' <- checkV c v VToken
                                          e3' <- annE (bindVars [(k3,V VToken)] c) e3 w
                                          IfYielding v' (k3,e3') . (,) k2 <$> annE (bindVars [(k2,V VToken)] c) e2 w

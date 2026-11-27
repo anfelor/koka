@@ -35,7 +35,7 @@ import Lidar.Syntax
 import Lidar.Traversal( child, TestSide(..), boxTag, canonical, failingTo, fvA, fvE, fvV, holes, testSides, within )
 import Lidar.Types( inst, isToken, unToken )
 import Lidar.Env( Env(..), envOf, dataBody, pointerShape, openFields, boxContents, M, get, gets, liftE, modify, put, runM, state )
-import Lidar.Query( Gamma, inferE, inferV, inferVar, noJoins, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
+import Lidar.Query( Gamma, globType, inferE, inferV, inferVar, noJoins, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 import Lidar.Layout
 import Lidar.Ground( Ground(..), GroundBind(..), groundValues, groundOrder )
 import Backend.Typed.CGen.Layout hiding( dupExpr, dropStmt )
@@ -183,14 +183,19 @@ pointerTest ve left right
 
 -- values
 
+-- a global, read through its initialisation if it is initialised on demand
+genGlob :: Name -> G Doc
+genGlob x
+  = do onDemand <- gets (S.member x . stOnDemand)
+       if onDemand then do modify (\st -> st{ stLocal = True })
+                           return (onceRead x)
+                   else return (text (cName x))
+
 genV :: Ctx -> VVal -> G Doc
 genV cx val
   = case val of
       Var x -> return (localName x)
-      Glob x _ -> do onDemand <- gets (S.member x . stOnDemand)
-                     if onDemand then do modify (\st -> st{ stLocal = True })
-                                         return (onceRead x)
-                                 else return (text (cName x))
+      Glob x _ -> genGlob x
       -- only globals are dupped, and every global is persistent (`kk_box_mark_persistent`)
       DupV v -> genV cx v
       UnitV -> return "kk_Unit"
@@ -950,6 +955,11 @@ genE cx dest expr
       LetCast v b x e
         -> do ve <- genV cx v
               genRead (shareValAlias cx v x) dest x (VPtr b) ve e
+      -- every global is persistent or static (`kk_box_mark_persistent`)
+      LetGlob x g ts e
+        -> do t <- liftC (globType (cxEnv cx) g ts)
+              ge <- genGlob g
+              genRead cx dest x t ge e
       Unroll v x e
         -> do A t <- tyOfName cx v
               a <- liftC (dataBody (cxEnv cx) t)
@@ -1371,6 +1381,8 @@ staticValue sc0 t (Ground binds res) blocks0
           GValue v -> do (ls,blocks') <- staticLeaves sc blocks v
                          return (sc{ scLocals = M.insert x ls (scLocals sc), scGamma = M.insert x (V tx) (scGamma sc) }, blocks')
           GCall f _ _ -> failG ("cannot fold " ++ show f)
+          GGlob g _ -> do ls <- maybe (failG ("not static: " ++ show g)) return (M.lookup g (scGlobals sc))
+                          return (sc{ scLocals = M.insert x ls (scLocals sc), scGamma = M.insert x (V tx) (scGamma sc) }, blocks)
 
 -- the C constants of the leaves of a ground value, and the blocks written so far with its own
 staticLeaves :: SCtx -> [Doc] -> VVal -> G ([Doc],[Doc])
