@@ -39,8 +39,16 @@ import Lidar.Syntax
 import Lidar.Traversal( child, descendA, descendB, descendV, pathOf, scrutVar )
 import Lidar.Passes.Common( replaceAType, replaceContents, replaceVType )
 
--- the new names of the variables in scope
-type Ren = M.Map Path Path
+-- the new names of the variables in scope, and the new names in scope (also of variables whose
+-- name an inner binder shadows)
+data Ren = Ren{ renNames :: M.Map Path Path, renScope :: S.Set Path }
+
+-- bind variables to new names
+bindRen :: [(Path,Path)] -> Ren -> Ren
+bindRen bs (Ren names scope) = Ren (M.union (M.fromList bs) names) (S.union (S.fromList (map snd bs)) scope)
+
+noRen :: Ren
+noRen = Ren M.empty S.empty
 
 -- `rsUsed`: the root names bound so far; `rsBound`: each binder with its new name, newest first;
 -- `rsRests`: the alternatives of the `[case-a]` that last bound each default binder
@@ -66,19 +74,19 @@ renDef global def
   = case def of
       DefFun{ defArgs = args, defRes = res, defBody = body }
         -> do xs <- mapM (\(x,_,_) -> bindRoot x) args
-              let ren = M.fromList (zip [x | (x,_,_) <- args] xs)
+              let ren = bindRen (zip [x | (x,_,_) <- args] xs) noRen
                   sub = described global ren
               body' <- renE global ren body
               return def{ defArgs = [(x',m,replaceVType sub t) | (x',(_,m,t)) <- zip xs args], defRes = replaceVType sub res, defBody = body' }
       DefVal x tvs ini t body
-        -> DefVal x tvs ini (replaceVType (described global M.empty) t) <$> renE global M.empty body
+        -> DefVal x tvs ini (replaceVType (described global noRen) t) <$> renE global noRen body
 
 -- the substitution for descriptions: the variables in scope, and the others by their binders
 described :: Global -> Ren -> M.Map Path VVal
-described global ren = M.map Var (M.union ren global)
+described global ren = M.map Var (M.union (renNames ren) global)
 
 look :: Ren -> Path -> Path
-look ren x = M.findWithDefault x x ren
+look ren x = M.findWithDefault x x (renNames ren)
 
 record :: Path -> Path -> R Path
 record x x' = do modify (\st -> st{ rsBound = (x,x') : rsBound st })
@@ -105,12 +113,12 @@ renE global ren expr
        case (expr, known rests) of
          (LetCast (Var z) b x e, _) -> do x' <- record x (child (lastCast (look ren z)) SCast)
                                           LetCast (Var (lastCast (look ren z))) (replaceAType sub b) x'
-                                            <$> renE global (M.insert x x' ren) e
+                                            <$> renE global (bindRen [(x,x')] ren) e
          (_, Just (bs,e)) -> do mapM_ (uncurry record) bs
-                                renE global (M.union (M.fromList bs) ren) e
+                                renE global (bindRen bs ren) e
          _ -> descendB (pure . look ren) (renV global ren) alt annotated
   where
-    inScope = S.fromList (M.elems ren)
+    inScope = renScope ren
     -- a cast of `z` while `z.cast` is in scope (at another type, perhaps) casts that cast
     lastCast z = if child z SCast `S.member` inScope then lastCast (child z SCast) else z
     -- an alternative whose binders are in scope
@@ -127,7 +135,7 @@ renE global ren expr
     sub = described global ren
     scrut = look ren <$> scrutVar expr
     alt bs e = do xs <- mapM bind bs
-                  e' <- renE global (M.union (M.fromList (zip (map fst bs) xs)) ren) e
+                  e' <- renE global (bindRen (zip (map fst bs) xs) ren) e
                   return (xs,e')
     bind (x,s) = case pathOf scrut s of
                    Just x' -> do when (s == [SRest]) (modify (\st -> st{ rsRests = M.insert x' indices (rsRests st) }))
@@ -166,7 +174,7 @@ renA :: Global -> Ren -> AVal -> R AVal
 renA global ren val
   = case val of
       Lam ps r e -> do xs <- mapM (\(x,_,_) -> bindRoot x) ps
-                       let ren' = M.union (M.fromList (zip [x | (x,_,_) <- ps] xs)) ren
+                       let ren' = bindRen (zip [x | (x,_,_) <- ps] xs) ren
                            sub = described global ren'
                        Lam [(x',m,replaceVType sub t) | (x',(_,m,t)) <- zip xs ps] (replaceVType sub r) <$> renE global ren' e
       InjA i a v -> InjA i (tyA a) <$> renA global ren v
