@@ -289,9 +289,8 @@ genV cx val
                          value | S.member x (cxOnDemand cx) = call "lean_obj_once" ['&' : n, '&' : n ++ "_once", "_init_" ++ n]
                                | otherwise = n
                      return [beat value | _ <- ls]
-      DupV v -> do es <- genV cx v
-                   ls <- tyOf cx v >>= leavesOf
-                   return [if l == LObj then call "lt_dup" [e] else e | (l,e) <- zip ls es]
+      -- only globals are dupped, and every global is persistent (its count is never changed)
+      DupV v -> genV cx v
       UnitV -> return []
       Lit lit -> (:[]) <$> genLit lit
       NoReuse _ _ -> return ["NULL"]
@@ -980,8 +979,7 @@ mainFn d leanMain (D.Main n exitCode)
 -- helpers for the generated code
 prelude :: [C]
 prelude
-  = [ "static inline lean_object* lt_dup(lean_object* o) { lean_inc(o); return o; }"
-    , "// the block of a full credit as a constructor object with a tag and a number of objects"
+  = [ "// the block of a full credit as a constructor object with a tag and a number of objects"
     , "static inline lean_object* lt_reuse_full(lean_object* r, unsigned tag, unsigned objs) {"
     , "  lean_ctor_set_tag(r, tag); r->m_other = objs; return r;"
     , "}"
