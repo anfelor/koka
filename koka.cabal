@@ -30,13 +30,13 @@ library
       Backend.C.ParcReuseSpec
       Backend.CSharp.FromCore
       Backend.JavaScript.FromCore
+      Backend.Typed.CFromCore
       Backend.Typed.CGen.CGen
       Backend.Typed.CGen.Decls
       Backend.Typed.CGen.Doc
       Backend.Typed.CGen.Koka
       Backend.Typed.CGen.Layout
       Backend.Typed.CGen.ReuseSlots
-      Backend.Typed.CFromCore
       Backend.Typed.Elab.Coerce
       Backend.Typed.Elab.Common
       Backend.Typed.Elab.Foreign
