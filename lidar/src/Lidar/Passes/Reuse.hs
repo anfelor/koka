@@ -18,6 +18,9 @@
   Closures get no credits. The body of a join point (which runs at most once) asks
   its jumps for the credits it needs as extra parameters: an allocation that finds
   no credit adds one. A jump passes an available credit of each size, or an empty one.
+  If the jumps pass credits with the same description, or empty ones, the parameter gets that
+  description: the unique branch of a drop specialization frees the block of `z` before its
+  jump, and the join point then reuses it with the description of `z.contents`.
   The body of a recursive join point, like a closure, gets no credits from its jumps.
 -}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
@@ -28,7 +31,7 @@ import Data.List( nub, (\\) )
 import Data.Maybe( fromMaybe )
 import Lidar.Name
 import Lidar.Syntax
-import Lidar.Traversal( boxTag, child, descendA, descendE, descendV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut )
+import Lidar.Traversal( boxTag, child, descendA, descendE, descendV, fvV, destructAOf, destructVOf, dsAlts, dsBuild, dsScrut )
 import Lidar.Passes.Common( trivialTy, defGamma, NameSupply, dropValue, freshFor, freshPathFrom, perBody, reuseChildren, scopeOf )
 import Lidar.Env( Env, envOf, boxContents, reuseSize, dataBody, M, ask, asks, evalM, get, gets, liftE, local, modify, put, state )
 import Lidar.Query( Gamma, bindAll, inferV, lamGamma, inferVar, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma, inferE, noJoins )
@@ -40,8 +43,10 @@ type Credits = [(Path,Int)]
 data REnv = REnv{ reEnv :: Env, reGamma :: Gamma, reJoins :: M.Map Name [Int] }
 
 -- `rsCredits`: the available credits, newest first;
--- `rsAsked`: in the body of a join point, the credits that it asks for
-data RS = RS{ rsUniq :: NameSupply, rsCredits :: Credits, rsAsked :: Maybe Credits }
+-- `rsAsked`: in the body of a join point, the credits that it asks for;
+-- `rsPassed`: for each credit that a join point asks for, the descriptions of the credits
+-- that its jumps pass (not the empty ones)
+data RS = RS{ rsUniq :: NameSupply, rsCredits :: Credits, rsAsked :: Maybe Credits, rsPassed :: M.Map Name [[Maybe Contents]] }
 
 type R a = M REnv RS a
 
@@ -85,7 +90,7 @@ scope ask action
        return (x, rsAsked s')
 
 reuseProgram :: Program -> (Program,[String])
-reuseProgram prog = perBody (\d -> evalM (ruE (defBody d)) (REnv (envOf prog) (defGamma d) M.empty) (RS (freshFor d) [] Nothing)) prog
+reuseProgram prog = perBody (\d -> evalM (ruE (defBody d)) (REnv (envOf prog) (defGamma d) M.empty) (RS (freshFor d) [] Nothing M.empty)) prog
 
 bind :: [(Path,Ty)] -> R a -> R a
 bind bs = local (\re -> re{ reGamma = bindAll bs (reGamma re) })
@@ -135,7 +140,13 @@ ruE expr
         -> do (e1',as) <- scope (Just []) (bind [(x,V t) | (x,_,t) <- ps] (ruE e1))
               let rs = fromMaybe [] as
               e2' <- local (\re -> re{ reJoins = M.insert j (map snd rs) (reJoins re) }) (ruE e2)
-              return (Join j tvs (ps ++ [(r,Owned,VReuse MaybeEmpty n Nothing) | (r,n) <- rs]) e1' e2')
+              ds <- gets (M.findWithDefault [] j . rsPassed)
+              modify (\s -> s{ rsPassed = M.delete j (rsPassed s) })
+              g <- asks reGamma
+              let describe d = case nub d of
+                                 [Just c@(Contents _ v _)] | all (`M.member` g) (fvV v) -> Just c
+                                 _ -> Nothing
+              return (Join j tvs (ps ++ [(r,Owned,VReuse MaybeEmpty n (describe d)) | ((r,n),d) <- zip rs (ds ++ repeat [])]) e1' e2')
       JoinRec t ds e
         -> do let group = M.fromList [(joinName d,[]) | d <- ds]
               ds' <- mapM (\d -> (\(e1,_) -> d{ joinBody = e1 }) <$> scope Nothing (local (\re -> re{ reJoins = group }) (bind [(x,V t') | (x,_,t') <- joinParams d] (ruE (joinBody d))))) ds
@@ -144,6 +155,11 @@ ruE expr
         -> do vs' <- mapM ruV vs
               ns  <- asks (M.findWithDefault [] j . reJoins)
               rs  <- mapM takeCredit ns
+              g   <- asks reGamma
+              let described r = case M.lookup r g of
+                                  Just (V (VReuse _ _ d)) -> [d]
+                                  _ -> [Nothing]
+              modify (\s -> s{ rsPassed = M.insertWith (zipWith (++)) j (map (maybe [] described) rs) (rsPassed s) })
               return (Jump j ts (vs' ++ [maybe (NoReuse n Nothing) Var r | (r,n) <- zip rs ns]))
       CaseLit v alts def
         -> do es <- branches [([],e) | e <- map snd alts ++ [def]]

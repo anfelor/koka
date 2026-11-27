@@ -16,18 +16,15 @@
 
   If the box is unique, the dups and the drop cancel out: the descendants are taken without
   reference counting, and the block becomes a reuse credit, which still contains them. The
-  other descendants of the contents are dropped. Both branches leave them owned, and continue
-  at a join point that takes the credit:
+  other descendants of the contents are dropped, and the block is freed. Both branches leave
+  the descendants owned, and continue at a join point:
 
-    join j(r : ◇n[k; z.contents : V]) = free r; e
-    if-unique z then (let @ r' = z in drop ..; jump j(r'))
-    else (dup x₁; ..; dup xₙ; drop z; jump j(no-reuse n [k; z.contents : V]))
+    join j() = e
+    if-unique z then (let @ r' = z in drop ..; free r'; jump j())
+    else (dup x₁; ..; dup xₙ; drop z; jump j())
 
-  The description of the credit names the contents and the tag k of the block, which
-  follows from the path of `z`. The empty credit of the shared branch has the same description, so that the jumps agree on it
-  (and `FillCredits` may fill it with a copy of the block). The shared branch is the
-  original code. Freeing the credit releases the block, unless `Reuse` uses it for an
-  allocation in `e`.
+  The shared branch is the original code. If `e` allocates a block of the same size, `Reuse`
+  passes the credit to the join point instead of freeing it.
 
   As in Koka's Parc, a descendant that is under a pointer in the contents is duplicated in the
   unique branch as well, and the box on the way to it is dropped, which is specialized in turn: the
@@ -40,7 +37,7 @@ import Control.Monad( foldM, guard )
 import Data.List( nub, partition )
 import Lidar.Syntax
 import Lidar.Build( compose )
-import Lidar.Traversal( boxTag, child, fieldsAt, stepsFrom, within )
+import Lidar.Traversal( child, fieldsAt, stepsFrom, within )
 import Lidar.Passes.Common( trivialTy, defGamma, typedChildren, NameSupply, dropValue, freshFor, freshNameFrom, freshPathFrom, perBody, projectAll, scopeOf )
 import Lidar.Env( Env, envOf, boxContents, reuseSize, M, ask, evalM, liftE, local, state )
 import Lidar.Query( Gamma, bindAll, inferAVar, unboxRuGamma )
@@ -63,20 +60,20 @@ dsE :: VExpr -> D VExpr
 dsE expr
   = do (_,g) <- ask
        case transferOf g expr of
-         Just (others,inside,z,s,n,e) | Just ways <- mapM (wayTo (child z SContents) inside) inside
-           -> compose (map (Dup 1) others) <$> specialize (zip inside ways) z s n e
+         Just (others,inside,z,s,e) | Just ways <- mapM (wayTo (child z SContents) inside) inside
+           -> compose (map (Dup 1) others) <$> specialize (zip inside ways) z s e
          _ -> typedChildren dsE expr
 
 -- The dups of descendants of the contents of a box `z` (among other dups) that Perceus makes
--- before it drops `z`, with the type of the contents and the size of the block.
-transferOf :: Gamma -> VExpr -> Maybe ([Path],[Path],Path,VType,Int,VExpr)
+-- before it drops `z`, a heap block, with the type of the contents.
+transferOf :: Gamma -> VExpr -> Maybe ([Path],[Path],Path,VType,VExpr)
 transferOf g expr
   = do (xs,z,e) <- dupsThenDrop expr
        let (inside,others) = partition (`within` child z SContents) xs
        guard (not (null inside))
        s <- either (const Nothing) Just (inferAVar g z >>= boxContents)
-       n <- either (const Nothing) Just (reuseSize s)
-       return (others,inside,z,s,n,e)
+       _ <- either (const Nothing) Just (reuseSize s)
+       return (others,inside,z,s,e)
   where
     dupsThenDrop (Dup 1 x e) = (\(xs,z,r) -> (x:xs,z,r)) <$> dupsThenDrop e
     dupsThenDrop (Drop z e) = Just ([],z,e)
@@ -101,26 +98,23 @@ wayTo p xs x
 
 -- In the unique branch, a descendant under a pointer is duplicated, and its box is dropped after
 -- the dups of its descendants (so that the drop is specialized as well).
-specialize :: [(Path,Way)] -> Path -> VType -> Int -> VExpr -> D VExpr
-specialize ways z s n e
+specialize :: [(Path,Way)] -> Path -> VType -> VExpr -> D VExpr
+specialize ways z s e
   = do (_,g) <- ask
        j <- state (freshNameFrom "dsj")
-       r <- fresh "r"
        let p = child z SContents
-           r' = child z SCredit
-           payload = Just (Contents (Just (boxTag z)) (Var p) s)
-           t = VReuse MaybeEmpty n payload
+           r = child z SCredit
            moved = [x | (x,Moved) <- ways]
            unders = [(q,b) | (_,Under q b) <- ways]
            covered = [Dup 1 x | (x,Covered) <- ways]
            dups b = [Dup 1 x | (x,Under _ b') <- ways, b' == b]
        g' <- liftE (unboxRuGamma g z)
        taken <- withGamma g' (dropExcept (moved ++ nub (map fst unders)) p s
-                  (compose covered (compose [compose (dups b) . Drop b | b <- nub (map snd unders)] (Jump j [] [Var r']))))
+                  (compose covered (compose [compose (dups b) . Drop b | b <- nub (map snd unders)] (Free r (Jump j [] [])))))
        unique <- dsE (UnboxRu z taken)
-       let shared = compose (map (Dup 1 . fst) ways) (Drop z (Jump j [] [NoReuse n payload]))
-       body <- bind [(r,V t)] (dsE (Free r e))
-       return (Join j [] [(r,Owned,t)] body (IsUnique z unique shared))
+       let shared = compose (map (Dup 1 . fst) ways) (Drop z (Jump j [] []))
+       body <- dsE e
+       return (Join j [] [] body (IsUnique z unique shared))
 
 -- Drop `v : t` except for its descendants `xs`, which the unique branch passes on.
 dropExcept :: [Path] -> Path -> VType -> VExpr -> D VExpr
