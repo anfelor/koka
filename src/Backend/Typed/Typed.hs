@@ -73,10 +73,11 @@ elabFip fip
 -- an effectful argument under a total type. Some primitives have a total type but read the
 -- context or the identity of their arguments (`@evv-at`, `fresh-marker`, `yielding`,
 -- `unsafe-ptr-eq`, the primitives of `std/core/lazy`, `@cctx-hole-create`): the modules of the
--- runtime are excluded, and so are the externals with internal names.
+-- runtime are excluded, and so are the externals with internal names. The top-level values that
+-- closed values can read: those of the same modules (total, as Koka's top-level values are).
 extractableOf :: [C.Core] -> S.Set Name
 extractableOf cores
-  = S.fromList ([toLidar (C.defName d) | c <- cores, ordinary c, d <- C.flattenDefGroups (C.coreProgDefs c), pureFun (C.defType d)]
+  = S.fromList ([toLidar (C.defName d) | c <- cores, ordinary c, d <- C.flattenDefGroups (C.coreProgDefs c), pureFun (C.defType d) || isVal (C.defSort d)]
                 ++ [toLidar (C.externalName x) | c <- cores, ordinary c, x@(C.External{}) <- C.coreProgExternals c
                                                , not (isHiddenName (C.externalName x)), pureFun (C.externalType x)])
   where
@@ -86,6 +87,9 @@ extractableOf cores
                    Nothing -> False
     totalArg tp = maybe True (\(_,eff,_) -> total eff) (splitFunType (expandSyn tp))
     total eff = isTypeTotal (expandSyn eff)
+    isVal sort = case sort of
+                   Syntax.DefVal -> True
+                   _ -> False
 
 -- the recursive groups of the module
 groupsOf :: C.Core -> [S.Set Name]

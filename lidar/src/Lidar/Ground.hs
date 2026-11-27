@@ -23,7 +23,7 @@
 -}
 module Lidar.Ground
   ( Ground(..), GroundBind(..)
-  , groundValues, groundOrder, groundV
+  , groundValues, groundOrder, groundV, globsV
   ) where
 
 import qualified Data.Map as M
@@ -43,11 +43,12 @@ data GroundBind = GValue VVal               -- ^ a ground value
 
 -- | The ground values of a lowered program, given the functions whose calls the client folds.
 -- A value is ground if its body is, given the ground values found so far: the least fixpoint,
--- so that values never refer to each other in a cycle.
+-- so that values never refer to each other in a cycle. A value initialised on demand is not
+-- ground: it keeps its once-cell, which its readers use.
 groundValues :: (Name -> Bool) -> Program -> M.Map Name Ground
 groundValues foldable prog = go M.empty
   where
-    vals = [(x,body) | DefVal x _ _ _ body <- progDefs prog]
+    vals = [(x,body) | DefVal x _ AtLoad _ body <- progDefs prog]
     go found
       = let found' = M.union found (M.fromList (mapMaybe (ground found) vals))
         in if M.size found' == M.size found then found else go found'
@@ -137,7 +138,7 @@ groundV globals bound = gv
                       LitChar _ -> True
                       LitFloat _ -> False
 
--- the globals that a value refers to
+-- | The globals that a value reads (not the functions it refers to, nor inside closures).
 globsV :: VVal -> [Name]
 globsV val
   = case val of
