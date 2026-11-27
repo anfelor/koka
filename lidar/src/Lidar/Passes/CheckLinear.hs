@@ -558,10 +558,15 @@ checkE env g js q expr
       Join j _ ps e1 e2
                         -> do let fvs = S.toList (S.union (fvE e1 `S.difference` S.fromList [x | (x,_,_) <- ps])
                                                            (S.fromList [x | (_,cs,_) <- M.elems (M.restrictKeys js (jumpTargets e1)), (x,_) <- cs]))
+                              tr <- get
                               let xs = [x | x <- fvs, not (trivialVar env g x), not (any (\y -> y /= x && x `within` y) fvs)]
+                                  -- the captures by their keys: one for each key (a cast `z.cast` is all
+                                  -- of `z`, for example), and none below another
+                                  covers y x = key tr x `within` key tr y && (key tr x /= key tr y || y < x)
+                                  reps = [x | x <- xs, not (any (\y -> y /= x && covers y x) xs)]
                               u <- local (const (M.fromList (params env ps ++ [(x,Unique) | x <- xs])))
                                          (checkE env (bindAll [(x,V t) | (x,_,t) <- ps] g) js q e1)
-                              caps <- concat <$> mapM (captured u) xs
+                              caps <- concat <$> mapM (captured u) reps
                               _ <- leave (params env ps ++ caps) u
                               checkE env g (M.insert j ([m | (_,m,_) <- ps],caps,uDiverges u) js) q e2
       -- bodies, like those of functions, in which only the group is in scope, and whose
