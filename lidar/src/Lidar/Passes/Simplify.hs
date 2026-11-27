@@ -194,6 +194,7 @@ knownE known expr
                r2@(e2',fv2) = knownE known' e2
            in if isRet e1' && not (usedIn x fv2) then r2 else rebuilt [fv1,fv2] (Let x t e1' e2')
       Deref v x e -> keepIfUsed x (Deref v x) [] (knownE (shadow [x] known) e)
+      LetCast v b x e -> keepIfUsed x (LetCast v b x) [] (knownE (shadow [x] known) e)
       Unroll v x e -> keepIfUsed x (Unroll v x) [] (knownE (shadow [x] known) e)
       _ | Just (x,e) <- decided known expr -> taken x e
       IsNull v n@Unreachable{} (x,e) -> keepIfUsed x (\e' -> IsNull v n (x,e')) [S.empty] (knownE (shadow [x] known) e)
