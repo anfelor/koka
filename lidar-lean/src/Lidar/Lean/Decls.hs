@@ -33,7 +33,7 @@ Mono types become IR types as follows.
 -}
 module Lidar.Lean.Decls
   ( Decls(..), Kind(..), CtorInfo(..)
-  , declsOf, worldTypes, leanName, irType, funTypes, takesWorld, typeKind, anyT, resultType, rawTypes, rawOfNat, isBuiltinType
+  , declsOf, worldTypes, leanName, irType, funTypes, takesWorld, typeKind, anyT, resultType, rawTypes, rawOfNat, isBuiltinType, objectTypes
   ) where
 
 import qualified Data.Map as M
@@ -91,6 +91,10 @@ rawTypes = [ ("UInt8",uint W8), ("UInt16",uint W16), ("UInt32",uint W32), ("UInt
 builtinTypes :: [(D.Name,Kind)]
 builtinTypes = [ ("Nat",KPrim vtInt), ("String",KPrim vtString) ]
                ++ [ (n,KAbstract) | n <- ["Int","Array","ByteArray","FloatArray","Thunk","Task"] ]
+
+-- | The abstract builtin types whose values are always objects (@Int@ can be a scalar).
+objectTypes :: [D.Name]
+objectTypes = ["Array","ByteArray","FloatArray","Thunk","Task"]
 
 -- | Whether the runtime implements the type itself: its constructors (such as @Int.ofNat@) are
 -- functions of the runtime, not constructor values.

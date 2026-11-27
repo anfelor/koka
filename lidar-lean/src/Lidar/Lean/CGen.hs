@@ -34,12 +34,12 @@ import Numeric( showHex )
 import Prettyprinter( Doc, pretty, vsep, hsep, nest, hardline, (<+>), layoutPretty, LayoutOptions(..), PageWidth(..) )
 import Prettyprinter.Render.String( renderString )
 import Lidar
-import Lidar.Env( Env(..), envOf, dataBody, boxContents, M, runM, liftE, state, modify, get, put )
+import Lidar.Env( Env(..), envOf, dataBody, pointerShape, boxContents, M, runM, liftE, state, modify, get, put )
 import Lidar.Query( Gamma, inferV, inferVar, altTypes, unboxRuGamma, copyRuGamma, uniqueGamma )
 import Lidar.Traversal( child, boxTag, fvA, descendA, descendV, descendE )
 import Lidar.Layout( leaves, shapeIsHeap )
 import qualified Lidar.Lean.Dump as D
-import Lidar.Lean.Decls( leanName, rawTypes, rawOfNat, worldTypes )
+import Lidar.Lean.Decls( leanName, rawTypes, rawOfNat, worldTypes, objectTypes )
 import Lidar.Lean.CGen.Layout
 import Lidar.Lean.CGen.Ground( groundDecls, closureInit, cString )
 
@@ -117,10 +117,12 @@ type G a = M () St a
 
 -- `cxJoins`: the label and the parameters of each join point in scope, and whether it is
 -- recursive (its jumps then assign the parameters in parallel); `cxBeats`: the static values
--- whose reads count a heartbeat (see `beatsOf`)
+-- whose reads count a heartbeat (see `beatsOf`); `cxShared`: the objects known to be shared (the
+-- else branch of `IsUnique`) and their aliases, which are objects and not boxed scalars
 data Ctx = Ctx{ cxEnv :: Env, cxTargets :: M.Map Name Target, cxGamma :: Gamma
               , cxJoins :: M.Map Name (String,[(Path,VType)],Bool), cxBeats :: S.Set Name
-              , cxOnDemand :: S.Set Name }   -- the values initialised on demand
+              , cxOnDemand :: S.Set Name    -- the values initialised on demand
+              , cxShared :: S.Set Path }
 
 fresh :: String -> G String
 fresh s = state (\st -> ("_" ++ s ++ show (stUniq st), st{ stUniq = stUniq st + 1 }))
@@ -143,6 +145,43 @@ leavesOf t = liftQ (mapM leafOf (leaves t))
 leavesOfTy :: Ty -> G [Leaf]
 leavesOfTy (V t) = leavesOf t
 leavesOfTy (A _) = return [LObj]
+
+-- `x` is the same object as `y`, so it is shared if `y` is
+shareAlias :: Ctx -> Path -> Path -> Ctx
+shareAlias cx y x
+  | S.member y (cxShared cx) = cx{ cxShared = S.insert x (cxShared cx) }
+  | otherwise = cx
+
+-- `shareAlias` for a value, whose binder is an alias only of a variable
+shareValAlias :: Ctx -> VVal -> Path -> Ctx
+shareValAlias cx v x
+  = case v of
+      Var y -> shareAlias cx y x
+      _ -> cx
+
+-- the object leaves of `x`, and whether each is known to be an object rather than a boxed scalar
+-- (it is shared, or its type rules out scalars), as Lean's `object` type
+objectLeaves :: Ctx -> Path -> G [(String,Bool)]
+objectLeaves cx x
+  = do t <- tyOfName cx x
+       ls <- leavesOfTy t
+       let ts = case t of { A _ -> [t]; V v -> map V (leaves v) }
+       return [ (n, S.member x (cxShared cx) || isObject (cxEnv cx) u)
+              | (LObj,u,n) <- zip3 ls ts (leafNames x (length ls)) ]
+
+-- whether a value of type `t` is always an object
+isObject :: Env -> Ty -> Bool
+isObject env t
+  = case t of
+      V (VPtr a) -> builtin a || heap
+      A a -> builtin a || heap
+      _ -> False
+  where
+    heap = (pointerShape env t >>= shapeIsHeap) == Just True
+    builtin a = case a of
+                  APrim PString -> True
+                  ACon n [] -> n `elem` map leanName objectTypes
+                  _ -> False
 
 target :: Ctx -> Name -> G Target
 target cx f = maybe (fail ("no C name for " ++ show f)) return (M.lookup f (cxTargets cx))
@@ -426,15 +465,16 @@ genE cx dest expr
            return (s1 ++ s2)
       Unreachable _ -> return ["lean_internal_panic_unreachable();"]
       Dup count x e ->
-        do ls <- tyOfName cx x >>= leavesOfTy
+        do os <- objectLeaves cx x
            s <- genE cx dest e
-           let inc n | count == 1 = "lean_inc(" ++ n ++ ");"
-                     | otherwise = "lean_inc_n(" ++ n ++ ", " ++ show count ++ ");"
-           return ([text (inc n) | (LObj,n) <- zip ls (leafNames x (length ls))] ++ s)
+           let inc (n,obj) | count == 1 = "lean_inc" ++ ref obj ++ "(" ++ n ++ ");"
+                           | otherwise = "lean_inc" ++ ref obj ++ "_n(" ++ n ++ ", " ++ show count ++ ");"
+           return (map (text . inc) os ++ s)
       Drop x e ->
         do ls <- tyOfName cx x >>= leavesOfTy
+           os <- objectLeaves cx x
            s <- genE cx dest e
-           return (mapMaybe dropLeaf (zip ls (leafNames x (length ls))) ++ s)
+           return (map dropObject os ++ mapMaybe dropCredit (zip ls (leafNames x (length ls))) ++ s)
       Free r e ->
         do rt <- tyOfName cx r
            s <- genE cx dest e
@@ -448,7 +488,7 @@ genE cx dest expr
              A _ -> return ()
              V _ -> fail ("uniqueness test of an unboxed value: " ++ show x)
            s1 <- genE cx{ cxGamma = uniqueGamma (cxGamma cx) x } dest e1
-           s2 <- genE cx dest e2
+           s2 <- genE cx{ cxShared = S.insert x (cxShared cx) } dest e2
            return [ifElse ("lean_is_exclusive(" ++ localName x ++ ")") s1 s2]
       IfFull r e1 e2 ->
         do t <- tyOfName cx r
@@ -512,16 +552,16 @@ genE cx dest expr
       Deref v x e ->
         do VPtr a <- tyOf cx v
            [ve] <- genV cx v
-           body <- genE (bindVar cx x (A a)) dest e
+           body <- genE (bindVar (shareValAlias cx v x) x (A a)) dest e
            return (declare x [LObj] [ve] ++ body)
       LetCast v b x e ->
         do [ve] <- genV cx v
-           body <- genE (bindVar cx x (V (VPtr b))) dest e
+           body <- genE (bindVar (shareValAlias cx v x) x (V (VPtr b))) dest e
            return (declare x [LObj] [ve] ++ body)
       Unroll v x e ->
         do A t <- tyOfName cx v
            a <- liftQ (dataBody (cxEnv cx) t)
-           body <- genE (bindVar cx x (A a)) dest e
+           body <- genE (bindVar (shareAlias cx v x) x (A a)) dest e
            return (declare x [LObj] [localName v] ++ body)
       -- the contents are read out of the block at once
       Unbox v x e ->
@@ -581,10 +621,11 @@ genE cx dest expr
       Plug{} -> fail "a constructor context"
       CtxCopy{} -> fail "a constructor context"
   where
-    dropLeaf (l,n) = case l of
-                       LObj -> Just (text ("lean_dec(" ++ n ++ ");"))
-                       LCredit -> Just (text ("if (" ++ n ++ " != NULL) lean_free_object(" ++ n ++ ");"))
-                       LScalar _ -> Nothing
+    ref obj = if obj then "_ref" else ""
+    dropObject (n,obj) = text ("lean_dec" ++ ref obj ++ "(" ++ n ++ ");")
+    dropCredit (l,n) = case l of
+                         LCredit -> Just (text ("if (" ++ n ++ " != NULL) lean_free_object(" ++ n ++ ");"))
+                         _ -> Nothing
 
 -- the leaves of a value, bound to locals first unless it is a variable (as they are read more
 -- than once)
@@ -734,7 +775,7 @@ genDef env tgts cnames beats onDemand def
                                                 initf <+> block ss, [])
              OnDemand -> fail "a value initialised on demand that is not an object"
   where
-    cx0 = Ctx env tgts M.empty M.empty beats onDemand
+    cx0 = Ctx env tgts M.empty M.empty beats onDemand S.empty
     cname f = maybe (fail ("no C name for " ++ show f)) return (M.lookup f cnames)
 
 -- the prototypes of the functions and values of other modules that the module uses, and the
