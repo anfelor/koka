@@ -10,7 +10,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 -- The global environment of a typed IR program, queries on it and on types that need no
 -- typing context, the lazy metadata, and the monad for typed IR consumers.
-module Lidar.Env( Env(..), Q, Lazies(..), envOf, funSig, dataBody, lazySides, openFields, boxContents, reuseSize, noHeapCredit
+module Lidar.Env( Env(..), Q, Lazies(..), envOf, funSig, dataBody, pointerShape, lazySides, openFields, boxContents, reuseSize, noHeapCredit
                         , M, runM, evalM, liftE
                         , module Control.Monad.Reader, module Control.Monad.State
                         ) where
@@ -74,6 +74,23 @@ dataBody env t
                        Just _  -> Left ("cannot unroll abstract type " ++ show n)
                        Nothing -> Left ("unknown type " ++ show n)
       _ -> Left ("unroll of " ++ ppr (A t))
+
+-- The constructor shape of a pointer, unfolding named types but not their
+-- payloads. Opaque representations supply no such evidence. Guard alias
+-- unfolding as well: a recursive name alone has no known representation.
+pointerShape :: Env -> Ty -> Maybe AType
+pointerShape env t
+  = case t of
+      V (VPtr a) -> shape S.empty a
+      A a -> shape S.empty a
+      _ -> Nothing
+  where
+    shape _ a | isShape a = Just a
+    shape seen a = case a of
+      ACon n _ | not (S.member n seen)
+               , Just TypeDef{} <- M.lookup n (envTypes env)
+               , Right b <- dataBody env a -> shape (S.insert n seen) b
+      _ -> Nothing
 
 -- the thunks and the strict alternatives of a lazy datatype `T⟨B̄⟩`, `data T⟨ā⟩ := L ~> S`
 lazySides :: Env -> AType -> Q ([(Int,AType)],[(Int,AType)])

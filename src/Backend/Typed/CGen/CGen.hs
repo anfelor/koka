@@ -33,8 +33,8 @@ import Backend.Typed.LidarName( fromLidar )
 import Platform.Runtime( showHFloat )
 import Lidar.Syntax
 import Lidar.Traversal( child, TestSide(..), boxTag, canonical, failingTo, fvA, fvE, fvV, holes, testSides, within )
-import Lidar.Types( inst, isShape, isToken, unToken )
-import Lidar.Env( Env(..), envOf, dataBody, openFields, boxContents, M, get, gets, liftE, modify, put, runM, state )
+import Lidar.Types( inst, isToken, unToken )
+import Lidar.Env( Env(..), envOf, dataBody, pointerShape, openFields, boxContents, M, get, gets, liftE, modify, put, runM, state )
 import Lidar.Query( Gamma, inferE, inferV, inferVar, noJoins, inferAVar, altTypes, unboxRuGamma, copyRuGamma, lockGamma, uniqueGamma )
 import Lidar.Layout
 import Lidar.Ground( Ground(..), GroundBind(..), groundValues, groundOrder )
@@ -114,23 +114,6 @@ stmtExpr ss e = "({" <+> align (vcat (ss ++ [e <.> ";"])) <+> "})"
 
 dupExpr :: CT -> Doc -> Doc
 dupExpr ct e = maybe e (\f -> text f <.> "(" <.> e <.> ",_ctx)") (dupFun ct)
-
--- The constructor shape of a pointer, unfolding named types but not their
--- payloads. Opaque representations supply no such evidence. Guard alias
--- unfolding as well: a recursive name alone has no known representation.
-pointerShape :: Env -> Ty -> Maybe AType
-pointerShape env t
-  = case t of
-      V (VPtr a) -> shape S.empty a
-      A a -> shape S.empty a
-      _ -> Nothing
-  where
-    shape _ a | isShape a = Just a
-    shape seen a = case a of
-      ACon n _ | not (S.member n seen)
-               , Just TypeDef{} <- M.lookup n (envTypes env)
-               , Right b <- dataBody env a -> shape (S.insert n seen) b
-      _ -> Nothing
 
 -- The statement of `dup x`, if `x` needs one. Like aggregate dup helpers, keep field dups
 -- inline: a call can spill another live field and enlarge even the unique path's stack frame.
