@@ -36,7 +36,7 @@ import Prettyprinter.Render.String( renderString )
 import Lidar
 import Lidar.Env( Env(..), envOf, dataBody, pointerShape, boxContents, M, runM, liftE, state, modify, get, put )
 import Lidar.Query( Gamma, globType, inferV, inferVar, altTypes, unboxRuGamma, copyRuGamma, uniqueGamma )
-import Lidar.Traversal( child, boxTag, fvA, descendA, descendV, descendE )
+import Lidar.Traversal( child, boxTag, fvA, descendA, descendV, descendE, globalsE )
 import Lidar.Layout( leaves, shapeIsHeap )
 import qualified Lidar.Lean.Dump as D
 import Lidar.Lean.Decls( leanName, rawTypes, rawOfNat, worldTypes, objectTypes )
@@ -292,10 +292,6 @@ genV cx val
   = case val of
       Var x -> do ls <- tyOfName cx x >>= leavesOfTy
                   return (leafNames x (length ls))
-      Glob x _ -> do ls <- tyOf cx val >>= leavesOf
-                     genGlob cx x ls
-      -- only globals are dupped, and every global is persistent (its count is never changed)
-      DupV v -> genV cx v
       UnitV -> return []
       Lit lit -> (:[]) <$> genLit lit
       NoReuse _ _ -> return ["NULL"]
@@ -926,26 +922,6 @@ initOrder roots uses inits = reverse (snd (foldl visit (S.empty,[]) roots))
       | otherwise = let (seen',acc') = foldl visit (S.insert x seen,acc) (S.toList (M.findWithDefault S.empty x uses))
                     in (seen', if S.member x inits then x : acc' else acc')
 
--- the top-level functions and values that an expression uses
-namesE :: VExpr -> S.Set Name
-namesE e = here <> getConst (descendE (const (Const S.empty)) (Const . namesV) (\_ e' -> Const (namesE e')) e)
-  where here = case e of
-                 Call f _ _ -> S.singleton f
-                 LetGlob _ x _ _ -> S.singleton x
-                 _ -> S.empty
-
-namesV :: VVal -> S.Set Name
-namesV v = here <> getConst (descendV (Const . namesA) (Const . namesV) v)
-  where here = case v of
-                 Glob x _ -> S.singleton x
-                 _ -> S.empty
-
-namesA :: AVal -> S.Set Name
-namesA a = case a of
-             Fun f -> S.singleton f
-             Lam _ _ e -> namesE e
-             _ -> getConst (descendA (const (Const S.empty)) (Const . namesA) (Const . namesV) a)
-
 -- the C `main` of a module with `main`, as Lean's `emitMainFn` writes it
 mainFn :: D.Dump -> String -> D.Main -> [C]
 mainFn d leanMain (D.Main n exitCode)
@@ -1034,7 +1010,7 @@ cgenModule d prog
                           [(defName def, i) | (def,Right (_,_,i)) <- zip (progDefs prog) rs]
                           ++ [(leanName (D.declName x), i) | (x,Right i) <- declInits]
                 roots = map (leanName . D.declName) (D.dumpDecls d) ++ map defName (progDefs prog)
-                uses = M.fromList ([(defName def, namesE (defBody def)) | def <- progDefs prog]
+                uses = M.fromList ([(defName def, globalsE (defBody def)) | def <- progDefs prog]
                                    ++ [(leanName (D.declName x), S.fromList (map leanName (initFnOf x))) | x <- D.dumpDecls d, hasInitFn x])
                 leanMain = maybe "_lean_main" tgtName (M.lookup (leanName "main") tgts)
                 doc = vsep ([ text ("// Lean compiler output (lidar-lean)")

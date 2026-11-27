@@ -402,10 +402,12 @@ elabConst action c as
                              (k3,e,te) <- apply action fv (drop (length ps) as)
                              return (k1 . Let x r (Call (leanName c) [] vs) . k2 . k3, e, te)
          (_, Just (SigVal _ t))
-           | null as -> return (id, Ret (Glob (leanName c) []), t)
-           | otherwise -> do (k1,fv) <- coerce t anyT (Glob (leanName c) [])
-                             (k2,e,te) <- apply action fv as
-                             return (k1 . k2, e, te)
+           | otherwise -> do x <- fresh "g"
+                             let k0 = LetGlob x (leanName c) []
+                             if null as then return (k0, Ret (Var x), t)
+                             else do (k1,fv) <- coerce t anyT (Var x)
+                                     (k2,e,te) <- apply action fv as
+                                     return (k0 . k1 . k2, e, te)
          _ -> fail ("unknown constant " ++ c)
 
 -- The partial application of `f` to `as`: a closure that takes the remaining arguments at
