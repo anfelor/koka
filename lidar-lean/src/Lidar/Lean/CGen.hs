@@ -35,7 +35,7 @@ import Prettyprinter( Doc, pretty, vsep, hsep, nest, hardline, (<+>), layoutPret
 import Prettyprinter.Render.String( renderString )
 import Lidar
 import Lidar.Env( Env(..), envOf, dataBody, pointerShape, boxContents, M, runM, liftE, state, modify, get, put )
-import Lidar.Query( Gamma, inferV, inferVar, altTypes, unboxRuGamma, copyRuGamma, uniqueGamma )
+import Lidar.Query( Gamma, globType, inferV, inferVar, altTypes, unboxRuGamma, copyRuGamma, uniqueGamma )
 import Lidar.Traversal( child, boxTag, fvA, descendA, descendV, descendE )
 import Lidar.Layout( leaves, shapeIsHeap )
 import qualified Lidar.Lean.Dump as D
@@ -276,6 +276,16 @@ genLit lit
 -- Values
 ------------------------------------------------------------------------------
 
+-- the leaves of a global with the given leaves
+genGlob :: Ctx -> Name -> [Leaf] -> G [String]
+genGlob cx x ls
+  = do tgt <- target cx x
+       let beat e = if S.member x (cxBeats cx) then "(lean_inc_heartbeat(), " ++ e ++ ")" else e
+           n = tgtName tgt
+           value | S.member x (cxOnDemand cx) = call "lean_obj_once" ['&' : n, '&' : n ++ "_once", "_init_" ++ n]
+                 | otherwise = n
+       return [beat value | _ <- ls]
+
 -- the leaves of a value
 genV :: Ctx -> VVal -> G [String]
 genV cx val
@@ -283,12 +293,7 @@ genV cx val
       Var x -> do ls <- tyOfName cx x >>= leavesOfTy
                   return (leafNames x (length ls))
       Glob x _ -> do ls <- tyOf cx val >>= leavesOf
-                     tgt <- target cx x
-                     let beat e = if S.member x (cxBeats cx) then "(lean_inc_heartbeat(), " ++ e ++ ")" else e
-                         n = tgtName tgt
-                         value | S.member x (cxOnDemand cx) = call "lean_obj_once" ['&' : n, '&' : n ++ "_once", "_init_" ++ n]
-                               | otherwise = n
-                     return [beat value | _ <- ls]
+                     genGlob cx x ls
       -- only globals are dupped, and every global is persistent (its count is never changed)
       DupV v -> genV cx v
       UnitV -> return []
@@ -553,6 +558,13 @@ genE cx dest expr
            [ve] <- genV cx v
            body <- genE (bindVar (shareValAlias cx v x) x (A a)) dest e
            return (declare x [LObj] [ve] ++ body)
+      -- every global is persistent
+      LetGlob x g ts e ->
+        do t <- liftQ (globType (cxEnv cx) g ts)
+           ls <- leavesOf t
+           vs <- genGlob cx g ls
+           body <- genE (bindVar cx x (V t)) dest e
+           return (declare x ls vs ++ body)
       LetCast v b x e ->
         do [ve] <- genV cx v
            body <- genE (bindVar (shareValAlias cx v x) x (V (VPtr b))) dest e
@@ -919,6 +931,7 @@ namesE :: VExpr -> S.Set Name
 namesE e = here <> getConst (descendE (const (Const S.empty)) (Const . namesV) (\_ e' -> Const (namesE e')) e)
   where here = case e of
                  Call f _ _ -> S.singleton f
+                 LetGlob _ x _ _ -> S.singleton x
                  _ -> S.empty
 
 namesV :: VVal -> S.Set Name

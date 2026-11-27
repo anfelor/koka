@@ -141,6 +141,7 @@ writeValue x t (Ground binds res)
     bind (y,ty,b) = do v <- case b of
                               GValue w -> genVal w
                               GCall f _ vs -> foldCall ty f vs
+                              GGlob g _ -> gets (M.lookup g . stGlobals) >>= maybe (fail ("not static: " ++ show g)) return
                        modify (\st -> st{ stLocals = M.insert y v (stLocals st), stGamma = M.insert y (V ty) (stGamma st) })
 
 leafC :: GLeaf -> String
