@@ -186,6 +186,13 @@ isObject env t
 target :: Ctx -> Name -> G Target
 target cx f = maybe (fail ("no C name for " ++ show f)) return (M.lookup f (cxTargets cx))
 
+-- the C function of a target that a closure can point to: a function of this module, which
+-- takes the leaves of its arguments
+directFun :: Target -> Maybe String
+directFun tgt = case (tgtCall tgt, tgtImpure tgt) of
+                  (Direct, Nothing) -> Just (tgtName tgt)
+                  _ -> Nothing
+
 ------------------------------------------------------------------------------
 -- C syntax
 ------------------------------------------------------------------------------
@@ -352,6 +359,7 @@ genBox cx tag at v
 -- take objects, so its parameters and result must be objects. The closure of an action takes
 -- Lean's world for its token, which its C function does not, and the closure of a function with
 -- more parameters than a closure passes one by one takes them in an array: a wrapper adapts both.
+-- A wrapper also calls a function that is not a C function of this module (`directFun`).
 genFun :: Ctx -> Name -> G String
 genFun cx f
   = case M.lookup f (envSigs (cxEnv cx)) of
@@ -362,13 +370,14 @@ genFun cx f
            tgt <- target cx f
            if not (all (== [LObj]) (rls : pls))
              then fail ("the function " ++ show f ++ " as a closure")
-             else if length own == length ps && length ps <= closureMaxArgs then staticClosure (tgtName tgt) (length ps)
-             else do fn <- fresh "lt_fun"
-                     xs <- mapM (const (fresh "a")) ps
-                     let (params,loads) = closureParams [if t == VToken then "_world" else x | (x,(_,t)) <- zip xs ps]
-                         cargs = [x | (x,(_,t)) <- zip xs ps, t /= VToken]
-                     modify (\st -> st{ stLams = stLams st ++ ["static lean_object*" <+> text (call fn params) <+> block (loads ++ [text ("return " ++ call (tgtName tgt) cargs ++ ";")])] })
-                     staticClosure fn (length ps)
+             else case directFun tgt of
+               Just cf | length own == length ps && length ps <= closureMaxArgs -> staticClosure cf (length ps)
+               _ -> do fn <- fresh "lt_fun"
+                       xs <- mapM (const (fresh "a")) ps
+                       let (params,loads) = closureParams [if t == VToken then "_world" else x | (x,(_,t)) <- zip xs ps]
+                       e <- callExpr tgt [(t, if t == VToken then [] else [(LObj,x)]) | (x,(_,t)) <- zip xs ps] rls
+                       modify (\st -> st{ stLams = stLams st ++ ["static lean_object*" <+> text (call fn params) <+> block (loads ++ [text ("return " ++ e ++ ";")])] })
+                       staticClosure fn (length ps)
       _ -> fail ("unknown function " ++ show f)
 
 -- the world that Lean passes to the closure of an action, for its token
@@ -1066,7 +1075,7 @@ cgenModule d prog
     declInits = [(x, declInitCode tgts x) | x <- D.dumpDecls d]
     cnames = M.union (M.fromList [(leanName (D.declName x), D.linkCName (D.declLink x)) | x <- D.dumpDecls d]) made
     -- the static objects of the values written as static data, and their prototypes and definitions
-    (gdecls,gvals) = groundDecls env (fmap tgtName . (`M.lookup` tgts)) cnames (`M.member` closed) prog
+    (gdecls,gvals) = groundDecls env (\f -> M.lookup f tgts >>= directFun) cnames (`M.member` closed) prog
     -- the declarations that have a C function: the externs, and the functions that lowering kept
     funs = S.fromList [f | DefFun{ defName = f } <- progDefs prog]
     defined x = case D.declValue x of
