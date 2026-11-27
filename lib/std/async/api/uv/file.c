@@ -76,7 +76,7 @@ kk_std_core_exn__error kk_uv_fd_read(kk_uv_loop_t loop, kk_ssize_t fd, kk_bytes_
   bufs[0] = uv_buf_init((char*)base,kk_to_size_t(len));
   // and read
   err = uv_fs_read(kk_uv_loop(loop,ctx), req, fd, bufs, 1, offset, &kk_uv_fd_read_callback);
-  kk_assert(kk_block_refcount(kk_datatype_as_ptr(buf,ctx)) > 0);
+  kk_assert(kk_block_refcount(kk_datatype_as_ptr(buf,ctx)) > 1);
   kk_bytes_drop(buf,ctx); // .. we must hold a reference in the callback as it must stay alive during the async read!
   if (err!=0) { kk_uv_req_free((uv_req_t*)req,ctx); return kk_error_from_uv_errno(err,ctx); }
   return kk_result_uv_req_dispose0((uv_req_t*)req,ctx);

@@ -99,8 +99,8 @@ static inline bool kk_tag_is_small_block(kk_tag_t tag) {
   Headers
 --------------------------------------------------------------------------------------*/
 
-// The reference count is 0 for a unique reference (for a faster free test in drop).
-// Negative reference counts use atomic increment/decrement (for thread shared objects).
+// The reference count is 1 for a unique reference, and 0 for a persistent object that is never counted or freed
+// (and not thread shared). Negative reference counts use atomic increment/decrement (for thread shared objects).
 // (Reference counts are always 32-bit (even on 64-bit) platforms but get "sticky" if
 //  they overflow into the negative range and in such case we never free the object, see `refcount.c`)
 typedef int32_t kk_refcount_t;
@@ -110,14 +110,19 @@ static inline bool kk_refcount_is_thread_shared(kk_refcount_t rc) {
   return (rc < 0);
 }
 
-// Is the reference unique, or are there (possibly) references from other threads? (includes static variables)
-static inline bool kk_refcount_is_unique_or_thread_shared(kk_refcount_t rc) {
+// Is the object persistent, or are there (possibly) references from other threads? (includes static variables)
+static inline bool kk_refcount_is_persistent_or_thread_shared(kk_refcount_t rc) {
   return (rc <= 0);
+}
+
+// Is the reference unique or persistent, or are there (possibly) references from other threads? (includes static variables)
+static inline bool kk_refcount_is_unique_or_thread_shared(kk_refcount_t rc) {
+  return (rc <= 1);
 }
 
 // Increment a positive reference count. To avoid UB on overflow, use unsigned addition.
 static inline kk_refcount_t kk_refcount_inc(kk_refcount_t rc) {
-  kk_assert_internal(rc >= 0);
+  kk_assert_internal(rc > 0);
   return (kk_refcount_t)((uint32_t)rc + 1);
 }
 
@@ -143,14 +148,14 @@ typedef struct kk_header_s {
 typedef uint64_t kk_uint_header_t;  // unsigned int of sizeof(kk_header_t)
 
 #define KK_SCAN_FSIZE_MAX (0xFF)
-#define KK_HEADER(scan_fsize,fidx,tag)    { scan_fsize, fidx, tag, KK_ATOMIC_VAR_INIT(0) }      // start with unique refcount
+#define KK_HEADER(scan_fsize,fidx,tag)    { scan_fsize, fidx, tag, KK_ATOMIC_VAR_INIT(1) }      // start with unique refcount
 #define KK_HEADER_STATIC(scan_fsize,tag)  { scan_fsize, 0, tag, KK_ATOMIC_VAR_INIT(INT32_MIN) } // start with a stuck refcount (RC_STUCK)
 
 static inline void kk_header_init(kk_header_t* h, kk_ssize_t scan_fsize, kk_cpath_t cpath, kk_tag_t tag) {
   kk_assert_internal(scan_fsize >= 0 && scan_fsize <= KK_SCAN_FSIZE_MAX);
   kk_assert_internal(cpath >= 0 && cpath <= KK_FIELD_IDX_MAX);
 #if (KK_ARCH_LITTLE_ENDIAN && !defined(__aarch64__))
-  *((uint64_t*)h) = ((uint64_t)scan_fsize | ((uint64_t)cpath << 8) | ((uint64_t)tag << 16)); // explicit shifts leads to better codegen in general
+  *((uint64_t*)h) = ((uint64_t)scan_fsize | ((uint64_t)cpath << 8) | ((uint64_t)tag << 16) | ((uint64_t)1 << 32)); // explicit shifts leads to better codegen in general
 #else
   kk_header_t header = KK_HEADER((uint8_t)scan_fsize, (uint8_t)cpath, (uint16_t)tag);
   #if __cplusplus
@@ -304,7 +309,11 @@ static inline void kk_block_refcount_set(kk_block_t* b, kk_refcount_t rc) {
 }
 
 static inline kk_decl_pure bool kk_block_is_unique(const kk_block_t* b) {
-  return kk_likely(kk_block_refcount(b) == 0);
+  return kk_likely(kk_block_refcount(b) == 1);
+}
+
+static inline kk_decl_pure bool kk_block_is_persistent(const kk_block_t* b) {
+  return (kk_block_refcount(b) == 0);
 }
 
 static inline kk_decl_pure bool kk_block_is_thread_shared(const kk_block_t* b) {
@@ -732,13 +741,14 @@ static inline void kk_block_free_maybe_small(kk_block_t* b, kk_context_t* ctx) {
 
 /*--------------------------------------------------------------------------------------
   Reference counting
-  0    : unique reference
-  > 0  : non thread-shared reference
+  1    : unique reference
+  > 1  : non thread-shared reference
+  0    : persistent: never counted or freed (and not thread-shared)
   < 0  : thread-shared or sticky
 
   The main performance trick is to do one single test in a dup/drop for the fast path.
-  In drop we can check `rc > 0` to decrement in place, or check further if we need
-  atomic decrement or can free (in case rc==0). The kk_block_check_xxx routines are not
+  In dup we can check `rc > 0` to increment in place, and in drop `rc > 1` to decrement in place,
+  or check further if we need atomic operations or can free (in case rc==1). The kk_block_check_xxx routines are not
   inlined and we get nice inlined assembly for the fast path with the single check.
 --------------------------------------------------------------------------------------*/
 
@@ -753,8 +763,8 @@ kk_decl_export kk_decl_cold kk_reuse_t  kk_block_check_drop_reuse(kk_block_t* b,
 static inline kk_block_t* kk_block_dup(kk_block_t* b) {
   kk_assert_internal(kk_block_is_valid(b));
   const kk_refcount_t rc = kk_block_refcount(b);
-  if kk_unlikely(kk_refcount_is_thread_shared(rc)) {  // (signed)rc < 0
-    return kk_block_check_dup(b, rc);                 // thread-shared or sticky (overflow) ?
+  if kk_unlikely(kk_refcount_is_persistent_or_thread_shared(rc)) {  // (signed)rc <= 0
+    return kk_block_check_dup(b, rc);                 // persistent, thread-shared or sticky (overflow) ?
   }
   else {
     kk_block_refcount_set(b, kk_refcount_inc(rc));
@@ -766,7 +776,7 @@ static inline kk_block_t* kk_block_dup(kk_block_t* b) {
 static inline kk_block_t* kk_block_dup_n(kk_block_t* b, uint64_t n) {
   kk_assert_internal(kk_block_is_valid(b));
   const kk_refcount_t rc = kk_block_refcount(b);
-  if kk_unlikely(kk_refcount_is_thread_shared(rc)) {
+  if kk_unlikely(kk_refcount_is_persistent_or_thread_shared(rc)) {
     return kk_block_check_dup_n(b, rc, n);
   }
   kk_block_refcount_set(b, n > (uint32_t)(INT32_MAX - rc) ? INT32_MIN : rc + (kk_refcount_t)n);
@@ -777,8 +787,8 @@ static inline kk_block_t* kk_block_dup_n(kk_block_t* b, uint64_t n) {
 static inline void kk_block_drop(kk_block_t* b, kk_context_t* ctx) {
   kk_assert_internal(kk_block_is_valid(b));
   const kk_refcount_t rc = kk_block_refcount(b);
-  if (kk_refcount_is_unique_or_thread_shared(rc)) {  // (signed)rc <= 0
-    kk_block_check_drop(b, rc, ctx);    // thread-shared, sticky (overflowed), or can be freed?
+  if (kk_refcount_is_unique_or_thread_shared(rc)) {  // (signed)rc <= 1
+    kk_block_check_drop(b, rc, ctx);    // persistent, thread-shared, sticky (overflowed), or can be freed?
   }
   else {
     kk_block_refcount_set(b, rc-1);
@@ -796,8 +806,8 @@ static inline void kk_block_drop_small(kk_block_t* b, kk_context_t* ctx) {
 static inline void kk_block_decref(kk_block_t* b, kk_context_t* ctx) {
   kk_assert_internal(kk_block_is_valid(b));
   const kk_refcount_t rc = kk_block_refcount(b);
-  if kk_unlikely(kk_refcount_is_unique_or_thread_shared(rc)) {  // (signed)rc <= 0
-    kk_block_check_decref(b, rc, ctx);  // thread-shared, sticky (overflowed), or can be freed?
+  if kk_unlikely(kk_refcount_is_unique_or_thread_shared(rc)) {  // (signed)rc <= 1
+    kk_block_check_decref(b, rc, ctx);  // persistent, thread-shared, sticky (overflowed), or can be freed?
   }
   else {
     kk_block_refcount_set(b, rc-1);
@@ -808,8 +818,8 @@ static inline void kk_block_decref_small(kk_block_t* b, kk_context_t* ctx) {
   kk_assert_internal(kk_block_is_valid(b));
   kk_assert_internal(kk_block_is_small(b));
   const kk_refcount_t rc = kk_block_refcount(b);
-  if kk_unlikely(kk_refcount_is_unique_or_thread_shared(rc)) {  // (signed)rc <= 0
-    kk_block_check_decref_small(b, rc, ctx);  // thread-shared, sticky (overflowed), or can be freed?
+  if kk_unlikely(kk_refcount_is_unique_or_thread_shared(rc)) {  // (signed)rc <= 1
+    kk_block_check_decref_small(b, rc, ctx);  // persistent, thread-shared, sticky (overflowed), or can be freed?
   }
   else {
     kk_block_refcount_set(b, rc-1);
@@ -820,8 +830,8 @@ static inline void kk_block_decref_small(kk_block_t* b, kk_context_t* ctx) {
 static inline kk_reuse_t kk_block_drop_reuse(kk_block_t* b, kk_context_t* ctx) {
   kk_assert_internal(kk_block_is_valid(b));
   const kk_refcount_t rc = kk_block_refcount(b);
-  if (kk_refcount_is_unique_or_thread_shared(rc)) {   // (signed)rc <= 0
-    return kk_block_check_drop_reuse(b, rc, ctx);     // thread-shared, sticky (overflowed), or can be reused?
+  if (kk_refcount_is_unique_or_thread_shared(rc)) {   // (signed)rc <= 1
+    return kk_block_check_drop_reuse(b, rc, ctx);     // persistent, thread-shared, sticky (overflowed), or can be reused?
   }
   else {
     kk_block_refcount_set(b, rc-1);
@@ -836,15 +846,15 @@ static inline void kk_box_drop(kk_box_t b, kk_context_t* ctx);
 static inline void kk_block_dropi(kk_block_t* b, kk_context_t* ctx) {
   kk_assert_internal(kk_block_is_valid(b));
   const kk_refcount_t rc = kk_block_refcount(b);
-  if (rc == 0) {
+  if (rc == 1) {
     const kk_ssize_t scan_fsize = kk_block_scan_fsize(b);
     for (kk_ssize_t i = 0; i < scan_fsize; i++) {
       kk_box_drop(kk_block_field(b, i), ctx);
     }
     kk_block_free(b,ctx);
   }
-  else if kk_unlikely(kk_refcount_is_thread_shared(rc)) {    // (signed)rc < 0
-    kk_block_check_drop(b, rc, ctx);                         // thread-share or sticky (overflowed) ?
+  else if kk_unlikely(kk_refcount_is_persistent_or_thread_shared(rc)) {    // (signed)rc <= 0
+    kk_block_check_drop(b, rc, ctx);                         // persistent, thread-shared or sticky (overflowed) ?
   }
   else {
     kk_block_refcount_set(b, rc-1);
@@ -855,7 +865,7 @@ static inline void kk_block_dropi(kk_block_t* b, kk_context_t* ctx) {
 static inline kk_reuse_t kk_block_dropi_reuse(kk_block_t* b, kk_context_t* ctx) {
   kk_assert_internal(kk_block_is_valid(b));
   const kk_refcount_t rc = kk_block_refcount(b);
-  if (rc == 0) {
+  if (rc == 1) {
     kk_ssize_t scan_fsize = kk_block_scan_fsize(b);
     for (kk_ssize_t i = 0; i < scan_fsize; i++) {
       kk_box_drop(kk_block_field(b, i), ctx);
@@ -872,15 +882,15 @@ static inline kk_reuse_t kk_block_dropi_reuse(kk_block_t* b, kk_context_t* ctx) 
 static inline void kk_block_dropn(kk_block_t* b, kk_ssize_t scan_fsize, kk_context_t* ctx) {
   kk_assert_internal(kk_block_is_valid(b));
   const kk_refcount_t rc = kk_block_refcount(b);
-  if (rc == 0) {                 // note: assume two's complement
+  if (rc == 1) {
     kk_assert_internal(scan_fsize == kk_block_scan_fsize(b));
     for (kk_ssize_t i = 0; i < scan_fsize; i++) {
       kk_box_drop(kk_block_field(b, i), ctx);
     }
     kk_block_free(b,ctx);
   }
-  else if kk_unlikely(kk_refcount_is_thread_shared(rc)) {  // (signed)rc < 0
-    kk_block_check_drop(b, rc, ctx);                       // thread-shared, sticky (overflowed)?
+  else if kk_unlikely(kk_refcount_is_persistent_or_thread_shared(rc)) {  // (signed)rc <= 0
+    kk_block_check_drop(b, rc, ctx);                       // persistent, thread-shared or sticky (overflowed)?
   }
   else {
     kk_block_refcount_set(b, rc-1);
@@ -893,15 +903,15 @@ static inline void kk_block_dropn(kk_block_t* b, kk_ssize_t scan_fsize, kk_conte
 static inline kk_reuse_t kk_block_dropn_reuse(kk_block_t* b, kk_ssize_t scan_fsize, kk_context_t* ctx) {
   kk_assert_internal(kk_block_is_valid(b));
   const kk_refcount_t rc = kk_block_refcount(b);
-  if (rc == 0) {
+  if (rc == 1) {
     kk_assert_internal(kk_block_scan_fsize(b) == scan_fsize);
     for (kk_ssize_t i = 0; i < scan_fsize; i++) {
       kk_box_drop(kk_block_field(b, i), ctx);
     }
     return b;
   }
-  else if kk_unlikely(kk_refcount_is_thread_shared(rc)) {    // (signed)rc < 0
-    kk_block_check_drop(b, rc, ctx);                         // thread-shared or sticky (overflowed)?
+  else if kk_unlikely(kk_refcount_is_persistent_or_thread_shared(rc)) {    // (signed)rc <= 0
+    kk_block_check_drop(b, rc, ctx);                         // persistent, thread-shared or sticky (overflowed)?
     return kk_reuse_null;
   }
   else {

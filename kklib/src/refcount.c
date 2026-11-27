@@ -24,7 +24,7 @@ static void kk_block_free_raw(kk_block_t* b, kk_context_t* ctx) {
   kk_block_free(b,ctx); // PR #864
 }
 
-// Check if a field `i` in a block `b` should be freed, i.e. it is heap allocated with a refcount of 0 (after rc decref).
+// Check if a field `i` in a block `b` should be freed, i.e. it is heap allocated with a unique refcount (before rc decref).
 static inline kk_block_t* kk_block_fast_field_should_free(kk_block_t* b, kk_ssize_t field, kk_context_t* ctx) {
   kk_box_t v = kk_block_field(b, field);
   if (kk_box_is_non_null_ptr(v)) {
@@ -42,7 +42,7 @@ static inline kk_block_t* kk_block_fast_field_should_free(kk_block_t* b, kk_ssiz
 // freed next (which can be done by `kk_block_drop_free_recx`)
 static kk_block_t* kk_block_fast_drop_free(kk_block_t* b, kk_context_t* ctx) {
 tailcall:
-  kk_assert_internal(kk_block_refcount(b) == 0);
+  kk_assert_internal(kk_block_is_unique(b));
   const bool is_small = kk_block_is_small(b); kk_unused(is_small);
   #if KK_HAS_FAST_FREE_SMALL
   #define kk_block_free_b(is_small,b,ctx)  if kk_likely(is_small) { kk_block_free_small(b,ctx); } else { kk_block_free(b,ctx); }
@@ -99,8 +99,11 @@ static void kk_block_drop_free(kk_block_t* b, kk_context_t* ctx) {
   Checked reference counts.
 
   positive:
-    0               : unique reference
-    1 to INT32_MAX  : reference count (in a single thread)   (~2.1e9 counts)
+    1               : unique reference
+    2 to INT32_MAX  : reference count (in a single thread)   (~2.1e9 counts)
+
+  zero:
+    0               : persistent: never counted or freed, and not thread-shared (RC_PERSISTENT)
 
   negative:
     INT32_MIN                                     : sticky: single-threaded stricky reference count (RC_STUCK)
@@ -110,9 +113,14 @@ static void kk_block_drop_free(kk_block_t* b, kk_context_t* ctx) {
     -1                                            : thread-shared reference count that is unique now (RC_SHARED_UNIQUE)
 
 
-  0 <= refcount <= MAX_INT32
-    regular reference counts where use 0 for a unique reference. So a reference count of 10 means there
-    are 11 reference (from the current thread only).
+  1 <= refcount <= MAX_INT32
+    regular reference counts where use 1 for a unique reference. So a reference count of 10 means there
+    are 10 reference (from the current thread only).
+
+  refcount == 0 (= RC_PERSISTENT)
+    A persistent object, such as the value of a top-level definition. Dup and drop leave it unchanged
+    and it is never freed. Unlike a sticky count it is not thread-shared: refs, lazy values and
+    the marking of thread-shared objects treat it as single-threaded (marking descends into its children).
     If it is dup'd beyond MAX_INT32 it'll overflow automatically into the sticky range (as a negative value)
 
   MAX_INT32 < refcount <= MAX_UINT32
@@ -152,7 +160,8 @@ static void kk_block_drop_free(kk_block_t* b, kk_context_t* ctx) {
 #define RC_STICKY         (RC_STUCK + 0x10000000)
 #define RC_STICKY_DROP    (RC_STUCK + 0x20000000)
 #define RC_SHARED_UNIQUE  KK_I32(-1)
-#define RC_UNIQUE         KK_I32(0)
+#define RC_UNIQUE         KK_I32(1)
+#define RC_PERSISTENT     KK_I32(0)
 
 
 static inline kk_refcount_t kk_atomic_dup(kk_block_t* b) {
@@ -168,11 +177,11 @@ static inline kk_refcount_t kk_atomic_acquire(kk_block_t* b) {
 static void kk_block_make_shared(kk_block_t* b) {
   kk_refcount_t rc = kk_block_refcount(b);
   kk_assert_internal(!kk_refcount_is_thread_shared(rc));  // not thread shared already
-  if (!kk_refcount_is_thread_shared(rc)) {
-    // positive rc N encodes N+1 references (0 == unique); thread-shared -N encodes
+  if (rc > RC_PERSISTENT) {                       // a persistent object stays persistent
+    // positive rc N encodes N references (1 == unique); thread-shared -N encodes
     // N references (freed when an atomic drop sees -1 == RC_SHARED_UNIQUE). So the
-    // count-preserving map is N+1 refs -> -(N+1), i.e. `~rc`
-    rc = ~rc;                                     // -(rc+1); cannot overflow as rc is positive
+    // count-preserving map is N refs -> -N
+    rc = -rc;                                     // cannot overflow as rc is positive
     if (rc <= RC_STICKY_DROP) { rc = RC_STICKY; } // for high reference counts default to sticky
     kk_block_refcount_set(b, rc);
   }
@@ -181,19 +190,19 @@ static void kk_block_make_shared(kk_block_t* b) {
 // Check if a reference dup needs an atomic operation
 kk_decl_noinline kk_block_t* kk_block_check_dup(kk_block_t* b, kk_refcount_t rc0) {
   kk_assert_internal(b!=NULL);
-  kk_assert_internal(kk_refcount_is_thread_shared(rc0)); // includes KK_STUCK
-  if kk_likely(rc0 > RC_STICKY) {
+  kk_assert_internal(kk_refcount_is_persistent_or_thread_shared(rc0)); // includes KK_STUCK
+  if kk_likely(rc0 != RC_PERSISTENT && rc0 > RC_STICKY) {
     kk_atomic_dup(b);  // decrement
   }
-  // else sticky: no longer dup (= decrement)
+  // else persistent or sticky: no longer dup (= decrement)
   return b;
 }
 
 // A bulk decrement of a shared count can span the entire sticky range.
 // Recompute from the current count on contention so concurrent dups cannot wrap it.
 kk_decl_noinline kk_block_t* kk_block_check_dup_n(kk_block_t* b, kk_refcount_t rc, uint64_t n) {
-  kk_assert_internal(kk_refcount_is_thread_shared(rc));
-  while (rc > RC_STICKY) {
+  kk_assert_internal(kk_refcount_is_persistent_or_thread_shared(rc));
+  while (rc != RC_PERSISTENT && rc > RC_STICKY) {
     const kk_refcount_t next = (n >= (uint32_t)(rc - RC_STICKY) ? RC_STICKY : rc - (kk_refcount_t)n);
     if (kk_atomic_cas_weak_relaxed(&b->header.refcount, &rc, next)) break;
   }
@@ -206,18 +215,18 @@ kk_decl_noinline kk_block_t* kk_block_check_dup_n(kk_block_t* b, kk_refcount_t r
 kk_decl_noinline void kk_block_check_drop(kk_block_t* b, kk_refcount_t rc0, kk_context_t* ctx) {
   kk_assert_internal(b!=NULL);
   kk_assert_internal(rc0 < 0 || kk_block_refcount(b) == rc0);
-  kk_assert_internal(rc0 == 0 || kk_refcount_is_thread_shared(rc0));
-  if kk_likely(rc0==0) {
+  kk_assert_internal(kk_refcount_is_unique_or_thread_shared(rc0));
+  if kk_likely(rc0==RC_UNIQUE) {
     kk_block_drop_free(b, ctx);  // no more references, free it.
   }
-  else if (rc0 <= RC_STICKY_DROP) {
-    // sticky: do not drop further
+  else if (rc0 == RC_PERSISTENT || rc0 <= RC_STICKY_DROP) {
+    // persistent or sticky: do not drop further
   }
   else {
     const kk_refcount_t rc = kk_atomic_drop(b);  // increment
     if (rc == RC_SHARED_UNIQUE) {    // this was the last reference?
       kk_atomic_acquire(b);          // prevent reordering of reads/writes before this point
-      kk_block_refcount_set(b,0);    // no longer shared
+      kk_block_refcount_set(b,RC_UNIQUE);    // no longer shared
       kk_block_drop_free(b, ctx);    // no more references, free it.
     }
     kk_assert_internal(rc < 0);  // a concurrent counted dup may have made it sticky
@@ -228,8 +237,8 @@ kk_decl_noinline void kk_block_check_drop(kk_block_t* b, kk_refcount_t rc0, kk_c
 kk_decl_noinline kk_reuse_t kk_block_check_drop_reuse(kk_block_t* b, kk_refcount_t rc0, kk_context_t* ctx) {
   kk_assert_internal(b!=NULL);
   kk_assert_internal(rc0 < 0 || kk_block_refcount(b) == rc0);
-  kk_assert_internal(rc0 == 0 || kk_refcount_is_thread_shared(rc0));
-  if kk_likely(rc0==0) {
+  kk_assert_internal(kk_refcount_is_unique_or_thread_shared(rc0));
+  if kk_likely(rc0==RC_UNIQUE) {
     // no more references, reuse it.
     kk_ssize_t scan_fsize = kk_block_scan_fsize(b);
     for (kk_ssize_t i = 0; i < scan_fsize; i++) {
@@ -250,17 +259,17 @@ kk_decl_noinline void kk_block_check_decref(kk_block_t* b, kk_refcount_t rc0, kk
   kk_unused(ctx);
   kk_assert_internal(b!=NULL);
   kk_assert_internal(rc0 < 0 || kk_block_refcount(b) == rc0);
-  kk_assert_internal(rc0 == 0 || kk_refcount_is_thread_shared(rc0));
-  if kk_likely(rc0==0) {
+  kk_assert_internal(kk_refcount_is_unique_or_thread_shared(rc0));
+  if kk_likely(rc0==RC_UNIQUE) {
     kk_free(b,ctx);  // no more references, free it (without dropping children!)
   }
-  else if kk_unlikely(rc0 <= RC_STICKY_DROP) {
-    // sticky: do not decrement further
+  else if kk_unlikely(rc0 == RC_PERSISTENT || rc0 <= RC_STICKY_DROP) {
+    // persistent or sticky: do not decrement further
   }
   else {
     const kk_refcount_t rc = kk_atomic_drop(b);  // decrement
     if (rc == RC_SHARED_UNIQUE) {    // last referenc?
-      kk_block_refcount_set(b,0);    // no longer shared
+      kk_block_refcount_set(b,RC_UNIQUE);    // no longer shared
       kk_free(b,ctx);                // no more references, free it.
     }
   }
@@ -271,17 +280,17 @@ kk_decl_noinline void kk_block_check_decref_small(kk_block_t* b, kk_refcount_t r
   kk_unused(ctx);
   kk_assert_internal(b!=NULL);
   kk_assert_internal(rc0 < 0 || kk_block_refcount(b) == rc0);
-  kk_assert_internal(rc0 == 0 || kk_refcount_is_thread_shared(rc0));
-  if kk_likely(rc0==0) {
+  kk_assert_internal(kk_refcount_is_unique_or_thread_shared(rc0));
+  if kk_likely(rc0==RC_UNIQUE) {
     kk_free_small(b,ctx);  // no more references, free it (without dropping children!)
   }
-  else if kk_unlikely(rc0 <= RC_STICKY_DROP) {
-    // sticky: do not decrement further
+  else if kk_unlikely(rc0 == RC_PERSISTENT || rc0 <= RC_STICKY_DROP) {
+    // persistent or sticky: do not decrement further
   }
   else {
     const kk_refcount_t rc = kk_atomic_drop(b);  // decrement
     if (rc == RC_SHARED_UNIQUE) {    // last referenc?
-      kk_block_refcount_set(b,0);    // no longer shared
+      kk_block_refcount_set(b,RC_UNIQUE);    // no longer shared
       kk_free_small(b,ctx);          // no more references, free it.
     }
   }
@@ -299,7 +308,7 @@ static kk_decl_noinline bool block_thread_shared_decref_no_free(kk_block_t* b) {
   const kk_refcount_t rc = kk_atomic_drop(b);
   kk_assert_internal(kk_refcount_is_thread_shared(rc));
   if (rc == RC_SHARED_UNIQUE) {
-    kk_block_refcount_set(b, 0); // no more shared
+    kk_block_refcount_set(b, RC_UNIQUE); // no more shared
     return true;                 // no more references
   }
   else {
@@ -310,11 +319,11 @@ static kk_decl_noinline bool block_thread_shared_decref_no_free(kk_block_t* b) {
 // Decrement a refcount without freeing the block yet. Returns true if there are no more references.
 static bool kk_block_decref_no_free(kk_block_t* b) {
   kk_refcount_t rc = kk_block_refcount(b);
-  if (rc==0) {
+  if (rc==RC_UNIQUE) {
     return true;
   }
-  else if kk_unlikely(kk_refcount_is_thread_shared(rc)) {
-    return (rc <= RC_STICKY_DROP ? false : block_thread_shared_decref_no_free(b));
+  else if kk_unlikely(kk_refcount_is_persistent_or_thread_shared(rc)) {
+    return (rc == RC_PERSISTENT || rc <= RC_STICKY_DROP ? false : block_thread_shared_decref_no_free(b));
   }
   else {
     kk_block_refcount_set(b, rc - 1);
@@ -331,7 +340,7 @@ static bool kk_block_decref_no_free(kk_block_t* b) {
 // (and it is faster than a recursive version so we only have a stackless free)
 //-----------------------------------------------------------------------------------------
 
-// Check if a field `i` in a block `b` should be freed, i.e. it is heap allocated with a refcount of 0.
+// Check if a field `i` in a block `b` should be freed, i.e. it is heap allocated with a unique refcount.
 // Optimizes by already freeing leaf blocks that are heap allocated but have no scan fields.
 static inline kk_block_t* kk_block_field_should_free(kk_block_t* b, kk_ssize_t field, kk_context_t* ctx) {
   kk_box_t v = kk_block_field(b, field);
@@ -391,7 +400,7 @@ static kk_decl_noinline void kk_block_drop_free_recx(kk_block_t* b, kk_context_t
     kk_assert_internal(kk_block_is_valid(b));
     const bool is_small = kk_block_is_small(b); kk_unused(is_small);
     scan_fsize = b->header.scan_fsize;
-    kk_assert_internal(kk_block_refcount(b) == 0);
+    kk_assert_internal(kk_block_is_unique(b));
     kk_assert_internal(scan_fsize > 0);           // due to kk_block_should_free
     // kk_assert_internal(!kk_block_is_no_free(b));  // due to kk_block_should_free
     if (scan_fsize == 1) {
@@ -475,7 +484,7 @@ static kk_decl_noinline void kk_block_drop_free_rec_old(kk_block_t* b, kk_contex
   // ------- move down ------------
   movedown:
     scan_fsize = b->header.scan_fsize;
-    kk_assert_internal(kk_block_refcount(b) == 0);
+    kk_assert_internal(kk_block_is_unique(b));
     kk_assert_internal(scan_fsize > 0);           // due to kk_block_should_free
     if (scan_fsize == 1) {
       // if just one field, we can free directly and continue with the child
@@ -577,6 +586,7 @@ static kk_decl_noinline void kk_block_mark_shared_recx(kk_block_t* b, kk_context
 
 
 // Check if a field `i` in a block `b` should be marked, i.e. it is heap allocated and not yet thread shared.
+// A persistent block stays persistent, but its children are marked.
 // Optimizes by already marking leaf blocks that have no scan fields.
 static inline kk_block_t* kk_block_field_should_mark(kk_block_t* b, kk_ssize_t field, kk_context_t* ctx)
 {
@@ -816,7 +826,7 @@ kk_decl_export void* kk_malloc_copy(const void* p, kk_context_t* ctx) {
 
 kk_decl_export kk_block_t* kk_block_alloc_copy(kk_block_t* b, kk_context_t* ctx) {
   kk_block_t* c = (kk_block_t*)kk_malloc_copy(b, ctx);
-  kk_block_refcount_set(c, 0);
+  kk_block_refcount_set(c, RC_UNIQUE);
   for (kk_ssize_t i = 0; i < kk_block_scan_fsize(b); i++) {
     kk_box_dup(kk_block_field(c, i), ctx);
   }
